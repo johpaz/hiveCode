@@ -5,7 +5,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { SCHEMA, PROJECTS_SCHEMA, CONTEXT_ENGINE_SCHEMA, MEETING_SCHEMA } from "./schema.ts";
 
 function getDbPath(): string {
-    return path.join(getHiveDir(), "data", "hive.db");
+    return path.join(getHiveDir(), "data", "hivecode.db");
 }
 
 export function getDbPathLazy(): string {
