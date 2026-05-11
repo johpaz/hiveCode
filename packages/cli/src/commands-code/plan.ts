@@ -5,8 +5,11 @@ import {
 } from "../ui/index.ts"
 import { getExecutionMode, setExecutionMode } from "@johpaz/hive-code-core"
 import { CoordinatorManager } from "@johpaz/hive-code-code/workers/coordinator-manager"
+import { ensureCodeDatabase } from "./db-init"
 
 export async function plan(description?: string): Promise<void> {
+  ensureCodeDatabase()
+
   hiveIntro("hive-code · Plan Mode")
   hiveModeBar("plan")
 

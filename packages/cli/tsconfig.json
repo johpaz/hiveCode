@@ -4,7 +4,9 @@
     "target": "ESNext",
     "module": "preserve",
     "lib": [
-      "ESNext"
+      "ESNext",
+      "DOM",
+      "DOM.Iterable"
     ],
     "outDir": "./dist",
     "declaration": true,

@@ -9,6 +9,11 @@ import { narrativeShow, narrativeSearch, narrativeExport } from "./commands-code
 import { decisionList, decisionShow } from "./commands-code/decisions"
 import { doctor } from "./commands-code/doctor"
 import { dev } from "./commands-code/dev"
+import { providerList, providerAdd, providerRemove, providerSetDefault, providerSetModel, providerTest } from "./commands-code/provider"
+import { mcpList, mcpAdd, mcpRemove, mcpEnable, mcpDisable, mcpTest, mcpInspect } from "./commands-code/mcp"
+import { skillList, skillEnable, skillDisable, skillAdd, skillRemove, skillInspect, skillAssign } from "./commands-code/skill"
+import { agentList, agentInspect, agentEdit, agentReset } from "./commands-code/agent"
+import { modeHistory, taskRollback, taskResume, upgrade, init } from "./commands-code/extras"
 
 // ─── Hive Base Commands (existing, no @clack/prompts) ────────────────────────
 // These commands don't use @clack/prompts so they still work
@@ -37,6 +42,7 @@ Usage: hive-code <command> [subcommand] [options]
 Modos de operación:
   mode get|status            Mostrar modo actual
   mode set <mode>            plan|approval|auto
+  mode history               Historial de cambios de modo
   mode cycle                 Ciclar al siguiente modo
 
 Gateway:
@@ -46,7 +52,33 @@ Gateway:
   reload                     Recargar config
   status                     Estado del sistema
 
-Coordinadores multi-IA:
+Providers LLM:
+  provider list              Listar providers
+  provider add <name>        Añadir provider (wizard)
+  provider remove <name>     Eliminar provider
+  provider set-default <n>   Provider por defecto
+  provider set-model <p> <m> Asignar modelo
+  provider test <name>       Ping con latencia
+
+MCP:
+  mcp list                   Listar servidores MCP
+  mcp add <url-or-name>      Añadir MCP server
+  mcp remove <name>          Eliminar MCP
+  mcp enable <name>          Habilitar MCP
+  mcp disable <name>         Deshabilitar MCP
+  mcp test <name>            Verificar conexión
+  mcp inspect <name>         Ver detalles MCP
+
+Skills:
+  skill list                 Listar skills
+  skill enable <name>        Habilitar skill
+  skill disable <name>       Deshabilitar skill
+  skill add <path>           Importar skill .md
+  skill remove <name>        Eliminar skill
+  skill inspect <name>       Ver skill
+  skill assign <sk> <coord>  Asignar a coordinador
+
+Coordinadores y Agentes:
   coordinator list           Listar coordinadores
   coordinator status <name>  Estado de un coordinador
   coordinator restart <name> Reiniciar coordinador
@@ -55,7 +87,7 @@ Coordinadores multi-IA:
 
   agent list                 Listar agentes/subagentes
   agent inspect <name>       Ver detalles de un agente
-  agent edit <name>          Editar system prompt
+  agent edit <name>          Editar system prompt en $EDITOR
   agent reset <name>         Restaurar prompt por defecto
 
 Tareas de código:
@@ -65,7 +97,7 @@ Tareas de código:
   task status <id>           Estado de tarea
   task cancel <id>           Cancelar tarea
   task rollback <id>         Revertir archivos + git
-  task resume <id>           Reanudar tarea
+  task resume <id>           Reanudar tarea pausada
 
 Narrativo y decisiones:
   narrative show             Mostrar narrativo de tarea
@@ -79,6 +111,7 @@ GitHub:
   github disconnect          Desconectar
   github status              Estado de integración
   github set-repo <repo>     Configurar repositorio
+  github whoami              Ver usuario conectado
 
 Secrets:
   secret list                Listar secrets (solo nombres)
@@ -99,9 +132,10 @@ ACE:
   ace reflector run          Forzar análisis inmediato
 
 Sistema:
+  init [path]                Inicializar proyecto
   doctor                     Diagnóstico completo
   doctor --fix               Correcciones automáticas
-  update                     Actualizar hive-code
+  upgrade                    Verificar actualizaciones
   migrate                    Migrar base de datos
   onboard                    Configuración inicial
 
@@ -138,6 +172,75 @@ async function main(): Promise<void> {
     case "doctor":
       await doctor(flags)
       break
+    case "init":
+      await init(subcommand)
+      break
+    case "upgrade":
+      await upgrade()
+      break
+
+    // ─── Providers ─────────────────────────────────────────────────────────
+    case "provider":
+    case "providers": {
+      if (subcommand === "list" || subcommand === undefined) await providerList()
+      else if (subcommand === "add") await providerAdd(args[2])
+      else if (subcommand === "remove") await providerRemove(args[2])
+      else if (subcommand === "set-default") await providerSetDefault(args[2])
+      else if (subcommand === "set-model") await providerSetModel(args.slice(2))
+      else if (subcommand === "test") await providerTest(args[2])
+      else {
+        console.error(`❌ Subcomando desconocido: "${subcommand}"`)
+        process.exit(1)
+      }
+      break
+    }
+
+    // ─── MCP ───────────────────────────────────────────────────────────────
+    case "mcp": {
+      if (subcommand === "list" || subcommand === undefined) await mcpList()
+      else if (subcommand === "add") await mcpAdd(args[2])
+      else if (subcommand === "remove") await mcpRemove(args[2])
+      else if (subcommand === "enable") await mcpEnable(args[2])
+      else if (subcommand === "disable") await mcpDisable(args[2])
+      else if (subcommand === "test") await mcpTest(args[2])
+      else if (subcommand === "inspect") await mcpInspect(args[2])
+      else {
+        console.error(`❌ Subcomando desconocido: "${subcommand}"`)
+        process.exit(1)
+      }
+      break
+    }
+
+    // ─── Skills ────────────────────────────────────────────────────────────
+    case "skill":
+    case "skills": {
+      if (subcommand === "list" || subcommand === undefined) await skillList()
+      else if (subcommand === "enable") await skillEnable(args[2])
+      else if (subcommand === "disable") await skillDisable(args[2])
+      else if (subcommand === "add") await skillAdd(args[2])
+      else if (subcommand === "remove") await skillRemove(args[2])
+      else if (subcommand === "inspect") await skillInspect(args[2])
+      else if (subcommand === "assign") await skillAssign(args.slice(2))
+      else {
+        console.error(`❌ Subcomando desconocido: "${subcommand}"`)
+        process.exit(1)
+      }
+      break
+    }
+
+    // ─── Agents ────────────────────────────────────────────────────────────
+    case "agent":
+    case "agents": {
+      if (subcommand === "list" || subcommand === undefined) await agentList(args.slice(2))
+      else if (subcommand === "inspect") await agentInspect(args[2])
+      else if (subcommand === "edit") await agentEdit(args[2])
+      else if (subcommand === "reset") await agentReset(args[2])
+      else {
+        console.error(`❌ Subcomando desconocido: "${subcommand}"`)
+        process.exit(1)
+      }
+      break
+    }
 
     // ─── Narrative & Decisions ─────────────────────────────────────────────
     case "narrative": {
@@ -164,9 +267,14 @@ async function main(): Promise<void> {
     }
 
     // ─── Hive Base Commands ────────────────────────────────────────────────
-    case "mode":
-      await mode(subcommand)
+    case "mode": {
+      if (subcommand === "history") {
+        await modeHistory()
+      } else {
+        await mode(subcommand)
+      }
       break
+    }
     case "start":
       await start(flags)
       break
@@ -180,9 +288,16 @@ async function main(): Promise<void> {
       await status(flags)
       break
     case "task":
-    case "tasks":
-      await tasks(subcommand, args.slice(2))
+    case "tasks": {
+      if (subcommand === "rollback") {
+        await taskRollback(args[2])
+      } else if (subcommand === "resume") {
+        await taskResume(args[2])
+      } else {
+        await tasks(subcommand, args.slice(2))
+      }
       break
+    }
     case "secret":
     case "secrets":
       await secrets(subcommand, args.slice(2))
@@ -200,25 +315,12 @@ async function main(): Promise<void> {
     case "coordinator":
       await coordinator(subcommand, args.slice(2))
       break
-    case "agent":
-    case "agents": {
-      // Stub for agent command — was in commands/agents.ts which used @clack/prompts
-      console.log("Agent management — use the web UI or API directly.")
-      break
-    }
     case "onboard": {
-      // Stub for onboard command
       console.log("Onboarding — use the web setup UI at http://localhost:18790/setup")
       break
     }
     case "migrate": {
-      // Stub for migrate command
       console.log("Database migration — run `bun run migrate` from the project root.")
-      break
-    }
-    case "update": {
-      // Stub for update command
-      console.log("Update — download the latest release from GitHub.")
       break
     }
 

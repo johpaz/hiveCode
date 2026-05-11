@@ -15,7 +15,7 @@ const log = logger.child("fs-delete");
 
 export const fsDeleteTool: Tool = {
   name: "fs_delete",
-  description: "Delete file or directory from workspace. Spanish: eliminar archivo, borrar archivo, borrar carpeta",
+  description: "Delete file or directory from workspace. REQUIRES explicit user confirmation (confirmed: true). Never delete without user approval. Spanish: eliminar archivo, borrar archivo, borrar carpeta",
   parameters: {
     type: "object",
     properties: {
@@ -27,8 +27,12 @@ export const fsDeleteTool: Tool = {
         type: "boolean",
         description: "Delete recursively for directories (default: false)",
       },
+      confirmed: {
+        type: "boolean",
+        description: "MUST be true — fs_delete requires explicit user confirmation before execution",
+      },
     },
-    required: ["path"],
+    required: ["path", "confirmed"],
   },
   execute: async (params: Record<string, unknown>, config?: any) => {
     const workspace = getWorkspace(config);
@@ -39,6 +43,14 @@ export const fsDeleteTool: Tool = {
       return { ok: false, error: (e as Error).message };
     }
     const recursive = (params.recursive as boolean) ?? false;
+    const confirmed = (params.confirmed as boolean) ?? false;
+
+    if (!confirmed) {
+      return {
+        ok: false,
+        error: "fs_delete requires explicit user confirmation. Set confirmed: true only after the user has approved the deletion.",
+      };
+    }
 
     log.debug(`Deleting: ${targetPath}`);
 

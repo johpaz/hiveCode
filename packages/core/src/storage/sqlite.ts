@@ -21,7 +21,7 @@ export function getDb(): Database {
 }
 
 
-export function initializeDatabase(): Database {
+export function initializeDatabase(extraSchemas?: string[]): Database {
     const hiveDir = getHiveDir();
     const dir = path.join(hiveDir, "data");
     if (!existsSync(dir)) {
@@ -32,6 +32,20 @@ export function initializeDatabase(): Database {
     const dbFileExists = existsSync(dbPath);
 
     _db = new Database(dbPath, { create: true });
+
+    // ── Pragmas WAL y performance (SPEC §3.2) ──
+    try {
+        _db.run(`PRAGMA journal_mode = WAL`);
+        _db.run(`PRAGMA synchronous = NORMAL`);
+        _db.run(`PRAGMA cache_size = -64000`);      // 64 MB
+        _db.run(`PRAGMA temp_store = MEMORY`);
+        _db.run(`PRAGMA mmap_size = 268435456`);    // 256 MB
+        _db.run(`PRAGMA foreign_keys = ON`);
+        const jm = _db.query(`PRAGMA journal_mode`).get() as { journal_mode: string };
+        logger.info(`🗄️  SQLite initialized — journal_mode: ${jm?.journal_mode || "unknown"}, path: ${dbPath}`);
+    } catch (pragmaErr) {
+        logger.warn("⚠️  Failed to set SQLite pragmas:", { error: (pragmaErr as Error).message });
+    }
 
     // ── Pre-schema migration: drop legacy cron tables before SCHEMA exec ──
     // This must happen BEFORE SCHEMA runs, because CREATE TABLE IF NOT EXISTS
@@ -83,6 +97,18 @@ export function initializeDatabase(): Database {
     _db.run(MEETING_SCHEMA);
 
     ensureSchemaSync();
+
+    // ── Extra schemas (e.g. Hive-Code tables) ──
+    if (extraSchemas && extraSchemas.length > 0) {
+        for (const schema of extraSchemas) {
+            try {
+                _db.run(schema);
+                logger.info("🗄️  Extra schema applied successfully");
+            } catch (schemaErr) {
+                logger.warn("⚠️  Failed to apply extra schema:", { error: (schemaErr as Error).message });
+            }
+        }
+    }
 
     return _db;
 }

@@ -5,8 +5,11 @@ import {
 } from "../ui/index.ts"
 import { getExecutionMode, setExecutionMode } from "@johpaz/hive-code-core"
 import { CoordinatorManager } from "@johpaz/hive-code-code/workers/coordinator-manager"
+import { ensureCodeDatabase } from "./db-init"
 
 export async function run(description?: string, flags: string[] = []): Promise<void> {
+  ensureCodeDatabase()
+
   const approvalFlag = flags.includes("--approval") || flags.includes("-a")
   const mode = approvalFlag ? "approval" : "auto"
 

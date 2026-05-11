@@ -141,6 +141,56 @@ export function parsePlan(text: string): ParsedPlan {
 }
 
 /**
+ * Group phases by dependency level for parallel execution.
+ * Phases in the same level have no dependencies between them and can run in parallel.
+ *
+ * Example:
+ *   Level 0: [backend]
+ *   Level 1: [frontend]
+ *   Level 2: [security, test]  ← parallel
+ *   Level 3: [devops]
+ */
+export function groupPhasesByLevel(phases: ParsedPhase[]): ParsedPhase[][] {
+  const levels = new Map<string, number>()
+
+  function getLevel(phase: ParsedPhase): number {
+    if (levels.has(phase.coordinator)) return levels.get(phase.coordinator)!
+
+    if (phase.dependsOn.length === 0) {
+      levels.set(phase.coordinator, 0)
+      return 0
+    }
+
+    const depLevels = phase.dependsOn
+      .map(dep => phases.find(p => p.coordinator === dep))
+      .filter((p): p is ParsedPhase => p !== undefined)
+      .map(getLevel)
+
+    const level = Math.max(...depLevels) + 1
+    levels.set(phase.coordinator, level)
+    return level
+  }
+
+  // Compute levels for all phases
+  for (const phase of phases) {
+    getLevel(phase)
+  }
+
+  // Group by level
+  const maxLevel = Math.max(...Array.from(levels.values()), -1)
+  const result: ParsedPhase[][] = []
+
+  for (let i = 0; i <= maxLevel; i++) {
+    const levelPhases = phases.filter(p => levels.get(p.coordinator) === i)
+    if (levelPhases.length > 0) {
+      result.push(levelPhases)
+    }
+  }
+
+  return result
+}
+
+/**
  * Build default phase order when architecture phase fails or returns no plan.
  */
 export function getDefaultPhases(): ParsedPhase[] {

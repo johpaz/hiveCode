@@ -2,7 +2,12 @@
 // Sistema de UI propio de Hive-Code usando @clack/core como motor.
 // NO importar de @clack/prompts en ningún lugar del proyecto.
 
-import { TextPrompt, SelectPrompt, type OptionLike } from "@clack/core"
+import { TextPrompt, SelectPrompt } from "@clack/core"
+export interface OptionLike {
+  value: any;
+  label?: string;
+  disabled?: boolean;
+}
 export { isCancel } from "@clack/core"
 
 // ─── Códigos ANSI ────────────────────────────────────────────────

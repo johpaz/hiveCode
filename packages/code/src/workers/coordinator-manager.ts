@@ -11,7 +11,7 @@ import {
 import { Scribe } from "../narrative/scribe"
 import { loadSecrets, distributeSecrets } from "./secrets"
 import { getToolsForCoordinator, executeToolByName } from "./tool-bridge"
-import { parsePlan, getDefaultPhases } from "./plan-parser"
+import { parsePlan, getDefaultPhases, groupPhasesByLevel } from "./plan-parser"
 import type { ParsedPhase } from "./plan-parser"
 import type {
   CoordinatorTask, CoordinatorResult, ControlMessage,
@@ -40,7 +40,7 @@ export class CoordinatorManager {
   private activeTaskId: string | null = null
   private activeSessionId: string | null = null
   private broadcastChannel: BroadcastChannel | null = null
-  private pendingResolve: ((value: CoordinatorResult) => void) | null = null
+  private pendingResolvers = new Map<string, (value: CoordinatorResult) => void>()
   private secrets: Record<string, string> = {}
   private allTools: Tool[] = []
 
@@ -63,21 +63,33 @@ export class CoordinatorManager {
     }
 
     for (const name of COORDINATOR_NAMES) {
-      try {
-        const worker = new (Worker as any)(COORDINATOR_FILES[name], { smol: name === "security" || name === "devops" }) as Bun.Worker
-        worker.onmessage = (msg: MessageEvent) => this.handleWorkerMessage(name, msg.data as WorkerToManagerMessage)
-        worker.onerror = (err: ErrorEvent) => log.error(`[${name}] Worker error: ${err.message}`)
-        this.workers.set(name, worker)
-        log.info(`[coordinator-manager] ✅ ${name} started`)
-      } catch (err) {
-        log.error(`[coordinator-manager] ❌ Failed to start ${name}: ${(err as Error).message}`)
-      }
+      this.createWorker(name)
     }
 
     this.broadcastChannel = new BroadcastChannel("hive-code:control")
     this.broadcastChannel.onmessage = (event: MessageEvent<ControlMessage>) => this.handleControlMessage(event.data)
 
     log.info("[coordinator-manager] ✅ All coordinators running")
+  }
+
+  private createWorker(name: PhaseName): void {
+    try {
+      const worker = new (Worker as any)(COORDINATOR_FILES[name], { smol: name === "security" || name === "devops" }) as Bun.Worker
+      worker.onmessage = (msg: MessageEvent) => this.handleWorkerMessage(name, msg.data as WorkerToManagerMessage)
+      worker.onerror = (err: ErrorEvent) => {
+        log.error(`[${name}] Worker crashed: ${err.message}. Restarting...`)
+        this.workers.delete(name)
+        // Auto-restart with exponential backoff
+        setTimeout(() => {
+          this.createWorker(name)
+          log.info(`[coordinator-manager] 🔄 ${name} worker restarted`)
+        }, 1000)
+      }
+      this.workers.set(name, worker)
+      log.info(`[coordinator-manager] ✅ ${name} started`)
+    } catch (err) {
+      log.error(`[coordinator-manager] ❌ Failed to start ${name}: ${(err as Error).message}`)
+    }
   }
 
   async stopAll(): Promise<void> {
@@ -105,6 +117,24 @@ export class CoordinatorManager {
     this.activeTaskId = this.scribe.createTask(this.activeSessionId, description, mode)
 
     log.info(`[coordinator-manager] 🚀 Task ${this.activeTaskId} (mode: ${mode}): ${description}`)
+
+    // Create git branch for this task
+    const branchName = `hive-code/task-${this.activeTaskId}`
+    try {
+      const gitResult = await executeToolByName(this.allTools, "git_branch", {
+        action: "create",
+        name: branchName,
+        path: process.cwd(),
+      })
+      if ((gitResult as any)?.ok) {
+        this.scribe.updateTaskStatus(this.activeTaskId, "planning", { branchName })
+        log.info(`[coordinator-manager] 🌿 Branch created: ${branchName}`)
+      } else {
+        log.warn(`[coordinator-manager] ⚠️  Could not create branch: ${(gitResult as any)?.error || "unknown"}`)
+      }
+    } catch (err) {
+      log.warn(`[coordinator-manager] ⚠️  Git branch creation failed: ${(err as Error).message}`)
+    }
 
     // Phase 1: Architecture
     const archResult = await this.dispatchPhase("architecture", { description })
@@ -147,77 +177,105 @@ export class CoordinatorManager {
 
     // Execute dynamic phases from the architecture plan
     const phases = plan.phases.length > 0 ? plan.phases : getDefaultPhases()
-    log.info(`[coordinator-manager] 📋 Executing phases: ${phases.map(p => p.coordinator).join(" → ")}`)
+    const levels = groupPhasesByLevel(phases)
 
-    for (let i = 0; i < phases.length; i++) {
+    log.info(`[coordinator-manager] 📋 Executing ${phases.length} phases in ${levels.length} level(s):`)
+    for (let lvl = 0; lvl < levels.length; lvl++) {
+      const levelPhases = levels[lvl]
+      log.info(`[coordinator-manager]    Level ${lvl}: ${levelPhases.map(p => p.coordinator).join(" + ")}`)
+    }
+
+    let globalPhaseIndex = 0
+
+    for (let levelIdx = 0; levelIdx < levels.length; levelIdx++) {
       if (isCancelled()) break
+
       const phaseMode = getMode()
-      const phaseDef = phases[i]
-      const phase = phaseDef.coordinator
+      const levelPhases = levels[levelIdx]
 
       if (phaseMode === "plan") {
-        log.info(`[coordinator-manager] 📋 Switched to plan — skipping execution phase ${phase}`)
+        log.info(`[coordinator-manager] 📋 Switched to plan — skipping level ${levelIdx}`)
+        globalPhaseIndex += levelPhases.length
         continue
       }
 
-      const task: CoordinatorTask = {
-        taskId: this.activeTaskId,
-        phaseId: this.scribe.createPhase(this.activeTaskId, phase, phase),
-        phase,
-        description,
-        adr: archResult.narrativeEntry,
-        interfaces: plan.interfaces,
-        narrative: archResult.narrativeEntry,
-        mode: phaseMode,
-        projectPath: process.cwd(),
-        secrets: this.secrets,
+      // Create tasks for all phases in this level
+      const levelTasks: Array<{ phase: PhaseName; task: CoordinatorTask }> = levelPhases.map(phaseDef => {
+        const phase = phaseDef.coordinator
+        const task: CoordinatorTask = {
+          taskId: this.activeTaskId,
+          phaseId: this.scribe.createPhase(this.activeTaskId, phase, phase),
+          phase,
+          description,
+          adr: archResult.narrativeEntry,
+          interfaces: plan.interfaces,
+          narrative: archResult.narrativeEntry,
+          mode: phaseMode,
+          projectPath: process.cwd(),
+          secrets: this.secrets,
+        }
+        return { phase, task }
+      })
+
+      // Dispatch all phases in this level in parallel
+      const results = await Promise.all(
+        levelTasks.map(({ phase, task }) => this.dispatchPhase(phase, task))
+      )
+
+      // Check results
+      for (let r = 0; r < results.length; r++) {
+        const result = results[r]
+        const { phase, task } = levelTasks[r]
+
+        if (result.status === "failed") {
+          this.scribe.updateTaskStatus(this.activeTaskId, "failed")
+          log.error(`[coordinator-manager] ❌ ${phase} phase failed: ${result.blockerDescription}`)
+          return
+        }
+
+        if (result.status === "blocked") {
+          this.scribe.updatePhaseStatus(task.phaseId, "blocked", result.blockerDescription)
+          this.scribe.updateTaskStatus(this.activeTaskId, "paused")
+          log.warn(`[coordinator-manager] ⚠️ ${phase} phase blocked: ${result.blockerDescription}`)
+          return
+        }
+
+        this.scribe.updatePhaseStatus(task.phaseId, "completed", result.narrativeEntry)
       }
 
-      const result = await this.dispatchPhase(phase, task)
-
-      if (result.status === "failed") {
-        this.scribe.updateTaskStatus(this.activeTaskId, "failed")
-        log.error(`[coordinator-manager] ❌ ${phase} phase failed: ${result.blockerDescription}`)
-        return
-      }
-
-      if (result.status === "blocked") {
-        this.scribe.updatePhaseStatus(task.phaseId, "blocked", result.blockerDescription)
-        this.scribe.updateTaskStatus(this.activeTaskId, "paused")
-        log.warn(`[coordinator-manager] ⚠️ ${phase} phase blocked: ${result.blockerDescription}`)
-        return
-      }
-
-      // Approval mode checkpoint
-      if (phaseMode === "approval" && onApprovalCheckpoint) {
-        this.scribe.updatePhaseStatus(task.phaseId, "running")
-        log.info(`[coordinator-manager] 🟡 ${phase} awaiting approval`)
+      // Approval mode checkpoint — after each level completes
+      const nextLevelPhases = levels[levelIdx + 1]
+      if (phaseMode === "approval" && onApprovalCheckpoint && nextLevelPhases) {
+        log.info(`[coordinator-manager] 🟡 Level ${levelIdx} awaiting approval`)
 
         const decision = await onApprovalCheckpoint({
-          phase,
-          phaseIndex: i,
+          phase: levelPhases.map(p => p.coordinator).join(", "),
+          phaseIndex: globalPhaseIndex,
           totalPhases: phases.length,
-          narrativeEntry: result.narrativeEntry,
-          nextPhase: phases[i + 1]?.coordinator,
+          narrativeEntry: results.map(r => r.narrativeEntry).join("\n\n"),
+          nextPhase: nextLevelPhases.map(p => p.coordinator).join(", "),
         })
 
         if (decision === "cancel") {
           this.scribe.updateTaskStatus(this.activeTaskId, "cancelled")
-          log.info(`[coordinator-manager] ❌ Task cancelled by user at ${phase} phase`)
+          log.info(`[coordinator-manager] ❌ Task cancelled by user at level ${levelIdx}`)
           return
         }
 
         if (decision === "skip") {
-          this.scribe.updatePhaseStatus(task.phaseId, "skipped")
-          log.info(`[coordinator-manager] ⏭️  Skipped ${phase} phase`)
+          for (const { task } of levelTasks) {
+            this.scribe.updatePhaseStatus(task.phaseId, "skipped")
+          }
+          log.info(`[coordinator-manager] ⏭️  Skipped level ${levelIdx}`)
+          globalPhaseIndex += levelPhases.length
           continue
         }
 
         // decision === "approve"
-        log.info(`[coordinator-manager] ✅ ${phase} approved`)
+        log.info(`[coordinator-manager] ✅ Level ${levelIdx} approved`)
       }
 
-      this.scribe.updatePhaseStatus(task.phaseId, "completed", result.narrativeEntry)
+      globalPhaseIndex += levelPhases.length
     }
 
     this.scribe.updateTaskStatus(this.activeTaskId, "completed")
@@ -234,11 +292,12 @@ export class CoordinatorManager {
 
       const idx = COORDINATOR_NAMES.indexOf(phase)
       setWorkerBusy(idx, true)
-      this.pendingResolve = resolve
+      const resolverKey = `${task.taskId}:${task.phaseId}`
+      this.pendingResolvers.set(resolverKey, resolve)
 
       const timeout = setTimeout(() => {
         setWorkerBusy(idx, false)
-        this.pendingResolve = null
+        this.pendingResolvers.delete(resolverKey)
         reject(new Error(`Worker ${phase} timed out after 5 minutes`))
       }, 300_000)
 
@@ -253,15 +312,31 @@ export class CoordinatorManager {
       worker.postMessage(msg)
 
       // Note: we don't set worker.onmessage here because it's already set in startAll
-      // The handleWorkerMessage will call pendingResolve when it receives a RESULT
+      // The handleWorkerMessage will call the correct resolver when it receives a RESULT
     })
   }
 
   private handleWorkerMessage(name: PhaseName, msg: WorkerToManagerMessage): void {
     if (msg.type === "RESULT" && msg.result) {
-      if (this.pendingResolve) {
-        this.pendingResolve(msg.result)
-        this.pendingResolve = null
+      // Write narrative entry for this phase
+      if (this.activeTaskId && this.activeSessionId) {
+        this.scribe.appendNarrative({
+          taskId: this.activeTaskId,
+          sessionId: this.activeSessionId,
+          coordinator: msg.result.coordinator,
+          phase: name,
+          entry: msg.result.narrativeEntry,
+          isDraft: false,
+          isOverride: false,
+        })
+        log.debug(`[coordinator-manager] 📝 Narrative entry saved for ${name}`)
+      }
+
+      const resolverKey = `${msg.taskId}:${msg.phaseId}`
+      const resolver = this.pendingResolvers.get(resolverKey)
+      if (resolver) {
+        resolver(msg.result)
+        this.pendingResolvers.delete(resolverKey)
       }
       const idx = COORDINATOR_NAMES.indexOf(name)
       setWorkerBusy(idx, false)
@@ -306,6 +381,21 @@ export class CoordinatorManager {
     const writeTools = new Set(["fs_write", "fs_edit", "fs_delete"])
     if (writeTools.has(msg.toolName) && this.activeTaskId && msg.toolArgs) {
       await this.createSnapshot(msg.toolArgs.path as string || msg.toolArgs.file as string)
+    }
+
+    // Enforce confirmation for destructive operations
+    if (msg.toolName === "fs_delete") {
+      const confirmed = (msg.toolArgs as any)?.confirmed === true
+      if (!confirmed) {
+        const errorMsg = `Tool 'fs_delete' requires explicit user confirmation. Set confirmed: true only after user approval. File: ${(msg.toolArgs as any)?.path || "unknown"}`
+        log.warn(`[coordinator-manager] 🚫 Blocked fs_delete without confirmation`)
+        worker.postMessage({
+          type: "TOOL_RESULT",
+          toolCallId: msg.toolCallId,
+          error: errorMsg,
+        } as ManagerToWorkerMessage)
+        return
+      }
     }
 
     // Execute the tool

@@ -301,7 +301,7 @@
 | Map L1 Context Compiler | 🔴 | No implementado |
 | postMessage fast-path | 🟡 | Usado pero con objetos, no strings |
 | setEnvironmentData | 🟢 | Implementado |
-| SQLite WAL | 🟡 | Schema existe, pragmas WAL no ejecutados |
+| SQLite WAL | 🟢 | Pragmas ejecutados en initializeDatabase() |
 | Bun.redis | 🔴 | No implementado |
 
 ### §10 CLI — Comandos
