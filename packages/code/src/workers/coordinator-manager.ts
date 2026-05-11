@@ -13,6 +13,8 @@ import { loadSecrets, distributeSecrets } from "./secrets"
 import { getToolsForCoordinator, executeToolByName } from "./tool-bridge"
 import { parsePlan, getDefaultPhases, groupPhasesByLevel } from "./plan-parser"
 import type { ParsedPhase } from "./plan-parser"
+import { checkAutomaticInterruption } from "../modes/interruptions"
+import { broadcastNarrative, broadcastPhase, broadcastMode } from "../modes/task-streaming"
 import type {
   CoordinatorTask, CoordinatorResult, ControlMessage,
   PhaseName, SessionMode, CoordinatorStatus,
@@ -25,13 +27,15 @@ const COORDINATOR_NAMES: PhaseName[] = [
   "architecture", "backend", "frontend", "security", "test", "devops",
 ]
 
+const WORKER_EXT = import.meta.url.endsWith(".ts") ? ".worker.ts" : ".worker.js"
+
 const COORDINATOR_FILES: Record<PhaseName, string> = {
-  architecture: new URL("./architecture.worker.ts", import.meta.url).pathname,
-  backend: new URL("./backend.worker.ts", import.meta.url).pathname,
-  frontend: new URL("./frontend.worker.ts", import.meta.url).pathname,
-  security: new URL("./security.worker.ts", import.meta.url).pathname,
-  test: new URL("./test.worker.ts", import.meta.url).pathname,
-  devops: new URL("./devops.worker.ts", import.meta.url).pathname,
+  architecture: new URL(`./architecture${WORKER_EXT}`, import.meta.url).pathname,
+  backend: new URL(`./backend${WORKER_EXT}`, import.meta.url).pathname,
+  frontend: new URL(`./frontend${WORKER_EXT}`, import.meta.url).pathname,
+  security: new URL(`./security${WORKER_EXT}`, import.meta.url).pathname,
+  test: new URL(`./test${WORKER_EXT}`, import.meta.url).pathname,
+  devops: new URL(`./devops${WORKER_EXT}`, import.meta.url).pathname,
 }
 
 export class CoordinatorManager {
@@ -137,7 +141,18 @@ export class CoordinatorManager {
     }
 
     // Phase 1: Architecture
-    const archResult = await this.dispatchPhase("architecture", { description })
+    const archPhaseId = this.scribe.createPhase(this.activeTaskId, "architecture", "architecture")
+    const archTask: CoordinatorTask = {
+      taskId: this.activeTaskId,
+      phaseId: archPhaseId,
+      phase: "architecture",
+      description,
+      narrative: "",
+      mode: mode ?? getMode(),
+      projectPath: process.cwd(),
+      secrets: this.secrets,
+    }
+    const archResult = await this.dispatchPhase("architecture", archTask)
 
     if (archResult.status === "failed" || archResult.status === "blocked") {
       this.scribe.updateTaskStatus(this.activeTaskId, "failed")
@@ -151,7 +166,7 @@ export class CoordinatorManager {
     // Save ADR to database
     if (plan.adr.title) {
       this.scribe.writeDecision({
-        id: crypto.randomUUID(),
+        id: Bun.randomUUIDv7(),
         taskId: this.activeTaskId,
         title: plan.adr.title,
         context: plan.adr.context,
@@ -241,6 +256,16 @@ export class CoordinatorManager {
         }
 
         this.scribe.updatePhaseStatus(task.phaseId, "completed", result.narrativeEntry)
+
+        // Stream phase completion to WebSocket subscribers
+        if (this.activeTaskId) {
+          broadcastPhase(this.activeTaskId, {
+            name: phase,
+            status: "completed",
+            coordinator: phase,
+            durationMs: result.durationMs,
+          })
+        }
       }
 
       // Approval mode checkpoint — after each level completes
@@ -304,19 +329,20 @@ export class CoordinatorManager {
       // Get tools for this coordinator
       const tools = getToolsForCoordinator(phase, this.allTools)
 
-      // Send task with tools via new protocol
+      // Send task with tools via string fast-path (SPEC §3.1: ~500 ns latency)
       const msg: ManagerToWorkerMessage = {
         type: "TASK",
         task: { ...task, tools: tools as any },
       }
-      worker.postMessage(msg)
+      worker.postMessage(JSON.stringify(msg))
 
       // Note: we don't set worker.onmessage here because it's already set in startAll
       // The handleWorkerMessage will call the correct resolver when it receives a RESULT
     })
   }
 
-  private handleWorkerMessage(name: PhaseName, msg: WorkerToManagerMessage): void {
+  private handleWorkerMessage(name: PhaseName, rawMsg: WorkerToManagerMessage | string): void {
+    const msg = typeof rawMsg === "string" ? JSON.parse(rawMsg) as WorkerToManagerMessage : rawMsg
     if (msg.type === "RESULT" && msg.result) {
       // Write narrative entry for this phase
       if (this.activeTaskId && this.activeSessionId) {
@@ -330,6 +356,14 @@ export class CoordinatorManager {
           isOverride: false,
         })
         log.debug(`[coordinator-manager] 📝 Narrative entry saved for ${name}`)
+
+        // Stream to WebSocket subscribers
+        broadcastNarrative(this.activeTaskId, {
+          coordinator: msg.result.coordinator,
+          phase: name,
+          content: msg.result.narrativeEntry,
+          timestamp: new Date().toISOString(),
+        })
       }
 
       const resolverKey = `${msg.taskId}:${msg.phaseId}`
@@ -354,6 +388,18 @@ export class CoordinatorManager {
   private async handleToolCall(name: PhaseName, msg: WorkerToManagerMessage): Promise<void> {
     const worker = this.workers.get(name)
     if (!worker || !msg.toolName || !msg.toolCallId) return
+
+    // Check automatic interruptions (SPEC §6.3)
+    const interruption = checkAutomaticInterruption(msg)
+    if (interruption?.blocked) {
+      log.warn(`[coordinator-manager] 🚫 Auto-interrupted: ${interruption.reason}`)
+      worker.postMessage(JSON.stringify({
+        type: "TOOL_RESULT",
+        toolCallId: msg.toolCallId,
+        error: `[INTERRUPTION ${interruption.severity}] ${interruption.reason}`,
+      } as ManagerToWorkerMessage))
+      return
+    }
 
     log.debug(`[coordinator-manager] 🛠️  ${name} calling tool: ${msg.toolName}`)
 
@@ -389,11 +435,11 @@ export class CoordinatorManager {
       if (!confirmed) {
         const errorMsg = `Tool 'fs_delete' requires explicit user confirmation. Set confirmed: true only after user approval. File: ${(msg.toolArgs as any)?.path || "unknown"}`
         log.warn(`[coordinator-manager] 🚫 Blocked fs_delete without confirmation`)
-        worker.postMessage({
+        worker.postMessage(JSON.stringify({
           type: "TOOL_RESULT",
           toolCallId: msg.toolCallId,
           error: errorMsg,
-        } as ManagerToWorkerMessage)
+        } as ManagerToWorkerMessage))
         return
       }
     }
@@ -405,12 +451,12 @@ export class CoordinatorManager {
       msg.toolArgs || {}
     )
 
-    // Send result back to worker
-    worker.postMessage({
+    // Send result back to worker via string fast-path
+    worker.postMessage(JSON.stringify({
       type: "TOOL_RESULT",
       toolCallId: msg.toolCallId,
       result,
-    } as ManagerToWorkerMessage)
+    } as ManagerToWorkerMessage))
 
     log.debug(`[coordinator-manager] ✅ ${msg.toolName} result sent to ${name}`)
   }
@@ -421,7 +467,9 @@ export class CoordinatorManager {
       const file = Bun.file(filePath)
       if (await file.exists()) {
         const content = await file.text()
-        const hash = await Bun.CryptoHasher.hash("sha256", content).toString("hex")
+        const hasher = new Bun.CryptoHasher("sha256")
+        hasher.update(content)
+        const hash = hasher.digest("hex")
         this.scribe.saveSnapshot(this.activeTaskId, filePath, content, hash)
         log.debug(`[coordinator-manager] 💾 Snapshot created: ${filePath}`)
       }
@@ -438,6 +486,9 @@ export class CoordinatorManager {
         if (msg.payload.mode) {
           setMode(msg.payload.mode)
           log.info(`[coordinator-manager] 🔄 Mode changed to ${msg.payload.mode}`)
+          if (this.activeSessionId) {
+            broadcastMode(this.activeSessionId, msg.payload.mode)
+          }
         }
         break
       case "TASK_CANCELLED":

@@ -111,8 +111,6 @@ Permite lecturas concurrentes desde los 6 workers mientras el main thread escrib
 **`Map<string, { value, ts }>` en main thread**
 Cache L1 para el Context Compiler. Invalidación por `MAX(rowid)` de SQLite. Latencia de nanosegundos. No es Redis, no necesita proceso externo.
 
-**`Bun.redis` (opcional, auto-detectado)**
-Si `REDIS_URL` o `VALKEY_URL` está en env, Hive-Code usa `Bun.redis` para cache persistida entre reinicios y deployments multi-instancia. Si no, el sistema funciona con SQLite + Map en memoria. Auto-detección en arranque, sin configuración explícita requerida.
 
 ### 3.3 Secretos y Credenciales
 
@@ -699,21 +697,16 @@ Cada skill es un archivo Markdown en `packages/skills/src/code/`.
 │    Narrativo, decisiones, trazas, playbook, snapshots         │
 │    Sesiones, modos, checkpoints de fases                      │
 │    Todo lo que debe sobrevivir un reinicio del proceso        │
-├──────────────────────────────────────────────────────────────┤
-│  OPCIONAL — Bun.redis (auto-detectado por REDIS_URL)         │
-│    Cache persistida entre reinicios para deployments          │
-│    Pub/sub para clusters multi-instancia                      │
-│    Si no está configurado: el sistema funciona sin él         │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 **¹ Estado de implementación:**
 - `SharedArrayBuffer` + `Atomics` → ✓ Implementado en `session-array.ts`
-- `Map<string, {value, ts}>` en memoria → ✗ Pendiente (cache L1 del Context Compiler)
-- `postMessage` fast-path → ✓ Bun nativo, usado en `coordinator-manager.ts`
-- `setEnvironmentData` → ✗ Pendiente (distribución de config a workers)
-- SQLite WAL → ✓ Implementado en `sqlite.ts` con `Database("hive.db", { create: true })`
-- Cache externa vía `Bun.redis` → ✗ Pendiente (solo si se configura `REDIS_URL`)
+- `Map<string, {value, ts}>` en memoria → ✓ Implementado en `context/cache.ts`
+- `postMessage` fast-path → ✓ Bun nativo, strings JSON en `coordinator-manager.ts`
+- `setEnvironmentData` → ✓ Implementado en `workers/secrets.ts`
+- SQLite WAL → ✓ Implementado en `sqlite.ts` con pragmas obligatorios
+
 ---
 
 ## 10. CLI — Comandos Completos

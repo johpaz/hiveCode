@@ -836,7 +836,6 @@ const gitCreatePrTool: Tool = {
 
     let token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || ""
     if (!token) {
-      try { token = await Bun.password.hash("", { algorithm: "bcrypt", cost: 1 }).then(() => "") } catch {}
       try {
         const secrets = (Bun as any).secrets
         token = secrets?.GITHUB_TOKEN || secrets?.GH_TOKEN || ""

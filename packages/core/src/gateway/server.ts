@@ -209,7 +209,7 @@ export async function startGateway(config: Config): Promise<void> {
     } else {
       log.info("✅ Gateway initialization completed successfully");
 
-      // ── Initialize New Cron Scheduler (Croner-based) ───────────────────────
+      // ── Initialize Cron Scheduler (Bun.cron-based) ───────────────────────
       try {
         const db = getDb();
 

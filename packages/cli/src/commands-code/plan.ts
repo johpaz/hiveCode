@@ -5,6 +5,7 @@ import {
 } from "../ui/index.ts"
 import { getExecutionMode, setExecutionMode } from "@johpaz/hive-code-core"
 import { CoordinatorManager } from "@johpaz/hive-code-code/workers/coordinator-manager"
+import { listenModeToggle, stopModeToggle } from "@johpaz/hive-code-code/modes/keyboard"
 import { ensureCodeDatabase } from "./db-init"
 
 export async function plan(description?: string): Promise<void> {
@@ -12,6 +13,10 @@ export async function plan(description?: string): Promise<void> {
 
   hiveIntro("hive-code · Plan Mode")
   hiveModeBar("plan")
+
+  listenModeToggle((mode) => {
+    hiveModeBar(mode)
+  })
 
   const task = description ?? await hiveText({
     message: "¿Qué quieres diseñar?",
@@ -44,6 +49,7 @@ export async function plan(description?: string): Promise<void> {
   } finally {
     await manager.stopAll()
     setExecutionMode(prevMode)
+    stopModeToggle()
   }
 
   hiveNote("Plan completado", [

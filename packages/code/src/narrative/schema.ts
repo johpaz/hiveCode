@@ -141,6 +141,13 @@ CREATE TABLE IF NOT EXISTS code_reflections (
   created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
+-- Config: Hive-Code settings (default provider, models, etc.)
+CREATE TABLE IF NOT EXISTS code_config (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
 -- Context cache: compiled context with TTL
 CREATE TABLE IF NOT EXISTS code_context_cache (
   cache_key   TEXT PRIMARY KEY,

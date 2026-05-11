@@ -7,7 +7,7 @@
 
 import type { Tool } from "@johpaz/hive-code-core/tools/types"
 import type { LLMToolDef } from "@johpaz/hive-code-core/agent/llm-client"
-import type { PhaseName } from "./types"
+import type { PhaseName, SessionMode } from "./types"
 
 // Re-export for convenience
 export type { Tool }

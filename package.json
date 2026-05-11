@@ -98,7 +98,7 @@
     "hive-code": "bun packages/cli/src/index.ts",
     "dev": "HIVE_HOME=$HOME/.hive-dev HIVE_DEV=true bun run packages/cli/src/index.ts dev",
     "start": "bun run packages/cli/src/index.ts start",
-    "build": "bun packages/skills/scripts/generate-bundle.ts && bun build packages/cli/src/index.ts --bundle --outfile dist/hive-code.js --target bun && bun packages/cli/scripts/postbuild.ts",
+    "build": "bun packages/skills/scripts/generate-bundle.ts && bun build packages/cli/src/index.ts packages/code/src/workers/architecture.worker.ts packages/code/src/workers/backend.worker.ts packages/code/src/workers/frontend.worker.ts packages/code/src/workers/security.worker.ts packages/code/src/workers/test.worker.ts packages/code/src/workers/devops.worker.ts --bundle --outdir dist --target bun --entry-naming '[name].js' && mv dist/index.js dist/hive-code.js && bun packages/cli/scripts/postbuild.ts",
     "build:binary": "bun build packages/cli/src/index.ts --compile --outfile ../../dist/hive-code-binary",
     "prepublishOnly": "bun run build",
     "test": "bun test",

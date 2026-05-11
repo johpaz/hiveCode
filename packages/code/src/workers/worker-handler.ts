@@ -8,8 +8,8 @@ import type {
 } from "./types"
 
 declare var self: {
-  onmessage: ((event: { data: ManagerToWorkerMessage }) => void) | null
-  postMessage(message: WorkerToManagerMessage): void
+  onmessage: ((event: { data: ManagerToWorkerMessage | string }) => void) | null
+  postMessage(message: WorkerToManagerMessage | string): void
 }
 
 const COORDINATOR_PROVIDER = process.env.HIVE_COORDINATOR_PROVIDER || "anthropic"
@@ -328,8 +328,8 @@ class WorkerAgent {
       const toolCallId = tc.id
       this.pendingToolResolvers.set(toolCallId, resolve)
 
-      // Send TOOL_CALL to main thread
-      self.postMessage({
+      // Send TOOL_CALL to main thread via string fast-path
+      self.postMessage(JSON.stringify({
         type: "TOOL_CALL",
         taskId: this.task!.taskId,
         phaseId: this.task!.phaseId,
@@ -337,7 +337,7 @@ class WorkerAgent {
         toolName: tc.function.name,
         toolArgs: JSON.parse(tc.function.arguments || "{}"),
         toolCallId,
-      })
+      } as WorkerToManagerMessage))
 
       // Timeout after 60 seconds
       setTimeout(() => {
@@ -365,7 +365,8 @@ export function createWorkerHandler(systemPrompt: string, coordinatorName: strin
   let currentTask: CoordinatorTask | null = null
 
   self.onmessage = async (event) => {
-    const msg = event.data as ManagerToWorkerMessage
+    const rawData = event.data as string | ManagerToWorkerMessage
+    const msg = typeof rawData === "string" ? JSON.parse(rawData) as ManagerToWorkerMessage : rawData
 
     if (msg.type === "TASK" && msg.task) {
       currentTask = msg.task
@@ -374,13 +375,14 @@ export function createWorkerHandler(systemPrompt: string, coordinatorName: strin
       const tools: LLMToolDef[] = (msg.task as any).tools || []
       const result = await agent.startTask(msg.task, tools)
 
-      self.postMessage({
+      // Send via string fast-path (SPEC §3.1: ~500 ns latency)
+      self.postMessage(JSON.stringify({
         type: "RESULT",
         taskId: result.taskId,
         phaseId: result.phaseId,
         coordinator: coordinatorName,
         result,
-      })
+      }))
       return
     }
 

@@ -21,7 +21,7 @@ export async function providerList(): Promise<void> {
   hiveIntro("hive-code · Providers")
 
   const db = getDb()
-  const rows = db.query("SELECT id, name, base_url, enabled, model_id FROM providers ORDER BY id").all() as any[]
+  const rows = db.query("SELECT id, name, base_url, enabled FROM providers ORDER BY id").all() as any[]
 
   if (rows.length === 0) {
     hiveNote("Sin providers", ["No hay providers configurados. Usa 'hive-code provider add <name>'"])
@@ -29,14 +29,17 @@ export async function providerList(): Promise<void> {
     return
   }
 
-  const defaultProvider = db.query("SELECT value FROM config WHERE key = 'default_provider'").get() as any
+  const defaultProvider = db.query("SELECT value FROM code_config WHERE key = 'default_provider'").get() as any
+  const modelRows = db.query("SELECT key, value FROM code_config WHERE key LIKE 'provider_model_%'").all() as any[]
+  const modelMap = new Map(modelRows.map(r => [r.key.replace("provider_model_", ""), r.value]))
 
   for (const row of rows) {
     const isDefault = defaultProvider?.value === row.id
     const status = row.enabled ? "●" : "○"
     const color = row.enabled ? "\x1b[38;5;114m" : "\x1b[38;5;240m"
+    const model = modelMap.get(row.id) || "default"
     hivePhaseComplete(row.id, `${row.name}${isDefault ? " (default)" : ""}`)
-    process.stdout.write(`  │    ${color}${status}\x1b[0m  ${row.id}  ·  model: ${row.model_id || "default"}\n`)
+    process.stdout.write(`  │    ${color}${status}\x1b[0m  ${row.id}  ·  model: ${model}\n`)
     if (row.base_url) {
       process.stdout.write(`  │         ${row.base_url}\n`)
     }
@@ -91,14 +94,18 @@ export async function providerAdd(name?: string): Promise<void> {
   })
 
   db.query(`
-    INSERT INTO providers (id, name, base_url, model_id, enabled)
-    VALUES (?, ?, ?, ?, 1)
+    INSERT INTO providers (id, name, base_url, enabled)
+    VALUES (?, ?, ?, 1)
   `).run(
     providerName,
     providerName,
-    (!isCancel(baseUrl) && baseUrl && typeof baseUrl === "string") ? baseUrl : null,
-    (!isCancel(model) && model && typeof model === "string") ? model : null
+    (!isCancel(baseUrl) && baseUrl && typeof baseUrl === "string") ? baseUrl : null
   )
+
+  if (!isCancel(model) && model && typeof model === "string") {
+    db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)")
+      .run(`provider_model_${providerName}`, model)
+  }
 
   // Store API key in Bun.secrets if available
   try {
@@ -151,7 +158,7 @@ export async function providerSetDefault(name?: string): Promise<void> {
     process.exit(1)
   }
 
-  db.query("INSERT OR REPLACE INTO config (key, value) VALUES ('default_provider', ?)").run(name)
+  db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(name)
   hiveOutro(`${name} es ahora el provider por defecto`)
 }
 
@@ -167,7 +174,8 @@ export async function providerSetModel(args: string[]): Promise<void> {
   }
 
   const db = getDb()
-  db.query("UPDATE providers SET model_id = ? WHERE id = ?").run(model, providerId)
+  db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)")
+    .run(`provider_model_${providerId}`, model)
   hiveOutro(`Modelo ${model} asignado a ${providerId}`)
 }
 

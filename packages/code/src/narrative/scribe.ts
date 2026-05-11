@@ -32,7 +32,7 @@ export class Scribe {
   private db = getDb()
 
   createSession(projectPath: string): string {
-    const id = crypto.randomUUID()
+    const id = Bun.randomUUIDv7()
     this.db.query(
       "INSERT INTO code_sessions (id, project_path) VALUES (?, ?)"
     ).run(id, projectPath)
@@ -41,7 +41,7 @@ export class Scribe {
   }
 
   createTask(sessionId: string, description: string, mode: string): string {
-    const id = crypto.randomUUID()
+    const id = Bun.randomUUIDv7()
     this.db.query(
       "INSERT INTO code_tasks (id, session_id, description, status, mode) VALUES (?, ?, ?, 'pending', ?)"
     ).run(id, sessionId, description, mode)

@@ -45,6 +45,8 @@ export interface CoordinatorTask {
   projectPath: string
   /** Secrets distributed by the main thread (fallback when setEnvironmentData unavailable) */
   secrets?: Record<string, string>
+  /** Tools available to this coordinator (injected by manager) */
+  tools?: any[]
 }
 
 export interface CoordinatorResult {
