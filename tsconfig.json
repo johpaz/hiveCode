@@ -1,0 +1,126 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "paths": {
+      "@johpaz/hive": [
+        "./packages/core/src/index.ts"
+      ],
+      "@johpaz/hive/agent/*": [
+        "./packages/core/src/agent/*"
+      ],
+      "@johpaz/hive/channels/*": [
+        "./packages/core/src/channels/*"
+      ],
+      "@johpaz/hive/storage/*": [
+        "./packages/core/src/storage/*"
+      ],
+      "@johpaz/hive/tools/*": [
+        "./packages/core/src/tools/*"
+      ],
+      "@johpaz/hive/config/*": [
+        "./packages/core/src/config/*"
+      ],
+      "@johpaz/hive/utils/*": [
+        "./packages/core/src/utils/*"
+      ],
+      "@johpaz/hive/gateway/*": [
+        "./packages/core/src/gateway/*"
+      ],
+      "@johpaz/hive/mcp/*": [
+        "./packages/mcp/src/*"
+      ],
+      "@johpaz/hive/skills/*": [
+        "./packages/skills/src/*"
+      ],
+      "@johpaz/hive-core": [
+        "./packages/core/src/index.ts"
+      ],
+      "@johpaz/hive-core/*": [
+        "./packages/core/src/*"
+      ],
+      "@johpaz/hive-code-core": [
+        "./packages/core/src"
+      ],
+      "@johpaz/hive-code-core/*": [
+        "./packages/core/src/*"
+      ],
+      "@johpaz/hive-agents-core/*": [
+        "./packages/core/src/*"
+      ],
+      "@johpaz/hive-mcp": [
+        "./packages/mcp/src/index.ts"
+      ],
+      "@johpaz/hive-mcp/*": [
+        "./packages/mcp/src/*"
+      ],
+      "@johpaz/hive-agents-mcp": [
+        "./packages/mcp/src/index.ts"
+      ],
+      "@johpaz/hive-agents-mcp/*": [
+        "./packages/mcp/src/*"
+      ],
+      "@johpaz/hive-skills": [
+        "./packages/skills/src/index.ts"
+      ],
+      "@johpaz/hive-skills/*": [
+        "./packages/skills/src/*"
+      ],
+      "@johpaz/hive-agents-skills": [
+        "./packages/skills/src/index.ts"
+      ],
+      "@johpaz/hive-agents-skills/*": [
+        "./packages/skills/src/*"
+      ],
+      "@johpaz/hive-cli": [
+        "./packages/cli/src/index.ts"
+      ],
+      "@johpaz/hive-code-bridge": [
+        "./packages/code-bridge/src/index.ts"
+      ],
+      "@johpaz/hive-code-bridge/*": [
+        "./packages/code-bridge/src/*"
+      ],
+      "@johpaz/hive-agents-code-bridge": [
+        "./packages/code-bridge/src/index.ts"
+      ],
+      "@johpaz/hive-agents-code-bridge/*": [
+        "./packages/code-bridge/src/*"
+      ],
+      "@johpaz/hive-tools": [
+        "./packages/tools/src/index.ts"
+      ],
+      "@johpaz/hive-tools/*": [
+        "./packages/tools/src/*"
+      ],
+      "@/*": [
+        "./packages/hive-ui/src/*"
+      ],
+      "@johpaz/hive-code-code": [
+        "./packages/code/src/index.ts"
+      ],
+      "@johpaz/hive-code-code/*": [
+        "./packages/code/src/*"
+      ],
+      "@johpaz/hive-tts": [
+        "./packages/tts/src/index.ts"
+      ],
+      "@johpaz/hive-tts/client": [
+        "./packages/tts/src/client.ts"
+      ],
+      "@johpaz/hive-tts/server": [
+        "./packages/tts/src/server.ts"
+      ]
+    }
+  },
+  "include": [
+    "packages/*/src/**/*",
+    "packages/hive-ui/src/**/*",
+    "tests/**/*",
+    "scripts/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}

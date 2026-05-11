@@ -1,0 +1,22 @@
+{
+  "name": "@johpaz/hive-code-skills",
+  "version": "0.1.0",
+  "private": true,
+  "description": "hive-code Skills — Code-focused skills for multi-AI coding",
+  "main": "./src/index.ts",
+  "license": "MIT",
+  "files": [
+    "src/"
+  ],
+  "scripts": {
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "typescript": "6.0.2",
+    "@types/bun": "^1.3.13"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./loader": "./src/loader.ts"
+  }
+}

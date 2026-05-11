@@ -1,0 +1,131 @@
+{
+  "name": "@johpaz/hive-code",
+  "version": "0.1.0",
+  "description": "hive-code — Multi-AI coding swarm. Console-first. Code-focused. Multi-provider.",
+  "private": true,
+  "bin": {
+    "hive-code": "dist/hive-code.js"
+  },
+  "main": "packages/core/src/index.ts",
+  "types": "packages/core/src/index.ts",
+  "workspaces": [
+    "packages/*"
+  ],
+  "exports": {
+    ".": "./packages/core/src/index.ts",
+    "./code": "./packages/code/src/index.ts",
+    "./code/workers": "./packages/code/src/workers/index.ts",
+    "./code/workers/types": "./packages/code/src/workers/types.ts",
+    "./code/workers/coordinator-manager": "./packages/code/src/workers/coordinator-manager.ts",
+    "./code/narrative": "./packages/code/src/narrative/index.ts",
+    "./code/narrative/scribe": "./packages/code/src/narrative/scribe.ts",
+    "./code/modes": "./packages/code/src/modes/index.ts",
+    "./core": "./packages/core/src/index.ts",
+    "./agent/service": "./packages/core/src/agent/service.ts",
+    "./agent/agent-loop": "./packages/core/src/agent/agent-loop.ts",
+    "./agent/context-compiler": "./packages/core/src/agent/context-compiler.ts",
+    "./agent/prompt-builder": "./packages/core/src/agent/prompt-builder.ts",
+    "./agent/conversation-store": "./packages/core/src/agent/conversation-store.ts",
+    "./agent/execution-mode": "./packages/core/src/agent/execution-mode.ts",
+    "./agent/tool-selector": "./packages/core/src/agent/tool-selector.ts",
+    "./agent/skill-selector": "./packages/core/src/agent/skill-selector.ts",
+    "./agent/playbook-selector": "./packages/core/src/agent/playbook-selector.ts",
+    "./agent/llm-client": "./packages/core/src/agent/llm-client.ts",
+    "./agent/native-tools": "./packages/core/src/agent/native-tools.ts",
+    "./channels/manager": "./packages/core/src/channels/manager.ts",
+    "./channels/base": "./packages/core/src/channels/base.ts",
+    "./channels/telegram": "./packages/core/src/channels/telegram.ts",
+    "./storage/sqlite": "./packages/core/src/storage/sqlite.ts",
+    "./storage/schema": "./packages/core/src/storage/schema.ts",
+    "./storage/seed": "./packages/core/src/storage/seed.ts",
+    "./storage/crypto": "./packages/core/src/storage/crypto.ts",
+    "./storage/onboarding": "./packages/core/src/storage/onboarding.ts",
+    "./tools/index": "./packages/core/src/tools/index.ts",
+    "./tools/types": "./packages/core/src/tools/types.ts",
+    "./tools/agents/index": "./packages/core/src/tools/agents/index.ts",
+    "./tools/filesystem/index": "./packages/core/src/tools/filesystem/index.ts",
+    "./tools/web/index": "./packages/core/src/tools/web/index.ts",
+    "./tools/projects/index": "./packages/core/src/tools/projects/index.ts",
+    "./tools/cron/index": "./packages/core/src/tools/cron/index.ts",
+    "./tools/cli/index": "./packages/core/src/tools/cli/index.ts",
+    "./tools/canvas/index": "./packages/core/src/tools/canvas/index.ts",
+    "./tools/codebridge/index": "./packages/core/src/tools/codebridge/index.ts",
+    "./tools/code/index": "./packages/core/src/tools/code/index.ts",
+    "./tools/core/index": "./packages/core/src/tools/core/index.ts",
+    "./config/index": "./packages/core/src/config/index.ts",
+    "./utils/logger": "./packages/core/src/utils/logger.ts",
+    "./utils/crypto": "./packages/core/src/utils/crypto.ts",
+    "./utils/retry": "./packages/core/src/utils/retry.ts",
+    "./gateway/index": "./packages/core/src/gateway/index.ts",
+    "./gateway/server": "./packages/core/src/gateway/server.ts",
+    "./mcp": "./packages/mcp/src/index.ts",
+    "./mcp/manager": "./packages/mcp/src/manager.ts",
+    "./mcp/config": "./packages/mcp/src/config.ts",
+    "./mcp/logger": "./packages/mcp/src/logger.ts",
+    "./mcp/transports": "./packages/mcp/src/transports/index.ts",
+    "./skills": "./packages/skills/src/index.ts",
+    "./skills/loader": "./packages/skills/src/loader.ts",
+    "./cli": "./packages/cli/src/index.ts"
+  },
+  "files": [
+    "dist/hive.js",
+    "dist/hive.cmd",
+    "dist/hive.ps1",
+    "dist/ui",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/johpaz/hive.git"
+  },
+  "keywords": [
+    "hive-code",
+    "coding",
+    "ai",
+    "llm",
+    "multi-ai",
+    "code-swarm",
+    "console",
+    "bun",
+    "sqlite",
+    "mcp",
+    "open-source",
+    "colombia"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "hive-code": "bun packages/cli/src/index.ts",
+    "dev": "HIVE_HOME=$HOME/.hive-dev HIVE_DEV=true bun run packages/cli/src/index.ts dev",
+    "start": "bun run packages/cli/src/index.ts start",
+    "build": "bun packages/skills/scripts/generate-bundle.ts && bun build packages/cli/src/index.ts --bundle --outfile dist/hive-code.js --target bun && bun packages/cli/scripts/postbuild.ts",
+    "build:binary": "bun build packages/cli/src/index.ts --compile --outfile ../../dist/hive-code-binary",
+    "prepublishOnly": "bun run build",
+    "test": "bun test",
+    "test:ci": "bun test --coverage",
+    "lint": "bunx tsc --noEmit",
+    "bench": "bun run scripts/bench.ts",
+    "reload-tools": "bun run scripts/reload-tools.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.74.0",
+    "@clack/core": "^1.3.0",
+    "@google/genai": "^1.43.0",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "grammy": "latest",
+    "ollama": "^0.6.3",
+    "openai": "^6.18.0",
+    "toon-format-parser": "^1.1.0",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.13",
+    "typescript": "6.0.2"
+  },
+  "overrides": {
+    "vite": "^8.0.0"
+  },
+  "resolutions": {
+    "vite": "^8.0.0"
+  }
+}

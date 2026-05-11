@@ -1,0 +1,32 @@
+{
+  "name": "@johpaz/hive-code-code",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "hive-code workers — 6 Bun Worker coordinators for software engineering",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "license": "MIT",
+  "files": ["src/"],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@johpaz/hive-code-core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "6.0.2",
+    "@types/bun": "^1.3.13"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./workers": "./src/workers/index.ts",
+    "./workers/coordinator-manager": "./src/workers/coordinator-manager.ts",
+    "./workers/types": "./src/workers/types.ts",
+    "./narrative": "./src/narrative/index.ts",
+    "./narrative/scribe": "./src/narrative/scribe.ts",
+    "./modes": "./src/modes/index.ts"
+  }
+}
