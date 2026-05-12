@@ -7,6 +7,7 @@
 
 import * as path from "node:path"
 import * as os from "node:os"
+import * as fs from "node:fs"
 
 /** Expand ~ to the home directory */
 export function expandPath(p: string): string {
@@ -17,24 +18,45 @@ export function expandPath(p: string): string {
 }
 
 /**
+ * Resolve the real (canonical) path of a file, following symlinks.
+ * If the file doesn't exist yet, resolves the parent directory instead.
+ */
+function realpathSafe(p: string): string {
+  try {
+    return fs.realpathSync(p)
+  } catch {
+    const dir = path.dirname(p)
+    try {
+      return path.join(fs.realpathSync(dir), path.basename(p))
+    } catch {
+      return p
+    }
+  }
+}
+
+/**
  * Resolve a user-supplied path against the workspace root.
  *
- * - If `workspace` is not set (null / undefined / empty), all paths pass through unchanged.
+ * - If `workspace` is not set (null / undefined / empty), the call is REJECTED
+ *   to prevent uncontrolled filesystem access.
  * - Relative paths are resolved relative to `workspace`.
  * - Absolute paths must be inside `workspace`; otherwise an error is thrown.
+ * - Symlink escape protection: resolves real paths before containment check.
  *
- * @throws Error when the resolved path is outside the workspace.
+ * @throws Error when no workspace is configured or the resolved path is outside the workspace.
  */
 export function resolveInWorkspace(
   filePath: string,
   workspace: string | null | undefined
 ): string {
   if (!workspace) {
-    // No workspace configured — allow any path
-    return filePath
+    throw new Error(
+      `[Workspace] Access denied: no workspace configured. Refusing to access '${filePath}' without a workspace boundary.`
+    )
   }
 
   const wsRoot = path.resolve(expandPath(workspace))
+  const wsRealRoot = realpathSafe(wsRoot)
 
   let resolved: string
   if (path.isAbsolute(filePath)) {
@@ -43,8 +65,9 @@ export function resolveInWorkspace(
     resolved = path.resolve(wsRoot, filePath)
   }
 
-  // Ensure the resolved path is inside the workspace
-  const relative = path.relative(wsRoot, resolved)
+  const resolvedReal = realpathSafe(resolved)
+
+  const relative = path.relative(wsRealRoot, resolvedReal)
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
     throw new Error(
       `[Workspace] Access denied: '${filePath}' resolves outside workspace '${wsRoot}'.`

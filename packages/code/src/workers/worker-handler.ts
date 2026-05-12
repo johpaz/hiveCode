@@ -130,8 +130,11 @@ class WorkerAgent {
       const apiKey = resolveApiKey(provider, task.secrets)
 
       // Build initial messages
+      const contextBlock = task.compiledContext
+        ? `\n\n${task.compiledContext}`
+        : ""
       this.messages = [
-        { role: "system", content: this.systemPrompt },
+        { role: "system", content: this.systemPrompt + contextBlock },
         {
           role: "user",
           content: [

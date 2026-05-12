@@ -1,8 +1,8 @@
 /**
- * cli_exec - Execute shell commands
+ * shell_executor - Execute shell commands in agent workspace
  *
  * @category cli
- * @seedId cli_exec
+ * @seedId shell_executor
  * @spanish ejecutar comando, terminal, bash, script, consola
  */
 
@@ -11,12 +11,8 @@ import { logger } from "../../utils/logger.ts";
 import { resolveInWorkspace, getWorkspace, expandPath } from "../filesystem/workspace-guard.ts";
 import * as fs from "node:fs";
 
-const log = logger.child("cli-exec");
+const log = logger.child("shell-executor");
 
-/**
- * Patterns that are unconditionally blocked regardless of workspace config.
- * Checked against the full command string (lowercased).
- */
 const BLOCKED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /rm\s+-rf\s+\/[^\s]*/, reason: "recursive delete from root" },
   { pattern: /rm\s+-rf\s+~/, reason: "recursive delete from home" },
@@ -28,13 +24,35 @@ const BLOCKED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /format\s+[a-z]:/i, reason: "disk format (Windows)" },
 ];
 
-export const cliExecTool: Tool = {
-  name: "cli_exec",
+const ALLOWED_ENV_VARS = new Set([
+  "PATH",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TERM",
+  "SHELL",
+  "USER",
+  "NODE_ENV",
+  "BUN_INSTALL",
+  "HIVE_HOME",
+])
+
+function buildSandboxEnv(): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {}
+  for (const key of ALLOWED_ENV_VARS) {
+    if (process.env[key]) env[key] = process.env[key]
+  }
+  return env
+}
+
+export const shellExecutorTool: Tool = {
+  name: "shell_executor",
   description: "Execute shell/bash commands in the agent workspace. NOTE: do NOT use for scheduling tasks, use cron.create instead. Spanish: ejecutar comando, terminal, bash, script, consola",
   parameters: {
     type: "object",
     properties: {
-      command: {
+      cmd: {
         type: "string",
         description: "The shell command to execute (supports pipes, redirections, variables)",
       },
@@ -47,14 +65,13 @@ export const cliExecTool: Tool = {
         description: "Working directory (default: agent workspace)",
       },
     },
-    required: ["command"],
+    required: ["cmd"],
   },
   execute: async (params: Record<string, unknown>, config?: any) => {
-    const command = params.command as string;
+    const command = (params.cmd as string) || (params.command as string) || "";
     const timeoutSecs = Math.min((params.timeout as number) ?? 30, 300);
     const timeoutMs = timeoutSecs * 1000;
 
-    // ── Workspace enforcement ──────────────────────────────────────────────────
     const workspace = getWorkspace(config);
     const defaultCwd = workspace ? expandPath(workspace) : process.cwd();
 
@@ -66,12 +83,10 @@ export const cliExecTool: Tool = {
       return { ok: false, error: (e as Error).message };
     }
 
-    // Ensure cwd exists
     if (!fs.existsSync(cwd)) {
       return { ok: false, error: `Working directory not found: ${cwd}` };
     }
 
-    // ── Dangerous pattern check ────────────────────────────────────────────────
     for (const { pattern, reason } of BLOCKED_PATTERNS) {
       if (pattern.test(command)) {
         return {
@@ -81,6 +96,8 @@ export const cliExecTool: Tool = {
       }
     }
 
+    const sandboxEnv = buildSandboxEnv();
+
     log.info(`Executing: ${command} (cwd=${cwd})`);
 
     const t0 = performance.now();
@@ -89,9 +106,9 @@ export const cliExecTool: Tool = {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-      // Use sh -c so pipes, redirections, variables, and quoted args all work
       const proc = Bun.spawn(["/bin/sh", "-c", command], {
         cwd,
+        env: sandboxEnv,
         signal: controller.signal,
         stdout: "pipe",
         stderr: "pipe",
@@ -107,8 +124,11 @@ export const cliExecTool: Tool = {
           new Response(proc.stderr).text(),
         ]);
         exitCode = await proc.exited;
+        if (exitCode !== 0 && controller.signal.aborted) {
+          exitCode = -1;
+          stderr = stderr || `Process killed after ${timeoutSecs}s timeout`;
+        }
       } catch {
-        // AbortController fired — process was killed due to timeout
         exitCode = -1;
         stdout = stdout || "";
         stderr = stderr || `Process killed after ${timeoutSecs}s timeout`;
@@ -137,6 +157,8 @@ export const cliExecTool: Tool = {
   },
 };
 
+export const cliExecTool = shellExecutorTool;
+
 export function createTools(): Tool[] {
-  return [cliExecTool];
+  return [shellExecutorTool];
 }

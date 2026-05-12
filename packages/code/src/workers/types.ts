@@ -47,6 +47,8 @@ export interface CoordinatorTask {
   secrets?: Record<string, string>
   /** Tools available to this coordinator (injected by manager) */
   tools?: any[]
+  /** Pre-compiled context from Context Compiler (skills, playbook, scratchpad) */
+  compiledContext?: string
 }
 
 export interface CoordinatorResult {

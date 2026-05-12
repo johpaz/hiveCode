@@ -65,7 +65,7 @@ export const SEED_DATA: SeedData = {
     // ─────────────────────────────────────────
     // 5. CLI — Ejecución de comandos
     // ─────────────────────────────────────────
-    { id: "cli_exec", name: "cli_exec", category: "cli", description: "Ejecutar comandos shell/bash en el entorno del agente. NOTA: NO usar para tareas programadas, usar cron.create. Sinónimos: ejecutar comando, terminal, bash, script, consola" },
+    { id: "shell_executor", name: "shell_executor", category: "cli", description: "Ejecutar comandos shell/bash en el entorno del agente. NOTA: NO usar para tareas programadas, usar cron.create. Sinónimos: ejecutar comando, terminal, bash, script, consola" },
 
     // ─────────────────────────────────────────
     // 6. AGENTS — Memoria, workers y delegación

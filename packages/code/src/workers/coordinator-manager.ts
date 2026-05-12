@@ -4,6 +4,8 @@ import { createAllTools } from "@johpaz/hive-code-core/tools"
 import type { Config } from "@johpaz/hive-code-core/config"
 import { loadConfig } from "@johpaz/hive-code-core/config"
 import type { Tool } from "@johpaz/hive-code-core/tools"
+import { selectSkills, getMinimalSkills, type SkillDescriptor } from "@johpaz/hive-code-core/agent/skill-selector"
+import { syncSkillsToFTS } from "@johpaz/hive-code-core/agent/context-compiler"
 import {
   getMode, setMode, getPhaseIndex, setPhaseIndex,
   setWorkerBusy, isWorkerBusy, setCancelled, isCancelled,
@@ -338,19 +340,74 @@ export class CoordinatorManager {
         reject(new Error(`Worker ${phase} timed out after 5 minutes`))
       }, 300_000)
 
-      // Get tools for this coordinator
-      const tools = getToolsForCoordinator(phase, this.allTools)
+    // Get tools for this coordinator
+    const tools = getToolsForCoordinator(phase, this.allTools)
 
-      // Send task with tools via string fast-path (SPEC §3.1: ~500 ns latency)
-      const msg: ManagerToWorkerMessage = {
-        type: "TASK",
-        task: { ...task, tools: tools as any },
-      }
+    // Compile worker context (skills, playbook, scratchpad) for this phase
+    const compiledContext = this.compileWorkerContext(phase, task.description, task.narrative)
+
+    // Send task with tools + compiled context via string fast-path (SPEC §3.1: ~500 ns latency)
+    const msg: ManagerToWorkerMessage = {
+      type: "TASK",
+      task: { ...task, tools: tools as any, compiledContext },
+    }
       worker.postMessage(JSON.stringify(msg))
 
-      // Note: we don't set worker.onmessage here because it's already set in startAll
-      // The handleWorkerMessage will call the correct resolver when it receives a RESULT
-    })
+  // Note: we don't set worker.onmessage here because it's already set in startAll
+  // The handleWorkerMessage will call the correct resolver when it receives a RESULT
+  })
+  }
+
+  /** Compile worker context: relevant skills, playbook rules, and scratchpad notes.
+   *  Runs on main thread where DB is available; injects as string into CoordinatorTask. */
+  private compileWorkerContext(phase: PhaseName, taskDescription: string, narrative: string): string {
+    const db = getDb()
+    const sections: string[] = []
+
+    // 1. Skills — minimal + FTS5-discovered for this phase
+    try {
+      const minimalSkills = getMinimalSkills()
+      const discoveredSkills = selectSkills(`${taskDescription} ${phase}`)
+      const seen = new Set<string>()
+      const allSkills: SkillDescriptor[] = []
+      for (const s of [...minimalSkills, ...discoveredSkills]) {
+        if (!seen.has(s.name)) { seen.add(s.name); allSkills.push(s) }
+      }
+      if (allSkills.length > 0) {
+        let skillSection = "# SKILLS\nRelevant skills for this phase:\n\n"
+        for (const skill of allSkills) {
+          skillSection += `## ${skill.name}\n${skill.description}\n\n${skill.body}\n\n---\n\n`
+        }
+        sections.push(skillSection)
+      }
+    } catch (err) {
+      log.warn(`[coordinator-manager] ⚠️ Skill compilation failed for ${phase}: ${(err as Error).message}`)
+    }
+
+    // 2. Playbook rules relevant to this coordinator
+    try {
+      const rules = db.query<any, [string]>(`
+        SELECT rule, confidence FROM code_playbook
+        WHERE active = 1 AND (coordinator = ? OR coordinator IS NULL)
+        ORDER BY confidence DESC LIMIT 5
+      `).all(phase)
+      if (rules.length > 0) {
+        let playbookSection = "# PLAYBOOK RULES\nFollow these verified patterns:\n\n"
+        for (const r of rules) {
+          playbookSection += `- [${(r.confidence * 100).toFixed(0)}%] ${r.rule}\n`
+        }
+        sections.push(playbookSection)
+      }
+    } catch {
+      // code_playbook may not have rows yet — skip silently
+    }
+
+    // 3. Recent scratchpad / narrative context
+    if (narrative) {
+      sections.push(`# PROJECT NARRATIVE\n${narrative.slice(0, 3000)}${narrative.length > 3000 ? "\n...(truncated)" : ""}`)
+    }
+
+    return sections.join("\n\n")
   }
 
   private handleWorkerMessage(name: PhaseName, rawMsg: WorkerToManagerMessage | string): void {
@@ -405,6 +462,7 @@ export class CoordinatorManager {
     const interruption = checkAutomaticInterruption(msg)
     if (interruption?.blocked) {
       log.warn(`[coordinator-manager] 🚫 Auto-interrupted: ${interruption.reason}`)
+      this.writeToolTrace(name, msg.toolName, "", `[INTERRUPTION] ${interruption.reason}`, false, 0n)
       worker.postMessage(JSON.stringify({
         type: "TOOL_RESULT",
         toolCallId: msg.toolCallId,
@@ -413,19 +471,20 @@ export class CoordinatorManager {
       return
     }
 
-    log.debug(`[coordinator-manager] 🛠️  ${name} calling tool: ${msg.toolName}`)
+    log.debug(`[coordinator-manager] 🛠️ ${name} calling tool: ${msg.toolName}`)
 
     // Check plan mode gate
     const mode = getMode()
     if (mode === "plan") {
-      const writeTools = new Set([
+      const planBlockedTools = new Set([
         "fs_write", "fs_edit", "fs_delete",
         "git_commit", "git_branch", "git_create_pr", "git_rollback",
         "append_narrative", "write_decision",
       ])
-      if (writeTools.has(msg.toolName)) {
+      if (planBlockedTools.has(msg.toolName)) {
         const errorMsg = `Tool '${msg.toolName}' is disabled in PLAN mode. Only read operations are allowed.`
         log.warn(`[coordinator-manager] 🚫 Blocked ${msg.toolName} in plan mode`)
+        this.writeToolTrace(name, msg.toolName, JSON.stringify(msg.toolArgs), errorMsg, false, 0n)
         worker.postMessage({
           type: "TOOL_RESULT",
           toolCallId: msg.toolCallId,
@@ -447,6 +506,7 @@ export class CoordinatorManager {
       if (!confirmed) {
         const errorMsg = `Tool 'fs_delete' requires explicit user confirmation. Set confirmed: true only after user approval. File: ${(msg.toolArgs as any)?.path || "unknown"}`
         log.warn(`[coordinator-manager] 🚫 Blocked fs_delete without confirmation`)
+        this.writeToolTrace(name, msg.toolName, "", errorMsg, false, 0n)
         worker.postMessage(JSON.stringify({
           type: "TOOL_RESULT",
           toolCallId: msg.toolCallId,
@@ -456,12 +516,20 @@ export class CoordinatorManager {
       }
     }
 
-    // Execute the tool
+    // Execute the tool with timing
+    const inputSummary = JSON.stringify(msg.toolArgs || {}).slice(0, 500)
+    const toolStart = performance.now()
     const result = await executeToolByName(
       this.allTools,
       msg.toolName,
       msg.toolArgs || {}
     )
+    const toolDurationNs = BigInt(Math.round((performance.now() - toolStart) * 1_000_000))
+    const success = !(result && typeof result === "object" && "ok" in (result as any) && (result as any).ok === false)
+    const outputSummary = typeof result === "string" ? result.slice(0, 500) : JSON.stringify(result).slice(0, 500)
+
+    // Write tool execution trace (SPEC §5.4)
+    this.writeToolTrace(name, msg.toolName, inputSummary, outputSummary, success, toolDurationNs)
 
     // Send result back to worker via string fast-path
     worker.postMessage(JSON.stringify({
@@ -471,6 +539,30 @@ export class CoordinatorManager {
     } as ManagerToWorkerMessage))
 
     log.debug(`[coordinator-manager] ✅ ${msg.toolName} result sent to ${name}`)
+  }
+
+  private writeToolTrace(
+    coordinator: string,
+    toolName: string,
+    inputSummary: string,
+    outputSummary: string,
+    success: boolean,
+    durationNs: bigint,
+  ): void {
+    try {
+      this.scribe.writeTrace({
+        taskId: this.activeTaskId || "unknown",
+        agentId: coordinator,
+        coordinator,
+        toolName,
+        inputSummary,
+        outputSummary,
+        success,
+        durationNs: Number(durationNs),
+      })
+    } catch (err) {
+      log.warn(`[coordinator-manager] ⚠️ Failed to write trace for ${toolName}: ${(err as Error).message}`)
+    }
   }
 
   private async createSnapshot(filePath: string | undefined): Promise<void> {

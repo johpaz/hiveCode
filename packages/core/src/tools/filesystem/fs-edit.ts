@@ -13,6 +13,20 @@ import * as fs from "node:fs";
 
 const log = logger.child("fs-edit");
 
+function backupIfExists(filePath: string): string | null {
+  try {
+    if (!fs.existsSync(filePath)) return null
+    const ts = Date.now()
+    const bak = `${filePath}.hive-bak.${ts}`
+    fs.copyFileSync(filePath, bak)
+    log.debug(`Backup created: ${bak}`)
+    return bak
+  } catch {
+    log.warn(`Backup failed for ${filePath}, proceeding without backup`)
+    return null
+  }
+}
+
 export const fsEditTool: Tool = {
   name: "fs_edit",
   description: "Edit specific lines or sections of a file. Spanish: editar archivo, modificar líneas, actualizar contenido",
@@ -60,16 +74,18 @@ export const fsEditTool: Tool = {
         };
       }
 
-      const content = fs.readFileSync(filePath, "utf-8");
+    const content = fs.readFileSync(filePath, "utf-8");
 
-      if (!content.includes(oldString)) {
-        return {
-          ok: false,
-          error: `String not found in file: ${oldString.substring(0, 50)}...`,
-        };
-      }
+    if (!content.includes(oldString)) {
+      return {
+        ok: false,
+        error: `String not found in file: ${oldString.substring(0, 50)}...`,
+      };
+    }
 
-      let newContent: string;
+    const backup = backupIfExists(filePath);
+
+    let newContent: string;
       let occurrences = 0;
       if (replaceAll) {
         occurrences = content.split(oldString).length - 1;
@@ -90,13 +106,14 @@ export const fsEditTool: Tool = {
 
       fs.writeFileSync(filePath, newContent, "utf-8");
 
-      return {
-        ok: true,
-        path: filePath,
-        replacements: replaceAll ? occurrences : 1,
-      };
-    } catch (error) {
-      log.error(`Error editing file: ${(error as Error).message}`);
+    return {
+      ok: true,
+      path: filePath,
+      replacements: replaceAll ? occurrences : 1,
+      backup,
+    };
+  } catch (error) {
+    log.error(`Error editing file: ${(error as Error).message}`);
       return {
         ok: false,
         error: `Failed to edit file: ${(error as Error).message}`,

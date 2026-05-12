@@ -112,7 +112,7 @@ export function parsePlan(text: string): ParsedPlan {
           severity: ["HIGH", "MEDIUM", "LOW"].includes(r?.severity) ? r.severity : "MEDIUM",
           description: String(r?.description || ""),
         })),
-        interfaces: parsed.interfaces ? String(parsed.interfaces) : undefined,
+        interfaces: Array.isArray(parsed.interfaces) ? JSON.stringify(parsed.interfaces) : (parsed.interfaces ? String(parsed.interfaces) : undefined),
       }
     } catch (err) {
       console.warn(`[plan-parser] JSON parse failed: ${(err as Error).message}`)

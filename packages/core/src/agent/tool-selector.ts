@@ -143,7 +143,7 @@ export const CORE_TOOL_CATALOG: ToolDescriptor[] = [
     { name: "task_evaluate", description: "Evaluate task result against acceptance criteria. Spanish keywords: evaluar tarea, validar resultado, criterios aceptación, verificar calidad", category: "projects", abstractionLevel: "atomic" },
 
     // Code execution
-    { name: "cli_exec", description: "Execute shell commands, run bash scripts and system commands. Spanish keywords: ejecutar comando, terminal, línea de comandos, bash, script, comando del sistema", category: "cli", abstractionLevel: "atomic" },
+    { name: "shell_executor", description: "Execute shell commands, run bash scripts and system commands. Spanish keywords: ejecutar comando, terminal, línea de comandos, bash, script, comando del sistema", category: "cli", abstractionLevel: "atomic" },
 
     // Web tools
     { name: "web_search", description: "Search web for current information, find up-to-date news facts and research. Spanish keywords: buscar en internet, buscar web, información, noticias, investigación, buscar", category: "web", abstractionLevel: "atomic" },

@@ -40,7 +40,7 @@ export function modeCycle(current: ExecutionMode): ExecutionMode {
 }
 
 const PLAN_BLOCKED_TOOLS = new Set([
-  "fs_write", "fs_edit", "fs_delete", "cli_exec",
+  "fs_write", "fs_edit", "fs_delete", "shell_executor",
   "codebridge_launch", "codebridge_cancel",
   "code_lint", "code_test", "code_build", "code_commit",
   "git_commit", "git_push",

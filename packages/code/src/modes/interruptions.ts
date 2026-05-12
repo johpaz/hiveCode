@@ -97,17 +97,18 @@ export function checkAutomaticInterruption(msg: WorkerToManagerMessage): Interru
     }
   }
 
-  // Check file modifications to sensitive files
-  if (toolName === "fs_write" || toolName === "fs_edit") {
+  // Check file operations on sensitive files (write, edit, AND delete)
+  if (toolName === "fs_write" || toolName === "fs_edit" || toolName === "fs_delete") {
     const filePath = (msg.toolArgs?.path as string) || ""
 
     for (const pattern of DANGEROUS_FILE_PATTERNS) {
       if (pattern.test(filePath)) {
-        log.warn(`[interruptions] BLOCKED sensitive file modification: ${filePath}`)
+        const operation = toolName === "fs_delete" ? "deletion" : "modification"
+        log.warn(`[interruptions] BLOCKED sensitive file ${operation}: ${filePath}`)
         return {
           blocked: true,
-          reason: `Modification of sensitive file detected: ${filePath}. This requires explicit user confirmation.`,
-          severity: "HIGH",
+          reason: `${operation.charAt(0).toUpperCase() + operation.slice(1)} of sensitive file detected: ${filePath}. This requires explicit user confirmation.`,
+          severity: toolName === "fs_delete" ? "CRITICAL" : "HIGH",
         }
       }
     }

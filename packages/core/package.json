@@ -67,6 +67,7 @@
     "./tools/core": "./src/tools/core/index.ts",
     "./tools/cron": "./src/tools/cron/index.ts",
     "./tools/filesystem": "./src/tools/filesystem/index.ts",
+"./tools/filesystem/workspace-guard": "./src/tools/filesystem/workspace-guard.ts",
     "./tools/projects": "./src/tools/projects/index.ts",
     "./tools/web": "./src/tools/web/index.ts",
     "./scheduler/dag": "./src/scheduler/dag/index.ts"

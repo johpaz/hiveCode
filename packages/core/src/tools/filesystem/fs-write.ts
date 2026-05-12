@@ -14,6 +14,20 @@ import * as fs from "node:fs";
 
 const log = logger.child("fs-write");
 
+function backupIfExists(filePath: string): string | null {
+  try {
+    if (!fs.existsSync(filePath)) return null
+    const ts = Date.now()
+    const bak = `${filePath}.hive-bak.${ts}`
+    fs.copyFileSync(filePath, bak)
+    log.debug(`Backup created: ${bak}`)
+    return bak
+  } catch {
+    log.warn(`Backup failed for ${filePath}, proceeding without backup`)
+    return null
+  }
+}
+
 export const fsWriteTool: Tool = {
   name: "fs_write",
   description: "Create or overwrite file in agent workspace. Spanish: crear archivo, guardar archivo, escribir archivo",
@@ -49,19 +63,14 @@ export const fsWriteTool: Tool = {
         fs.mkdirSync(dir, { recursive: true });
       }
 
+      const backup = backupIfExists(filePath);
+
       await Bun.write(filePath, content);
 
-      return {
-        ok: true,
-        path: filePath,
-        bytesWritten: content.length,
-      };
+      return { ok: true, path: filePath, bytesWritten: content.length, backup };
     } catch (error) {
       log.error(`Error writing file: ${(error as Error).message}`);
-      return {
-        ok: false,
-        error: `Failed to write file: ${(error as Error).message}`,
-      };
+      return { ok: false, error: `Failed to write file: ${(error as Error).message}` };
     }
   },
 };

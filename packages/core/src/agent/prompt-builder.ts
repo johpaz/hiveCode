@@ -100,7 +100,7 @@ export async function buildSystemPrompt(opts: BuildSystemPromptOpts): Promise<st
     agentSection += `1. **TODAS** tus operaciones de archivos y comandos ocurren DENTRO de \`${workspacePath}\`. Sin excepciones.\n`
     agentSection += `2. Cuando el sistema te pida listar archivos, explorar, leer o escribir — hazlo SIEMPRE dentro de \`${workspacePath}\`.\n`
     agentSection += `3. Nunca uses \`ls\`, \`find\`, \`cat\` u otras herramientas apuntando a directorios del sistema (\`/\`, \`~\`, \`/home\`, \`/etc\`, etc.).\n`
-    agentSection += `4. Cuando uses \`cli_exec\`, el directorio de trabajo ya es \`${workspacePath}\` por defecto — NO necesitas especificar \`cwd\`.\n`
+    agentSection += `4. Cuando uses \`shell_executor\`, el directorio de trabajo ya es \`${workspacePath}\` por defecto — NO necesitas especificar \`cwd\`.\n`
     agentSection += `5. Para rutas relativas, son relativas a \`${workspacePath}\` — no al directorio del proceso.\n`
     agentSection += `6. Si el usuario pide explorar "el proyecto" o "los archivos", asume que se refiere a \`${workspacePath}\`.\n`
     agentSection += `7. Las tools de filesystem (\`fs_read\`, \`fs_write\`, \`fs_list\`, etc.) ya tienen tu workspace configurado — úsalas directamente con rutas relativas.\n\n`

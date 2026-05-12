@@ -16,8 +16,16 @@ export function getDbPathLazy(): string {
 let _db: Database | null = null;
 
 export function getDb(): Database {
-    if (!_db) throw new Error("DB no inicializada. Llama initializeDatabase() primero.");
-    return _db;
+  if (!_db) throw new Error("DB no inicializada. Llama initializeDatabase() primero.");
+  return _db;
+}
+
+export function _setDb(db: Database): void {
+  _db = db;
+}
+
+export function _resetDb(): void {
+  _db = null;
 }
 
 

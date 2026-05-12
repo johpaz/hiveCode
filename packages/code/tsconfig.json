@@ -12,7 +12,8 @@
     "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
     "isolatedModules": true,
-    "lib": ["ESNext"]
+    "lib": ["ESNext"],
+    "types": ["bun"]
   },
   "include": ["src/**/*.ts"]
 }
