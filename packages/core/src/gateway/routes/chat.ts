@@ -55,10 +55,10 @@ export async function handleChat(
     const db = getDb();
 
     // Resolve user ID
-    const finalUserId = userId || resolveUserId({ channel }) || "default";
-    
-    // Resolve agent ID (coordinator by default)
-    const finalAgentId = agentId || resolveAgentId(null) || "main";
+  const finalUserId = userId || resolveUserId() || "default";
+
+  // Resolve agent ID (coordinator by default)
+  const finalAgentId = agentId || resolveAgentId() || "main";
 
     // Generate or use provided thread_id
     const threadId = thread_id || `${finalUserId}-${Date.now()}`;

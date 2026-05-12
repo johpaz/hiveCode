@@ -76,7 +76,7 @@ export async function loadAgentConfigFromDB(
     const db = getDb();
 
     // Get coordinator agent ID from database
-    const coordinatorAgentId = resolveAgentId(null);
+    const coordinatorAgentId = resolveAgentId();
 
     // Obtener configuración del agente coordinador
     const agentConfig = db.query(`

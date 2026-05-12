@@ -64,10 +64,10 @@ export class AgentRunner {
   async generate(options: ModelOptions): Promise<ModelResponse> {
     const db = getDb()
     // Resolve agentId from database (coordinator or first enabled)
-    const agentId = resolveAgentId(null) || "main"
+    const agentId = resolveAgentId() || "main"
 
     // Resolve userId from database
-    const userId = options.userId || resolveUserId({})
+    const userId = options.userId || resolveUserId()
     if (!userId) {
       throw new Error("No userId provided. Please complete onboarding first.")
     }

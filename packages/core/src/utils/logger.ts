@@ -369,7 +369,7 @@ let _logger: Logger | null = null;
 export function getLogger(): Logger {
   if (!_logger) {
     const config = loadConfig();
-    _logger = new Logger({ level: config.logging?.level });
+    _logger = new Logger({ level: (config.logging?.level as LogLevel) ?? "info" });
   }
   return _logger;
 }
