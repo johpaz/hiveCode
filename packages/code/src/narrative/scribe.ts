@@ -155,4 +155,34 @@ export class Scribe {
       files: this.getSnapshots(taskId),
     }
   }
+
+  writeTrace(trace: {
+    taskId: string
+    agentId: string
+    coordinator: string
+    toolName: string
+    inputSummary?: string
+    outputSummary?: string
+    success: boolean
+    durationNs?: number
+    tokensIn?: number
+    tokensOut?: number
+  }): void {
+    this.db.query(`
+      INSERT INTO code_traces
+        (task_id, agent_id, coordinator, tool_name, input_summary, output_summary, success, duration_ns, tokens_in, tokens_out, analyzed)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    `).run(
+      trace.taskId,
+      trace.agentId,
+      trace.coordinator,
+      trace.toolName,
+      trace.inputSummary ?? "",
+      trace.outputSummary ?? "",
+      trace.success ? 1 : 0,
+      trace.durationNs ?? 0,
+      trace.tokensIn ?? 0,
+      trace.tokensOut ?? 0,
+    )
+  }
 }

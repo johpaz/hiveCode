@@ -10,14 +10,10 @@ import { loadConfig, startGateway, logger, getHiveDir, initializeDatabase } from
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, openSync } from "node:fs";
 import * as path from "node:path";
 import { spawn, ChildProcess } from "child_process";
-import { embeddedUI } from "../ui-bundle.generated";
 
 // Import adapter system
 import {
   detectAdapter,
-  DockerAdapter,
-  BunGlobalAdapter,
-  BinaryAdapter,
   type InstallationAdapter,
   type GatewayConfig,
   DEFAULT_GATEWAY_CONFIG,
@@ -61,7 +57,7 @@ function startUIServer(
   uiPort: number
 ): void {
   const configScript = `<script>window.__HIVE_CONFIG__={"apiUrl":"http://localhost:${gatewayPort}","wsUrl":"ws://localhost:${gatewayPort}"}</script>`;
-  const useEmbedded = embeddedUI.size > 0;
+
 
   Bun.serve({
     hostname: "0.0.0.0",
@@ -72,16 +68,6 @@ function startUIServer(
       // SPA fallback: rutas sin extensión → index.html
       if (!path.extname(subPath)) subPath = "/index.html";
 
-      if (useEmbedded) {
-        const isIndex = subPath === "/index.html" || !embeddedUI.has(subPath);
-        const entry = embeddedUI.get(subPath) ?? embeddedUI.get("/index.html")!;
-        if (isIndex) {
-          const html = entry.data.toString("utf8").replace("</head>", `${configScript}</head>`);
-          return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
-        }
-        // Convert Buffer to Uint8Array for Response
-        return new Response(entry.data as BodyInit, { headers: { "Content-Type": entry.mime } });
-      }
 
       // Filesystem path (npm / Docker)
       const filePath = path.join(uiDir!, subPath);
@@ -513,9 +499,6 @@ async function handleProductionMode(
 
   // Get UI directory from adapter config
   const adapterConfig = await adapter.getConfig();
-  // Detect Docker environment: either DockerAdapter or BinaryAdapter in Docker container
-  const isDocker = adapterConfig.type === "docker"
-    || (adapterConfig.type === "binary" && process.env.HIVE_UI_DIR === "/app/ui");
 
   // The gateway child process serves both the API and the UI on the same port.
   // No separate UI server needed — always open the browser on the gateway port.

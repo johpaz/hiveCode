@@ -65,6 +65,7 @@
     "./mcp/transports": "./packages/mcp/src/transports/index.ts",
     "./skills": "./packages/skills/src/index.ts",
     "./skills/loader": "./packages/skills/src/loader.ts",
+    "./skills/bundled-data.generated": "./packages/skills/src/bundled-data.generated.ts",
     "./cli": "./packages/cli/src/index.ts"
   },
   "files": [

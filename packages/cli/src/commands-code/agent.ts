@@ -12,11 +12,9 @@ import {
   hiveNote, hiveText, isCancel,
 } from "../ui/index.ts"
 import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
-import { ensureCodeDatabase } from "./db-init"
 import { spawn } from "child_process"
 
 export async function agentList(args: string[] = []): Promise<void> {
-  ensureCodeDatabase()
   hiveIntro("hive-code · Agentes")
 
   const coordinatorFilter = args.find(a => a.startsWith("--coordinator="))?.split("=")[1]
@@ -52,7 +50,6 @@ export async function agentList(args: string[] = []): Promise<void> {
 }
 
 export async function agentInspect(name?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!name) {
     hiveOutro("Uso: hive-code agent inspect <name>", "error")
@@ -87,7 +84,6 @@ export async function agentInspect(name?: string): Promise<void> {
 }
 
 export async function agentEdit(name?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!name) {
     hiveOutro("Uso: hive-code agent edit <name>", "error")
@@ -123,7 +119,6 @@ export async function agentEdit(name?: string): Promise<void> {
 }
 
 export async function agentReset(name?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!name) {
     hiveOutro("Uso: hive-code agent reset <name>", "error")

@@ -14,10 +14,8 @@ import {
   hiveNote, hiveSpinner, hiveText, hiveSelect, isCancel,
 } from "../ui/index.ts"
 import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
-import { ensureCodeDatabase } from "./db-init"
 
 export async function providerList(): Promise<void> {
-  ensureCodeDatabase()
   hiveIntro("hive-code · Providers")
 
   const db = getDb()
@@ -50,7 +48,6 @@ export async function providerList(): Promise<void> {
 }
 
 export async function providerAdd(name?: string): Promise<void> {
-  ensureCodeDatabase()
   hiveIntro("hive-code · Añadir Provider")
 
   const providerName = name ?? await hiveText({
@@ -123,7 +120,6 @@ export async function providerAdd(name?: string): Promise<void> {
 }
 
 export async function providerRemove(name?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!name) {
     hiveOutro("Uso: hive-code provider remove <name>", "error")
@@ -143,7 +139,6 @@ export async function providerRemove(name?: string): Promise<void> {
 }
 
 export async function providerSetDefault(name?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!name) {
     hiveOutro("Uso: hive-code provider set-default <name>", "error")
@@ -163,7 +158,6 @@ export async function providerSetDefault(name?: string): Promise<void> {
 }
 
 export async function providerSetModel(args: string[]): Promise<void> {
-  ensureCodeDatabase()
 
   const providerId = args[0]
   const model = args[1]
@@ -180,7 +174,6 @@ export async function providerSetModel(args: string[]): Promise<void> {
 }
 
 export async function providerTest(name?: string): Promise<void> {
-  ensureCodeDatabase()
   hiveIntro("hive-code · Test Provider")
 
   const db = getDb()

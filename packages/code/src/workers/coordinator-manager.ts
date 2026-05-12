@@ -82,6 +82,18 @@ export class CoordinatorManager {
       worker.onmessage = (msg: MessageEvent) => this.handleWorkerMessage(name, msg.data as WorkerToManagerMessage)
       worker.onerror = (err: ErrorEvent) => {
         log.error(`[${name}] Worker crashed: ${err.message}. Restarting...`)
+        // Write crash trace to code_traces for post-mortem analysis
+        try {
+          this.scribe.writeTrace({
+            taskId: this.activeTaskId || "unknown",
+            agentId: name,
+            coordinator: name,
+            toolName: "worker_crash",
+            outputSummary: err.message,
+            success: false,
+            durationNs: 0,
+          })
+        } catch { /* ignore trace write failures during crash */ }
         this.workers.delete(name)
         // Auto-restart with exponential backoff
         setTimeout(() => {

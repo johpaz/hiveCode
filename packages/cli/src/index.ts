@@ -27,6 +27,12 @@ import { ace } from "./commands/ace"
 import { github } from "./commands/github"
 import { coordinator } from "./commands/coordinator"
 
+import { initializeDatabase } from "@johpaz/hive-code-core/storage/sqlite"
+import { seedAllData } from "@johpaz/hive-code-core/storage/seed"
+import { initializeCodeDatabase, validateCodeSchema } from "@johpaz/hive-code-code/narrative"
+import { seedCodeData } from "@johpaz/hive-code-code/seed"
+import { logger } from "@johpaz/hive-code-core/utils/logger"
+
 import pkg from "../../../package.json"
 
 const VERSION = pkg.version
@@ -150,6 +156,24 @@ Examples:
   hive-code doctor               Diagnosticar el sistema
 `
 
+let _dbInitialized = false
+
+function ensureGlobalInit(): void {
+  if (_dbInitialized) return
+  try {
+    initializeDatabase()
+    initializeCodeDatabase()
+    seedAllData()
+    seedCodeData()
+    validateCodeSchema()
+    _dbInitialized = true
+    logger.info("[cli] 🚀 Global init complete — DB, schemas, seeds, validation OK")
+  } catch (err) {
+    logger.error("[cli] ❌ Global init failed:", (err as Error).message)
+    process.exit(1)
+  }
+}
+
 async function main(): Promise<void> {
   const isDev = process.argv[1]?.endsWith(".ts")
   const args = process.argv.slice(isDev ? 2 : 1)
@@ -157,6 +181,12 @@ async function main(): Promise<void> {
   const command = normalizedArgs[0]
   const subcommand = normalizedArgs[1]
   const flags = normalizedArgs.filter((a) => a.startsWith("--"))
+
+  // Centralized initialization for all commands except help/version/gateway-only
+  const skipInit = ["--help", "-h", "--version", "-v", undefined].includes(command)
+  if (!skipInit) {
+    ensureGlobalInit()
+  }
 
   switch (command) {
     // ─── Hive-Code UI Commands ─────────────────────────────────────────────
@@ -344,7 +374,16 @@ async function main(): Promise<void> {
   }
 }
 
+// ─── Global Error Handlers (FASE 2) ─────────────────────────────────────────
+process.on("uncaughtException", (err) => {
+  logger.error("[cli] Uncaught exception:", err)
+  process.exit(1)
+})
+process.on("unhandledRejection", (reason, promise) => {
+  logger.error(`[cli] Unhandled rejection at: ${promise}, reason: ${reason}`)
+})
+
 main().catch((error) => {
-  console.error("Fatal error:", error.message)
+  logger.error("[cli] Fatal error:", error.message)
   process.exit(1)
 })

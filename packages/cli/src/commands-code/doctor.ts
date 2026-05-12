@@ -3,7 +3,6 @@ import {
   hiveNote, hiveSpinner,
 } from "../ui/index.ts"
 import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
-import { ensureCodeDatabase } from "./db-init"
 
 interface DoctorCheck {
   name: string
@@ -13,7 +12,6 @@ interface DoctorCheck {
 }
 
 export async function doctor(flags: string[] = []): Promise<void> {
-  ensureCodeDatabase()
 
   const fixMode = flags.includes("--fix")
 

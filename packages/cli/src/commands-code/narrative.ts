@@ -3,10 +3,8 @@ import {
   hiveNote, hiveText, isCancel,
 } from "../ui/index.ts"
 import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
-import { ensureCodeDatabase } from "./db-init"
 
 export async function narrativeShow(args: string[]): Promise<void> {
-  ensureCodeDatabase()
   const taskFlag = args.find(a => a.startsWith("--task="))
   const taskId = taskFlag ? taskFlag.split("=")[1] : undefined
   const lastFlag = args.find(a => a.startsWith("--last="))
@@ -77,7 +75,6 @@ export async function narrativeShow(args: string[]): Promise<void> {
 }
 
 export async function narrativeSearch(args: string[]): Promise<void> {
-  ensureCodeDatabase()
 
   const query = args[0]
 
@@ -112,7 +109,6 @@ export async function narrativeSearch(args: string[]): Promise<void> {
 }
 
 export async function narrativeExport(args: string[]): Promise<void> {
-  ensureCodeDatabase()
 
   const formatFlag = args.find(a => a.startsWith("--format="))
   const format = formatFlag ? formatFlag.split("=")[1] : "md"

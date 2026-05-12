@@ -13,7 +13,6 @@ import {
   hiveNote, hiveSpinner, isCancel,
 } from "../ui/index.ts"
 import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
-import { ensureCodeDatabase } from "./db-init"
 import { executeToolByName } from "@johpaz/hive-code-code/workers/tool-bridge"
 import { createAllTools } from "@johpaz/hive-code-core/tools"
 import { loadConfig } from "@johpaz/hive-code-core/config"
@@ -21,7 +20,6 @@ import { loadConfig } from "@johpaz/hive-code-core/config"
 // ─── Mode History ────────────────────────────────────────────────────────────
 
 export async function modeHistory(): Promise<void> {
-  ensureCodeDatabase()
   hiveIntro("hive-code · Historial de Modos")
 
   const db = getDb()
@@ -58,7 +56,6 @@ export async function modeHistory(): Promise<void> {
 // ─── Task Rollback ───────────────────────────────────────────────────────────
 
 export async function taskRollback(taskId?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!taskId) {
     hiveOutro("Uso: hive-code task rollback <id>", "error")
@@ -103,7 +100,6 @@ export async function taskRollback(taskId?: string): Promise<void> {
 // ─── Task Resume ─────────────────────────────────────────────────────────────
 
 export async function taskResume(taskId?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!taskId) {
     hiveOutro("Uso: hive-code task resume <id>", "error")

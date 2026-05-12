@@ -2,7 +2,6 @@
  * Installation Adapter System
  * 
  * Provides a unified interface for different Hive installation methods:
- * - Docker Compose (standard)
  * - Bun Global (npm-style installation)
  * - Binary (standalone compiled binary)
  */
@@ -12,7 +11,7 @@ import { z } from "zod";
 /**
  * Installation type identifier
  */
-export type InstallationType = "docker" | "bun-global" | "binary";
+export type InstallationType = "bun-global" | "binary";
 
 /**
  * Installation paths for different methods
@@ -193,7 +192,7 @@ export const installationPathsSchema = z.object({
  * Schema for complete installation configuration validation
  */
 export const installationConfigSchema = z.object({
-  type: z.enum(["docker", "bun-global", "binary"]),
+  type: z.enum(["bun-global", "binary"]),
   gateway: gatewayConfigSchema,
   paths: installationPathsSchema,
   env: z.record(z.string(), z.string()),

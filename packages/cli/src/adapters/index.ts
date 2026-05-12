@@ -1,29 +1,3 @@
-/**
- * Installation Adapters
- * 
- * Unified interface for different Hive installation methods.
- * Each adapter handles the specifics of its installation type,
- * providing a consistent API for gateway management.
- * 
- * @example
- * ```typescript
- * import { detectAdapter } from "@johpaz/hive-agents-cli/adapters";
- * 
- * const adapter = await detectAdapter();
- * console.log(`Detected: ${adapter.name}`);
- * 
- * const config = await adapter.getConfig();
- * console.log(`Gateway port: ${config.gateway.port}`);
- * 
- * const validation = await adapter.validate();
- * if (!validation.valid) {
- *   console.error("Validation errors:", validation.errors);
- * }
- * ```
- * 
- * @packageDocumentation
- */
-
 // Types and interfaces
 export type {
   InstallationType,
@@ -64,7 +38,6 @@ export {
 } from "./config";
 
 // Adapters
-export { DockerAdapter } from "./docker";
 export { BunGlobalAdapter } from "./bun-global";
 export { BinaryAdapter } from "./binary";
 

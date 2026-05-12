@@ -350,18 +350,7 @@ export class BunGlobalAdapter implements InstallationAdapter {
       warnings.push("Hive Gateway is not running");
     }
 
-    // Check for conflicting installations
-    try {
-      execSync("docker --version", { stdio: "ignore" });
-      const dockerAdapter = new (await import("./docker")).DockerAdapter();
-      const dockerInstalled = await dockerAdapter.detect();
 
-      if (dockerInstalled) {
-        info.push("Note: Docker installation also detected");
-      }
-    } catch {
-      // Docker not installed, no conflict
-    }
 
     return {
       valid: errors.length === 0,

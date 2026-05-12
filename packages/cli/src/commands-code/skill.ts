@@ -15,10 +15,8 @@ import {
   hiveNote, hiveSpinner, hiveText, isCancel,
 } from "../ui/index.ts"
 import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
-import { ensureCodeDatabase } from "./db-init"
 
 export async function skillList(): Promise<void> {
-  ensureCodeDatabase()
   hiveIntro("hive-code · Skills")
 
   const db = getDb()
@@ -41,7 +39,6 @@ export async function skillList(): Promise<void> {
 }
 
 export async function skillEnable(name?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!name) {
     hiveOutro("Uso: hive-code skill enable <name>", "error")
@@ -54,7 +51,6 @@ export async function skillEnable(name?: string): Promise<void> {
 }
 
 export async function skillDisable(name?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!name) {
     hiveOutro("Uso: hive-code skill disable <name>", "error")
@@ -67,7 +63,6 @@ export async function skillDisable(name?: string): Promise<void> {
 }
 
 export async function skillAdd(pathArg?: string): Promise<void> {
-  ensureCodeDatabase()
   hiveIntro("hive-code · Añadir Skill")
 
   const filePath = pathArg ?? await hiveText({
@@ -100,7 +95,6 @@ export async function skillAdd(pathArg?: string): Promise<void> {
 }
 
 export async function skillRemove(name?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!name) {
     hiveOutro("Uso: hive-code skill remove <name>", "error")
@@ -113,7 +107,6 @@ export async function skillRemove(name?: string): Promise<void> {
 }
 
 export async function skillInspect(name?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!name) {
     hiveOutro("Uso: hive-code skill inspect <name>", "error")
@@ -147,7 +140,6 @@ export async function skillInspect(name?: string): Promise<void> {
 }
 
 export async function skillAssign(args: string[]): Promise<void> {
-  ensureCodeDatabase()
 
   const skillName = args[0]
   const coordinator = args[1]

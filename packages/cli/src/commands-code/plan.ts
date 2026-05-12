@@ -6,10 +6,8 @@ import {
 import { getExecutionMode, setExecutionMode } from "@johpaz/hive-code-core"
 import { CoordinatorManager } from "@johpaz/hive-code-code/workers/coordinator-manager"
 import { listenModeToggle, stopModeToggle } from "@johpaz/hive-code-code/modes/keyboard"
-import { ensureCodeDatabase } from "./db-init"
 
 export async function plan(description?: string): Promise<void> {
-  ensureCodeDatabase()
 
   hiveIntro("hive-code · Plan Mode")
   hiveModeBar("plan")

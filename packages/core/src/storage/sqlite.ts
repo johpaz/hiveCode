@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { logger } from "../utils/logger.ts";
 import * as path from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
+import { getHiveDir } from "../config/loader.ts";
 import { SCHEMA, PROJECTS_SCHEMA, CONTEXT_ENGINE_SCHEMA, MEETING_SCHEMA } from "./schema.ts";
 
 function getDbPath(): string {

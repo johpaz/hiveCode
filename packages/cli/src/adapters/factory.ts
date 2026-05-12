@@ -6,7 +6,6 @@
  */
 
 import type { InstallationAdapter, InstallationType, AdapterOptions } from "./types";
-import { DockerAdapter } from "./docker";
 import { BunGlobalAdapter } from "./bun-global";
 import { BinaryAdapter } from "./binary";
 
@@ -15,7 +14,6 @@ import { BinaryAdapter } from "./binary";
  * Lower number = higher priority
  */
 const DETECTION_PRIORITY: InstallationType[] = [
-  "docker",            // Standard Docker
   "binary",            // Compiled binary
   "bun-global",        // Global npm installation
 ];
@@ -25,9 +23,8 @@ const DETECTION_PRIORITY: InstallationType[] = [
  */
 function createAllAdapters(options?: { hiveDir?: string }): Record<InstallationType, InstallationAdapter> {
   return {
-    "docker": new DockerAdapter({ hiveDir: options?.hiveDir }),
     "bun-global": new BunGlobalAdapter({ hiveDir: options?.hiveDir }),
-    "binary": new BinaryAdapter({ hiveDir: options?.hiveDir }),
+    "binary": new BinaryAdapter({ hiveDir: options?.hiveDir })
   };
 }
 
@@ -50,11 +47,11 @@ export async function detectAdapter(options?: AdapterOptions): Promise<Installat
   if (options?.forceType) {
     const adapters = createAllAdapters({ hiveDir });
     const adapter = adapters[options.forceType];
-    
+
     if (verbose) {
       console.log(`Using forced adapter: ${adapter.name} (${options.forceType})`);
     }
-    
+
     return adapter;
   }
 
@@ -63,10 +60,10 @@ export async function detectAdapter(options?: AdapterOptions): Promise<Installat
 
   for (const type of DETECTION_PRIORITY) {
     const adapter = adapters[type];
-    
+
     try {
       const isDetected = await adapter.detect();
-      
+
       if (isDetected) {
         if (verbose) {
           console.log(`Detected installation: ${adapter.name} (${type})`);
@@ -86,7 +83,7 @@ export async function detectAdapter(options?: AdapterOptions): Promise<Installat
   if (verbose) {
     console.log("No specific installation detected, using BinaryAdapter (fallback)");
   }
-  
+
   return adapters.binary;
 }
 
@@ -100,7 +97,7 @@ export async function detectAllAdapters(options?: { hiveDir?: string }): Promise
 
   for (const type of DETECTION_PRIORITY) {
     const adapter = adapters[type];
-    
+
     try {
       if (await adapter.detect()) {
         available.push(adapter);
@@ -130,7 +127,7 @@ export async function isInstallationTypeAvailable(
 ): Promise<boolean> {
   const adapters = createAllAdapters({ hiveDir: options?.hiveDir });
   const adapter = adapters[type];
-  
+
   try {
     return await adapter.detect();
   } catch {
@@ -153,7 +150,6 @@ export function getAdapterByType(
  * Installation type display names
  */
 export const INSTALLATION_TYPE_NAMES: Record<InstallationType, string> = {
-  "docker": "Docker Compose",
   "bun-global": "Bun Global (npm-style)",
   "binary": "Standalone Binary",
 };
@@ -162,7 +158,6 @@ export const INSTALLATION_TYPE_NAMES: Record<InstallationType, string> = {
  * Installation type descriptions
  */
 export const INSTALLATION_TYPE_DESCRIPTIONS: Record<InstallationType, string> = {
-  "docker": "Standard Docker Compose installation with named volumes",
   "bun-global": "Global installation via `bun install -g @johpaz/hive-agents`",
   "binary": "Standalone compiled binary with embedded UI (or Docker container)",
 };

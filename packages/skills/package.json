@@ -17,6 +17,7 @@
   },
   "exports": {
     ".": "./src/index.ts",
-    "./loader": "./src/loader.ts"
+    "./loader": "./src/loader.ts",
+    "./bundled-data.generated": "./src/bundled-data.generated.ts"
   }
 }

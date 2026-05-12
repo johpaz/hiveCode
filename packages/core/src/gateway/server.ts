@@ -82,8 +82,7 @@ import { handleGetChatHistory, handleGetCanvas, handleGetNotes, handleUpdateNote
 import { handleChat as handlePostChat } from "./routes/chat";
 import { handleGetConfig } from "./routes/config";
 import { handleGetWorkspace, handleUpdateWorkspace, handleValidateWorkspace, handleCreateWorkspace, handleOpenWorkspace } from "./routes/workspace";
-import { getNarration, expandPath, addCorsHeaders, CORS_ORIGINS } from "./helpers";
-import { redactConfig } from "./helpers";
+import { getNarration, expandPath, addCorsHeaders, CORS_ORIGINS, redactConfig } from "./helpers";
 
 const logSubscribers = new Set<string>();
 
@@ -99,6 +98,41 @@ interface WebSocketData {
   providerId?: string;
   modelId?: string;
   meetingSessionId?: string;
+}
+
+/**
+ * Helper: build and apply MCP server config from DB record.
+ * Extracted to eliminate duplication between /toggle and /:id POST handlers.
+ */
+async function connectMcpServer(
+  mcp: any,
+  server: Record<string, any>,
+  mcpName: string
+): Promise<void> {
+  const mcpServerConfig: any = {
+    transport: server.transport as string,
+    command: server.command as string | null,
+    args: server.args ? JSON.parse(server.args as string) : [],
+    url: server.url as string | null,
+    enabled: true,
+  }
+
+  if (server.headers_encrypted && server.headers_iv) {
+    try {
+      mcpServerConfig.headers = decryptConfig(server.headers_encrypted, server.headers_iv);
+    } catch {
+      logger.warn(`[MCP] Failed to decrypt headers for ${mcpName}`);
+    }
+  }
+
+  const currentConfig = mcp.config || { servers: {} }
+  const newServersConfig = { ...currentConfig.servers }
+  newServersConfig[mcpName] = mcpServerConfig
+
+  await mcp.updateConfig({
+    ...currentConfig,
+    servers: newServersConfig,
+  });
 }
 
 export async function startGateway(config: Config): Promise<void> {
@@ -145,10 +179,22 @@ export async function startGateway(config: Config): Promise<void> {
   let dbModel: string;
   // ── Bind port immediately so parent health-check doesn't timeout ──────────
   // The full handler is loaded via server.reload() once initialization finishes
+  const showErrors = process.env.NODE_ENV !== "production";
+
   let server = Bun.serve<WebSocketData>({
     port,
     hostname: host,
     idleTimeout: 0,  // Disable 10s idle timeout — SSE streams can run for minutes
+    development: showErrors,
+    error(error) {
+      log.error(`[gateway] Unhandled error: ${error.message}`);
+      return Response.json({
+        success: false,
+        error: showErrors ? error.message : "Internal server error",
+        ...(showErrors && { stack: error.stack }),
+        requestId: crypto.randomUUID(),
+      }, { status: 500 });
+    },
     fetch: (req) => {
       const origin = req.headers.get("Origin") ?? ""
       const isLocalhost = origin.includes("localhost") || origin.includes("127.0.0.1") || origin.includes("0.0.0.0")
@@ -1355,36 +1401,7 @@ export async function startGateway(config: Config): Promise<void> {
                   const server = getDb().query(`SELECT * FROM mcp_servers WHERE id = ? OR name = ?`).get(mcpName, mcpName) as Record<string, any> | undefined;
                   if (server) {
                     log.info(`[MCP] Server config: transport=${server.transport}, url=${server.url}`)
-
-                    // Build MCP server config
-                    const mcpServerConfig: any = {
-                      transport: server.transport as string,
-                      command: server.command as string | null,
-                      args: server.args ? JSON.parse(server.args as string) : [],
-                      url: server.url as string | null,
-                      enabled: true,
-                    }
-
-                    // Decrypt headers if present
-                    if (server.headers_encrypted && server.headers_iv) {
-                      try {
-                        mcpServerConfig.headers = decryptConfig(server.headers_encrypted, server.headers_iv);
-                      } catch (e) {
-                        log.warn(`Failed to decrypt headers for ${mcpName}`);
-                      }
-                    }
-
-                    // Get current MCP config and add/update this server
-                    const currentConfig = (mcp as any).config || { servers: {} }
-                    const newServersConfig = { ...currentConfig.servers }
-                    newServersConfig[mcpName] = mcpServerConfig
-
-                    // Update MCP Manager config (this will register and auto-connect the server)
-                    await mcp.updateConfig({
-                      ...currentConfig,
-                      servers: newServersConfig,
-                    });
-
+                    await connectMcpServer(mcp, server, mcpName);
                     log.info(`[MCP] Server registered in MCP Manager`)
 
                     // Get tools after connection
@@ -1440,36 +1457,7 @@ export async function startGateway(config: Config): Promise<void> {
                   const server = getDb().query(`SELECT * FROM mcp_servers WHERE id = ? OR name = ?`).get(mcpName, mcpName) as Record<string, any> | undefined;
                   if (server) {
                     log.info(`[MCP] Server config: transport=${server.transport}, url=${server.url}`)
-
-                    // Build MCP server config
-                    const mcpServerConfig: any = {
-                      transport: server.transport as string,
-                      command: server.command as string | null,
-                      args: server.args ? JSON.parse(server.args as string) : [],
-                      url: server.url as string | null,
-                      enabled: true,
-                    }
-
-                    // Decrypt headers if present
-                    if (server.headers_encrypted && server.headers_iv) {
-                      try {
-                        mcpServerConfig.headers = decryptConfig(server.headers_encrypted, server.headers_iv);
-                      } catch (e) {
-                        log.warn(`Failed to decrypt headers for ${mcpName}`);
-                      }
-                    }
-
-                    // Get current MCP config and add/update this server
-                    const currentConfig = (mcp as any).config || { servers: {} }
-                    const newServersConfig = { ...currentConfig.servers }
-                    newServersConfig[mcpName] = mcpServerConfig
-
-                    // Update MCP Manager config (this will register and auto-connect the server)
-                    await mcp.updateConfig({
-                      ...currentConfig,
-                      servers: newServersConfig,
-                    });
-
+                    await connectMcpServer(mcp, server, mcpName);
                     log.info(`[MCP] Server registered in MCP Manager`)
 
                     // Get tools after connection
@@ -2649,6 +2637,15 @@ export async function startGateway(config: Config): Promise<void> {
         const channel = channelManager?.getChannel("webchat") as any;
         if (channel?.unregisterConnection) channel.unregisterConnection(data.sessionId);
       },
+    },
+    error(error) {
+      log.error(`[gateway] Unhandled error (reload): ${error.message}`);
+      return Response.json({
+        success: false,
+        error: showErrors ? error.message : "Internal server error",
+        ...(showErrors && { stack: error.stack }),
+        requestId: crypto.randomUUID(),
+      }, { status: 500 });
     },
   });
 

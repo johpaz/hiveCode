@@ -1,15 +1,18 @@
 /**
  * Task WebSocket Streaming
  *
- * Integrates CoordinatorManager with the gateway's WebSocket system
- * to stream task narration, phase changes, and mode changes in real-time.
+ * NOTE: The broadcast functions are called from CoordinatorManager, but the gateway
+ * does not yet expose a WebSocket endpoint that subscribes to these channels.
+ * The code is functional but the consumer side is missing.
+ *
+ * TODO: Add WebSocket route in gateway/server.ts that handles:
+ *   - ws://host/ws/task/{taskId} for narration+phase streams
+ *   - ws://host/ws/session/{sessionId} for mode toggle events
  *
  * Channels:
  *   - task:{taskId}:narration   — Narrative entries
  *   - task:{taskId}:phase       — Phase status changes
  *   - session:{sessionId}:mode  — Mode toggle events
- *
- * Usage: call broadcastTaskEvent() from CoordinatorManager
  */
 
 import type { SessionMode } from "../workers/types"

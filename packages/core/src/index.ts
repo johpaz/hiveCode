@@ -31,20 +31,15 @@ export { createAllTools, createToolsByCategory } from "./tools/index.ts";
 export type { Tool, ToolResult } from "./tools/types.ts";
 
 // Config
-export * from "./config/index.ts";
+export * from "./config/loader.ts";
 
 // Utils
 export * from "./utils/logger.ts";
 export { retry } from "./utils/retry.ts";
 
-// Other core modules
-export * from "./security/index.ts";
-export * from "./heartbeat/index.ts";
+// Events
 export * from "./events/event-bus.ts";
 export * from "./events/agent-bus.ts";
-export * from "./state/store.ts";
-export * from "./resilience/circuit-breaker.ts";
-export * from "./plugins/index.ts";
 export * from "./canvas/index.ts";
 
 // Re-export native-tools types

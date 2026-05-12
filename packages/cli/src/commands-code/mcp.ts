@@ -15,10 +15,8 @@ import {
   hiveNote, hiveSpinner, hiveText, isCancel,
 } from "../ui/index.ts"
 import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
-import { ensureCodeDatabase } from "./db-init"
 
 export async function mcpList(): Promise<void> {
-  ensureCodeDatabase()
   hiveIntro("hive-code · MCP Servers")
 
   const db = getDb()
@@ -46,7 +44,6 @@ export async function mcpList(): Promise<void> {
 }
 
 export async function mcpAdd(urlOrName?: string): Promise<void> {
-  ensureCodeDatabase()
   hiveIntro("hive-code · Añadir MCP")
 
   const input = urlOrName ?? await hiveText({
@@ -75,7 +72,6 @@ export async function mcpAdd(urlOrName?: string): Promise<void> {
 }
 
 export async function mcpRemove(name?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!name) {
     hiveOutro("Uso: hive-code mcp remove <name>", "error")
@@ -88,7 +84,6 @@ export async function mcpRemove(name?: string): Promise<void> {
 }
 
 export async function mcpEnable(name?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!name) {
     hiveOutro("Uso: hive-code mcp enable <name>", "error")
@@ -101,7 +96,6 @@ export async function mcpEnable(name?: string): Promise<void> {
 }
 
 export async function mcpDisable(name?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!name) {
     hiveOutro("Uso: hive-code mcp disable <name>", "error")
@@ -114,7 +108,6 @@ export async function mcpDisable(name?: string): Promise<void> {
 }
 
 export async function mcpTest(name?: string): Promise<void> {
-  ensureCodeDatabase()
   hiveIntro("hive-code · Test MCP")
 
   const mcpId = name ?? await hiveText({
@@ -155,7 +148,6 @@ export async function mcpTest(name?: string): Promise<void> {
 }
 
 export async function mcpInspect(name?: string): Promise<void> {
-  ensureCodeDatabase()
 
   if (!name) {
     hiveOutro("Uso: hive-code mcp inspect <name>", "error")

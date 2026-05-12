@@ -3,10 +3,8 @@ import {
   hiveNote,
 } from "../ui/index.ts"
 import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
-import { ensureCodeDatabase } from "./db-init"
 
 export async function decisionList(): Promise<void> {
-  ensureCodeDatabase()
 
   hiveIntro("hive-code · Decisiones (ADRs)")
 
@@ -31,7 +29,6 @@ export async function decisionList(): Promise<void> {
 }
 
 export async function decisionShow(args: string[]): Promise<void> {
-  ensureCodeDatabase()
 
   const id = args[0]
 
