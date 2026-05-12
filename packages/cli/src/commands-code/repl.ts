@@ -1,10 +1,10 @@
-import * as readline from "node:readline"
 import * as path from "node:path"
 import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
 import { logger } from "@johpaz/hive-code-core/utils/logger"
 import {
-  S, isCancel, hiveSelect
+  BEE, S, isCancel, hiveSelect
 } from "../ui/index.ts"
+import { parseInternalCommand, renderHelp, getCtx } from "@johpaz/hive-code-code/coordinator/command-parser"
 import { plan } from "./plan"
 import { run } from "./run"
 
@@ -34,7 +34,7 @@ const MODE_COLORS: Record<Mode, string> = {
 
 const MODE_LABELS: Record<Mode, string> = {
   plan:     `${C.bold}${C.purple}PLAN${C.reset}`,
-  approval: `${C.bold}${C.amber}APROBACIÓN${C.reset}`,
+  approval: `${C.bold}${C.amber}APROBACI\u00d3N${C.reset}`,
   auto:     `${C.bold}${C.green}AUTO${C.reset}`,
 }
 
@@ -71,26 +71,25 @@ function fmtTokens(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`
 }
 
-// ─── Render helpers ─────────────────────────────────────────────────
-
 let _promptRendered = false
 
 function renderPrompt(status: ReplStatus, input: string): void {
-  const sep = `${C.dim}  │  ${C.reset}`
+  const sep = `${C.dim}  \u2502  ${C.reset}`
 
   const items = [
     `${MODE_LABELS[status.mode]}  ${C.dim}[shift+tab]${C.reset}`,
     status.provider
-      ? `${C.white}${status.provider}${C.reset}${status.model ? ` · ${status.model}` : ""}`
+      ? `${C.white}${status.provider}${C.reset}${status.model ? ` \u00b7 ${status.model}` : ""}`
       : `${C.dim}sin provider${C.reset}`,
     `${C.dim}^C salir${C.reset}`,
-    `${C.dim}:help${C.reset}`,
+    `${C.dim}/help${C.reset}`,
     `ctx: ${status.taskCount}`,
     `${fmtTokens(status.tokenCount)} tok`,
   ]
 
-  const barLine = `  ${C.dim}│${C.reset}  ${items.join(sep)}`
-  const promptLine = `  ${C.amber}${S.active}${C.reset}  ${C.white}¿Qué quieres construir?${C.reset}  ${input || C.dim + "describe la tarea..." + C.reset}`
+  const barLine = `  ${C.dim}\u2502${C.reset}  ${items.join(sep)}`
+  const beeIcon = input.startsWith("/") ? BEE.happy : BEE.waiting
+  const promptLine = `  ${beeIcon}  ${C.white}\u00bfQu\u00e9 quieres construir?${C.reset}  ${input || C.dim + "describe la tarea o escribe /help..." + C.reset}`
 
   if (_promptRendered) {
     process.stdout.write(`\x1b[2A\r${C.clearLine}${barLine}\n${C.clearLine}${promptLine}`)
@@ -99,8 +98,6 @@ function renderPrompt(status: ReplStatus, input: string): void {
     _promptRendered = true
   }
 }
-
-// ─── Input handler ──────────────────────────────────────────────────
 
 type InputState = "normal" | "esc" | "csi"
 
@@ -113,8 +110,27 @@ function getInput(status: ReplStatus): Promise<string | null> {
     let buffer = ""
     let state: InputState = "normal"
     let csiBuf = ""
+    let suggestions: string[] = []
+    let suggestionIdx = -1
     _promptRendered = false
     renderPrompt(status, "")
+
+    function getSuggestions(prefix: string): string[] {
+      if (!prefix.startsWith("/") || prefix.length < 2) return []
+      const db = getDb()
+      try {
+        const search = prefix.slice(1).toLowerCase().replace(/[^a-z0-9_\/\s-]/g, "")
+        const rows = db.query(`
+          SELECT command FROM code_commands_fts
+          WHERE command MATCH ?
+          ORDER BY rank
+          LIMIT 5
+        `).all(search) as { command: string }[]
+        return rows.map(r => r.command)
+      } catch {
+        return []
+      }
+    }
 
     function onData(data: Buffer) {
       for (let i = 0; i < data.length; i++) {
@@ -130,10 +146,37 @@ function getInput(status: ReplStatus): Promise<string | null> {
           if (byte >= 0x40 && byte <= 0x7e) {
             state = "normal"
             if (csiBuf === "" && byte === 0x5a) {
+              // Shift+Tab: cycle mode
               const idx = MODE_CYCLE.indexOf(status.mode)
               status.mode = MODE_CYCLE[(idx + 1) % MODE_CYCLE.length]
               saveMode(status.mode)
               renderPrompt(status, buffer)
+            } else if (csiBuf === "A") {
+              // Up arrow: previous suggestion
+              if (suggestions.length > 0) {
+                suggestionIdx = Math.max(0, suggestionIdx - 1)
+                buffer = suggestions[suggestionIdx]
+                renderPrompt(status, buffer)
+              }
+            } else if (csiBuf === "B") {
+              // Down arrow: next suggestion
+              if (suggestions.length > 0) {
+                suggestionIdx = Math.min(suggestions.length - 1, suggestionIdx + 1)
+                buffer = suggestions[suggestionIdx]
+                renderPrompt(status, buffer)
+              }
+            } else if (csiBuf === "" && byte === 0x49) {
+              // Tab: autocomplete
+              if (buffer.startsWith("/")) {
+                const sugg = getSuggestions(buffer)
+                if (sugg.length === 1) {
+                  buffer = sugg[0] + " "
+                  renderPrompt(status, buffer)
+                } else if (sugg.length > 1) {
+                  suggestions = sugg
+                  suggestionIdx = -1
+                }
+              }
             }
             continue
           }
@@ -144,6 +187,20 @@ function getInput(status: ReplStatus): Promise<string | null> {
 
         if (byte === 0x1b) { state = "esc"; continue }
         if (byte === 0x03 || byte === 0x04) { cleanup(); resolve(null); return }
+        if (byte === 0x09) {
+          // Tab: autocomplete
+          if (buffer.startsWith("/")) {
+            const sugg = getSuggestions(buffer)
+            if (sugg.length === 1) {
+              buffer = sugg[0] + " "
+              renderPrompt(status, buffer)
+            } else if (sugg.length > 1) {
+              suggestions = sugg
+              suggestionIdx = -1
+            }
+          }
+          continue
+        }
         if (byte === 0x0d || byte === 0x0a) {
           cleanup()
           process.stdout.write("\n")
@@ -152,11 +209,15 @@ function getInput(status: ReplStatus): Promise<string | null> {
         }
         if (byte === 0x7f || byte === 0x08) {
           buffer = buffer.slice(0, -1)
+          suggestions = []
+          suggestionIdx = -1
           renderPrompt(status, buffer)
           continue
         }
         if (byte >= 0x20 && byte <= 0x7e) {
           buffer += String.fromCharCode(byte)
+          suggestions = []
+          suggestionIdx = -1
           renderPrompt(status, buffer)
         }
       }
@@ -171,78 +232,52 @@ function getInput(status: ReplStatus): Promise<string | null> {
   })
 }
 
-// ─── Command handlers ──────────────────────────────────────────────
-
-function showHelp(): void {
-  process.stdout.write(
-    `\n  ${C.amber}${S.info}${C.reset}  ${C.bold}Comandos del REPL${C.reset}\n` +
-    `  ${C.dim}│${C.reset}\n` +
-    `  ${C.dim}│${C.reset}    ${C.white}:help${C.reset}      ${C.dim}Mostrar esta ayuda${C.reset}\n` +
-    `  ${C.dim}│${C.reset}    ${C.white}:mode${C.reset}       ${C.dim}Cambiar al siguiente modo${C.reset}\n` +
-    `  ${C.dim}│${C.reset}    ${C.white}:mode <m>${C.reset}   ${C.dim}plan | approval | auto${C.reset}\n` +
-    `  ${C.dim}│${C.reset}    ${C.white}:status${C.reset}     ${C.dim}Estado actual del sistema${C.reset}\n` +
-    `  ${C.dim}│${C.reset}    ${C.white}:clear${C.reset}      ${C.dim}Limpiar pantalla${C.reset}\n` +
-    `  ${C.dim}│${C.reset}    ${C.white}:exit${C.reset}       ${C.dim}Salir del REPL${C.reset}\n` +
-    `  ${C.dim}│${C.reset}\n` +
-    `  ${C.dim}│${C.reset}    ${C.bold}Cada tarea se ejecuta según el modo activo:${C.reset}\n` +
-    `  ${C.dim}│${C.reset}    ${MODE_COLORS.plan}PLAN${C.reset}        ${C.dim}Solo diseña, no modifica archivos${C.reset}\n` +
-    `  ${C.dim}│${C.reset}    ${MODE_COLORS.approval}APROBACIÓN${C.reset}  ${C.dim}Plan + confirmación antes de implementar${C.reset}\n` +
-    `  ${C.dim}│${C.reset}    ${MODE_COLORS.auto}AUTO${C.reset}        ${C.dim}Ejecuta todo automáticamente${C.reset}\n` +
-    `  ${C.dim}│${C.reset}\n`
-  )
-}
-
 function showStatus(s: ReplStatus): void {
   const gh = s.ghConnected
-    ? `${C.green}✓${C.reset} conectado`
-    : `${C.dim}—${C.reset}`
+    ? `${C.green}\u2713${C.reset} conectado`
+    : `${C.dim}\u2014${C.reset}`
   process.stdout.write(
-    `\n  ${C.amber}${S.info}${C.reset}  ${C.bold}Estado del sistema${C.reset}\n` +
-    `  ${C.dim}│${C.reset}\n` +
-    `  ${C.dim}│${C.reset}    ${C.white}Modo:${C.reset}      ${MODE_COLORS[s.mode]}${s.mode.toUpperCase()}${C.reset}\n` +
-    `  ${C.dim}│${C.reset}    ${C.white}Provider:${C.reset}  ${s.provider || "ninguno"}${s.model ? ` · ${s.model}` : ""}\n` +
-    `  ${C.dim}│${C.reset}    ${C.white}GitHub:${C.reset}    ${gh}\n` +
-    `  ${C.dim}│${C.reset}    ${C.white}Proyecto:${C.reset}  ${s.projectPath}\n` +
-    `  ${C.dim}│${C.reset}    ${C.white}Tareas:${C.reset}    ${s.taskCount} activas\n` +
-    `  ${C.dim}│${C.reset}    ${C.white}Tokens:${C.reset}    ${fmtTokens(s.tokenCount)}\n` +
-    `  ${C.dim}│${C.reset}\n`
+    `\n  ${S.info}  ${C.bold}Estado del sistema${C.reset}\n` +
+    `  ${C.dim}\u2502${C.reset}\n` +
+    `  ${C.dim}\u2502${C.reset}    ${C.white}Modo:${C.reset}      ${MODE_COLORS[s.mode]}${s.mode.toUpperCase()}${C.reset}\n` +
+    `  ${C.dim}\u2502${C.reset}    ${C.white}Provider:${C.reset}  ${s.provider || "ninguno"}${s.model ? ` \u00b7 ${s.model}` : ""}\n` +
+    `  ${C.dim}\u2502${C.reset}    ${C.white}GitHub:${C.reset}    ${gh}\n` +
+    `  ${C.dim}\u2502${C.reset}    ${C.white}Proyecto:${C.reset}  ${s.projectPath}\n` +
+    `  ${C.dim}\u2502${C.reset}    ${C.white}Tareas:${C.reset}    ${s.taskCount} activas\n` +
+    `  ${C.dim}\u2502${C.reset}    ${C.white}Tokens:${C.reset}    ${fmtTokens(s.tokenCount)}\n` +
+    `  ${C.dim}\u2502${C.reset}\n`
   )
 }
 
 async function handleCommand(input: string, status: ReplStatus): Promise<"continue" | "exit"> {
-  const cmd = input.slice(1).toLowerCase().trim()
+  const trimmed = input.trim()
+  if (!trimmed.startsWith("/")) return "continue"
 
-  if (cmd === "exit" || cmd === "q" || cmd === "quit") return "exit"
-  if (cmd === "help" || cmd === "h") { showHelp(); return "continue" }
-  if (cmd === "clear" || cmd === "cls") { console.clear(); return "continue" }
-  if (cmd === "status" || cmd === "st") { showStatus(status); return "continue" }
+  const db = getDb()
+  const ctx = getCtx(db)
 
-  if (cmd === "mode" || cmd === "m") {
-    const idx = MODE_CYCLE.indexOf(status.mode)
-    status.mode = MODE_CYCLE[(idx + 1) % MODE_CYCLE.length]
-    saveMode(status.mode)
-    process.stdout.write(`  ${C.amber}${S.info}${C.reset}  Modo: ${MODE_LABELS[status.mode]}\n`)
-    return "continue"
+  if (trimmed === "/exit" || trimmed === "/q" || trimmed === "/quit") return "exit"
+  if (trimmed === "/clear" || trimmed === "/cls") { console.clear(); return "continue" }
+
+  const result = await parseInternalCommand(trimmed, db, {
+    ...ctx,
+    activeMode: status.mode,
+    activeProvider: status.provider,
+    activeModel: status.model,
+  })
+
+  if (result.output) {
+    process.stdout.write(`${result.output}\n`)
   }
 
-  if (cmd.startsWith("mode ")) {
-    const newMode = cmd.slice(5).trim() as Mode
-    if (MODE_CYCLE.includes(newMode)) {
-      status.mode = newMode
-      saveMode(newMode)
-      process.stdout.write(`  ${C.amber}${S.info}${C.reset}  Modo: ${MODE_LABELS[newMode]}\n`)
-    } else {
-      process.stdout.write(`  ${C.red}${S.error}${C.reset}  Modo inválido. Usa: plan, approval, auto\n`)
-    }
-    return "continue"
+  if (result.newState) {
+    if (result.newState.activeMode) status.mode = result.newState.activeMode
+    if (result.newState.activeProvider) status.provider = result.newState.activeProvider
+    if (result.newState.activeModel) status.model = result.newState.activeModel
   }
 
-  process.stdout.write(`  ${C.red}${S.error}${C.reset}  Comando desconocido: :${cmd}\n`)
-  process.stdout.write(`  ${C.dim}│${C.reset}  Usa ${C.white}:help${C.reset} para ver comandos disponibles\n`)
   return "continue"
 }
-
-// ─── Task execution ────────────────────────────────────────────────
 
 async function executeTask(task: string, status: ReplStatus): Promise<void> {
   if (status.mode === "plan") {
@@ -253,23 +288,21 @@ async function executeTask(task: string, status: ReplStatus): Promise<void> {
     await plan(task)
 
     const approval = await hiveSelect({
-      message: "¿Deseas implementar este plan?",
+      message: "\u00bfDeseas implementar este plan?",
       options: [
-        { value: "yes", label: "Sí, implementar" },
+        { value: "yes", label: "S\u00ed, implementar" },
         { value: "no", label: "No, volver" },
       ],
     })
 
     if (isCancel(approval) || approval === "no") {
-      process.stdout.write(`  ${C.amber}${S.barEnd}${C.reset}  ${C.dim}Implementación omitida${C.reset}\n`)
+      process.stdout.write(`  ${C.amber}${S.barEnd}${C.reset}  ${C.dim}Implementaci\u00f3n omitida${C.reset}\n`)
       return
     }
 
     await run(task, [])
   }
 }
-
-// ─── Main export ───────────────────────────────────────────────────
 
 export async function repl(): Promise<void> {
   if (!process.stdin.isTTY) {
@@ -281,7 +314,7 @@ export async function repl(): Promise<void> {
   const projectName = path.basename(status.projectPath)
 
   process.stdout.write(
-    `\n  ${S.bee}  ${C.bold}${C.amber}hive-code v${VERSION}${C.reset} · ${C.white}${projectName}${C.reset}\n` +
+    `\n  ${BEE.happy}  ${C.bold}${C.amber}hive-code v${VERSION}${C.reset} \u00b7 ${C.white}${projectName}${C.reset}\n` +
     `  ${C.amber}${S.bar}${C.reset}\n`
   )
 
@@ -297,7 +330,7 @@ export async function repl(): Promise<void> {
     const trimmed = task.trim()
     if (!trimmed) continue
 
-    if (trimmed.startsWith(":")) {
+    if (trimmed.startsWith("/")) {
       const result = await handleCommand(trimmed, status)
       if (result === "exit") break
       continue
@@ -307,7 +340,7 @@ export async function repl(): Promise<void> {
       await executeTask(trimmed, status)
     } catch (err) {
       logger.error("[repl] Task execution error:", err)
-      process.stdout.write(`  ${C.red}${S.error}${C.reset}  ${(err as Error).message}\n`)
+      process.stdout.write(`  ${BEE.error}  ${(err as Error).message}\n`)
     }
   }
 

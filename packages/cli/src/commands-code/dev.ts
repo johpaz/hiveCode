@@ -32,9 +32,9 @@ async function waitForPort(port: number, timeout = 15000): Promise<boolean> {
 function getGatewayPort(): number {
 	try {
 		const pidFile = path.join(getHiveDir(), "gateway.pid")
-		if (!existsSync(pidFile)) return 18790
+		if (!existsSync(pidFile)) return 16120
 	} catch {}
-	return 18790
+	return 16120
 }
 
 async function isGatewayRunning(): Promise<boolean> {
@@ -51,8 +51,10 @@ async function isGatewayRunning(): Promise<boolean> {
 	}
 }
 
-export async function dev(): Promise<void> {
-	hiveIntro("hive-code · Dev Mode")
+export async function dev(flags: string[] = []): Promise<void> {
+	const productionLike = flags.includes("--prod") || flags.includes("-p")
+
+	hiveIntro(productionLike ? "🐝 hive-code · Modo Dev (Producción-like)" : "hive-code · Dev Mode")
 
 	const hiveDir = getHiveDir()
 	const spinner = hiveSpinner("default")
@@ -67,11 +69,13 @@ export async function dev(): Promise<void> {
 
 		gatewayChild = spawn(
 			process.execPath,
-			[process.argv[1] || "", "start", "--skip-check", "--dev-internal"],
+			[process.argv[1] || "", "start", "--skip-check"],
 			{
 				detached: true,
 				stdio: ["ignore", "pipe", "pipe"],
-				env: { ...process.env, HIVE_DEV: "true", HIVE_GATEWAY_CHILD: "1" },
+				env: productionLike
+					? { ...process.env, HIVE_GATEWAY_CHILD: "1", NO_BROWSER: "1" }
+					: { ...process.env, HIVE_DEV: "true", HIVE_GATEWAY_CHILD: "1" },
 			}
 		)
 

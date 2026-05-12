@@ -167,9 +167,9 @@ export interface AdapterOptions {
  */
 export const gatewayConfigSchema = z.object({
   host: z.string().optional().default("127.0.0.1"),
-  port: z.number().int().min(1).max(65535).default(18790),
+  port: z.number().int().min(1).max(65535).default(16120),
   uiPort: z.number().int().min(1).max(65535).optional(),
-  wsPort: z.number().int().min(1).max(65535).default(18790),
+  wsPort: z.number().int().min(1).max(65535).default(16120),
   codeBridgePort: z.number().int().min(1).max(65535).default(18791),
   publicUrl: z.string().url().optional(),
   openBrowser: z.boolean().default(true),
@@ -205,8 +205,8 @@ export const installationConfigSchema = z.object({
  */
 export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
   host: "127.0.0.1",
-  port: 18790,
-  wsPort: 18790,
+  port: 16120,
+  wsPort: 16120,
   codeBridgePort: 18791,
   openBrowser: true,
   daemon: false,
@@ -216,7 +216,7 @@ export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
  * Common ports used by Hive
  */
 export const PORTS = {
-  GATEWAY: 18790,
+  GATEWAY: 16120,
   CODE_BRIDGE: 18791,
   VITE_DEV: 5173,
 } as const;

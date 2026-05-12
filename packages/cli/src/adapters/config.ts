@@ -24,13 +24,8 @@ export function getHiveDir(customDir?: string): string {
     return path.resolve(process.env.HIVE_HOME);
   }
   
-  // Development mode
-  if (process.env.HIVE_DEV === "true") {
-    return path.join(process.env.HOME || "", ".hive-dev");
-  }
-  
-  // Default production location
-  return path.join(process.env.HOME || "", ".hive");
+  // Default location: same for dev and production
+  return path.join(process.env.HOME || "", ".hivecode");
 }
 
 /**

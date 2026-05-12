@@ -197,8 +197,6 @@ async function waitForVite(port: number, timeout: number = 30000): Promise<boole
 export async function start(flags: string[]): Promise<void> {
   const daemon = flags.includes("--daemon");
   const skipCheck = flags.includes("--skip-check");
-  const devInternal = flags.includes("--dev-internal");
-
   const isDev = isDevMode();
   const isChild = isChildProcess();
 
@@ -286,7 +284,7 @@ async function handleDevMode(
 
   // Spawn Gateway child process
   const spawnGateway = (): ReturnType<typeof spawn> => {
-    const gw = spawn(process.execPath, [process.argv[1] || "", "start", "--skip-check", "--dev-internal"], {
+    const gw = spawn(process.execPath, [process.argv[1] || "", "start", "--skip-check"], {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, HIVE_DEV: "true", HIVE_GATEWAY_CHILD: "1" },

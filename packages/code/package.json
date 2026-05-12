@@ -27,6 +27,7 @@
     "./workers/types": "./src/workers/types.ts",
     "./narrative": "./src/narrative/index.ts",
     "./narrative/scribe": "./src/narrative/scribe.ts",
-    "./modes": "./src/modes/index.ts"
+    "./modes": "./src/modes/index.ts",
+    "./coordinator/command-parser": "./src/coordinator/command-parser.ts"
   }
 }

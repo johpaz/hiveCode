@@ -187,6 +187,71 @@ function seedCodePlaybook(): void {
   }
 }
 
+// ─── 3. Commands FTS (autocomplete for slash commands) ─────────────────────
+
+interface CommandSeed {
+  command: string
+  category: string
+  description: string
+}
+
+const INTERNAL_COMMANDS: CommandSeed[] = [
+  { command: "/provider list", category: "provider", description: "Muestra providers configurados + modelo activo" },
+  { command: "/provider add", category: "provider", description: "Agrega nuevo provider" },
+  { command: "/provider set", category: "provider", description: "Cambia provider activo" },
+  { command: "/provider test", category: "provider", description: "Ping al provider, mide latencia" },
+  { command: "/provider status", category: "provider", description: "Estado de todos los providers" },
+  { command: "/modelo list", category: "modelo", description: "Lista modelos disponibles por provider" },
+  { command: "/modelo set", category: "modelo", description: "Cambia modelo activo" },
+  { command: "/modelo info", category: "modelo", description: "Detalles del modelo" },
+  { command: "/mcp list", category: "mcp", description: "Lista MCPs conectados/desconectados" },
+  { command: "/mcp add", category: "mcp", description: "Registra nuevo MCP" },
+  { command: "/mcp enable", category: "mcp", description: "Activa MCP en sesión actual" },
+  { command: "/mcp disable", category: "mcp", description: "Desactiva sin eliminar config" },
+  { command: "/mcp test", category: "mcp", description: "Verifica conexión y lista tools" },
+  { command: "/skill list", category: "skill", description: "Lista skills: built-in / custom / active" },
+  { command: "/skill enable", category: "skill", description: "Activa skill" },
+  { command: "/skill disable", category: "skill", description: "Desactiva sin eliminar" },
+  { command: "/skill info", category: "skill", description: "Muestra contenido y metadata" },
+  { command: "/skill add", category: "skill", description: "Importa skill desde archivo .md" },
+  { command: "/mode get", category: "mode", description: "Muestra modo actual" },
+  { command: "/mode set", category: "mode", description: "Cambia modo Plan/Approval/Auto" },
+  { command: "/mode history", category: "mode", description: "Historial de cambios de modo" },
+  { command: "/task list", category: "task", description: "Tareas recientes" },
+  { command: "/task status", category: "task", description: "Estado detallado + fase actual" },
+  { command: "/task cancel", category: "task", description: "Cancela tarea en curso" },
+  { command: "/task rollback", category: "task", description: "Reviente cambios de una tarea" },
+  { command: "/narrative show", category: "narrative", description: "Muestra últimas N entradas del narrativo" },
+  { command: "/narrative search", category: "narrative", description: "Busca en el narrativo por FTS5" },
+  { command: "/narrative export", category: "narrative", description: "Exporta narrativo completo" },
+  { command: "/ace status", category: "ace", description: "Estado del aprendizaje adaptativo" },
+  { command: "/ace playbook list", category: "ace", description: "Reglas aprendidas (activas + inactivas)" },
+  { command: "/ace playbook reset", category: "ace", description: "Borra playbook y reinicia aprendizaje" },
+  { command: "/ace reflector run", category: "ace", description: "Fuerza análisis inmediato" },
+  { command: "/github status", category: "github", description: "Verifica token válido y permisos" },
+  { command: "/github whoami", category: "github", description: "Muestra usuario autenticado" },
+  { command: "/github set-repo", category: "github", description: "Vincula a repo específico" },
+  { command: "/doctor", category: "system", description: "Chequeo completo del sistema" },
+  { command: "/version", category: "system", description: "Muestra versión + commit hash" },
+  { command: "/env", category: "system", description: "Muestra variables de entorno no sensibles" },
+  { command: "/help", category: "system", description: "Muestra ayuda categorizada" },
+]
+
+function seedCommandsFts(): void {
+  const db = getDb()
+
+  try {
+    db.run("DELETE FROM code_commands_fts")
+    const stmt = db.prepare("INSERT INTO code_commands_fts(command, category, description) VALUES (?, ?, ?)")
+    for (const cmd of INTERNAL_COMMANDS) {
+      stmt.run(cmd.command, cmd.category, cmd.description)
+    }
+    log.info(`[seed] ✅ ${INTERNAL_COMMANDS.length} internal commands indexed for FTS5`)
+  } catch (err) {
+    log.warn("[seed] ⚠️  Failed to seed commands FTS:", (err as Error).message)
+  }
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export function seedCodeData(): void {
@@ -196,6 +261,7 @@ export function seedCodeData(): void {
     seedCodeTools()
     seedCodeSkills()
     seedCodePlaybook()
+    seedCommandsFts()
     log.info("[seed] ✨ Hive-Code seed completed")
   } catch (err) {
     log.error("[seed] ❌ Hive-Code seed failed:", (err as Error).message)

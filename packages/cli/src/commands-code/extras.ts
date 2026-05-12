@@ -181,8 +181,8 @@ export async function init(pathArg?: string): Promise<void> {
   spinner.start(`Inicializando ${targetPath}...`)
 
   try {
-    // Create .hive directory
-    await Bun.write(`${targetPath}/.hive/.gitkeep`, "")
+    // Create .hivecode directory
+    await Bun.write(`${targetPath}/.hivecode/.gitkeep`, "")
 
     // Create default hive-code.yaml if not exists
     const configPath = `${targetPath}/hive-code.yaml`

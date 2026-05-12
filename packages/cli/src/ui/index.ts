@@ -17,3 +17,5 @@ export {
   bar,
   emptyLine,
 } from "./theme.ts"
+
+export { BEE, BEE_FULL, BEE_COORDINATOR } from "./mascot.ts"

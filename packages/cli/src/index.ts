@@ -54,7 +54,7 @@ Modos de operación:
 
 Gateway:
   start [--mode <mode>]      Iniciar el gateway
-  dev                        Modo desarrollo (usa ~/.hive-dev)
+  dev [--prod]               Modo desarrollo (--prod para producción-like)
   stop                       Detener el gateway
   reload                     Recargar config
   status                     Estado del sistema
@@ -198,7 +198,7 @@ async function main(): Promise<void> {
       await run(subcommand, flags)
       break
     case "dev":
-      await dev()
+      await dev(flags)
       break
     case "doctor":
       await doctor(flags)
@@ -347,7 +347,7 @@ async function main(): Promise<void> {
       await coordinator(subcommand, args.slice(2))
       break
     case "onboard": {
-      console.log("Onboarding — use the web setup UI at http://localhost:18790/setup")
+      console.log("Onboarding — use the web setup UI at http://localhost:16120/setup")
       break
     }
     case "migrate": {

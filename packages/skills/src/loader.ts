@@ -323,7 +323,7 @@ export class SkillLoader {
     }
 
     // 2. Load managed skills (medium priority)
-    const managedDir = this.expandPath(this.config.skills?.managedDir ?? "~/.hive/skills");
+    const managedDir = this.expandPath(this.config.skills?.managedDir ?? "~/.hivecode/skills");
     if (fs.existsSync(managedDir)) {
       for (const entry of fs.readdirSync(managedDir, { withFileTypes: true })) {
         if (entry.isDirectory()) {

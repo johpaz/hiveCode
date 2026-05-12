@@ -3,6 +3,7 @@
 // NO importar de @clack/prompts en ningún lugar del proyecto.
 
 import { TextPrompt, SelectPrompt } from "@clack/core"
+import { BEE, BEE_COORDINATOR } from "./mascot.ts"
 export interface OptionLike {
   value: any;
   label?: string;
@@ -82,7 +83,7 @@ export function emptyLine(coordinator = "default"): string {
  */
 export function hiveIntro(title: string): void {
   process.stdout.write(
-    `\n  ${S.bee}  ${C.bold}${C.amber}${title}${C.reset}\n` +
+    `\n  ${BEE.happy}  ${C.bold}${C.amber}${title}${C.reset}\n` +
     `  ${C.amber}${S.bar}${C.reset}\n`
   )
 }
@@ -125,10 +126,8 @@ export function hiveModeBar(mode: "plan" | "approval" | "auto"): void {
  *   ⬢  Architecture Coordinator completó
  */
 export function hivePhaseComplete(coordinator: string, summary: string): void {
-  const color = COORDINATOR_COLOR[coordinator] ?? C.amber
   process.stdout.write(
-    `  ${color}${S.done}${C.reset}  ${C.white}${summary}${C.reset}\n` +
-    `  ${bar(coordinator)}\n`
+    `  ${BEE.done}  ${C.white}${summary}${C.reset}\n`
   )
 }
 
@@ -171,7 +170,7 @@ export function hiveNote(title: string, lines: string[]): void {
  * start(msg), update(msg) y stop(msg).
  */
 export function hiveSpinner(coordinator = "default") {
-  const frames = ["⬡", "⬡", "⬢", "⬢"]
+  const frames = [BEE.thinking, BEE.plan, BEE.thinking]
   const color = COORDINATOR_COLOR[coordinator] ?? C.amber
   let i = 0
   let interval: ReturnType<typeof setInterval> | null = null

@@ -148,6 +148,21 @@ CREATE TABLE IF NOT EXISTS code_config (
   updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
+-- Context state: current session state (active provider, model, mode, MCPs, skills)
+CREATE TABLE IF NOT EXISTS code_context_state (
+  session_id       TEXT PRIMARY KEY REFERENCES code_sessions(id) ON DELETE CASCADE,
+  active_provider  TEXT DEFAULT 'anthropic',
+  active_model     TEXT DEFAULT '',
+  active_mode      TEXT DEFAULT 'plan' CHECK(active_mode IN ('plan','approval','auto')),
+  active_mcp       TEXT DEFAULT '[]',
+  active_skills    TEXT DEFAULT '[]',
+  updated_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+-- Commands FTS: autocomplete for internal slash commands
+CREATE VIRTUAL TABLE IF NOT EXISTS code_commands_fts
+  USING fts5(command, category, description);
+
 -- Context cache: compiled context with TTL
 CREATE TABLE IF NOT EXISTS code_context_cache (
   cache_key   TEXT PRIMARY KEY,

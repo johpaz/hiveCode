@@ -124,8 +124,8 @@ export async function startGateway(config: Config): Promise<void> {
   const multimodalService: any = {};
 
   const host = config.gateway?.host ?? "127.0.0.1";
-  const port = config.gateway?.port ?? 18790;
-  const pidFile = expandPath(config.gateway?.pidFile ?? "~/.hive/gateway.pid");
+  const port = config.gateway?.port ?? 16120;
+  const pidFile = expandPath(config.gateway?.pidFile ?? "~/.hivecode/gateway.pid");
 
   // FIX 2 — startTime para calcular uptime en /status y /api/agents
   const startTime = Date.now();
@@ -423,13 +423,16 @@ export async function startGateway(config: Config): Promise<void> {
   });
 
   // ── Auth helper ──────────────────────────────────────────────────────────
-  // Dev mode when HIVE_DEV is set to "true" or "1".
-  // Set HIVE_DEV=true in your development environment.
   const isDev = process.env.HIVE_DEV === "true" || process.env.HIVE_DEV === "1";
+  const authToken = process.env.HIVE_AUTH_TOKEN;
 
   function checkAuth(req: Request, url: URL): boolean {
-    // En modo desarrollo, permitir todo
-    if (isDev) return true;
+    // Si hay token configurado, respetarlo siempre (dev o prod)
+    if (authToken) {
+      const bearer = req.headers.get("authorization")?.replace("Bearer ", "");
+      if (bearer === authToken) return true;
+      // Fall through to individual endpoint checks
+    }
 
     // En setup mode (sin usuarios), bypass total — el wizard no tiene token aún
     if (gatewaySetupMode) return true;
@@ -604,7 +607,7 @@ export async function startGateway(config: Config): Promise<void> {
           }
 
           // In production: serve from dist folder
-          // Priority: HIVE_UI_DIR (Docker) > ~/.hive/ui > HIVE_DIST_DIR/ui (global npm) > cwd/packages/hive-ui/dist (monorepo)
+          // Priority: HIVE_UI_DIR (Docker) > ~/.hivecode/ui > HIVE_DIST_DIR/ui (global npm) > cwd/packages/hive-ui/dist (monorepo)
           const uiDirFromEnv = process.env.HIVE_UI_DIR;
           const uiDirFromHive = path.join(getHiveDir(), "ui");
           const uiDirFromDist = process.env.HIVE_DIST_DIR ? path.join(process.env.HIVE_DIST_DIR, "ui") : null;
@@ -658,7 +661,7 @@ export async function startGateway(config: Config): Promise<void> {
           return new Response(
             "UI not found.\n\n" +
             "Options:\n" +
-            "  1. Place the UI in ~/.hive/ui/ (copy hive-ui/dist contents there)\n" +
+            "  1. Place the UI in ~/.hivecode/ui/ (copy hive-ui/dist contents there)\n" +
             "  2. Set HIVE_UI_DIR=/path/to/ui\n" +
             "  3. Build from source: cd packages/hive-ui && bun run build\n",
             { status: 404, headers: { "Content-Type": "text/plain" } }
@@ -867,7 +870,7 @@ export async function startGateway(config: Config): Promise<void> {
             ).get();
             const liveWorkspacePath = coordinatorRow?.workspace
               ? expandPath(coordinatorRow.workspace)
-              : expandPath("~/.hive/workspace");
+              : expandPath("~/.hivecode/workspace");
             if (req.method === "GET") {
               return await handleGetWorkspace(req, addCorsHeaders, liveWorkspacePath, wsType);
             }

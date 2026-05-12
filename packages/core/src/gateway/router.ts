@@ -117,7 +117,7 @@ export class Router {
     }
 
     const baseDir = this.config.agent?.baseDir?.replace(/^~/, process.env.HOME ?? "") 
-      ?? `${process.env.HOME}/.hive/agents`;
+      ?? `${process.env.HOME}/.hivecode/agents`;
     
     return `${baseDir}/${agentId}/workspace`;
   }

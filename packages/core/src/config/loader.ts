@@ -1,6 +1,6 @@
 /**
  * Config loader — stubbed to fix build.
- * TODO: Implement full config loading from ~/.hive/config.json or env vars.
+ * TODO: Implement full config loading from ~/.hivecode/config.json or env vars.
  */
 
 export interface Config {
@@ -44,13 +44,13 @@ export interface Binding {
 }
 
 export function getHiveDir(): string {
-  return process.env.HIVE_HOME || `${process.env.HOME || "/tmp"}/.hive`
+  return process.env.HIVE_HOME || `${process.env.HOME || "/tmp"}/.hivecode`
 }
 
 export function loadConfig(): Config {
-  // TODO: Load from ~/.hive/config.json
+  // TODO: Load from ~/.hivecode/config.json
   return {
-    port: Number(process.env.HIVE_PORT) || 18790,
+    port: Number(process.env.HIVE_PORT) || 16120,
     host: process.env.HIVE_HOST || "0.0.0.0",
   }
 }
