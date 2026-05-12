@@ -68,7 +68,7 @@ function getSubAgentList(coordinatorName: string): string {
   const { listSubAgents } = require("./subagent-registry")
   const agents = listSubAgents(coordinatorName)
   if (agents.length === 0) return "  (none)"
-  return agents.map(a => `  - ${a.name}: ${a.description}`).join("\n")
+  return agents.map((a: any) => ` - ${a.name}: ${a.description}`).join("\n")
 }
 
 /** Tool definition for spawn_subagent */

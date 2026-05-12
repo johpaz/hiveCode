@@ -21,6 +21,7 @@
       "DOM",
       "DOM.Iterable"
     ],
+    "types": ["bun"],
     "paths": {
       "@johpaz/hive-code-core": [
         "./packages/core/src/index.ts"

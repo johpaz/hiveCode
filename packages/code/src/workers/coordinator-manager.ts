@@ -168,13 +168,34 @@ export class CoordinatorManager {
     }
     const archResult = await this.dispatchPhase("architecture", archTask)
 
-    if (archResult.status === "failed" || archResult.status === "blocked") {
-      this.scribe.updateTaskStatus(this.activeTaskId, "failed")
-      log.error(`[coordinator-manager] ❌ Architecture phase failed: ${archResult.blockerDescription}`)
-      return
-    }
+	if (archResult.status === "failed" || archResult.status === "blocked") {
+		this.scribe.appendNarrative({
+			taskId: this.activeTaskId,
+			sessionId: this.activeSessionId!,
+			coordinator: archResult.coordinator,
+			phase: "architecture",
+			entry: archResult.narrativeEntry || archResult.blockerDescription || "",
+			isDraft: false,
+			isOverride: false,
+		})
+		this.scribe.updatePhaseStatus(archPhaseId, archResult.status, archResult.blockerDescription)
+		this.scribe.updateTaskStatus(this.activeTaskId, "failed")
+		log.error(`[coordinator-manager] ❌ Architecture phase failed: ${archResult.blockerDescription}`)
+		return
+	}
 
-    // Parse the architecture output into a structured plan
+	this.scribe.appendNarrative({
+		taskId: this.activeTaskId,
+		sessionId: this.activeSessionId!,
+		coordinator: archResult.coordinator,
+		phase: "architecture",
+		entry: archResult.narrativeEntry,
+		isDraft: false,
+		isOverride: false,
+	})
+	this.scribe.updatePhaseStatus(archPhaseId, "completed", archResult.narrativeEntry)
+
+	// Parse the architecture output into a structured plan
     const plan = parsePlan(archResult.narrativeEntry)
 
     // Save ADR to database
@@ -256,20 +277,30 @@ export class CoordinatorManager {
         const result = results[r]
         const { phase, task } = levelTasks[r]
 
-        if (result.status === "failed") {
-          this.scribe.updateTaskStatus(this.activeTaskId, "failed")
-          log.error(`[coordinator-manager] ❌ ${phase} phase failed: ${result.blockerDescription}`)
-          return
-        }
+		this.scribe.appendNarrative({
+			taskId: this.activeTaskId!,
+			sessionId: this.activeSessionId!,
+			coordinator: result.coordinator,
+			phase,
+			entry: result.narrativeEntry || result.blockerDescription || "",
+			isDraft: false,
+			isOverride: false,
+		})
 
-        if (result.status === "blocked") {
-          this.scribe.updatePhaseStatus(task.phaseId, "blocked", result.blockerDescription)
-          this.scribe.updateTaskStatus(this.activeTaskId, "paused")
-          log.warn(`[coordinator-manager] ⚠️ ${phase} phase blocked: ${result.blockerDescription}`)
-          return
-        }
+		if (result.status === "failed") {
+			this.scribe.updateTaskStatus(this.activeTaskId, "failed")
+			log.error(`[coordinator-manager] ❌ ${phase} phase failed: ${result.blockerDescription}`)
+			return
+			}
 
-        this.scribe.updatePhaseStatus(task.phaseId, "completed", result.narrativeEntry)
+			if (result.status === "blocked") {
+			this.scribe.updatePhaseStatus(task.phaseId, "blocked", result.blockerDescription)
+			this.scribe.updateTaskStatus(this.activeTaskId, "paused")
+			log.warn(`[coordinator-manager] ⚠️ ${phase} phase blocked: ${result.blockerDescription}`)
+			return
+			}
+
+			this.scribe.updatePhaseStatus(task.phaseId, "completed", result.narrativeEntry)
 
         // Stream phase completion to WebSocket subscribers
         if (this.activeTaskId) {

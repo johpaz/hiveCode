@@ -95,7 +95,7 @@ export function parsePlan(text: string): ParsedPlan {
     try {
       const parsed = JSON.parse(jsonStr)
 
-      const phases = (parsed.phases || [])
+      const phases = ((parsed.phases || []) as any[])
         .map(normalizePhase)
         .filter((p): p is ParsedPhase => p !== null)
 
