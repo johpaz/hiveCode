@@ -1,5 +1,4 @@
 import { getDb } from "../../storage/sqlite"
-import { emitCanvas } from "../../canvas/emitter"
 import { encryptConfig } from "../../storage/crypto"
 
 export async function handleGetAgents(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
@@ -107,10 +106,6 @@ export async function handleCreateAgent(req: Request, addCorsHeaders: (r: Respon
     agentId = result?.id || ""
   }
 
-  emitCanvas("canvas:node_add", {
-    node: { id: agentId, name: body.name, status: "idle", type: "agent" }
-  })
-
   const agent = getDb().query(`
     SELECT id, name, description, provider_id, model_id, tone, status, enabled, active, created_at, workspace
     FROM agents WHERE id = ?
@@ -195,8 +190,6 @@ export async function handleUpdateAgent(req: Request, addCorsHeaders: (r: Respon
     updates.push("updated_at = unixepoch()")
     params.push(agentId)
     getDb().query(`UPDATE agents SET ${updates.join(", ")} WHERE id = ?`).run(...params as any[])
-
-    emitCanvas("canvas:node_update", { id: agentId, updates: body })
   }
 
   return addCorsHeaders(Response.json({ ok: true }), req)
@@ -211,8 +204,6 @@ export async function handleDeleteAgent(req: Request, addCorsHeaders: (r: Respon
   }
 
   getDb().query(`DELETE FROM agents WHERE id = ?`).run(agentId)
-
-  emitCanvas("canvas:node_remove", { id: agentId })
 
   return addCorsHeaders(Response.json({ ok: true }), req)
 }

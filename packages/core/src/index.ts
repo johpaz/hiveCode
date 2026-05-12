@@ -40,7 +40,6 @@ export { retry } from "./utils/retry.ts";
 // Events
 export * from "./events/event-bus.ts";
 export * from "./events/agent-bus.ts";
-export * from "./canvas/index.ts";
 
 // Re-export native-tools types
 export type { Tool as NativeTool, ToolResult as NativeToolResult } from "./agent/native-tools.ts";

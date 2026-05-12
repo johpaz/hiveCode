@@ -87,7 +87,7 @@ export class ChannelManager {
       }
 
       for (const [accountId, accountConfig] of Object.entries(accounts)) {
-        const fullConfig = { ...channelConfig, ...accountConfig };
+        const fullConfig = { ...(channelConfig as any), ...(accountConfig as any) };
         await this.createChannel(channelName, accountId, fullConfig);
       }
     }

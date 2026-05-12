@@ -7,7 +7,7 @@ const log = logger.child("llm-client")
 /**
  * Local Llama provider.
  * - isLocalProvider: enables num_ctx, tool injection in system prompt
- * - beforeCall: auto-starts the llama server if not running
+ * Note: Hive-Code is terminal-only — local LLM server must be started manually
  */
 export class LocalLlamaProvider extends OpenAICompatBase {
   constructor() {
@@ -19,12 +19,7 @@ export class LocalLlamaProvider extends OpenAICompatBase {
   }
 
   protected async beforeCall(options: LLMCallOptions): Promise<void> {
-    try {
-      const { llamaManager } = await import("../../gateway/llm-local/manager")
-      const modelId = options.model.replace(/^local-llama\//i, "")
-      await llamaManager.start("TEXT", modelId as any)
-    } catch (err) {
-      log.warn(`[llm-client] local-llama auto-start failed or skipped: ${err}`)
-    }
+    // Hive-Code does not auto-start local LLM — user must start it manually
+    log.debug(`[llm-client] local-llama call — ensure server is running manually`)
   }
 }

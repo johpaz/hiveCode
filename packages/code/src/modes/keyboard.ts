@@ -38,7 +38,6 @@ export function listenModeToggle(onModeChange?: (mode: SessionMode) => void): vo
 
   stdin.setRawMode(true)
   stdin.resume()
-  stdin.setEncoding(null)
 
   modeToggleListener = (buf: Buffer) => {
     // Shift+Tab sends: ESC [ Z  (0x1B 0x5B 0x5A)

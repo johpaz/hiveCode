@@ -1,8 +1,6 @@
 import { getDb } from "../../storage/sqlite.ts"
 import { loadConfig } from "../../config/loader.ts"
 import { cpus } from "node:os"
-import { readFile } from "node:fs/promises"
-import { join } from "node:path"
 import pkg from "../../../../../package.json"
 
 const CURRENT_VERSION = pkg.version
@@ -12,37 +10,25 @@ export interface VersionInfo {
   latest?: string
   status: "up-to-date" | "update-available" | "checking" | "error"
   error?: string
-  installationType?: "docker" | "binary" | "npm" | "bun"
+  installationType?: "binary" | "npm" | "bun"
 }
 
 /**
  * Detecta el tipo de instalación de Hive
  */
-function detectInstallationType(): "docker" | "binary" | "npm" | "bun" {
+function detectInstallationType(): | "binary" | "npm" | "bun" {
   // Docker: existe el archivo .dockerenv o el path contiene /.docker
-  if (process.env.HIVE_DOCKER === "true" || process.env.RUNNING_IN_DOCKER === "true") {
-    return "docker"
-  }
-  
-  // Verificar si hay archivo .dockerenv (solo Linux)
-  try {
-    if (require("fs").existsSync("/.dockerenv")) {
-      return "docker"
-    }
-  } catch {
-    // Ignorar error en sistemas que no soportan require
-  }
-  
+
   // Bun: process.execPath contiene "bun"
   if (process.execPath?.includes("bun")) {
     return "bun"
   }
-  
+
   // npm: las variables de entorno de npm
   if (process.env.npm_config_global_prefix) {
     return "npm"
   }
-  
+
   // Por defecto, asumir binario standalone
   return "binary"
 }
@@ -54,18 +40,18 @@ async function getLatestVersionFromNpm(): Promise<string | null> {
   try {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 5000)
-    
+
     const response = await fetch("https://registry.npmjs.org/@johpaz/hive-agents/latest", {
       signal: controller.signal,
       headers: { "Accept": "application/json" }
     })
-    
+
     clearTimeout(timeout)
-    
+
     if (!response.ok) {
       return null
     }
-    
+
     const data = await response.json()
     return data.version
   } catch (error) {
@@ -81,21 +67,21 @@ async function getLatestVersionFromGitHub(): Promise<string | null> {
   try {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 5000)
-    
-    const response = await fetch("https://api.github.com/repos/johpaz/hive/releases/latest", {
+
+    const response = await fetch("https://api.github.com/repos/johpaz/hiveCode /releases/latest", {
       signal: controller.signal,
-      headers: { 
+      headers: {
         "Accept": "application/vnd.github.v3+json",
         "User-Agent": "Hive-Version-Checker"
       }
     })
-    
+
     clearTimeout(timeout)
-    
+
     if (!response.ok) {
       return null
     }
-    
+
     const data = await response.json()
     // Remover prefijo "v" si existe (ej: "v1.7.15" -> "1.7.15")
     return data.tag_name?.replace(/^v/, "") || null
@@ -112,15 +98,15 @@ async function getLatestVersionFromGitHub(): Promise<string | null> {
 function compareVersions(v1: string, v2: string): number {
   const parts1 = v1.split(".").map(Number)
   const parts2 = v2.split(".").map(Number)
-  
+
   for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
     const n1 = parts1[i] || 0
     const n2 = parts2[i] || 0
-    
+
     if (n1 > n2) return 1
     if (n1 < n2) return -1
   }
-  
+
   return 0
 }
 
@@ -132,19 +118,19 @@ export async function handleGetVersion(
   addCorsHeaders: (r: Response, req: Request) => Response
 ): Promise<Response> {
   const installationType = detectInstallationType()
-  
+
   // Responder inmediatamente con la versión actual y estado "checking"
   let versionInfo: VersionInfo = {
     current: CURRENT_VERSION,
     status: "checking",
     installationType
   }
-  
+
   // Siempre verificar en npm registry (es donde se publica @johpaz/hive-agents)
   // GitHub Releases solo como fallback si npm falla
   const latest = await getLatestVersionFromNpm()
     .then(v => v ?? getLatestVersionFromGitHub())
-  
+
   if (latest) {
     const isUpdateAvailable = compareVersions(latest, CURRENT_VERSION) > 0
     versionInfo = {
@@ -161,7 +147,7 @@ export async function handleGetVersion(
       installationType
     }
   }
-  
+
   return addCorsHeaders(Response.json(versionInfo), req)
 }
 
@@ -173,35 +159,22 @@ export async function handleTriggerUpdate(
   addCorsHeaders: (r: Response, req: Request) => Response
 ): Promise<Response> {
   const installationType = detectInstallationType()
-  
+
   try {
     let command: string[]
     let message: string
-    
+
     switch (installationType) {
-      case "docker":
-        // Docker: el usuario debe ejecutar docker compose pull && docker compose up -d
-        return addCorsHeaders(Response.json({
-          success: false,
-          error: "En Docker, ejecuta manualmente: docker compose pull && docker compose up -d",
-          instructions: [
-            "1. Abre una terminal en el directorio de Hive",
-            "2. Ejecuta: docker compose pull",
-            "3. Luego ejecuta: docker compose up -d",
-            "4. Recarga esta página para ver la nueva versión"
-          ]
-        }), req)
-        
       case "bun":
         command = ["bun", "install", "-g", "@johpaz/hive-agents@latest"]
         message = "Actualizando Hive desde npm..."
         break
-        
+
       case "npm":
         command = ["npm", "install", "-g", "@johpaz/hive-agents@latest"]
         message = "Actualizando Hive desde npm..."
         break
-        
+
       case "binary":
         return addCorsHeaders(Response.json({
           success: false,
@@ -213,26 +186,26 @@ export async function handleTriggerUpdate(
             "4. Ejecuta: hive start"
           ]
         }), req)
-        
+
       default:
         return addCorsHeaders(Response.json({
           success: false,
           error: "Tipo de instalación no reconocido"
         }), req)
     }
-    
+
     // Ejecutar comando de actualización
     const proc = Bun.spawn(command, {
       stdout: "pipe",
       stderr: "pipe",
     })
-    
+
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
       proc.exited
     ])
-    
+
     if (exitCode === 0) {
       return addCorsHeaders(Response.json({
         success: true,
@@ -386,10 +359,10 @@ export async function handleGetUsageStats(req: Request, addCorsHeaders: (r: Resp
   const toonJsonBytes = toonTotals?.toonJsonBytes || 0
   const toonJsonTokens = toonTotals?.toonJsonTokens || 0
   const toonToonTokens = toonTotals?.toonToonTokens || 0
-  
+
   // Use saved_percent directly from DB (calculated at record time by toon-format-parser)
   const toonSavedBytesPercent = toonTotals?.toonSavedPercent || 0
-  
+
   // Use saved_tokens_pct directly from DB (calculated at record time by toon-format-parser)
   const toonSavingsPercent = toonTotals?.toonSavedTokensPct || 0
 

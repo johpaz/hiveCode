@@ -1,5 +1,4 @@
 import { getDb } from "../../storage/sqlite"
-import { emitCanvas } from "../../canvas/emitter"
 import { syncSkillsToFTS } from "../../agent/skill-selector"
 
 export async function handleGetSkills(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {

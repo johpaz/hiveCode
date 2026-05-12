@@ -19,13 +19,12 @@ import { callLLM, resolveProviderConfig, type LLMMessage } from "./llm-client"
 import { addMessage } from "./conversation-store"
 import { saveTrace, recordLLMUsage } from "./tracer"
 import { maybeCompact, clearOldToolResults } from "./compaction"
-import { emitCanvas } from "../canvas/emitter"
 import type { MCPClientManager } from "@johpaz/hive-code-mcp"
 import { compileContext } from "./context-compiler"
 import { formatToolResult } from "../utils/toon"
 import { getAverageTokenCost } from "../storage/usage"
 import { resolveUserId, resolveAgentId } from "../storage/onboarding"
-import type { ContentPart } from "../multimodal/types"
+import type { ContentPart } from "./llm-client"
 import { getExecutionMode, canExecuteTool, requiresConfirmation, getBlockReason } from "./execution-mode"
 
 /**
@@ -119,11 +118,6 @@ export async function* runAgent(
 
   const cleanModel = providerCfg.model.replace(new RegExp(`^${providerCfg.provider}\\/`), "")
   log.info(`[agent-loop] Starting: agent=${agentName} thread=${opts.threadId} provider=${providerCfg.provider}/${cleanModel}`)
-
-  emitCanvas("canvas:node_update", {
-    nodeId: opts.agentId,
-    changes: { status: "thinking" },
-  })
 
   // Store the user message in conversation history
   if (!opts.isolated) {
@@ -232,11 +226,6 @@ export async function* runAgent(
 
     for (const tc of response.tool_calls) {
       const toolName = tc.function.name
-
-      emitCanvas("canvas:node_update", {
-        nodeId: opts.agentId,
-        changes: { status: "tool_call", currentTool: toolName },
-      })
 
       if (opts.onStep) {
         if (response.content) {
@@ -518,11 +507,6 @@ export async function* runAgent(
     }
 
     if (loopDetected) break
-
-    emitCanvas("canvas:node_update", {
-      nodeId: opts.agentId,
-      changes: { status: "thinking", currentTool: null },
-    })
   }
 
   // ── Synthesis call when max iterations hit without a text response ────────
@@ -566,11 +550,6 @@ export async function* runAgent(
 
   // ── Post-loop ────────────────────────────────────────────────────────────
   const durationMs = Math.round(performance.now() - t0)
-
-  emitCanvas("canvas:node_update", {
-    nodeId: opts.agentId,
-    changes: { status: "idle", currentTool: null },
-  })
 
   // Record usage
   recordLLMUsage({

@@ -26,9 +26,6 @@ import * as cli from "./cli/index.ts";
 // Agents (15)
 import * as agents from "./agents/index.ts";
 
-// Canvas (11 = 7 + 4 A2UI)
-import * as canvas from "./canvas/index.ts";
-
 // Codebridge (4)
 import * as codebridge from "./codebridge/index.ts";
 
@@ -64,9 +61,6 @@ export function createAllTools(config: Config): Tool[] {
     // AGENTS (14)
     ...agents.createTools(),
 
-    // CANVAS (7 + A2UI 4)
-    ...canvas.createTools(config),
-
     // CODEBRIDGE (3)
     ...codebridge.createTools(),
 
@@ -98,8 +92,6 @@ export function createToolsByCategory(category: string, config: Config): Tool[] 
       return cli.createTools();
     case "agents":
       return agents.createTools();
-    case "canvas":
-      return canvas.createTools(config);
     case "codebridge":
       return codebridge.createTools();
     case "code":
@@ -131,13 +123,6 @@ export {
 export {
   webSearchTool,
   webFetchTool,
-  browserNavigateTool,
-  browserScreenshotTool,
-  browserClickTool,
-  browserTypeTool,
-  browserExtractTool,
-  browserScriptTool,
-  browserWaitTool,
 } from "./web/index.ts";
 
 export {
@@ -183,15 +168,7 @@ export {
   projectUpdatesTool,
 } from "./agents/index.ts";
 
-export {
-  canvasRenderTool,
-  canvasAskTool,
-  canvasConfirmTool,
-  canvasShowCardTool,
-  canvasShowProgressTool,
-  canvasShowListTool,
-  canvasClearTool,
-} from "./canvas/index.ts";
+
 
 export {
   codebridgeLaunchTool,

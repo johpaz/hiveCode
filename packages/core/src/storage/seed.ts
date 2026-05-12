@@ -33,17 +33,10 @@ export const SEED_DATA: SeedData = {
     { id: "fs_exists", name: "fs_exists", category: "filesystem", description: "Verificar si existe un archivo o directorio. Sinónimos: comprobar archivo, existe archivo, verificar existencia, hay archivo" },
 
     // ─────────────────────────────────────────
-    // 2. WEB — Búsqueda, navegación + automatización
+    // 2. WEB — Búsqueda y fetch ligero
     // ─────────────────────────────────────────
     { id: "web_search", name: "web_search", category: "web", description: "Buscar en la web información actual y noticias. Sinónimos: búsqueda web, noticias, información, buscar en internet, google" },
     { id: "web_fetch", name: "web_fetch", category: "web", description: "Obtener contenido de texto de una URL (ligero, sin JS). Sinónimos: descargar página, extraer texto, obtener contenido, leer url" },
-    { id: "browser_navigate", name: "browser_navigate", category: "web", description: "Navegar a una URL y obtener contenido renderizado (soporta JS). Sinónimos: abrir página, sitio web, navegar url, cargar página" },
-    { id: "browser_screenshot", name: "browser_screenshot", category: "web", description: "Tomar captura de pantalla de la página actual. Sinónimos: screenshot, imagen de página, capturar pantalla, foto página" },
-    { id: "browser_click", name: "browser_click", category: "web", description: "Hacer clic en un elemento de la página web. Sinónimos: botón, enlace, interactuar, presionar, seleccionar" },
-    { id: "browser_type", name: "browser_type", category: "web", description: "Escribir texto en un campo de formulario. Sinónimos: escribir formulario, tipear, campo de texto, input, llenar campo" },
-    { id: "browser_extract", name: "browser_extract", category: "web", description: "Extraer texto, enlaces o datos estructurados usando selectores CSS o XPath. Sinónimos: obtener datos, scraping, selectores, extraer información" },
-    { id: "browser_script", name: "browser_script", category: "web", description: "Ejecutar JavaScript arbitrario en el navegador y obtener resultado. Sinónimos: ejecutar javascript, script, código, función, evaluar" },
-    { id: "browser_wait", name: "browser_wait", category: "web", description: "Esperar a que aparezca un elemento o se cumpla una condición. Sinónimos: esperar, condición, elemento, selector, pausa" },
 
     // ─────────────────────────────────────────
     // 3. PROJECTS — Proyectos y tareas en BD
@@ -92,25 +85,6 @@ export const SEED_DATA: SeedData = {
     { id: "bus_publish", name: "bus_publish", category: "agents", description: "Publicar mensaje en el Agent Bus para comunicación worker-to-worker. Sinónimos: publicar mensaje, comunicar workers, enviar bus" },
     { id: "bus_read", name: "bus_read", category: "agents", description: "Leer mensajes no leídos del Agent Bus. Sinónimos: leer mensajes bus, recibir mensajes, verificar bus" },
     { id: "project_updates", name: "project_updates", category: "agents", description: "Obtener actualizaciones recientes de workers en el mismo proyecto. Sinónimos: actualizaciones proyecto, estado workers, progreso equipo" },
-
-    // ─────────────────────────────────────────
-    // 7. CANVAS — UI interactiva
-    // ─────────────────────────────────────────
-    { id: "canvas_render", name: "canvas_render", category: "canvas", description: "Renderizar un componente o visualización en el canvas. Sinónimos: renderizar, visualizar, gráfico, diagrama" },
-    { id: "canvas_ask", name: "canvas_ask", category: "canvas", description: "Mostrar formulario interactivo y esperar input del usuario. Sinónimos: formulario interactivo, preguntar usuario, input" },
-    { id: "canvas_confirm", name: "canvas_confirm", category: "canvas", description: "Mostrar diálogo de confirmación antes de ejecutar una acción. Sinónimos: confirmar acción, diálogo, aprobar" },
-    { id: "canvas_show_card", name: "canvas_show_card", category: "canvas", description: "Mostrar información estructurada en formato de tarjeta. Sinónimos: mostrar tarjeta, card, información estructurada" },
-    { id: "canvas_show_progress", name: "canvas_show_progress", category: "canvas", description: "Mostrar barra de progreso o indicador de estado. Sinónimos: barra de progreso, indicador, progreso visual" },
-    { id: "canvas_show_list", name: "canvas_show_list", category: "canvas", description: "Mostrar información en lista clave-valor. Sinónimos: lista clave-valor, mostrar lista, información en lista" },
-    { id: "canvas_clear", name: "canvas_clear", category: "canvas", description: "Limpiar contenido actual del canvas. Sinónimos: limpiar canvas, borrar visualización, resetear" },
-
-    // ─────────────────────────────────────────
-    // 7b. CANVAS A2UI v0.9 — Superficies interactivas ricas
-    // ─────────────────────────────────────────
-    { id: "a2ui_create_surface", name: "a2ui_create_surface", category: "a2ui", description: "Crear superficie A2UI v0.9 para UI interactiva rica: formularios, dashboards, wizards, flujos multi-paso. Siempre llamar ANTES de a2ui_update_components. Requiere surfaceId y catalogId='https://a2ui.org/specification/v0_9/basic_catalog.json'. Sinónimos: crear superficie A2UI, iniciar UI A2UI, crear form A2UI, interfaz interactiva, crear dashboard A2UI" },
-    { id: "a2ui_update_components", name: "a2ui_update_components", category: "a2ui", description: "Enviar componentes A2UI v0.9 como lista plana (adjacency list). Tipos: Text, Button, TextField, Row, Column, Card, List, Tabs, Modal, ChoicePicker, Slider, CheckBox, DateTimeInput, Image, Divider. Reglas: children usa explicitList (NO array), ChoicePicker usa selections (NO value), TextField usa textFieldType (NO variant), Tabs.tabItems.title es string plano. Sinónimos: actualizar componentes A2UI, enviar UI A2UI, renderizar componentes A2UI, layout A2UI" },
-    { id: "a2ui_update_data_model", name: "a2ui_update_data_model", category: "a2ui", description: "Actualizar data model de superficie A2UI v0.9 via JSON Pointer (/ruta/campo). Omitir path reemplaza todo el modelo. Los componentes con {path:'/...'} se actualizan automáticamente en el cliente. Sinónimos: actualizar datos A2UI, poblar formulario A2UI, inicializar estado A2UI, data model, binding" },
-    { id: "a2ui_delete_surface", name: "a2ui_delete_surface", category: "a2ui", description: "Eliminar superficie A2UI v0.9 del canvas. Usar al completar o cancelar el flujo para liberar recursos. Sinónimos: eliminar superficie A2UI, borrar UI A2UI, cerrar formulario A2UI, limpiar canvas A2UI" },
 
     // ─────────────────────────────────────────
     // 8. CODEBRIDGE — Subagentes CLI de código externos

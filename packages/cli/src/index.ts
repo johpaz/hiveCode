@@ -14,6 +14,7 @@ import { mcpList, mcpAdd, mcpRemove, mcpEnable, mcpDisable, mcpTest, mcpInspect 
 import { skillList, skillEnable, skillDisable, skillAdd, skillRemove, skillInspect, skillAssign } from "./commands-code/skill"
 import { agentList, agentInspect, agentEdit, agentReset } from "./commands-code/agent"
 import { modeHistory, taskRollback, taskResume, upgrade, init } from "./commands-code/extras"
+import { repl } from "./commands-code/repl"
 
 // ─── Hive Base Commands (existing, no @clack/prompts) ────────────────────────
 // These commands don't use @clack/prompts so they still work
@@ -183,7 +184,7 @@ async function main(): Promise<void> {
   const flags = normalizedArgs.filter((a) => a.startsWith("--"))
 
   // Centralized initialization for all commands except help/version/gateway-only
-  const skipInit = ["--help", "-h", "--version", "-v", undefined].includes(command)
+  const skipInit = ["--help", "-h", "--version", "-v"].includes(command)
   if (!skipInit) {
     ensureGlobalInit()
   }
@@ -364,8 +365,10 @@ async function main(): Promise<void> {
     case "--help":
     case "-h":
     case "help":
-    case undefined:
       console.log(HELP)
+      break
+    case undefined:
+      await repl()
       break
     default:
       console.error(`❌ Comando desconocido: "${command}"\n`)

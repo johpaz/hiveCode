@@ -5,7 +5,7 @@
  * Tools are executed in the main thread (serialised access to filesystem/git).
  */
 
-import type { Tool } from "@johpaz/hive-code-core/tools/types"
+import type { Tool } from "@johpaz/hive-code-core/tools"
 import type { LLMToolDef } from "@johpaz/hive-code-core/agent/llm-client"
 import type { PhaseName, SessionMode } from "./types"
 

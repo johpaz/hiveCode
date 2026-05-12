@@ -8,7 +8,6 @@ import type { Tool } from "../types.ts";
 import { getDb } from "../../storage/sqlite.ts";
 import { logger } from "../../utils/logger.ts";
 import { agentBus } from "../../events/agent-bus.ts";
-import { emitCanvas } from "../../canvas/emitter.ts";
 
 const log = logger.child("agents");
 
@@ -413,7 +412,6 @@ export const taskDelegateTool: Tool = {
     if (taskId) {
       db.query("UPDATE tasks SET status='in_progress', agent_id=?, updated_at=unixepoch() WHERE id=?")
         .run(workerId, taskId);
-      emitCanvas("canvas:node_update", { id: taskId.toString(), type: "task", data: { status: "in_progress", agent_id: workerId } });
     }
 
     // Notify Agent Bus: task started
@@ -437,7 +435,6 @@ export const taskDelegateTool: Tool = {
         db.query(
           "UPDATE tasks SET status='completed', progress=100, result=?, updated_at=unixepoch() WHERE id=?"
         ).run(result, taskId);
-        emitCanvas("canvas:node_update", { id: taskId.toString(), type: "task", data: { status: "completed", progress: 100 } });
 
         // Recalculate project progress if project_id provided
         if (resolvedProjectId) {
@@ -447,7 +444,6 @@ export const taskDelegateTool: Tool = {
           const avg = Math.round(rows?.avg ?? 0);
           db.query("UPDATE projects SET progress=?, updated_at=unixepoch() WHERE id=?")
             .run(avg, resolvedProjectId);
-          emitCanvas("canvas:node_update", { id: resolvedProjectId, type: "project", data: { progress: avg } });
         }
       }
 
@@ -472,7 +468,6 @@ export const taskDelegateTool: Tool = {
         db.query(
           "UPDATE tasks SET status='failed', result=?, updated_at=unixepoch() WHERE id=?"
         ).run((err as Error).message, taskId);
-        emitCanvas("canvas:node_update", { id: taskId.toString(), type: "task", data: { status: "failed" } });
       }
 
       // Notify Agent Bus: task failed

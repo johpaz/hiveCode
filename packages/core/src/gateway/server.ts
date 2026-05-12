@@ -28,31 +28,19 @@ const _pkgVersion = (() => {
 import { cpus as osCpus } from "node:os";
 import { getDb, getDbPathLazy, initializeDatabase } from "../storage/sqlite";
 import { seedAllData } from "../storage/seed";
-import { canvasManager } from "../canvas/canvas-manager.ts";
-import { subscribeCanvas, unsubscribeCanvas, emitCanvas, getCanvasSnapshot, removeCanvasComponent } from "../canvas/emitter";
-import { subscribeBridge, unsubscribeBridge } from "../tools/bridge-events";
-import { resolveCanvasInteraction } from "../tools/canvas/index";
 import { randomUUID } from "crypto";
 import { decryptConfig } from "../storage/crypto.ts";
 import { resolveContext } from "./resolver";
-import { voiceService } from "../voice/index";
-import { multimodalService } from "../multimodal/index";
 import { initializeGateway, type GatewayInitializationResult } from "./initializer";
-import { handleSetupStatus, handleVerifyProvider, handleCompleteSetup, handleSetupProviders, handleSetupEthics, handleSetupOllamaModels } from "./routes/setup";
-import { handleAuthStatus, handleLogin, handleSetupCredentials, handleChangePassword, handleRecover, handleDisableAuth, handleRecoveryKey } from "./routes/auth";
-import { resolveUserId } from "../storage/onboarding";
 import { handleGetAgents, handleCreateAgent, handleUpdateAgent, handleDeleteAgent } from "./routes/agents";
 import { handleGetProviders, handleCreateProvider, handleToggleProvider, handleUpdateProvider, handleSyncProviderModels } from "./routes/providers";
 import { handleGetUsers, handleCreateUser, handleUpdateUserSettings, handleGetUserChannels, handleLinkUserChannel } from "./routes/users";
 import { handleGetSkills, handleActivateSkill, handleUpdateSkill, handleDeleteSkill, handleCreateSkill } from "./routes/skills";
 import { handleGetEthics, handleActivateEthics, handleDeleteEthics } from "./routes/ethics";
 import { handleGetTools, handleActivateTool, handleUpdateTool } from "./routes/tools";
-import { handleGetProjects, handleGetActiveProject, handleCreateProject, handleUpdateProject, handleGetProjectHistory, handleGetProjectDetail, handleGetProjectTasks } from "./routes/projects";
 import { handleGetTasks, handleUpdateTask } from "./routes/tasks";
 import { setChannelSendFn } from "./channel-notify";
-import { CronScheduler } from "../scheduler/CronScheduler";
-import { DAGScheduler, ParallelStrategy } from "../scheduler/dag/index";
-import { createTaskHandler, setSchedulerForCleanup } from "../scheduler/integration";
+
 
 import { setSchedulerInstance as setScheduleToolsInstance } from "../tools/cron/index.ts";
 import { setSchedulerInstance as setCronApiInstance } from "./routes/cron-api";
@@ -72,13 +60,8 @@ import {
 import { handleGetChannels, handleGetChannelConfig, handleActivateChannel, handleDeactivateChannel, handleCreateChannel, handleGetChannelAccount, handleUpdateChannelAccount, handleDeleteChannelAccount, handleChannelAction, handleUpdateChannelSettings, handleToggleChannel, handleGetChannelStatus, handleReconnectChannel, handleGetWhatsAppDetails, handleDisconnectWhatsApp, handleUpdateWhatsAppConfig } from "./routes/channels";
 import { handleGetMcpServers, handleGetMcpServerDetail, handleCreateMcpServer, handleUpdateMcpServer, handleDeleteMcpServer, handleToggleMcpServer, handleGetMCPServerTools } from "./routes/mcp";
 import { handleGetModels, handleCreateModel, handleToggleModel, handleGetModelsConfig, handleUpdateModelsConfig, handleDeleteModel, handleUpdateModel } from "./routes/models";
-import { handleGetVoiceProviders, handleGetConfiguredVoiceProviders, handleSaveVoiceProviderKey, handleTestVoice, handleGetChannelVoice, handleUpdateChannelVoice, handleGetVoiceProviderVoices } from "./routes/voice";
-import { handleGetVisionProviders, handleGetChannelVision, handleUpdateChannelVision, handleOcrImage } from "./routes/multimodal";
-import { handleGetLocalTTSStatus, handleGetLocalTTSLogs, handleInstallLocalTTS, handleStartLocalTTS, handleStopLocalTTS, handleSpeakLocalTTS, handleGetAvailableModels, handleGetInstalledVoices, handleDownloadModel, handleGetDownloadLogs, initializeLocalTTS } from "./routes/tts-local";
-import { handleGetLocalLLMStatus, handleGetLocalLLMLogs, handleInstallLocalLLM, handleStartLocalLLM, handleStopLocalLLM, handleDownloadLLMModel, initializeLocalLLM } from "./routes/llm-local";
-import { handleCreateMeeting, handleListMeetings, handleGetMeeting, handleAddMeetingSegment, handleStopMeeting } from "./routes/meeting";
 import { handleGetActivityStats, handleGetSystemStats, handleGetUsageStats, handleSystemReload, handleApiReload, handleGetVersion, handleTriggerUpdate } from "./routes/system";
-import { handleGetChatHistory, handleGetCanvas, handleGetNotes, handleUpdateNote } from "./routes/chat";
+import { handleGetChatHistory, handleGetNotes } from "./routes/chat";
 import { handleChat as handlePostChat } from "./routes/chat";
 import { handleGetConfig } from "./routes/config";
 import { handleGetWorkspace, handleUpdateWorkspace, handleValidateWorkspace, handleCreateWorkspace, handleOpenWorkspace } from "./routes/workspace";
@@ -136,6 +119,10 @@ async function connectMcpServer(
 }
 
 export async function startGateway(config: Config): Promise<void> {
+  // Stubs for removed non-essential services — Hive-Code is terminal-only
+  const voiceService: any = {};
+  const multimodalService: any = {};
+
   const host = config.gateway?.host ?? "127.0.0.1";
   const port = config.gateway?.port ?? 18790;
   const pidFile = expandPath(config.gateway?.pidFile ?? "~/.hive/gateway.pid");
@@ -231,6 +218,20 @@ export async function startGateway(config: Config): Promise<void> {
     gatewaySetupMode = true;
   }
 
+  // Auto-onboarding para modo terminal-only: crea un usuario por defecto si no existe ninguno
+  if (gatewaySetupMode) {
+    try {
+      const db = getDb();
+      const userId = randomUUID();
+      db.query(`INSERT INTO users (id, name, email, language, timezone, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(userId, "Hive User", "user@hive.local", "es", "UTC", new Date().toISOString());
+      log.info("🐝 Auto-onboarding: usuario por defecto creado (terminal-only mode)");
+      gatewaySetupMode = false;
+    } catch (err) {
+      log.warn(`Auto-onboarding failed: ${(err as Error).message} — staying in setup mode`);
+    }
+  }
+
   try {
     // Usar el inicializador modular para todos los componentes críticos
     const init = await initializeGateway(config, pidFile);
@@ -240,10 +241,6 @@ export async function startGateway(config: Config): Promise<void> {
     channelManager = init.channelManager;
     dbProvider = init.provider;
     dbModel = init.model;
-
-    // Auto-iniciar TTS y LLM local si están instalados
-    await initializeLocalTTS();
-    await initializeLocalLLM();
 
     // Conectar channel-notify singleton para que las tools (notify, report_progress) puedan enviar mensajes
     setChannelSendFn(async (channel, sessionId, content) => {
@@ -255,36 +252,7 @@ export async function startGateway(config: Config): Promise<void> {
     } else {
       log.info("✅ Gateway initialization completed successfully");
 
-      // ── Initialize Cron Scheduler (Bun.cron-based) ───────────────────────
-      try {
-        const db = getDb();
 
-        // Repair orphaned task_runs (status='running' from previous crash)
-        db.query(`
-          UPDATE task_runs 
-          SET status = 'timeout', finished_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-          WHERE status = 'running'
-        `).run();
-
-        // Create and boot scheduler
-        const handler = createTaskHandler();
-        const scheduler = new CronScheduler(db, handler);
-        scheduler.boot();
-
-        // Register scheduler globally for tools, routes, and internal cleanup
-        setScheduleToolsInstance(scheduler);
-        setCronApiInstance(scheduler);
-        setSchedulerForCleanup(scheduler);
-
-        log.info(`📅 CronScheduler initialized with ${scheduler.getStatus().length} task(s)`);
-
-        // Register DAGScheduler as a global service (opt-in by swarms)
-        const dagScheduler = new DAGScheduler({ strategy: new ParallelStrategy(), maxConcurrentWorkers: 2 });
-        (globalThis as any).__dagScheduler = dagScheduler;
-        log.info("🔀 DAGScheduler ready");
-      } catch (err) {
-        log.error(`❌ CronScheduler initialization failed: ${(err as Error).message}`);
-      }
 
     }
   } catch (error) {
@@ -315,109 +283,8 @@ export async function startGateway(config: Config): Promise<void> {
     log.info(`📥 Message from ${message.channel}:${message.accountId}`);
     log.info(`   Session: ${message.sessionId}`);
 
-    const voiceConfig = voiceService.getChannelVoiceConfig(message.channel);
-    const visionConfig = multimodalService.getChannelVisionConfig(message.channel);
     let messageContent = message.content;
-
-    let preferAudioResponse = false;
-    let inputType: "text" | "audio_transcribed" | "image" | "document" = "text";
-    let sttProviderUsed: string | null = null;
-    let contentParts: import("../multimodal/types").ContentPart[] | undefined;
-
-    if (voiceConfig.voiceEnabled && message.audio) {
-      log.info(`🎙️ Voice enabled, processing audio...`);
-
-      if (!voiceConfig.sttProvider) {
-        log.warn(`⚠️ STT provider not configured for channel ${message.channel}`);
-        await channelManager.send(message.channel, message.sessionId, {
-          content: `🎙️ Para usar notas de voz, necesitas configurar el proveedor STT en la configuración del canal. Ve a Configuración > Canales > [Tu canal] y configura "Prov. STT" (ej: groq-whisper o openai)`,
-        });
-        return;
-      }
-
-      try {
-        const audioInput = voiceService.normalizeAudioFromChannel(message.channel, message.audio);
-        sttProviderUsed = voiceConfig.sttProvider || "groq-whisper";
-        messageContent = await voiceService.transcribe(audioInput, sttProviderUsed);
-        log.info(`📝 Transcribed: ${messageContent.substring(0, 100)}...`);
-
-        inputType = "audio_transcribed";
-        // If user sent audio and TTS is available, always respond in audio
-        preferAudioResponse = !!voiceConfig.ttsProvider;
-
-        await channelManager.send(message.channel, message.sessionId, {
-          content: `🎙️ Transcripción: ${messageContent}`,
-          type: "message"
-        });
-      } catch (error) {
-        log.error(`❌ Transcription failed: ${(error as Error).message}`);
-        await channelManager.send(message.channel, message.sessionId, {
-          content: `Error al transcribir audio: ${(error as Error).message}`,
-        });
-        return;
-      }
-    }
-
-    // ── Multimodal: image/document processing ──
-    if (message.image || message.document) {
-      log.info(`🖼️ Multimodal content detected on channel ${message.channel}`);
-
-      if (message.image) {
-        try {
-          const imageInput = multimodalService.normalizeImageFromChannel(message.channel, message.image);
-          const activeModelId = dbModel;
-          const activeProviderId = dbProvider;
-          const modelHasVision = activeModelId && activeProviderId
-            ? multimodalService.modelSupportsVision(activeProviderId, activeModelId)
-            : false;
-
-          if (visionConfig.visionEnabled && modelHasVision) {
-            contentParts = await multimodalService.processImage(imageInput, visionConfig.visionModelId || undefined);
-            inputType = "image";
-            log.info(`🖼️ Image sent as vision ContentParts (model supports vision)`);
-          } else {
-            const ocrProvider = visionConfig.ocrProvider || "openai";
-            log.info(`🖼️ Model lacks vision, using OCR via ${ocrProvider}...`);
-            const ocrText = await multimodalService.ocrImage(imageInput, ocrProvider);
-            messageContent = ocrText
-              ? `[Imagen adjunta — contenido extraído por OCR]\n${ocrText}\n\n${messageContent || ""}`
-              : messageContent || "";
-            inputType = "image";
-            log.info(`🖼️ OCR result: ${ocrText.substring(0, 100)}...`);
-          }
-        } catch (imgError) {
-          log.error(`❌ Image processing failed: ${(imgError as Error).message}`);
-          await channelManager.send(message.channel, message.sessionId, {
-            content: `⚠️ Error al procesar la imagen: ${(imgError as Error).message}`,
-          });
-        }
-      }
-
-      if (message.document) {
-        try {
-          const docInput = multimodalService.normalizeDocumentFromChannel(message.channel, message.document);
-          const ocrProvider = visionConfig.ocrProvider || "openai";
-          log.info(`📄 Document detected, extracting text via OCR (${ocrProvider})...`);
-          const docImage: import("../multimodal/types").ImageInput = {
-            type: docInput.type,
-            data: docInput.data,
-            mimeType: docInput.mimeType,
-            caption: docInput.fileName,
-          };
-          const ocrText = await multimodalService.ocrImage(docImage, ocrProvider);
-          messageContent = ocrText
-            ? `[Documento adjunto: ${docInput.fileName || "unknown"}]\n${ocrText}\n\n${messageContent || ""}`
-            : messageContent || "";
-          inputType = "document";
-          log.info(`📄 Document OCR result: ${ocrText.substring(0, 100)}...`);
-        } catch (docError) {
-          log.error(`❌ Document processing failed: ${(docError as Error).message}`);
-          await channelManager.send(message.channel, message.sessionId, {
-            content: `⚠️ Error al procesar el documento: ${(docError as Error).message}`,
-          });
-        }
-      }
-    }
+    const inputType = "text";
 
     log.info(` Content: ${messageContent.substring(0, 150)}${messageContent.length > 150 ? "..." : ""}`);
 
@@ -438,11 +305,7 @@ export async function startGateway(config: Config): Promise<void> {
     // routingSessionId = peerId del canal → para enviar respuestas de vuelta al canal correcto
     const routingSessionId = message.sessionId;
 
-    const userMetadata = inputType === "audio_transcribed"
-      ? { input_type: "audio_transcribed", stt_provider: sttProviderUsed, channel: message.channel }
-      : inputType === "image" || inputType === "document"
-        ? { input_type: inputType, ocr_provider: visionConfig.ocrProvider, channel: message.channel }
-        : { input_type: "text", channel: message.channel };
+    const userMetadata = { input_type: "text", channel: message.channel };
 
     // Obtener la zona horaria del usuario para el timestamp exacto
     const userRow = getDb()
@@ -462,9 +325,7 @@ export async function startGateway(config: Config): Promise<void> {
     }
     const messageContentWithTime = `[Timestamp: ${exactTime} (${userTimezone})]\n${messageContent}`;
 
-    const messages = contentParts
-      ? [{ role: "user" as const, content: [{ type: "text" as const, text: messageContentWithTime }, ...contentParts] as import("../multimodal/types").ContentPart[] }]
-      : [{ role: "user" as const, content: messageContentWithTime }];
+    const messages = [{ role: "user" as const, content: messageContentWithTime }];
 
     try {
       log.info(`🤖 Routing to agent loop...`);
@@ -543,54 +404,10 @@ export async function startGateway(config: Config): Promise<void> {
       }
       log.info(`📤 LLM response: ${responseContent.substring(0, 100)}${responseContent.length > 100 ? "..." : ""}`);
 
-      const shouldSpeak = preferAudioResponse;
-      let responseType: "text" | "audio" = "text";
-      let ttsProviderUsed: string | null = null;
-      let ttsMimeType: string | null = null;
-
-      if (responseContent) {
-        if (shouldSpeak) {
-          if (!voiceConfig.ttsProvider) {
-            log.warn(`⚠️ TTS provider not configured, user requested audio`);
-            await channelManager.send(message.channel, routingSessionId, {
-              content: `${responseContent}\n\n🔊 Para recibir respuestas en audio, configura el proveedor TTS en Configuración > Canales > [Tu canal] (ej: elevenlabs, openai-tts)`
-            });
-          } else {
-            try {
-              log.info(`🔊 TTS enabled, synthesizing audio...`);
-              const audioOutput = await voiceService.speak(responseContent, voiceConfig.ttsProvider, voiceConfig.ttsVoiceId || undefined);
-              ttsProviderUsed = voiceConfig.ttsProvider;
-              ttsMimeType = audioOutput.mimeType;
-              responseType = "audio";
-
-              try {
-                const channel = channelManager.getChannel(message.channel);
-                if (channel?.sendAudio) {
-                  await channel.sendAudio(routingSessionId, audioOutput.data as Buffer, audioOutput.mimeType);
-                  log.info(`✅ Audio sent to ${routingSessionId}`);
-                } else {
-                  log.warn(`Channel ${message.channel} does not support audio, sending text`);
-                  await channelManager.send(message.channel, routingSessionId, { content: responseContent });
-                }
-              } catch (audioError) {
-                log.error(`❌ Audio send failed: ${(audioError as Error).message}, sending text instead`);
-                // Fallback to text
-                await channelManager.send(message.channel, routingSessionId, { content: responseContent });
-              }
-            } catch (ttsError) {
-              log.error(`❌ TTS failed: ${(ttsError as Error).message}, sending text instead`);
-              await channelManager.send(message.channel, routingSessionId, { content: responseContent });
-            }
-          }
-        } else {
-          await channelManager.send(message.channel, routingSessionId, { content: responseContent });
-        }
-      }
+      await channelManager.send(message.channel, routingSessionId, { content: responseContent });
 
       const assistantMetadata = {
-        response_type: responseType,
-        tts_provider: ttsProviderUsed,
-        mime_type: ttsMimeType,
+        response_type: "text" as const,
         channel: message.channel
       };
 
@@ -698,7 +515,6 @@ export async function startGateway(config: Config): Promise<void> {
 
         // ── WebSocket upgrade ────────────────────────────────────────────────
         if (url.pathname === "/ws" || url.pathname === "/ws/") {
-          let sessionId = url.searchParams.get("session") || resolveUserId({}) || "default";
           // Auth: accept ?token=<authToken> (same as REST Bearer) as alternative to ?session=<userId>
           if (!isDev && !gatewaySetupMode) {
             const tokenParam = url.searchParams.get("token");
@@ -706,48 +522,12 @@ export async function startGateway(config: Config): Promise<void> {
             if (tokenParam && activeToken && tokenParam === activeToken) {
               // Token auth — resolve the real userId from DB
               const user = getDb().query("SELECT id FROM users LIMIT 1").get() as { id: string } | undefined;
-              if (user) sessionId = user.id;
-            }
-            try {
-              const userExists = getDb().query("SELECT 1 FROM users WHERE id = ? LIMIT 1").get(sessionId);
-              if (!userExists) {
-                return new Response("Unauthorized", { status: 401 });
-              }
-            } catch {
-              return new Response("Unauthorized", { status: 401 });
             }
           }
-          if (!sessionId) {
-            return new Response("Missing session or user ID", { status: 400 });
-          }
-          const success = server.upgrade(req, {
-            data: { sessionId, authenticatedAt: Date.now() },
-          });
-          if (success) return undefined;
-          return new Response("WebSocket upgrade failed", { status: 400 });
         }
 
-        // ── Bridge Events WebSocket upgrade ────────────────────────────────────
-        if (url.pathname === "/bridge-events" || url.pathname === "/bridge-events/") {
-          const sessionId = `bridge:${url.searchParams.get("sessionId") ?? (resolveUserId({}) ?? "default")}`;
-          const success = server.upgrade(req, { data: { sessionId, authenticatedAt: Date.now() } });
-          if (success) return undefined;
-          return new Response("Bridge events WebSocket upgrade failed", { status: 400 });
-        }
-
-
-
-
-        // ── Meeting Stream WebSocket upgrade ───────────────────────────────────
-        if (url.pathname === "/meeting-stream" || url.pathname === "/meeting-stream/") {
-          const meetingSessionId = url.searchParams.get("meetingSessionId") ?? "";
-          const sessionId = `meeting:${meetingSessionId || crypto.randomUUID()}`;
-          const success = server.upgrade(req, {
-            data: { sessionId, meetingSessionId, authenticatedAt: Date.now() },
-          });
-          if (success) return undefined;
-          return new Response("Meeting stream WebSocket upgrade failed", { status: 400 });
-        }
+        // ── WebSocket upgrades for terminal-only mode ────────────────────────
+        // No meeting-stream, no bridge-events — Hive-Code is terminal-only
 
         // ── Health (must be before UI routing so it works in dev mode too) ───
         if (url.pathname === "/health" || url.pathname === "/health/") {
@@ -897,67 +677,6 @@ export async function startGateway(config: Config): Promise<void> {
           return addCorsHeaders(new Response("Unauthorized", { status: 401 }), req);
         }
 
-        // ── Setup API ────────────────────────────────────────────────────────
-        // GET /api/setup/status
-        if (url.pathname === "/api/setup/status" || url.pathname === "/api/setup/status/") {
-          return addCorsHeaders(await handleSetupStatus(), req)
-        }
-
-        // GET /api/setup/providers
-        if (url.pathname === "/api/setup/providers" && req.method === "GET") {
-          return handleSetupProviders(addCorsHeaders, req)
-        }
-
-        // GET /api/setup/ollama-models
-        if (url.pathname === "/api/setup/ollama-models" && req.method === "GET") {
-          return handleSetupOllamaModels(addCorsHeaders, req)
-        }
-
-        // GET /api/setup/ethics
-        if (url.pathname === "/api/setup/ethics" && req.method === "GET") {
-          return handleSetupEthics(addCorsHeaders, req)
-        }
-
-        // POST /api/setup/verify-provider
-        if (url.pathname === "/api/setup/verify-provider" && req.method === "POST") {
-          return addCorsHeaders(await handleVerifyProvider(req), req)
-        }
-
-        // POST /api/setup/complete
-        if (url.pathname === "/api/setup/complete" && req.method === "POST") {
-          return await handleCompleteSetup(req, config, addCorsHeaders)
-        }
-
-        // ── Auth API ─────────────────────────────────────────────────────────
-        // GET /api/auth/status
-        if (url.pathname === "/api/auth/status" && req.method === "GET") {
-          return handleAuthStatus(req, addCorsHeaders);
-        }
-        // POST /api/auth/login
-        if (url.pathname === "/api/auth/login" && req.method === "POST") {
-          return handleLogin(req, addCorsHeaders);
-        }
-        // POST /api/auth/setup-credentials
-        if (url.pathname === "/api/auth/setup-credentials" && req.method === "POST") {
-          return handleSetupCredentials(req, addCorsHeaders);
-        }
-        // POST /api/auth/change-password
-        if (url.pathname === "/api/auth/change-password" && req.method === "POST") {
-          return handleChangePassword(req, addCorsHeaders);
-        }
-        // POST /api/auth/recover
-        if (url.pathname === "/api/auth/recover" && req.method === "POST") {
-          return handleRecover(req, addCorsHeaders);
-        }
-        // POST /api/auth/disable
-        if (url.pathname === "/api/auth/disable" && req.method === "POST") {
-          return handleDisableAuth(req, addCorsHeaders);
-        }
-        // GET /api/auth/recovery-key
-        if (url.pathname === "/api/auth/recovery-key" && req.method === "GET") {
-          return handleRecoveryKey(req, addCorsHeaders);
-        }
-
         // ── Status ───────────────────────────────────────────────────────────
         if (url.pathname === "/status" || url.pathname === "/status/") {
           return addCorsHeaders(new Response(
@@ -1015,40 +734,6 @@ export async function startGateway(config: Config): Promise<void> {
           if (req.method === "GET") {
             return await handleGetConfig(req, addCorsHeaders, config);
           }
-        }
-
-        // ── Projects API ─────────────────────────────────────────────────────
-        if ((url.pathname === "/api/projects" || url.pathname === "/api/projects/") && req.method === "GET") {
-          return await handleGetProjects(req, addCorsHeaders)
-        }
-
-        if (url.pathname === "/api/projects/active" && req.method === "GET") {
-          return await handleGetActiveProject(req, addCorsHeaders)
-        }
-
-        if (url.pathname === "/api/projects/history" && req.method === "GET") {
-          return await handleGetProjectHistory(req, addCorsHeaders)
-        }
-
-        const projectDetailMatch = url.pathname.match(/^\/api\/projects\/([^/]+)$/)
-        if (projectDetailMatch && req.method === "GET") {
-          const projectId = projectDetailMatch[1]
-          return await handleGetProjectDetail(req, addCorsHeaders, projectId)
-        }
-
-        if (projectDetailMatch && (req.method === "PATCH" || req.method === "PUT")) {
-          return await handleUpdateProject(req, addCorsHeaders)
-        }
-
-        const projectTasksMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/tasks$/)
-        if (projectTasksMatch && req.method === "GET") {
-          const projectId = projectTasksMatch[1]
-          return await handleGetProjectTasks(req, addCorsHeaders, projectId)
-        }
-
-        // POST /api/projects — crear nuevo proyecto
-        if (url.pathname === "/api/projects" && req.method === "POST") {
-          return await handleCreateProject(req, addCorsHeaders)
         }
 
         // ── Tasks API ─────────────────────────────────────────────────────
@@ -1531,153 +1216,13 @@ export async function startGateway(config: Config): Promise<void> {
           return await handleReconnectChannel(req, addCorsHeaders, channelId, channelManager);
         }
 
-        // ── Voice API ───────────────────────────────────────────────────────
-        if (url.pathname === "/api/voice/providers" && req.method === "GET") {
-          return await handleGetVoiceProviders(req, addCorsHeaders)
-        }
-
-        if (url.pathname === "/api/voice/configured-providers" && req.method === "GET") {
-          return await handleGetConfiguredVoiceProviders(req, addCorsHeaders)
-        }
-
-        // POST /api/voice/providers/:providerId/key - Save API key for a voice provider
-        const voiceProviderKeyMatch = url.pathname.match(/^\/api\/voice\/providers\/([^/]+)\/key$/)
-        if (voiceProviderKeyMatch && req.method === "POST") {
-          return await handleSaveVoiceProviderKey(req, addCorsHeaders)
-        }
-
-        if (url.pathname === "/api/voice/test" && req.method === "POST") {
-          return await handleTestVoice(req, addCorsHeaders)
-        }
-
-        // GET /api/voice/:provider/voices - Get available voices for a provider
-        const voiceProviderVoicesMatch = url.pathname.match(/^\/api\/voice\/([^/]+)\/voices$/)
-        if (voiceProviderVoicesMatch && req.method === "GET") {
-          const providerId = voiceProviderVoicesMatch[1]
-          return await handleGetVoiceProviderVoices(req, addCorsHeaders, providerId)
-        }
-
-        // GET /api/channels/:id/voice - Get voice config for a channel
-        const channelVoiceMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/voice$/)
-        if (channelVoiceMatch && req.method === "GET") {
-          const channelId = channelVoiceMatch[1]
-          return await handleGetChannelVoice(req, addCorsHeaders, channelId)
-        }
-
-        // PATCH /api/channels/:id/voice - Update voice config for a channel
-        if (channelVoiceMatch && req.method === "PATCH") {
-          const channelId = channelVoiceMatch[1]
-          return await handleUpdateChannelVoice(req, addCorsHeaders, channelId)
-        }
-
-        // ── Multimodal / Vision API ─────────────────────────────────────────
-        if (url.pathname === "/api/multimodal/vision-providers" && req.method === "GET") {
-          return await handleGetVisionProviders(req, addCorsHeaders)
-        }
-
-        if (url.pathname === "/api/multimodal/ocr" && req.method === "POST") {
-          return await handleOcrImage(req, addCorsHeaders)
-        }
-
-        const channelVisionMatch = url.pathname.match(/^\/api\/channels\/([^/]+)\/vision$/)
-        if (channelVisionMatch && req.method === "GET") {
-          const channelId = channelVisionMatch[1]
-          return await handleGetChannelVision(req, addCorsHeaders, channelId)
-        }
-
-        if (channelVisionMatch && req.method === "PATCH") {
-          const channelId = channelVisionMatch[1]
-          return await handleUpdateChannelVision(req, addCorsHeaders, channelId)
-        }
-
-        // ── Piper TTS Local ──────────────────────────────────────────────────
-        if (url.pathname === "/api/tts-local/status" && req.method === "GET") {
-          return await handleGetLocalTTSStatus(req, addCorsHeaders)
-        }
-        if (url.pathname === "/api/tts-local/logs" && req.method === "GET") {
-          return await handleGetLocalTTSLogs(req, addCorsHeaders)
-        }
-        if (url.pathname === "/api/tts-local/install" && req.method === "POST") {
-          return await handleInstallLocalTTS(req, addCorsHeaders)
-        }
-        if (url.pathname === "/api/tts-local/start" && req.method === "POST") {
-          return await handleStartLocalTTS(req, addCorsHeaders)
-        }
-        if (url.pathname === "/api/tts-local/stop" && req.method === "POST") {
-          return await handleStopLocalTTS(req, addCorsHeaders)
-        }
-        if (url.pathname === "/api/tts-local/speak" && req.method === "POST") {
-          return await handleSpeakLocalTTS(req, addCorsHeaders)
-        }
-        // Modelos
-        if (url.pathname === "/api/tts-local/models" && req.method === "GET") {
-          return await handleGetAvailableModels(req, addCorsHeaders)
-        }
-        if (url.pathname === "/api/tts-local/models/download" && req.method === "POST") {
-          return await handleDownloadModel(req, addCorsHeaders)
-        }
-        if (url.pathname === "/api/tts-local/models/logs" && req.method === "GET") {
-          return await handleGetDownloadLogs(req, addCorsHeaders)
-        }
-        if (url.pathname === "/api/tts-local/voices" && req.method === "GET") {
-          return await handleGetInstalledVoices(req, addCorsHeaders)
-        }
-
-        // ── LLM Local ────────────────────────────────────────────────────────
-        if (url.pathname === "/api/llm-local/status" && req.method === "GET") {
-          return await handleGetLocalLLMStatus(req, addCorsHeaders)
-        }
-        if (url.pathname === "/api/llm-local/logs" && req.method === "GET") {
-          return await handleGetLocalLLMLogs(req, addCorsHeaders)
-        }
-        if (url.pathname === "/api/llm-local/install" && req.method === "POST") {
-          return await handleInstallLocalLLM(req, addCorsHeaders)
-        }
-        if (url.pathname === "/api/llm-local/start" && req.method === "POST") {
-          return await handleStartLocalLLM(req, addCorsHeaders)
-        }
-        if (url.pathname === "/api/llm-local/stop" && req.method === "POST") {
-          return await handleStopLocalLLM(req, addCorsHeaders)
-        }
-        if (url.pathname === "/api/llm-local/download-model" && req.method === "POST") {
-          return await handleDownloadLLMModel(req, addCorsHeaders)
-        }
-
-        // ── Meeting Transcription API ────────────────────────────────────────
-        if (url.pathname === "/api/meetings" && req.method === "POST") {
-          return await handleCreateMeeting(req, addCorsHeaders);
-        }
-
-        if (url.pathname === "/api/meetings" && req.method === "GET") {
-          return await handleListMeetings(req, addCorsHeaders);
-        }
-
-        const meetingIdMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)$/);
-        if (meetingIdMatch && req.method === "GET") {
-          return await handleGetMeeting(req, addCorsHeaders, meetingIdMatch[1]);
-        }
-
-        const meetingSegmentMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/segments$/);
-        if (meetingSegmentMatch && req.method === "POST") {
-          return await handleAddMeetingSegment(req, addCorsHeaders, meetingSegmentMatch[1]);
-        }
-
-        const meetingStopMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/stop$/);
-        if (meetingStopMatch && req.method === "POST") {
-          return await handleStopMeeting(req, addCorsHeaders, meetingStopMatch[1]);
-        }
-
-        // ── Chat / Canvas / Notes API ───────────────────────────────────────
+        // ── Chat / Notes API ────────────────────────────────────────────────
         if (url.pathname === "/api/chat/history" && req.method === "GET") {
           return await handleGetChatHistory(req, addCorsHeaders)
         }
 
         if (url.pathname === "/api/chat" && req.method === "POST") {
           return await handlePostChat(req, addCorsHeaders)
-        }
-
-        if (url.pathname === "/api/canvas" && req.method === "GET") {
-          return await handleGetCanvas(req, addCorsHeaders)
         }
 
         if (url.pathname === "/api/notes" && req.method === "GET") {
@@ -1757,28 +1302,6 @@ export async function startGateway(config: Config): Promise<void> {
     websocket: {
       open(ws) {
         const data = ws.data;
-        const isBridge = data.sessionId.startsWith("bridge:");
-
-        if (isBridge) {
-          log.info(`Bridge events client connected: ${data.sessionId}`);
-          subscribeBridge(ws as any);
-          ws.send(JSON.stringify({ type: "bridge:connected", sessionId: data.sessionId }));
-          return;
-        }
-
-        // ── Meeting Stream ─────────────────────────────────────────────────────
-        if (data.sessionId.startsWith("meeting:")) {
-          log.info(`Meeting stream client connected: ${data.sessionId}`);
-          ws.send(JSON.stringify({ type: "meeting:connected", sessionId: data.sessionId, meetingSessionId: (data as any).meetingSessionId }));
-          return;
-        }
-
-        // ── LLM Local ─────────────────────────────────────────────────────────
-        if (data.sessionId.startsWith("llm-local:")) {
-          log.info(`Local LLM client connected: ${data.sessionId}`);
-          ws.send(JSON.stringify({ type: "llm-local:connected", sessionId: data.sessionId }));
-          return;
-        }
 
         log.debug(`WebSocket connected: ${data.sessionId} `);
 
@@ -1803,9 +1326,6 @@ export async function startGateway(config: Config): Promise<void> {
           // Get channels
           const channels = db.query("SELECT id FROM channels WHERE active = 1").all() as Array<{ id: string }>;
 
-          // Get voice config from webchat channel
-          const voiceConfig = db.query("SELECT voice_enabled, stt_provider, tts_provider FROM channels WHERE id = 'webchat'").get() as { voice_enabled: number; stt_provider: string; tts_provider: string } | undefined;
-
           // Get code bridge
           const codeBridge = db.query("SELECT id FROM code_bridge WHERE enabled = 1").all() as Array<{ id: string }>;
 
@@ -1815,11 +1335,6 @@ export async function startGateway(config: Config): Promise<void> {
             user: user ? { id: user.id, name: user.name, language: user.language } : null,
             agent: agent ? { id: agent.id, name: agent.name, provider: agent.provider_id, model: agent.model_id } : null,
             channels: channels.map(c => c.id),
-            voice: voiceConfig ? {
-              enabled: voiceConfig.voice_enabled === 1,
-              sttProvider: voiceConfig.stt_provider,
-              ttsProvider: voiceConfig.tts_provider
-            } : { enabled: false, sttProvider: null, ttsProvider: null },
             codeBridge: codeBridge.map(cb => cb.id)
           } as OutboundMessage));
         } catch (err) {
@@ -1829,87 +1344,6 @@ export async function startGateway(config: Config): Promise<void> {
 
       async message(ws, message) {
         const data = ws.data;
-
-        // LLM Local
-        if (data.sessionId.startsWith("llm-local:")) {
-          const { handleLLMWebSocket } = await import("./llm-local/server");
-          await handleLLMWebSocket(ws as any, message.toString());
-          return;
-        }
-
-        // Bridge events clients are read-only; only respond to ping keepalive
-        if (data.sessionId.startsWith("bridge:")) {
-          try {
-            const m = JSON.parse(message.toString());
-            if (m?.type === "ping") ws.send(JSON.stringify({ type: "pong" }));
-          } catch { /* ignore */ }
-          return;
-        }
-
-        // Meeting stream: handle audio chunks and stop commands
-        if (data.sessionId.startsWith("meeting:")) {
-          try {
-            const m = JSON.parse(message.toString()) as Record<string, unknown>;
-            if (m?.type === "ping") {
-              ws.send(JSON.stringify({ type: "pong" }));
-              return;
-            }
-            if (m?.type === "audio_chunk") {
-              const meetingSessionId = (data as any).meetingSessionId as string;
-              const audioBase64 = m.audio as string;
-              const speaker = (m.speaker as string) || null;
-              const mimeType = (m.mime_type as string) || "audio/webm";
-              (async () => {
-                try {
-                  const db = getDb();
-                  const session = db.query(
-                    `SELECT id, stt_model, status FROM meeting_sessions WHERE id = ?`
-                  ).get(meetingSessionId) as { id: string; stt_model: string; status: string } | undefined;
-                  if (!session || session.status !== "active") {
-                    ws.send(JSON.stringify({ type: "error", error: "Sesión no activa o no encontrada" }));
-                    return;
-                  }
-                  const transcription = await voiceService.transcribe(
-                    { type: "base64", data: audioBase64, mimeType },
-                    session.stt_model
-                  );
-                  const seqResult = db.query(
-                    `SELECT COALESCE(MAX(seq) + 1, 0) as next_seq FROM meeting_segments WHERE session_id = ?`
-                  ).get(meetingSessionId) as { next_seq: number };
-                  const seq = seqResult.next_seq;
-                  db.query(
-                    `INSERT INTO meeting_segments (session_id, seq, speaker, text) VALUES (?, ?, ?, ?)`
-                  ).run(meetingSessionId, seq, speaker, transcription);
-                  ws.send(JSON.stringify({ type: "transcript_segment", seq, speaker, text: transcription }));
-                } catch (err) {
-                  ws.send(JSON.stringify({ type: "error", error: (err as Error).message }));
-                }
-              })();
-              return;
-            }
-            if (m?.type === "meeting_stop") {
-              const meetingSessionId = (data as any).meetingSessionId as string;
-              try {
-                const db = getDb();
-                db.query(
-                  `UPDATE meeting_sessions SET status = 'stopped', stopped_at = unixepoch() WHERE id = ? AND status = 'active'`
-                ).run(meetingSessionId);
-                const countResult = db.query(
-                  `SELECT COUNT(*) as count FROM meeting_segments WHERE session_id = ?`
-                ).get(meetingSessionId) as { count: number };
-                ws.send(JSON.stringify({ type: "meeting_stopped", session_id: meetingSessionId, segment_count: countResult.count }));
-              } catch (err) {
-                ws.send(JSON.stringify({ type: "error", error: (err as Error).message }));
-              }
-              return;
-            }
-          } catch { /* ignore malformed messages */ }
-          return;
-        }
-
-
-
-
 
         let msg: InboundMessage;
         try {
@@ -1928,160 +1362,6 @@ export async function startGateway(config: Config): Promise<void> {
 
         if (msg.type === "ping") {
           ws.send(JSON.stringify({ type: "pong", sessionId: msg.sessionId } as OutboundMessage));
-          return;
-        }
-
-        // Canvas subscribe
-        if (msg.type === "canvas_subscribe") {
-          subscribeCanvas(ws);
-          canvasManager.registerSession(`canvas:${data.sessionId}`, ws);
-          ws.send(JSON.stringify({
-            type: "canvas:snapshot",
-            data: getCanvasSnapshot(),
-          }));
-          return;
-        }
-
-        // Canvas unsubscribe
-        if (msg.type === "canvas_unsubscribe") {
-          unsubscribeCanvas(ws);
-          canvasManager.unregisterSession(`canvas:${data.sessionId}`);
-          return;
-        }
-
-        // A2UI actions — user interacted with an A2UI surface component
-        if (msg.type === "a2ui:action") {
-          const actionData = (msg.data ?? msg) as Record<string, unknown>;
-          const actionName = actionData.name as string ?? "action";
-          const surfaceId = actionData.surfaceId as string ?? "unknown";
-          const sourceComponentId = actionData.sourceComponentId as string ?? "unknown";
-          const context = actionData.context as Record<string, unknown> ?? {};
-
-          const interactionMsg = `[a2ui:action] surface=${surfaceId} action=${actionName} component=${sourceComponentId}${Object.keys(context).length > 0 ? ` context=${JSON.stringify(context)}` : ""}`;
-          log.info(`A2UI action forwarded to agent: ${interactionMsg}`);
-
-          const sessionId = data.sessionId;
-          ws.send(JSON.stringify({ type: "typing", isTyping: true, sessionId } as OutboundMessage));
-
-          laneQueue.enqueue(sessionId, async (_task, signal) => {
-            if (signal.aborted) {
-              ws.send(JSON.stringify({ type: "typing", isTyping: false, sessionId } as OutboundMessage));
-              return;
-            }
-            try {
-              const { userId } = resolveContext({ channel: "webchat", channelUserId: sessionId });
-              const messages = [{ role: "user" as const, content: interactionMsg }];
-              let streamedContent = "";
-              const messageId = crypto.randomUUID();
-
-              const response = await runner.generate({
-                provider: dbProvider as any,
-                messages,
-                maxTokens: 4096,
-                tools: prepareTools(agent, sessionId),
-                maxSteps: 15,
-                threadId: sessionId,
-                userId,
-                onToken: async (token: string) => {
-                  if (signal.aborted) return;
-                  streamedContent += token;
-                  ws.send(JSON.stringify({ type: "message", id: messageId, sessionId, content: token, isChunk: true, isStep: false } as OutboundMessage));
-                },
-                onStep: async (step) => {
-                  if (signal.aborted) return;
-                  log.debug(`[a2ui:action TOOL] ${step.type}: ${step.toolName || ""}`);
-                },
-              });
-
-              ws.send(JSON.stringify({ type: "typing", isTyping: false, sessionId } as OutboundMessage));
-
-              const content = streamedContent || response.content?.trim() || "";
-              if (content && streamedContent.length === 0) {
-                ws.send(JSON.stringify({ type: "message", sessionId, content, isStep: false } as OutboundMessage));
-              }
-            } catch (error) {
-              ws.send(JSON.stringify({ type: "typing", isTyping: false, sessionId } as OutboundMessage));
-              ws.send(JSON.stringify({ type: "error", sessionId, error: (error as Error).message } as OutboundMessage));
-              log.error(`A2UI action agent error: ${(error as Error).message}`);
-            }
-          });
-
-          return;
-        }
-
-        // Canvas interactions from the main session — route to canvasManager and local resolver
-        if (msg.type === "canvas:interact") {
-          const { componentId } = msg;
-          let resolvedByPending = false;
-          if (componentId) {
-            removeCanvasComponent(componentId);
-            // Resolve local pending interactions (canvas_confirm tool)
-            resolvedByPending = resolveCanvasInteraction(componentId, msg.data);
-          }
-          const canvasSessionId = `canvas:${data.sessionId}`;
-          canvasManager.handleMessage(canvasSessionId, JSON.stringify(msg));
-
-          // If no tool was waiting for this interaction, forward it to the agent as a new turn
-          if (!resolvedByPending) {
-            const interactionData = msg.data as Record<string, unknown> | undefined;
-            const action = (msg as any).action as string | undefined;
-
-            // Build a human-readable message describing what the user clicked
-            let interactionMsg = `[canvas:interact] componentId=${componentId ?? "unknown"}, action=${action ?? "click"}`;
-            if (interactionData && Object.keys(interactionData).length > 0) {
-              interactionMsg += `, data=${JSON.stringify(interactionData)}`;
-            }
-
-            log.info(`Canvas interaction forwarded to agent: ${interactionMsg}`);
-
-            const sessionId = data.sessionId;
-
-            ws.send(JSON.stringify({ type: "typing", isTyping: true, sessionId } as OutboundMessage));
-
-            laneQueue.enqueue(sessionId, async (_task, signal) => {
-              if (signal.aborted) {
-                ws.send(JSON.stringify({ type: "typing", isTyping: false, sessionId } as OutboundMessage));
-                return;
-              }
-              try {
-                const { userId } = resolveContext({ channel: "webchat", channelUserId: sessionId });
-                const messages = [{ role: "user" as const, content: interactionMsg }];
-                let streamedContent = "";
-                const messageId = crypto.randomUUID();
-
-                const response = await runner.generate({
-                  provider: dbProvider as any,
-                  messages,
-                  maxTokens: 4096,
-                  tools: prepareTools(agent, sessionId),
-                  maxSteps: 15,
-                  threadId: sessionId,
-                  userId,
-                  onToken: async (token: string) => {
-                    if (signal.aborted) return;
-                    streamedContent += token;
-                    ws.send(JSON.stringify({ type: "message", id: messageId, sessionId, content: token, isChunk: true, isStep: false } as OutboundMessage));
-                  },
-                  onStep: async (step) => {
-                    if (signal.aborted) return;
-                    log.debug(`[canvas:interact TOOL] ${step.type}: ${step.toolName || ""}`);
-                  },
-                });
-
-                ws.send(JSON.stringify({ type: "typing", isTyping: false, sessionId } as OutboundMessage));
-
-                const content = streamedContent || response.content?.trim() || "";
-                if (content && streamedContent.length === 0) {
-                  ws.send(JSON.stringify({ type: "message", sessionId, content, isStep: false } as OutboundMessage));
-                }
-              } catch (error) {
-                ws.send(JSON.stringify({ type: "typing", isTyping: false, sessionId } as OutboundMessage));
-                ws.send(JSON.stringify({ type: "error", sessionId, error: (error as Error).message } as OutboundMessage));
-                log.error(`Canvas interact agent error: ${(error as Error).message}`);
-              }
-            });
-          }
-
           return;
         }
 
@@ -2616,23 +1896,10 @@ export async function startGateway(config: Config): Promise<void> {
 
       close(ws) {
         const data = ws.data;
-        const isBridge = data.sessionId.startsWith("bridge:");
-
-        if (isBridge) {
-          unsubscribeBridge(ws as any);
-          return;
-        }
-        if (data.sessionId.startsWith("meeting:")) {
-          log.info(`Meeting stream client disconnected: ${data.sessionId}`);
-          return;
-        }
-
         log.debug(`WebSocket disconnected: ${data.sessionId}`);
         logSubscribers.delete(data.sessionId);
         sessionManager.delete(data.sessionId);
         laneQueue.cancel(data.sessionId);
-        unsubscribeCanvas(ws);
-        canvasManager.unregisterSession(`canvas:${data.sessionId}`);
 
         const channel = channelManager?.getChannel("webchat") as any;
         if (channel?.unregisterConnection) channel.unregisterConnection(data.sessionId);
@@ -2674,61 +1941,10 @@ export async function startGateway(config: Config): Promise<void> {
 
   log.info(`Gateway started successfully`);
 
-  // Check if running as child process in dev mode (parent handles browser open)
-  const isGatewayChild = process.env.HIVE_GATEWAY_CHILD === "1";
-
-  // Print URLs based on mode
-  if (isDev) {
-    // In development: Gateway serves UI on port 18790 (same as production), Vite provides HMR on 5173
-    const devUrl = gatewaySetupMode ? `http://localhost:${port}/setup` : `http://localhost:${port}`;
-    log.info(`[gateway] UI:        ${devUrl}`);
-    log.info(`[gateway] API:       http://${host}:${port}`);
-    log.info(`[gateway] WebSocket: ws://${host}:${port}/ws`);
-    log.info(`[gateway] Canvas:    ws://${host}:${port}/canvas`);
-    log.info(`[gateway] Modo:     desarrollo`);
-    if (!isGatewayChild) {
-      log.info(gatewaySetupMode ? `🎉 Primer arranque — abriendo setup...` : `🐝 Administra tu Hive aquí: ${devUrl}`);
-    }
-  } else {
-    // In production: Gateway serves UI from dist/
-    const isSetupMode = gatewaySetupMode;
-    const baseUrl = process.env.HIVE_PUBLIC_URL?.replace(/\/$/, "") ?? `http://${host}:${port}`;
-    const uiUrl = isSetupMode ? `${baseUrl}/setup` : `${baseUrl}/ui`;
-
-    log.info(`[gateway] UI:        ${uiUrl}`);
-    log.info(`[gateway] API:       http://${host}:${port}`);
-    log.info(`[gateway] WebSocket: ws://${host}:${port}/ws`);
-    log.info(`[gateway] Canvas:    ws://${host}:${port}/canvas`);
-
-    // Always open browser on startup (setup and normal mode).
-    // Set NO_BROWSER=1 to skip in headless/server environments (e.g. CLI parent manages the browser).
-    if (!process.env.NO_BROWSER) {
-      log.info(isSetupMode ? `🎉 Primer arranque — abriendo wizard de configuración...` : `🐝 Administra tu Hive aquí: ${uiUrl}`);
-      try {
-        const platform = process.platform;
-        let shellCmd: string;
-        if (platform === "win32") {
-          shellCmd = `start "" "${uiUrl}"`;
-        } else if (platform === "darwin") {
-          shellCmd = `open "${uiUrl}"`;
-        } else {
-          // Linux: gio open first (GNOME/Wayland native), then xdg-open fallbacks
-          shellCmd = `gio open "${uiUrl}" 2>/dev/null || xdg-open "${uiUrl}" 2>/dev/null || sensible-browser "${uiUrl}" 2>/dev/null || x-www-browser "${uiUrl}" 2>/dev/null || true`;
-        }
-        const shell = platform === "win32" ? "cmd" : "/bin/sh";
-        const shellArg = platform === "win32" ? "/c" : "-c";
-        // Use Bun.spawn (native Bun API) for reliable detached subprocess
-        const proc = Bun.spawn([shell, shellArg, shellCmd], {
-          stdout: "ignore",
-          stderr: "ignore",
-          stdin: "ignore",
-        });
-        proc.unref();
-      } catch (err) {
-        log.warn(`Could not open browser: ${(err as Error).message}`);
-      }
-    }
-  }
+  // Terminal-only mode — no UI, no browser
+  log.info(`[gateway] API:       http://${host}:${port}`);
+  log.info(`[gateway] WebSocket: ws://${host}:${port}/ws`);
+  log.info(`[gateway] Modo:      ${isDev ? "desarrollo" : "producción"}`);
   if (!gatewaySetupMode) log.info(`Channels: ${channelManager.listChannels().map((c) => c.name).join(", ") || "none"}`);
 
   // FIX 7 — SIGTERM: graceful shutdown with full cleanup
@@ -2746,19 +1962,6 @@ export async function startGateway(config: Config): Promise<void> {
       log.info("Stopping channels...");
       await channelManager.stopAll();
     }
-
-    // BrowserService — kill any running browser processes
-    try {
-      const mod = await import("../tools/web/browser-service");
-      mod.CDPClient.closeAll();
-      log.info("Browser processes cleaned up");
-    } catch { }
-
-    // CanvasManager — stop heartbeat intervals
-    try {
-      canvasManager.clearAll();
-      log.info("Canvas sessions cleaned up");
-    } catch { }
 
     // MCP hot-reload — stop polling interval
     try {

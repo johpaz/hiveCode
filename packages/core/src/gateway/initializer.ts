@@ -13,8 +13,7 @@ import { resolveAgentId, runStartupMigrations } from "../storage/onboarding";
 import { createMCPManager, type MCPClientManager } from "@johpaz/hive-code-mcp";
 import { setMCPManager } from "../mcp/singleton";
 import { startMCPHotReload } from "../mcp/hot-reload";
-import { initializeBrowserService } from "../tools/web/browser-service";
-import { activateBrowserTools } from "../storage/onboarding";
+
 
 const log = logger.child("gateway:init");
 
@@ -106,14 +105,14 @@ export async function loadAgentConfigFromDB(
 
     if (providers.length > 0) {
       config.models = config.models || {};
-      config.models.providers = config.models.providers || {};
+      (config.models as any).providers = (config.models as any).providers || {};
 
       const { decryptApiKey } = await import("../storage/crypto");
 
       for (const p of providers) {
         const apiKey = await decryptApiKey(p.api_key_encrypted, p.api_key_iv);
 
-        config.models.providers[p.name] = {
+        (config.models as any).providers[p.name] = {
           apiKey,
           baseUrl: p.base_url || undefined,
           defaultModel: model,
@@ -252,25 +251,6 @@ export async function initializeGateway(
     // 5. Crear AgentService (reemplaza la clase Agent legacy)
     const agent = createAgentService();
     await agent.initialize();
-
-    // 5b. Initialize Browser Service (Chrome via Bun.WebView nativo)
-    let browserAvailable = false;
-
-    try {
-      log.info("Detecting browser (lazy launch — will open on first agent use)...");
-
-      const browserService = initializeBrowserService(config);
-      browserAvailable = await browserService.start();
-
-      if (browserAvailable) {
-        activateBrowserTools();
-      } else {
-        log.warn("⚠️  No se encontró Chrome/Chromium - browser tools desactivadas");
-        log.warn("   Linux: sudo dnf install chromium  |  macOS: brew install --cask google-chrome");
-      }
-    } catch (error) {
-      log.warn(`Browser Service initialization skipped: ${(error as Error).message}`);
-    }
 
     // 6. Inicializar MCP Manager y agent loop
     // MCP se inicializa con los servidores de la config + DB

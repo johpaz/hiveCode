@@ -10,7 +10,7 @@ import { logger } from "../../utils/logger.ts"
 import { getDb } from "../../storage/sqlite.ts"
 import { getAgentLoop } from "../agent-loop"
 import { resolveUserId, resolveAgentId } from "../../storage/onboarding"
-import type { ContentPart } from "../../multimodal/types"
+import type { ContentPart } from "../llm-client"
 
 export type Provider = "openai" | "anthropic" | "gemini" | "mistral" | "kimi" | "ollama" | "openrouter" | "deepseek" | "nvidia"
 

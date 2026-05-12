@@ -3,7 +3,7 @@ import { logger } from "@johpaz/hive-code-core/utils/logger"
 import { createAllTools } from "@johpaz/hive-code-core/tools"
 import type { Config } from "@johpaz/hive-code-core/config"
 import { loadConfig } from "@johpaz/hive-code-core/config"
-import type { Tool } from "@johpaz/hive-code-core/tools/types"
+import type { Tool } from "@johpaz/hive-code-core/tools"
 import {
   getMode, setMode, getPhaseIndex, setPhaseIndex,
   setWorkerBusy, isWorkerBusy, setCancelled, isCancelled,
@@ -71,7 +71,7 @@ export class CoordinatorManager {
     }
 
     this.broadcastChannel = new BroadcastChannel("hive-code:control")
-    this.broadcastChannel.onmessage = (event: MessageEvent<ControlMessage>) => this.handleControlMessage(event.data)
+    this.broadcastChannel.onmessage = (event: any) => this.handleControlMessage(event.data as ControlMessage)
 
     log.info("[coordinator-manager] ✅ All coordinators running")
   }
@@ -230,8 +230,8 @@ export class CoordinatorManager {
       const levelTasks: Array<{ phase: PhaseName; task: CoordinatorTask }> = levelPhases.map(phaseDef => {
         const phase = phaseDef.coordinator
         const task: CoordinatorTask = {
-          taskId: this.activeTaskId,
-          phaseId: this.scribe.createPhase(this.activeTaskId, phase, phase),
+          taskId: this.activeTaskId || "current",
+          phaseId: this.scribe.createPhase(this.activeTaskId || "current", phase, phase),
           phase,
           description,
           adr: archResult.narrativeEntry,
