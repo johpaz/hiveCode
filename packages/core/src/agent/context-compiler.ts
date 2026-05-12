@@ -31,7 +31,7 @@ import { syncPlaybookToFTS } from "./playbook-selector"
 import { getRecentMessages, getSummary, getScratchpad, toAPIMessages } from "./conversation-store"
 import { formatContext, estimateTokens } from "../utils/toon"
 import { buildSystemPromptWithProjects } from "./prompt-builder"
-import { createAllTools } from "../tools/index.ts"
+import { createAllTools } from "../tools/index"
 import { getMCPManager as getSingletonMCPManager } from "../mcp/singleton"
 import { syncMCPToolsToDB, syncMCPToolsToFTS } from "../mcp/tool-sync"
 import { getUserDate, getUserTime } from "../utils/date"
@@ -110,7 +110,7 @@ export async function compileContext(opts: {
   })()
 
   // Resolve userId from database with priority: explicit param → channel identity → single user
-  const userId = opts.userId || "default"
+  const userId = opts.userId || threadId || "default"
 
   // [STEP-1] Load agent config
   log.info(`[context-compiler] [STEP-1] Loading agent config for id=${agentId}`)
