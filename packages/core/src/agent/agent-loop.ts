@@ -23,7 +23,6 @@ import type { MCPClientManager } from "@johpaz/hive-code-mcp"
 import { compileContext } from "./context-compiler"
 import { formatToolResult } from "../utils/toon"
 import { getAverageTokenCost } from "../storage/usage"
-import { resolveUserId, resolveAgentId } from "../storage/onboarding"
 import type { ContentPart } from "./llm-client"
 import { getExecutionMode, canExecuteTool, requiresConfirmation, getBlockReason } from "./execution-mode"
 
@@ -641,14 +640,11 @@ export class AgentLoop {
     }
   ): AsyncIterable<StreamChunk> {
     // Resolve from database with priority: explicit param → DB lookup → single user/agent
-    const threadId = config.configurable?.thread_id || resolveUserId({}) || "default"
-    const agentId = config.configurable?.agent_id || resolveAgentId(config.configurable?.agent_id) || this._resolveCoordinatorId() || "main"
+    const threadId = config.configurable?.thread_id || "default"
+    const agentId = config.configurable?.agent_id || "main"
     const systemPromptOverride = config.configurable?.system_prompt
     const channel = config.configurable?.channel
-    const userId = config.configurable?.user_id || resolveUserId({
-      channel: config.configurable?.channel ? (config.configurable?.channel as string).split(':')[0] : null,
-      channelUserId: config.configurable?.thread_id
-    })
+    const userId = config.configurable?.user_id || "default"
 
     // Log MCP Manager status
     log.info(`[AgentLoop.stream] MCP Manager available: ${this.mcpManager !== null}`)
@@ -686,9 +682,7 @@ export class AgentLoop {
   }
 
   private _resolveCoordinatorId(): string {
-    // Use the storage helper to get coordinator agent ID from database
-    const coordinatorId = resolveAgentId(null);
-    return coordinatorId || "main";
+    return "main";
   }
 }
 

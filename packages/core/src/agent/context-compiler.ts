@@ -32,7 +32,6 @@ import { getRecentMessages, getSummary, getScratchpad, toAPIMessages } from "./c
 import { formatContext, estimateTokens } from "../utils/toon"
 import { buildSystemPromptWithProjects } from "./prompt-builder"
 import { createAllTools } from "../tools/index.ts"
-import { resolveUserId } from "../storage/onboarding"
 import { getMCPManager as getSingletonMCPManager } from "../mcp/singleton"
 import { syncMCPToolsToDB, syncMCPToolsToFTS } from "../mcp/tool-sync"
 import { getUserDate, getUserTime } from "../utils/date"
@@ -111,11 +110,7 @@ export async function compileContext(opts: {
   })()
 
   // Resolve userId from database with priority: explicit param → channel identity → single user
-  const userId = opts.userId || resolveUserId({
-    threadId,
-    channel: opts.channel,
-    channelUserId: threadId
-  }) || threadId || ""
+  const userId = opts.userId || "default"
 
   // [STEP-1] Load agent config
   log.info(`[context-compiler] [STEP-1] Loading agent config for id=${agentId}`)
@@ -327,24 +322,18 @@ export async function compileContext(opts: {
   log.info(`[context-compiler] [STEP-10] Building system prompt...`)
   let systemPrompt: string
   try {
-    systemPrompt = await buildSystemPromptWithProjects({ agentId, userId })
+    systemPrompt = await buildSystemPromptWithProjects({ agentId })
     log.info(`[context-compiler] [STEP-10] ✅ System prompt built (${systemPrompt.length} chars)`)
   } catch (err) {
     log.error(`[context-compiler] [STEP-10] ❌ FAILED building system prompt: ${JSON.stringify(err)}`)
     throw err
   }
 
-  // [STEP-10b] Inject current date/time (ENTORNO ACTUAL)
-  const userRow = db.query<any, [string]>(
-    "SELECT timezone FROM users WHERE id = ?"
-  ).get(userId)
-  const userTimezone = userRow?.timezone || "UTC"
   const now = new Date()
-  const fecha = getUserDate(userTimezone, now)
-  const hora = getUserTime(userTimezone, now)
+
   const workspaceLine = agent.workspace ? `\n**Workspace**: ${agent.workspace} (usa SIEMPRE este path como basePath en herramientas de filesystem)` : ""
-  systemPrompt += `\n\n# ENTORNO ACTUAL\n**Fecha**: ${fecha}\n**Hora**: ${hora}\n**Zona horaria**: ${userTimezone}${workspaceLine}\n`
-  log.info(`[context-compiler] [STEP-10b] ✅ Injected current date/time: ${fecha} ${hora} (${userTimezone})`)
+  systemPrompt += `\n\n# ENTORNO ACTUAL\n${workspaceLine}\n`
+
 
   // Inject scratchpad (Strategy: WRITE) — usando TOON para ahorro de tokens
   if (scratchpadNotes.length > 0) {
@@ -395,12 +384,8 @@ export async function compileContext(opts: {
     } catch (err) {
       log.warn(`[context-compiler] [STEP-10c] Failed to inject projects: ${(err as Error).message}`)
     }
-  }
 
-  // Dynamic tool discovery instruction (coordinator only)
-  // Note: MCP tools are already available directly, no search needed
-  if (!isWorker) {
-    // Build minimal tools documentation from filtered native tools
+    // Dynamic tool discovery instruction (coordinator only)
     const minimalToolsDocs = filteredNativeTools
       .filter(t => MINIMAL_TOOLS.has(t.name))
       .map(t => `- **${t.name}**: ${t.description || "Herramienta nativa"}`)
@@ -534,7 +519,7 @@ export async function compileContext(opts: {
       `])\n\n` +
       `// 3. Poblar data model\n` +
       `a2ui_update_data_model(surfaceId:"contact_form", path:"/form", value:{name:"",email:""})\n` +
-      `\`\`\`\n`
+      `\`\`\`\n`;
   }
 
   // For isolated workers, add task context + tool discovery instruction

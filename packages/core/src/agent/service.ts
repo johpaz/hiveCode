@@ -17,7 +17,6 @@ import { logger } from "../utils/logger"
 import { buildSystemPromptWithProjects } from "./prompt-builder"
 import { getAgentLoop, rebuildAgentLoop } from "./agent-loop"
 import type { MCPClientManager } from "@johpaz/hive-code-mcp"
-import { resolveAgentId, resolveUserId } from "../storage/onboarding"
 import { getMCPManager as getSingletonMCPManager } from "../mcp/singleton"
 import type { ContentPart } from "./llm-client"
 
@@ -62,7 +61,6 @@ export class AgentService {
 
   constructor(config?: AgentServiceConfig) {
     // Resolve agentId from database if not provided
-    this.agentId = config?.agentId || resolveAgentId(null) || "main"
     this.workspacePath = config?.workspacePath || ""
   }
 
@@ -99,7 +97,7 @@ export class AgentService {
   async getAgent(agentId?: string): Promise<AgentDBRecord | null> {
     const db = getDb()
     const id = agentId || this.agentId
-    
+
     const agent = db.query<any, [string]>(
       "SELECT * FROM agents WHERE id = ? LIMIT 1"
     ).get(id) as AgentDBRecord | undefined
@@ -231,10 +229,9 @@ export class AgentService {
   /**
    * Obtiene el system prompt para un agente
    */
-  async getSystemPrompt(agentId?: string, userId?: string): Promise<string> {
+  async getSystemPrompt(agentId?: string): Promise<string> {
     const id = agentId || this.agentId
-    const uid = userId || resolveUserId({}) || "default"
-    return buildSystemPromptWithProjects({ agentId: id, userId: uid })
+    return buildSystemPromptWithProjects({ agentId: id })
   }
 
   /**

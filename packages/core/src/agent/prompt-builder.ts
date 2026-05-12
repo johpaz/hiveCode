@@ -16,13 +16,12 @@
 import { getDb } from "../storage/sqlite"
 import { logger } from "../utils/logger"
 import { formatContext } from "../utils/toon"
-import { resolveUserId } from "../storage/onboarding"
 
 const log = logger.child("prompt-builder")
 
 export interface BuildSystemPromptOpts {
   agentId: string
-  userId: string
+  userId?: string
 }
 
 /**
@@ -36,7 +35,7 @@ export interface BuildSystemPromptOpts {
  */
 export async function buildSystemPrompt(opts: BuildSystemPromptOpts): Promise<string> {
   const db = getDb()
-  const { agentId, userId } = opts
+  const { agentId = "main" } = opts
 
   // ──────────────────────────────────────────────────────────────────────────
   // 1. ÉTICA — Capa constitucional (siempre completa)
@@ -116,40 +115,15 @@ export async function buildSystemPrompt(opts: BuildSystemPromptOpts): Promise<st
   }
 
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // 3. IDENTIDAD DEL USUARIO
-  // ──────────────────────────────────────────────────────────────────────────
-  const user = db.query<any, [string]>(`
-    SELECT id, name, language,  timezone, occupation, notes
-    FROM users
-    WHERE id = ?
-  `).get(userId)
 
-  let userSection = `# IDENTIDAD DEL USUARIO\n\n`
 
-  if (user) {
-    const userData: Record<string, string | null> = {}
 
-    if (user.name) userData.Nombre = user.name
-    if (user.language) userData.Idioma = user.language
-    if (user.timezone) userData.ZonaHoraria = user.timezone
-    if (user.occupation) userData.Ocupación = user.occupation
-    if (user.notes) userData.Notes = user.notes
 
-    // Usar TOON para comprimir datos del usuario
-    if (Object.keys(userData).length > 0) {
-      userSection += formatContext(userData) + "\n\n"
-    } else {
-      userSection += `Usuario ID: ${userId}\n\n`
-    }
-  } else {
-    userSection += `Usuario ID: ${userId}\n\n`
-  }
 
   // ──────────────────────────────────────────────────────────────────────────
   // Ensamblar secciones en orden
   // ──────────────────────────────────────────────────────────────────────────
-  const systemPrompt = `${ethicsSection}${agentSection}${userSection}`.trim()
+  const systemPrompt = `${ethicsSection}${agentSection}`.trim()
 
   log.info(`[prompt-builder] Built system prompt for agent=${agent.name} role=${agent.role}`)
 
@@ -162,8 +136,7 @@ export async function buildSystemPrompt(opts: BuildSystemPromptOpts): Promise<st
  */
 export async function buildSystemPromptWithProjects(opts: {
   agentId: string
-  userId?: string
+
 }): Promise<string> {
-  const userId = opts.userId || resolveUserId({}) || "default"
-  return buildSystemPrompt({ agentId: opts.agentId, userId })
+  return buildSystemPrompt({ agentId: opts.agentId })
 }

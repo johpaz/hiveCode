@@ -102,6 +102,8 @@ function renderPrompt(status: ReplStatus, input: string): void {
 
 // ─── Input handler ──────────────────────────────────────────────────
 
+type InputState = "normal" | "esc" | "csi"
+
 function getInput(status: ReplStatus): Promise<string | null> {
   return new Promise((resolve) => {
     const stdin = process.stdin
@@ -109,7 +111,8 @@ function getInput(status: ReplStatus): Promise<string | null> {
     stdin.resume()
 
     let buffer = ""
-    let escSeq: string | null = null
+    let state: InputState = "normal"
+    let csiBuf = ""
     _promptRendered = false
     renderPrompt(status, "")
 
@@ -117,44 +120,41 @@ function getInput(status: ReplStatus): Promise<string | null> {
       for (let i = 0; i < data.length; i++) {
         const byte = data[i]
 
-        if (escSeq !== null) {
-          escSeq += String.fromCharCode(byte)
+        if (state === "esc") {
+          state = byte === 0x5b ? "csi" : "normal"
+          if (state === "csi") { csiBuf = ""; continue }
+          continue
+        }
+
+        if (state === "csi") {
           if (byte >= 0x40 && byte <= 0x7e) {
-            if (escSeq === "\x1b[Z") {
+            state = "normal"
+            if (csiBuf === "" && byte === 0x5a) {
               const idx = MODE_CYCLE.indexOf(status.mode)
               status.mode = MODE_CYCLE[(idx + 1) % MODE_CYCLE.length]
               saveMode(status.mode)
               renderPrompt(status, buffer)
-            } else if (escSeq === "\x1b" || escSeq.length > 4) {
-              cleanup(); resolve(null); return
             }
-            escSeq = null
+            continue
           }
+          csiBuf += String.fromCharCode(byte)
+          if (csiBuf.length > 16) state = "normal"
           continue
         }
 
-        if (byte === 0x03 || byte === 0x04) {
-          cleanup(); resolve(null); return
-        }
-
+        if (byte === 0x1b) { state = "esc"; continue }
+        if (byte === 0x03 || byte === 0x04) { cleanup(); resolve(null); return }
         if (byte === 0x0d || byte === 0x0a) {
           cleanup()
           process.stdout.write("\n")
           resolve(buffer)
           return
         }
-
         if (byte === 0x7f || byte === 0x08) {
           buffer = buffer.slice(0, -1)
           renderPrompt(status, buffer)
           continue
         }
-
-        if (byte === 0x1b) {
-          escSeq = "\x1b"
-          continue
-        }
-
         if (byte >= 0x20 && byte <= 0x7e) {
           buffer += String.fromCharCode(byte)
           renderPrompt(status, buffer)
@@ -272,6 +272,11 @@ async function executeTask(task: string, status: ReplStatus): Promise<void> {
 // ─── Main export ───────────────────────────────────────────────────
 
 export async function repl(): Promise<void> {
+  if (!process.stdin.isTTY) {
+    console.log("REPL requires a TTY. Use 'hive-code <command>' for non-interactive mode.")
+    return
+  }
+
   const status = loadStatus()
   const projectName = path.basename(status.projectPath)
 
