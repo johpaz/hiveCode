@@ -13,7 +13,7 @@
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveSpinner, hiveText, isCancel,
-} from "../ui/index.ts"
+} from "@johpaz/hive-code-ui"
 import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
 
 export async function mcpList(): Promise<void> {

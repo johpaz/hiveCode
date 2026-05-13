@@ -10,7 +10,7 @@
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveText, isCancel,
-} from "../ui/index.ts"
+} from "@johpaz/hive-code-ui"
 import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
 import { spawn } from "child_process"
 

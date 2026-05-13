@@ -2,12 +2,12 @@ import {
   hiveIntro, hiveOutro, hiveModeBar,
   hivePhaseComplete, hivePhaseActive, hiveSpinner,
   hiveNote, hiveText, hiveCheckpoint, isCancel,
-} from "../ui/index.ts"
+} from "@johpaz/hive-code-ui"
 import { getExecutionMode, setExecutionMode } from "@johpaz/hive-code-core"
 import { CoordinatorManager } from "@johpaz/hive-code-code/workers/coordinator-manager"
 import { listenModeToggle, stopModeToggle } from "@johpaz/hive-code-code/modes/keyboard"
 
-export async function run(description?: string, flags: string[] = []): Promise<void> {
+export async function run(description?: string, flags: string[] = [], options?: { keyboard?: boolean }): Promise<void> {
 
   const approvalFlag = flags.includes("--approval") || flags.includes("-a")
   const mode = approvalFlag ? "approval" : "auto"
@@ -15,9 +15,11 @@ export async function run(description?: string, flags: string[] = []): Promise<v
   hiveIntro(`hive-code · ${mode === "approval" ? "Approval" : "Auto"} Mode`)
   hiveModeBar(mode)
 
-  listenModeToggle((newMode) => {
-    hiveModeBar(newMode)
-  })
+  if (options?.keyboard !== false) {
+    listenModeToggle((newMode) => {
+      hiveModeBar(newMode)
+    })
+  }
 
   const task = description ?? await hiveText({
     message: "¿Qué quieres construir?",

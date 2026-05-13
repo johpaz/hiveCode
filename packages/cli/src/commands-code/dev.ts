@@ -1,4 +1,4 @@
-import { hiveIntro, hiveOutro, hiveSpinner, hiveNote } from "../ui/index.ts"
+import { hiveIntro, hiveOutro, hiveSpinner, hiveNote } from "@johpaz/hive-code-ui"
 import { getHiveDir } from "@johpaz/hive-code-core/config/loader"
 import { repl } from "./repl"
 import { spawn, type ChildProcess } from "node:child_process"

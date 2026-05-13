@@ -2,19 +2,21 @@ import {
   hiveIntro, hiveOutro, hiveModeBar,
   hivePhaseComplete, hiveSpinner, hiveNote,
   hiveText, isCancel,
-} from "../ui/index.ts"
+} from "@johpaz/hive-code-ui"
 import { getExecutionMode, setExecutionMode } from "@johpaz/hive-code-core"
 import { CoordinatorManager } from "@johpaz/hive-code-code/workers/coordinator-manager"
 import { listenModeToggle, stopModeToggle } from "@johpaz/hive-code-code/modes/keyboard"
 
-export async function plan(description?: string): Promise<void> {
+export async function plan(description?: string, options?: { keyboard?: boolean }): Promise<void> {
 
   hiveIntro("hive-code · Plan Mode")
   hiveModeBar("plan")
 
-  listenModeToggle((mode) => {
-    hiveModeBar(mode)
-  })
+  if (options?.keyboard !== false) {
+    listenModeToggle((mode) => {
+      hiveModeBar(mode)
+    })
+  }
 
   const task = description ?? await hiveText({
     message: "¿Qué quieres diseñar?",

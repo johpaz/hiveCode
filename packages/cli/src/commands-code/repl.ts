@@ -1,27 +1,18 @@
 import * as path from "node:path"
+import { createInterface } from "node:readline/promises"
 import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
 import { logger } from "@johpaz/hive-code-core/utils/logger"
 import {
-  BEE, S, isCancel, hiveSelect
-} from "../ui/index.ts"
-import { parseInternalCommand, renderHelp, getCtx } from "@johpaz/hive-code-code/coordinator/command-parser"
-import { plan } from "./plan"
-import { run } from "./run"
+  BEE, S, C, isCancel, hiveSelect, hiveNote, hiveOutro,
+  runProviderSetupWizard,
+} from "@johpaz/hive-code-ui"
+import { parseInternalCommand, getCtx } from "@johpaz/hive-code-code/coordinator/command-parser"
+import { plan as runPlan } from "./plan"
+import { run as runTask } from "./run"
 
 const VERSION = "1.0.0"
 
-const C = {
-  amber:      "\x1b[38;5;214m",
-  amberDim:   "\x1b[38;5;172m",
-  green:      "\x1b[38;5;114m",
-  red:        "\x1b[38;5;203m",
-  purple:     "\x1b[38;5;141m",
-  white:      "\x1b[38;5;252m",
-  dim:        "\x1b[2m",
-  bold:       "\x1b[1m",
-  reset:      "\x1b[0m",
-  clearLine:  "\x1b[2K\r",
-}
+
 
 const MODE_CYCLE = ["plan", "approval", "auto"] as const
 type Mode = (typeof MODE_CYCLE)[number]
@@ -71,11 +62,8 @@ function fmtTokens(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`
 }
 
-let _promptRendered = false
-
-function renderPrompt(status: ReplStatus, input: string): void {
+function buildStatusBar(status: ReplStatus): string {
   const sep = `${C.dim}  \u2502  ${C.reset}`
-
   const items = [
     `${MODE_LABELS[status.mode]}  ${C.dim}[shift+tab]${C.reset}`,
     status.provider
@@ -86,167 +74,27 @@ function renderPrompt(status: ReplStatus, input: string): void {
     `ctx: ${status.taskCount}`,
     `${fmtTokens(status.tokenCount)} tok`,
   ]
+  return `  ${C.dim}\u2502${C.reset}  ${items.join(sep)}`
+}
 
-  const barLine = `  ${C.dim}\u2502${C.reset}  ${items.join(sep)}`
-  const beeIcon = input.startsWith("/") ? BEE.happy : BEE.waiting
-  const promptLine = `  ${beeIcon}  ${C.white}\u00bfQu\u00e9 quieres construir?${C.reset}  ${input || C.dim + "describe la tarea o escribe /help..." + C.reset}`
 
-  if (_promptRendered) {
-    process.stdout.write(`\x1b[2A\r${C.clearLine}${barLine}\n${C.clearLine}${promptLine}`)
-  } else {
-    process.stdout.write(`\n${barLine}\n${promptLine}`)
-    _promptRendered = true
+
+function completer(line: string): [string[], string] {
+  if (!line.startsWith("/") || line.length < 2) return [[], line]
+  const search = line.slice(1).toLowerCase().replace(/[^a-z0-9_/\s-]/g, "")
+  const db = getDb()
+  try {
+    const rows = db.query(`
+      SELECT command FROM code_commands_fts
+      WHERE command MATCH ?
+      ORDER BY rank
+      LIMIT 5
+    `).all(search + "*") as { command: string }[]
+    const hits = rows.map(r => "/" + r.command)
+    return [hits, line]
+  } catch {
+    return [[], line]
   }
-}
-
-type InputState = "normal" | "esc" | "csi"
-
-function getInput(status: ReplStatus): Promise<string | null> {
-  return new Promise((resolve) => {
-    const stdin = process.stdin
-    stdin.setRawMode(true)
-    stdin.resume()
-
-    let buffer = ""
-    let state: InputState = "normal"
-    let csiBuf = ""
-    let suggestions: string[] = []
-    let suggestionIdx = -1
-    _promptRendered = false
-    renderPrompt(status, "")
-
-    function getSuggestions(prefix: string): string[] {
-      if (!prefix.startsWith("/") || prefix.length < 2) return []
-      const db = getDb()
-      try {
-        const search = prefix.slice(1).toLowerCase().replace(/[^a-z0-9_\/\s-]/g, "")
-        const rows = db.query(`
-          SELECT command FROM code_commands_fts
-          WHERE command MATCH ?
-          ORDER BY rank
-          LIMIT 5
-        `).all(search) as { command: string }[]
-        return rows.map(r => r.command)
-      } catch {
-        return []
-      }
-    }
-
-    function onData(data: Buffer) {
-      for (let i = 0; i < data.length; i++) {
-        const byte = data[i]
-
-        if (state === "esc") {
-          state = byte === 0x5b ? "csi" : "normal"
-          if (state === "csi") { csiBuf = ""; continue }
-          continue
-        }
-
-        if (state === "csi") {
-          if (byte >= 0x40 && byte <= 0x7e) {
-            state = "normal"
-            if (csiBuf === "" && byte === 0x5a) {
-              // Shift+Tab: cycle mode
-              const idx = MODE_CYCLE.indexOf(status.mode)
-              status.mode = MODE_CYCLE[(idx + 1) % MODE_CYCLE.length]
-              saveMode(status.mode)
-              renderPrompt(status, buffer)
-            } else if (csiBuf === "A") {
-              // Up arrow: previous suggestion
-              if (suggestions.length > 0) {
-                suggestionIdx = Math.max(0, suggestionIdx - 1)
-                buffer = suggestions[suggestionIdx]
-                renderPrompt(status, buffer)
-              }
-            } else if (csiBuf === "B") {
-              // Down arrow: next suggestion
-              if (suggestions.length > 0) {
-                suggestionIdx = Math.min(suggestions.length - 1, suggestionIdx + 1)
-                buffer = suggestions[suggestionIdx]
-                renderPrompt(status, buffer)
-              }
-            } else if (csiBuf === "" && byte === 0x49) {
-              // Tab: autocomplete
-              if (buffer.startsWith("/")) {
-                const sugg = getSuggestions(buffer)
-                if (sugg.length === 1) {
-                  buffer = sugg[0] + " "
-                  renderPrompt(status, buffer)
-                } else if (sugg.length > 1) {
-                  suggestions = sugg
-                  suggestionIdx = -1
-                }
-              }
-            }
-            continue
-          }
-          csiBuf += String.fromCharCode(byte)
-          if (csiBuf.length > 16) state = "normal"
-          continue
-        }
-
-        if (byte === 0x1b) { state = "esc"; continue }
-        if (byte === 0x03 || byte === 0x04) { cleanup(); resolve(null); return }
-        if (byte === 0x09) {
-          // Tab: autocomplete
-          if (buffer.startsWith("/")) {
-            const sugg = getSuggestions(buffer)
-            if (sugg.length === 1) {
-              buffer = sugg[0] + " "
-              renderPrompt(status, buffer)
-            } else if (sugg.length > 1) {
-              suggestions = sugg
-              suggestionIdx = -1
-            }
-          }
-          continue
-        }
-        if (byte === 0x0d || byte === 0x0a) {
-          cleanup()
-          process.stdout.write("\n")
-          resolve(buffer)
-          return
-        }
-        if (byte === 0x7f || byte === 0x08) {
-          buffer = buffer.slice(0, -1)
-          suggestions = []
-          suggestionIdx = -1
-          renderPrompt(status, buffer)
-          continue
-        }
-        if (byte >= 0x20 && byte <= 0x7e) {
-          buffer += String.fromCharCode(byte)
-          suggestions = []
-          suggestionIdx = -1
-          renderPrompt(status, buffer)
-        }
-      }
-    }
-
-    function cleanup() {
-      stdin.removeListener("data", onData)
-      stdin.setRawMode(false)
-    }
-
-    stdin.on("data", onData)
-  })
-}
-
-function showStatus(s: ReplStatus): void {
-  const gh = s.ghConnected
-    ? `${C.green}\u2713${C.reset} conectado`
-    : `${C.dim}\u2014${C.reset}`
-  process.stdout.write(
-    `\n  ${S.info}  ${C.bold}Estado del sistema${C.reset}\n` +
-    `  ${C.dim}\u2502${C.reset}\n` +
-    `  ${C.dim}\u2502${C.reset}    ${C.white}Modo:${C.reset}      ${MODE_COLORS[s.mode]}${s.mode.toUpperCase()}${C.reset}\n` +
-    `  ${C.dim}\u2502${C.reset}    ${C.white}Provider:${C.reset}  ${s.provider || "ninguno"}${s.model ? ` \u00b7 ${s.model}` : ""}\n` +
-    `  ${C.dim}\u2502${C.reset}    ${C.white}GitHub:${C.reset}    ${gh}\n` +
-    `  ${C.dim}\u2502${C.reset}    ${C.white}Proyecto:${C.reset}  ${s.projectPath}\n` +
-    `  ${C.dim}\u2502${C.reset}    ${C.white}Tareas:${C.reset}    ${s.taskCount} activas\n` +
-    `  ${C.dim}\u2502${C.reset}    ${C.white}Tokens:${C.reset}    ${fmtTokens(s.tokenCount)}\n` +
-    `  ${C.dim}\u2502${C.reset}\n`
-  )
 }
 
 async function handleCommand(input: string, status: ReplStatus): Promise<"continue" | "exit"> {
@@ -280,13 +128,62 @@ async function handleCommand(input: string, status: ReplStatus): Promise<"contin
 }
 
 async function executeTask(task: string, status: ReplStatus): Promise<void> {
-  if (status.mode === "plan") {
-    await plan(task)
-  } else if (status.mode === "auto") {
-    await run(task, [])
-  } else {
-    await plan(task)
+  // Guard: sin provider configurado no se puede ejecutar ninguna tarea
+  if (!status.provider) {
+    hiveNote("Sin provider configurado", [
+      "Necesitas un provider LLM para ejecutar tareas.",
+      "Configura uno ahora o usa: hive-code provider add",
+    ])
+    const choice = await hiveSelect({
+      message: "¿Qué deseas hacer?",
+      options: [
+        { value: "setup", label: "Configurar provider ahora" },
+        { value: "cancel", label: "Cancelar tarea" },
+      ],
+    })
+    if (isCancel(choice) || choice === "cancel") return
 
+    const db = getDb()
+    const knownProviders = (
+      db.query("SELECT id FROM providers ORDER BY id").all() as { id: string }[]
+    ).map((r) => r.id)
+
+    const result = await runProviderSetupWizard(knownProviders)
+    if (!result) return
+
+    db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(
+      result.provider
+    )
+    if (result.model) {
+      db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)").run(
+        `provider_model_${result.provider}`,
+        result.model
+      )
+    }
+    try {
+      const secrets = (Bun as any).secrets
+      if (secrets?.set)
+        secrets.set(
+          `${result.provider.toUpperCase().replace(/-/g, "_")}_API_KEY`,
+          result.apiKey
+        )
+    } catch {
+      db.query("UPDATE providers SET api_key_encrypted = ? WHERE id = ?").run(
+        Buffer.from(result.apiKey).toString("base64"),
+        result.provider
+      )
+    }
+    status.provider = result.provider
+    status.model = result.model || ""
+    hiveOutro(`Provider ${result.provider} configurado`)
+  }
+
+  if (status.mode === "plan") {
+    await runPlan(task, { keyboard: false })
+  } else if (status.mode === "auto") {
+    await runTask(task, [], { keyboard: false })
+  } else {
+    await runPlan(task, { keyboard: false })
     const approval = await hiveSelect({
       message: "\u00bfDeseas implementar este plan?",
       options: [
@@ -294,13 +191,11 @@ async function executeTask(task: string, status: ReplStatus): Promise<void> {
         { value: "no", label: "No, volver" },
       ],
     })
-
     if (isCancel(approval) || approval === "no") {
       process.stdout.write(`  ${C.amber}${S.barEnd}${C.reset}  ${C.dim}Implementaci\u00f3n omitida${C.reset}\n`)
       return
     }
-
-    await run(task, [])
+    await runTask(task, [], { keyboard: false })
   }
 }
 
@@ -318,16 +213,77 @@ export async function repl(): Promise<void> {
     `  ${C.amber}${S.bar}${C.reset}\n`
   )
 
+  // Shift+Tab: cycle mode (persists across readline instances)
+  const handleShiftTab = (_str: unknown, key: unknown) => {
+    const k = key as { name?: string; shift?: boolean } | null
+    if (k?.name === "tab" && k?.shift) {
+      const idx = MODE_CYCLE.indexOf(status.mode)
+      status.mode = MODE_CYCLE[(idx + 1) % MODE_CYCLE.length]
+      saveMode(status.mode)
+    }
+  }
+  process.stdin.on("keypress", handleShiftTab)
+
+  let sigintCount = 0
+  let rl: ReturnType<typeof createInterface> | null = null
+
+  function closeRL() {
+    if (!rl) return
+    rl.close()
+    rl.removeAllListeners()
+    rl = null
+  }
+
+  function createRL() {
+    closeRL()
+    rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: true,
+      completer,
+    })
+
+    rl.on("SIGINT", () => {
+      sigintCount++
+      process.stdout.write(C.clearLine)
+      if (sigintCount >= 2) {
+        closeRL()
+        process.stdin.removeListener("keypress", handleShiftTab)
+        process.stdout.write(`\n ${C.amber}${S.barEnd}${C.reset} ${C.green}${S.check}${C.reset} Hasta luego\n\n`)
+        process.exit(0)
+      }
+      setTimeout(() => { sigintCount = 0 }, 2000)
+      process.stdout.write(`\n${C.dim} [Ctrl+C otra vez para salir]${C.reset}\n`)
+      rl?.prompt(true)
+    })
+
+    return rl
+  }
+
+  createRL()
+
   while (true) {
     try {
       status.taskCount = (getDb().query("SELECT COUNT(*) as c FROM code_tasks WHERE status NOT IN ('cancelled','completed')").get() as any)?.c ?? 0
       status.tokenCount = (getDb().query("SELECT COALESCE(SUM(tokens_in + tokens_out), 0) as t FROM code_traces").get() as any)?.t ?? 0
     } catch {}
 
-    const task = await getInput(status)
-    if (task === null) break
+    if (!rl) rl = createRL()
 
-    const trimmed = task.trim()
+    process.stdout.write(`\n${buildStatusBar(status)}\n`)
+    const promptStr = ` ${BEE.waiting} ${C.white}\u00bfQu\u00e9 quieres construir?${C.reset} `
+
+    const line = await new Promise<string | null>((resolve) => {
+      if (!rl) { resolve(null); return }
+      rl.once("line", resolve)
+      rl.once("close", () => resolve(null))
+      rl.setPrompt(promptStr)
+      rl.prompt()
+    })
+
+    if (line === null) break
+
+    const trimmed = line.trim()
     if (!trimmed) continue
 
     if (trimmed.startsWith("/")) {
@@ -336,13 +292,17 @@ export async function repl(): Promise<void> {
       continue
     }
 
+    closeRL()
     try {
       await executeTask(trimmed, status)
     } catch (err) {
       logger.error("[repl] Task execution error:", err)
-      process.stdout.write(`  ${BEE.error}  ${(err as Error).message}\n`)
+      process.stdout.write(` ${BEE.error} ${(err as Error).message}\n`)
     }
+    createRL()
   }
 
-  process.stdout.write(`  ${C.amber}${S.barEnd}${C.reset}  ${C.green}${S.check}${C.reset}  Hasta luego\n\n`)
+  closeRL()
+  process.stdin.removeListener("keypress", handleShiftTab)
+  process.stdout.write(`\n  ${C.amber}${S.barEnd}${C.reset}  ${C.green}${S.check}${C.reset}  Hasta luego\n\n`)
 }

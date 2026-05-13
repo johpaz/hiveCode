@@ -15,6 +15,7 @@ import { skillList, skillEnable, skillDisable, skillAdd, skillRemove, skillInspe
 import { agentList, agentInspect, agentEdit, agentReset } from "./commands-code/agent"
 import { modeHistory, taskRollback, taskResume, upgrade, init } from "./commands-code/extras"
 import { repl } from "./commands-code/repl"
+import { telegramConnect, telegramDisconnect, telegramStatus } from "./commands-code/telegram"
 
 // ─── Hive Base Commands (existing, no @clack/prompts) ────────────────────────
 // These commands don't use @clack/prompts so they still work
@@ -119,6 +120,11 @@ GitHub:
   github status              Estado de integración
   github set-repo <repo>     Configurar repositorio
   github whoami              Ver usuario conectado
+
+Telegram:
+  telegram connect           Conectar bot de Telegram (wizard Rezi)
+  telegram disconnect        Desconectar bot
+  telegram status            Estado e info del bot
 
 Secrets:
   secret list                Listar secrets (solo nombres)
@@ -346,6 +352,21 @@ async function main(): Promise<void> {
     case "coordinator":
       await coordinator(subcommand, args.slice(2))
       break
+    // ─── Telegram ──────────────────────────────────────────────────────────
+    case "telegram": {
+      if (subcommand === "connect") await telegramConnect()
+      else if (subcommand === "disconnect") await telegramDisconnect()
+      else if (subcommand === "status") await telegramStatus()
+      else {
+        console.error(`❌ Subcomando desconocido: "${subcommand}"`)
+        console.log("  telegram connect      Conectar bot")
+        console.log("  telegram disconnect   Desconectar bot")
+        console.log("  telegram status       Ver estado")
+        process.exit(1)
+      }
+      break
+    }
+
     case "onboard": {
       console.log("Onboarding — use the web setup UI at http://localhost:16120/setup")
       break

@@ -1,7 +1,7 @@
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveSpinner,
-} from "../ui/index.ts"
+} from "@johpaz/hive-code-ui"
 import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
 
 interface DoctorCheck {

@@ -47,9 +47,15 @@
       "@johpaz/hive-code-skills/*": [
         "./packages/skills/src/*"
       ],
-      "@johpaz/hive-code-cli": [
-        "./packages/cli/src/index.ts"
-      ],
+    "@johpaz/hive-code-ui": [
+      "./packages/ui/src/index.ts"
+    ],
+    "@johpaz/hive-code-ui/*": [
+      "./packages/ui/src/*"
+    ],
+    "@johpaz/hive-code-cli": [
+      "./packages/cli/src/index.ts"
+    ],
       "@hive/core": [
         "./packages/core/src/index.ts"
       ],
