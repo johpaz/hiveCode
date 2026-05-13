@@ -36,10 +36,11 @@ interface Logger {
 }
 
 function createLogger(): Logger {
+  const dev = !!process.env.HIVE_DEV
   return {
-    debug: (msg, ...args) => console.debug(`[skills] ${msg}`, ...args),
-    info: (msg, ...args) => console.info(`[skills] ${msg}`, ...args),
-    warn: (msg, ...args) => console.warn(`[skills] ${msg}`, ...args),
+    debug: (msg, ...args) => dev && console.debug(`[skills] ${msg}`, ...args),
+    info:  (msg, ...args) => dev && console.info(`[skills] ${msg}`, ...args),
+    warn:  (msg, ...args) => console.warn(`[skills] ${msg}`, ...args),
     error: (msg, ...args) => console.error(`[skills] ${msg}`, ...args),
   };
 }

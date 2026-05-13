@@ -167,6 +167,8 @@ let _dbInitialized = false
 
 function ensureGlobalInit(): void {
   if (_dbInitialized) return
+  // En modo normal (no dev) los logs de init van solo a archivo, no a consola
+  if (!process.env.HIVE_DEV) logger.setLevel("warn")
   try {
     initializeDatabase()
     initializeCodeDatabase()
@@ -174,7 +176,7 @@ function ensureGlobalInit(): void {
     seedCodeData()
     validateCodeSchema()
     _dbInitialized = true
-    logger.info("[cli] 🚀 Global init complete — DB, schemas, seeds, validation OK")
+    if (process.env.HIVE_DEV) logger.info("[cli] 🚀 Global init complete — DB, schemas, seeds, validation OK")
   } catch (err) {
     logger.error("[cli] ❌ Global init failed:", (err as Error).message)
     process.exit(1)
