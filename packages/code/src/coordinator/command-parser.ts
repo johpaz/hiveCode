@@ -16,6 +16,13 @@ export interface MenuItem {
   desc: string
 }
 
+export interface UiCallbacks {
+  suspendTui?: () => Promise<void>
+  resumeTui?: () => void
+  runProviderSetupWizard?: (knownProviders: string[], version: string) => Promise<{ provider: string; baseUrl?: string; apiKey: string; model?: string } | null>
+  runTelegramConnectWizard?: () => Promise<Record<string, any> | null>
+}
+
 export interface CommandResult {
   handled: boolean
   output?: string
@@ -240,6 +247,7 @@ async function handleProviderCommand(
   args: string[],
   db: ReturnType<typeof getDb>,
   ctx: ContextState,
+  ui?: UiCallbacks,
 ): Promise<CommandResult> {
   const [action, ...rest] = args
 
@@ -278,6 +286,37 @@ async function handleProviderCommand(
       return { handled: true, output: renderProviderList(providers, ctx.activeProvider, modelMap) }
     }
     case "add": {
+      // Interactive wizard if UI callbacks available
+      if (ui?.suspendTui && ui?.resumeTui && ui?.runProviderSetupWizard) {
+        const known = (db.query("SELECT id FROM providers ORDER BY id").all() as { id: string }[]).map(r => r.id)
+        await ui.suspendTui()
+        try {
+          const result = await ui.runProviderSetupWizard(known, VERSION)
+          if (result) {
+            db.query(`
+              INSERT INTO providers (id, name, base_url, api_key_encrypted, enabled)
+              VALUES (?,?,?,?,1)
+              ON CONFLICT(id) DO UPDATE SET
+                base_url = excluded.base_url,
+                api_key_encrypted = excluded.api_key_encrypted,
+                enabled = 1
+            `).run(result.provider, result.provider, result.baseUrl || null, Buffer.from(result.apiKey).toString("base64"))
+            db.query("INSERT OR REPLACE INTO code_config (key,value) VALUES ('default_provider',?)").run(result.provider)
+            if (result.model) {
+              db.query("INSERT OR REPLACE INTO code_config (key,value) VALUES (?,?)").run(`provider_model_${result.provider}`, result.model)
+            }
+            return {
+              handled: true,
+              output: `  \u2713 Provider ${result.provider} configurado`,
+              newState: { activeProvider: result.provider, activeModel: result.model || "" },
+            }
+          }
+          return { handled: true, output: "  Configuraci\u00f3n cancelada" }
+        } finally {
+          ui.resumeTui()
+        }
+      }
+      // Fallback non-interactive
       const name = rest[0]
       if (!name) return {
         handled: true,
@@ -880,6 +919,7 @@ async function handleGithubCommand(
 async function handleTelegramCommand(
   args: string[],
   db: ReturnType<typeof getDb>,
+  ui?: UiCallbacks,
 ): Promise<CommandResult> {
   const [action, ...rest] = args
 
@@ -920,6 +960,31 @@ async function handleTelegramCommand(
   }
 
   if (action === "connect" || action === "edit") {
+    if (ui?.suspendTui && ui?.resumeTui && ui?.runTelegramConnectWizard) {
+      await ui.suspendTui()
+      try {
+        const result = await ui.runTelegramConnectWizard()
+        if (result) {
+          const configJson = JSON.stringify({
+            dmPolicy: result.dmPolicy,
+            allowFrom: result.allowFrom,
+            groups: result.groups,
+            enabled: true,
+          })
+          db.query(`
+            INSERT OR REPLACE INTO channels (id, type, config_encrypted, enabled, status)
+            VALUES ('telegram', 'telegram', ?, 1, 'connected')
+          `).run(Buffer.from(configJson).toString("base64"))
+          return {
+            handled: true,
+            output: `  \u2713 Telegram ${action === "connect" ? "conectado" : "actualizado"}`,
+          }
+        }
+        return { handled: true, output: "  Configuraci\u00f3n cancelada" }
+      } finally {
+        ui.resumeTui()
+      }
+    }
     return {
       handled: true,
       output: [
@@ -943,6 +1008,7 @@ export async function parseInternalCommand(
   input: string,
   db: ReturnType<typeof getDb>,
   ctx?: ContextState,
+  ui?: UiCallbacks,
 ): Promise<CommandResult> {
   if (!input.startsWith("/")) {
     return { handled: false }
@@ -955,7 +1021,7 @@ export async function parseInternalCommand(
 
   switch (cmd) {
     case "provider":
-      return handleProviderCommand(args, db, ctxState)
+      return handleProviderCommand(args, db, ctxState, ui)
     case "modelo":
       return handleModelCommand(args, db, ctxState)
     case "mcp":
@@ -973,7 +1039,7 @@ export async function parseInternalCommand(
     case "github":
       return handleGithubCommand(args, db)
     case "telegram":
-      return handleTelegramCommand(args, db)
+      return handleTelegramCommand(args, db, ui)
     case "doctor":
       return { handled: true, output: runDoctor(db) }
     case "help":

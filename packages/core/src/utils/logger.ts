@@ -310,6 +310,10 @@ export class Logger {
   setLevel(level: LogLevel): void {
     this.config.level = level;
   }
+
+  setConsole(enabled: boolean): void {
+    this.config.console = enabled;
+  }
 }
 
 export class ChildLogger {
@@ -385,5 +389,6 @@ export const logger = {
   getCorrelationId: () => getLogger().getCorrelationId(),
   withCorrelationId: (id: string) => getLogger().withCorrelationId(id),
   setLevel: (level: any) => getLogger().setLevel(level),
+  setConsole: (enabled: boolean) => getLogger().setConsole(enabled),
   setHandler: (handler: any) => { /* no-op for compatibility */ },
 };

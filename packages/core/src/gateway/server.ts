@@ -25,10 +25,8 @@ const _pkgVersion = (() => {
     return "0.0.27";
   }
 })();
-import { cpus as osCpus } from "node:os";
 import { getDb, getDbPathLazy, initializeDatabase } from "../storage/sqlite";
 import { seedAllData } from "../storage/seed";
-import { randomUUID } from "crypto";
 import { decryptConfig } from "../storage/crypto.ts";
 import { resolveContext } from "./resolver";
 import { initializeGateway, type GatewayInitializationResult } from "./initializer";
@@ -131,7 +129,7 @@ export async function startGateway(config: Config): Promise<void> {
   const startTime = Date.now();
 
   // CPU delta sampling — process.cpuUsage() is cumulative; we diff between calls
-  const numCores = osCpus().length || 1;
+  const numCores = navigator.hardwareConcurrency || 1;
   let lastCpuSample = process.cpuUsage();
   let lastCpuSampleTime = Date.now();
   const log = logger.child("gateway");
@@ -146,7 +144,7 @@ export async function startGateway(config: Config): Promise<void> {
       process.env.HIVE_AUTH_TOKEN = readFileSync(tokenFile, "utf-8").trim();
       log.info("🔑 Auth token loaded from persistent storage");
     } else {
-      const generated = randomUUID().replace(/-/g, "");
+      const generated = crypto.randomUUID().replace(/-/g, "");
       process.env.HIVE_AUTH_TOKEN = generated;
       mkdirSync(path.dirname(tokenFile), { recursive: true });
       writeFileSync(tokenFile, generated, { mode: 0o600 });
@@ -179,7 +177,7 @@ export async function startGateway(config: Config): Promise<void> {
         success: false,
         error: showErrors ? error.message : "Internal server error",
         ...(showErrors && { stack: error.stack }),
-        requestId: crypto.randomUUID(),
+        requestId: crypto.crypto.randomUUID(),
       }, { status: 500 });
     },
     fetch: (req) => {
@@ -222,7 +220,7 @@ export async function startGateway(config: Config): Promise<void> {
   if (gatewaySetupMode) {
     try {
       const db = getDb();
-      const userId = randomUUID();
+      const userId = crypto.randomUUID();
       db.query(`INSERT INTO users (id, name, email, language, timezone, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
         .run(userId, "Hive User", "user@hive.local", "es", "UTC", new Date().toISOString());
       log.info("🐝 Auto-onboarding: usuario por defecto creado (terminal-only mode)");
@@ -978,7 +976,7 @@ export async function startGateway(config: Config): Promise<void> {
           const body = await req.json().catch(() => ({}))
           const { name, description, category, tools, triggers, preferred_agents, body: bodyContent } = body
           if (!name) return addCorsHeaders(new Response("Missing name", { status: 400 }), req)
-          const id = randomUUID()
+          const id = crypto.randomUUID()
           getDb().query(`INSERT INTO skills(id, name, description, category, tools, triggers, preferred_agents, body, version, version_num, active) VALUES(?, ?, ?, ?, ?, ?, ?, ?, '0.0.1', 1, 1)`).run(id, name, description || "", category || "", tools || "", triggers || "", typeof preferred_agents === 'object' ? JSON.stringify(preferred_agents || []) : (preferred_agents || "[]"), bodyContent || "")
           return addCorsHeaders(Response.json({ success: true, id }), req)
         }
@@ -1017,7 +1015,7 @@ export async function startGateway(config: Config): Promise<void> {
           const body = await req.json().catch(() => ({}))
           const { name, description, content, is_default } = body
           if (!name || !content) return addCorsHeaders(Response.json({ success: false, error: "Missing name or content" }, { status: 400 }), req)
-          const id = randomUUID()
+          const id = crypto.randomUUID()
           getDb().query(`INSERT INTO ethics(id, name, description, content, is_default, enabled, active) VALUES(?, ?, ?, ?, ?, 1, 1)`).run(id, name, description || "", content, is_default ? 1 : 0)
           return addCorsHeaders(Response.json({ success: true, id }), req)
         }
@@ -1483,7 +1481,7 @@ export async function startGateway(config: Config): Promise<void> {
 
                 // Streaming: send tokens as they arrive
                 let streamedContent = "";
-                let messageId = crypto.randomUUID();
+                let messageId = crypto.crypto.randomUUID();
 
                 const response = await runner.generate({
                   provider: dbProvider as any,
@@ -1740,7 +1738,7 @@ export async function startGateway(config: Config): Promise<void> {
 
               // Streaming: send tokens as they arrive
               let streamedContent = "";
-              let messageId = crypto.randomUUID();
+              let messageId = crypto.crypto.randomUUID();
 
               const response = await runner.generate({
                 provider: dbProvider as any,
@@ -1917,7 +1915,7 @@ export async function startGateway(config: Config): Promise<void> {
         success: false,
         error: showErrors ? error.message : "Internal server error",
         ...(showErrors && { stack: error.stack }),
-        requestId: crypto.randomUUID(),
+        requestId: crypto.crypto.randomUUID(),
       }, { status: 500 });
     },
   });

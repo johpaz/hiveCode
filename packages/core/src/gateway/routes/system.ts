@@ -1,6 +1,5 @@
 import { getDb } from "../../storage/sqlite.ts"
 import { loadConfig } from "../../config/loader.ts"
-import { cpus } from "node:os"
 import pkg from "../../../../../package.json"
 
 const CURRENT_VERSION = pkg.version
@@ -248,7 +247,7 @@ export function getSystemStats(startTime: number) {
     },
     uptime: uptimeStr,
     connections: 0, // Placeholder
-    cores: cpus().length,
+    cores: navigator.hardwareConcurrency,
     recentMessages: 0, // Placeholder
   }
 }

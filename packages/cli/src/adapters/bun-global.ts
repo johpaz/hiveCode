@@ -5,7 +5,6 @@
  * Uses global npm-style installation with local filesystem paths.
  */
 
-import { spawn, execSync } from "node:child_process";
 import * as path from "node:path";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import type {
@@ -44,37 +43,22 @@ export class BunGlobalAdapter implements InstallationAdapter {
    * Check if Bun global installation is available
    */
   async detect(): Promise<boolean> {
-    try {
-      // Check if Bun is installed
-      execSync("bun --version", { stdio: "ignore" });
+    const bunCheck = Bun.spawnSync(["bun", "--version"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" })
+    if (bunCheck.exitCode !== 0) return false
 
-      // Check if hive is installed globally
-      try {
-        const output = execSync("bun which hive", {
-          encoding: "utf-8",
-          stdio: ["ignore", "pipe", "ignore"],
-        });
-
-        const hivePath = output.trim();
-        if (hivePath && existsSync(hivePath)) {
-          return true;
-        }
-      } catch {
-        // Try alternative detection
-        const output = execSync("bun pm ls -g", {
-          encoding: "utf-8",
-          stdio: ["ignore", "pipe", "ignore"],
-        });
-
-        if (output.includes("@johpaz/hive-agents") || output.includes("hive")) {
-          return true;
-        }
-      }
-
-      return false;
-    } catch {
-      return false;
+    const whichResult = Bun.spawnSync(["bun", "which", "hive"], { stdin: "ignore", stdout: "pipe", stderr: "ignore" })
+    if (whichResult.exitCode === 0) {
+      const hivePath = whichResult.stdout.toString().trim()
+      if (hivePath && existsSync(hivePath)) return true
     }
+
+    const lsResult = Bun.spawnSync(["bun", "pm", "ls", "-g"], { stdin: "ignore", stdout: "pipe", stderr: "ignore" })
+    if (lsResult.exitCode === 0) {
+      const output = lsResult.stdout.toString()
+      if (output.includes("@johpaz/hive-agents") || output.includes("hive")) return true
+    }
+
+    return false
   }
 
   /**
@@ -88,20 +72,14 @@ export class BunGlobalAdapter implements InstallationAdapter {
     let uiDir: string | null = null;
 
     // Check in dist directory relative to hive binary
-    try {
-      const hivePath = execSync("bun which hive", {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-
-      const distDir = path.dirname(hivePath);
-      const potentialUiDir = path.join(distDir, "ui");
-
+    const whichResult = Bun.spawnSync(["bun", "which", "hive"], { stdin: "ignore", stdout: "pipe", stderr: "ignore" })
+    if (whichResult.exitCode === 0) {
+      const hivePath = whichResult.stdout.toString().trim()
+      const distDir = path.dirname(hivePath)
+      const potentialUiDir = path.join(distDir, "ui")
       if (existsSync(potentialUiDir)) {
-        uiDir = potentialUiDir;
+        uiDir = potentialUiDir
       }
-    } catch {
-      // Binary location not found, will use embedded UI fallback
     }
 
     // Also check current working directory for development
@@ -146,25 +124,21 @@ export class BunGlobalAdapter implements InstallationAdapter {
         args.push("--daemon");
       }
 
-      const child = spawn("bun", args, {
-        stdio: "inherit",
-        detached: false,
+      const child = Bun.spawn(["bun", ...args], {
+        stdin:  "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
         env: mergeEnv(process.env, {
           HIVE_HOME: this.hiveDir,
         }),
       });
 
-      child.on("close", (code) => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new Error(`Bun hive exited with code ${code}`));
-        }
-      });
-
-      child.on("error", (error) => {
-        reject(error);
-      });
+      child.exited
+        .then((code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`Bun hive exited with code ${code}`));
+        })
+        .catch(reject);
     });
   }
 
@@ -197,7 +171,8 @@ export class BunGlobalAdapter implements InstallationAdapter {
       } else {
         // Try to kill by process name
         try {
-          execSync("pkill -f 'bun.*hive.*start'", { stdio: "ignore" });
+          const r = Bun.spawnSync(["pkill", "-f", "bun.*hive.*start"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" })
+          if (r.exitCode !== 0) throw new Error("not running")
           console.log("✅ Hive Gateway detenido");
         } catch {
           console.log("⚠️  Hive Gateway no está corriendo");
@@ -292,27 +267,20 @@ export class BunGlobalAdapter implements InstallationAdapter {
     const info: string[] = [];
 
     // Check Bun installation
-    try {
-      const version = execSync("bun --version", { encoding: "utf-8" }).trim();
-      info.push(`Bun: v${version}`);
-    } catch {
+    const bunVersionResult = Bun.spawnSync(["bun", "--version"], { stdin: "ignore", stdout: "pipe", stderr: "ignore" })
+    if (bunVersionResult.exitCode === 0) {
+      info.push(`Bun: v${bunVersionResult.stdout.toString().trim()}`);
+    } else {
       errors.push("Bun is not installed or not in PATH");
     }
 
     // Check global hive installation
-    try {
-      const hivePath = execSync("bun which hive", {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-
+    const bunWhichResult = Bun.spawnSync(["bun", "which", "hive"], { stdin: "ignore", stdout: "pipe", stderr: "ignore" })
+    if (bunWhichResult.exitCode === 0) {
+      const hivePath = bunWhichResult.stdout.toString().trim()
       if (hivePath && existsSync(hivePath)) {
         info.push(`Hive binary: ${hivePath}`);
-
-        // Check if UI directory exists
-        const distDir = path.dirname(hivePath);
-        const uiDir = path.join(distDir, "ui");
-
+        const uiDir = path.join(path.dirname(hivePath), "ui");
         if (existsSync(uiDir)) {
           info.push(`UI directory: ${uiDir}`);
         } else {
@@ -321,7 +289,7 @@ export class BunGlobalAdapter implements InstallationAdapter {
       } else {
         errors.push("Hive is not installed globally");
       }
-    } catch {
+    } else {
       errors.push("Hive is not installed globally (try: bun install -g @johpaz/hive-agents)");
     }
 

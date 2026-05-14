@@ -4,26 +4,37 @@ use ratatui::{
 };
 
 use crate::app::AppState;
-use crate::widgets::{command_popup, header, history, input, statusbar, welcome};
+use crate::widgets::{command_popup, header, history, input, mascot, statusbar, welcome};
 
 pub fn draw(frame: &mut Frame, state: &mut AppState) {
     let area = frame.area();
 
     if state.history.is_empty() {
-        // ── Welcome state: full screen for welcome widget ─────────────────
+        // ── Welcome state: content + input box + statusbar ────────────────
         let root = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Fill(1),   // welcome (includes inline input)
-                Constraint::Length(1), // statusbar
+                Constraint::Fill(1),      // welcome content
+                Constraint::Length(5),    // input box (more spacious)
+                Constraint::Length(1),    // statusbar
             ])
             .split(area);
 
         welcome::draw(frame, state, root[0]);
-        statusbar::draw(frame, state, root[1]);
+        input::draw(frame, state, root[1]);
+        statusbar::draw(frame, state, root[2]);
 
-        // Suggestion popup anchored to bottom of welcome area
-        command_popup::draw(frame, state, root[0]);
+        // Suggestion popup anchored above the input box
+        let popup_anchor = ratatui::layout::Rect {
+            x: root[1].x,
+            y: root[0].y,
+            width: root[1].width,
+            height: root[0].height + root[1].height,
+        };
+        command_popup::draw(frame, state, popup_anchor);
+
+        // Mascot in bottom-right corner (drawn last, on top)
+        mascot::draw(frame, state, area);
     } else {
         // ── Active session: header + history + input + statusbar ──────────
         let root = Layout::default()
@@ -31,7 +42,7 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
             .constraints([
                 Constraint::Length(3), // header
                 Constraint::Fill(1),   // history
-                Constraint::Length(3), // input
+                Constraint::Length(5), // input (more spacious)
                 Constraint::Length(1), // statusbar
             ])
             .split(area);
@@ -42,9 +53,9 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
         let status_area  = root[3];
 
         let footer_area = ratatui::layout::Rect {
-            x:      input_area.x,
-            y:      input_area.y,
-            width:  input_area.width,
+            x: input_area.x,
+            y: input_area.y,
+            width: input_area.width,
             height: input_area.height + status_area.height,
         };
 
@@ -53,5 +64,8 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
         input::draw(frame, state, input_area);
         statusbar::draw(frame, state, status_area);
         command_popup::draw(frame, state, footer_area);
+
+        // Mascot in bottom-right corner
+        mascot::draw(frame, state, area);
     }
 }

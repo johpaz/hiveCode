@@ -7,7 +7,8 @@ import { getExecutionMode, setExecutionMode } from "@johpaz/hivecode-core"
 import { CoordinatorManager } from "@johpaz/hivecode-code/workers/coordinator-manager"
 import { listenModeToggle, stopModeToggle } from "@johpaz/hivecode-code/modes/keyboard"
 
-export async function run(description?: string, flags: string[] = [], options?: { keyboard?: boolean }): Promise<void> {
+export async function run(description?: string, flags: string[] = [], options?: { keyboard?: boolean; exitOnError?: boolean }): Promise<void> {
+  const exitOnError = options?.exitOnError ?? true
 
   const approvalFlag = flags.includes("--approval") || flags.includes("-a")
   const mode = approvalFlag ? "approval" : "auto"
@@ -99,7 +100,8 @@ export async function run(description?: string, flags: string[] = [], options?: 
     hiveOutro(`Tarea completada${taskId ? ` · ID: ${taskId.slice(0, 8)}` : ""}`)
   } catch (err) {
     hiveOutro(`Error: ${(err as Error).message}`, "error")
-    process.exit(1)
+    if (exitOnError) process.exit(1)
+    else throw err
   } finally {
     await manager.stopAll()
     setExecutionMode(prevMode)

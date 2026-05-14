@@ -1,8 +1,8 @@
 use color_eyre::eyre::Result;
 use crossterm::{
     event::{
-        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent,
-        KeyModifiers, MouseEvent, MouseEventKind,
+        Event, EventStream, KeyCode, KeyEvent,
+        KeyModifiers,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -35,6 +35,17 @@ pub enum ReplMode {
     Plan,
     Approval,
     Auto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MascotState {
+    Welcome,      // \( ^•^)/  happy, wings up
+    Thinking,     // (~•~)     squinted eyes
+    Completed,    // (★•★)     star eyes
+    Error,        // (x•x)     X eyes, red
+    Idle,         // (-•-)     sleeping, gray
+    PlanMode,     // (o•o)     open eyes, observing
+    Approval,     // (?•?)     waiting for user decision
 }
 
 impl ReplMode {
@@ -171,6 +182,7 @@ pub struct AppState {
     pub active_phase: String,
     pub activity_status: String,
     pub popup_area: Option<Rect>,
+    pub mascot_state: MascotState,
 }
 
 impl Default for AppState {
@@ -203,11 +215,36 @@ impl Default for AppState {
             active_phase: String::new(),
             activity_status: "idle".to_string(),
             popup_area: None,
+            mascot_state: MascotState::Welcome,
         }
     }
 }
 
 impl AppState {
+    pub fn update_mascot_state(&mut self) {
+        self.mascot_state = if self.status_msg.contains("Error") || self.status_msg.contains("(×ᴗ×)") {
+            MascotState::Error
+        } else if self.activity_status == "idle" || self.active_coordinator.is_empty() {
+            if self.history.is_empty() {
+                MascotState::Welcome
+            } else if self.running {
+                // Just finished — show success briefly until next state update
+                MascotState::Completed
+            } else {
+                match self.mode {
+                    ReplMode::Plan => MascotState::PlanMode,
+                    _ => MascotState::Idle,
+                }
+            }
+        } else if self.activity_status == "thinking" || self.activity_status == "running" {
+            MascotState::Thinking
+        } else if self.activity_status == "waiting" {
+            MascotState::Approval
+        } else {
+            MascotState::Thinking
+        };
+    }
+
     pub fn apply_message(&mut self, msg: BunMessage) {
         match msg {
             BunMessage::Init {
@@ -233,6 +270,7 @@ impl AppState {
             BunMessage::Status { running, msg } => {
                 self.running = running;
                 self.status_msg = msg;
+                self.update_mascot_state();
             }
             BunMessage::StateUpdate { new_mode, new_provider, new_model } => {
                 if let Some(m) = new_mode {
@@ -280,6 +318,7 @@ impl AppState {
                 if !coordinator.is_empty() {
                     self.status_msg = format!("{} · {}", coordinator, status);
                 }
+                self.update_mascot_state();
             }
             // Handled in the main loop before apply_message is called
             BunMessage::Suspend | BunMessage::Resume => {}
@@ -418,48 +457,6 @@ impl AppState {
         }
     }
 
-    pub fn handle_mouse(&mut self, mouse: MouseEvent, ipc_tx: &Sender<TuiMessage>) {
-        // Only handle left-clicks (Down or Up) inside the popup
-        let is_left_click = matches!(
-            mouse.kind,
-            MouseEventKind::Down(crossterm::event::MouseButton::Left)
-                | MouseEventKind::Up(crossterm::event::MouseButton::Left)
-                | MouseEventKind::Drag(crossterm::event::MouseButton::Left)
-        );
-        if !is_left_click {
-            return;
-        }
-        let Some(area) = self.popup_area else { return };
-        let col = mouse.column;
-        let row = mouse.row;
-        if col < area.x || col >= area.x + area.width || row < area.y || row >= area.y + area.height {
-            // Click outside popup — close it
-            self.show_popup = false;
-            self.suggestions.clear();
-            self.popup_sel = 0;
-            return;
-        }
-        // Click inside popup — figure out which item (accounting for border)
-        let item_row = row.saturating_sub(area.y + 1); // +1 for top border
-        let idx = item_row as usize;
-        if idx < self.suggestions.len() {
-            self.popup_sel = idx;
-            if let Some(cmd) = self.suggestions.get(self.popup_sel).cloned() {
-                self.show_popup = false;
-                self.suggestions.clear();
-                self.input.set(&cmd);
-                self.history.push(HistoryEntry {
-                    role: Role::User,
-                    content: cmd.clone(),
-                });
-                self.input.clear();
-                self.running = true;
-                self.status_msg = "Procesando...".to_string();
-                let _ = ipc_tx.try_send(TuiMessage::Submit { input: cmd });
-            }
-        }
-    }
-
     pub fn fmt_tokens(&self) -> String {
         let n = self.token_count;
         if n < 1_000 {
@@ -477,7 +474,7 @@ impl AppState {
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(out, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(out);
     Ok(Terminal::new(backend)?)
 }
@@ -487,7 +484,6 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) 
     let _ = execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
     );
     let _ = terminal.show_cursor();
 }
@@ -502,7 +498,6 @@ pub async fn run(screen: &str) -> Result<()> {
         let _ = execute!(
             stdout(),
             LeaveAlternateScreen,
-            DisableMouseCapture
         );
         default_panic(info);
     }));
@@ -560,8 +555,8 @@ pub async fn run(screen: &str) -> Result<()> {
                     Some(Ok(Event::Key(key))) => {
                         state.handle_key(key, &ipc_tx);
                     }
-                    Some(Ok(Event::Mouse(mouse))) => {
-                        state.handle_mouse(mouse, &ipc_tx);
+                    Some(Ok(Event::Mouse(_mouse))) => {
+                        // Mouse disabled — Antigravity terminal doesn't support it well
                     }
                     Some(Err(_)) | None => break,
                     _ => {}

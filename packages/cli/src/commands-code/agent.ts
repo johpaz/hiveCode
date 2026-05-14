@@ -12,7 +12,6 @@ import {
   hiveNote, hiveText, isCancel,
 } from "@johpaz/hivecode-ui"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
-import { spawn } from "child_process"
 
 export async function agentList(args: string[] = []): Promise<void> {
   hiveIntro("hivecode · Agentes")
@@ -105,9 +104,8 @@ export async function agentEdit(name?: string): Promise<void> {
 
   // Open in $EDITOR
   const editor = process.env.EDITOR || "nano"
-  const proc = spawn(editor, [tmpFile], { stdio: "inherit" })
-
-  await new Promise((resolve) => proc.on("close", resolve))
+  const proc = Bun.spawn([editor, tmpFile], { stdin: "inherit", stdout: "inherit", stderr: "inherit" })
+  await proc.exited
 
   // Read back
   const newPrompt = await Bun.file(tmpFile).text()

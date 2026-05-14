@@ -7,7 +7,8 @@ import { getExecutionMode, setExecutionMode } from "@johpaz/hivecode-core"
 import { CoordinatorManager } from "@johpaz/hivecode-code/workers/coordinator-manager"
 import { listenModeToggle, stopModeToggle } from "@johpaz/hivecode-code/modes/keyboard"
 
-export async function plan(description?: string, options?: { keyboard?: boolean }): Promise<void> {
+export async function plan(description?: string, options?: { keyboard?: boolean; exitOnError?: boolean }): Promise<void> {
+  const exitOnError = options?.exitOnError ?? true
 
   hiveIntro("hivecode · Plan Mode")
   hiveModeBar("plan")
@@ -45,7 +46,8 @@ export async function plan(description?: string, options?: { keyboard?: boolean 
   } catch (err) {
     spinner.stop(`Error: ${(err as Error).message}`, "error")
     hiveOutro("Plan fallido", "error")
-    process.exit(1)
+    if (exitOnError) process.exit(1)
+    else throw err
   } finally {
     await manager.stopAll()
     setExecutionMode(prevMode)

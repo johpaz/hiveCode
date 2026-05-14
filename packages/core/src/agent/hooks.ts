@@ -1,6 +1,5 @@
 import type { Config } from "../config/loader.ts";
 import { logger } from "../utils/logger.ts";
-import * as childProcess from "node:child_process";
 
 export type HookName =
   | "before_model_resolve"
@@ -114,46 +113,24 @@ export class HookPipeline {
     scriptPath: string,
     context: HookContext
   ): Promise<Record<string, unknown> | void> {
-    return new Promise((resolve, reject) => {
-      const payload = JSON.stringify(context);
+    const payload = JSON.stringify(context);
 
-      const proc = childProcess.spawn(scriptPath, [], {
-        stdio: ["pipe", "pipe", "pipe"],
-        shell: true,
-      }) as any;
-
-      let stdout = "";
-      let stderr = "";
-
-      proc.stdout?.on("data", (data) => {
-        stdout += data.toString();
-      });
-
-      proc.stderr?.on("data", (data) => {
-        stderr += data.toString();
-      });
-
-      proc.on("close", (code) => {
-        if (code === 0 && stdout) {
-          try {
-            resolve(JSON.parse(stdout));
-          } catch {
-            resolve();
-          }
-        } else if (stderr) {
-          reject(new Error(stderr));
-        } else {
-          resolve();
-        }
-      });
-
-      proc.on("error", (error) => {
-        reject(error);
-      });
-
-      proc.stdin?.write(payload);
-      proc.stdin?.end();
+    const proc = Bun.spawn(["sh", "-c", scriptPath], {
+      stdin:  new Response(payload).body ?? "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
     });
+
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const code = await proc.exited;
+
+    if (code === 0 && stdout) {
+      try { return JSON.parse(stdout) } catch { return }
+    }
+    if (stderr) throw new Error(stderr)
   }
 
   hasHandlers(name: HookName): boolean {

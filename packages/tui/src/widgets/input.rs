@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{AppState, AMBER, DIM};
+use crate::app::{AppState, MascotState, AMBER, DIM, GREEN, RED};
 
 pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
     let (border_color, title_text) = if state.running {
@@ -48,13 +48,34 @@ pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
         Style::default().fg(DIM)
     };
 
-    let mascot = if state.running { " (~ᴗ~) " } else { " (?ᴗ?) " };
+    // Mascot face based on state — positioned at the RIGHT of the input
+    let (mascot_face, mascot_color) = match state.mascot_state {
+        MascotState::Welcome   => ("\\(^•^)/", AMBER),
+        MascotState::Thinking  => ("(~•~)",    AMBER),
+        MascotState::Completed => ("(★•★)",    GREEN),
+        MascotState::Error     => ("(x•x)",    RED),
+        MascotState::Idle      => ("(-•-)",    DIM),
+        MascotState::PlanMode  => ("(o•o)",    ratatui::style::Color::Rgb(196, 181, 253)),
+        MascotState::Approval  => ("(?•?)",    ratatui::style::Color::Rgb(252, 211, 77)),
+    };
+    let mascot = format!(" {} ", mascot_face);
+    let mascot_style = Style::default()
+        .fg(mascot_color)
+        .add_modifier(Modifier::BOLD);
+
+    // Calculate inner width (minus borders) to right-align mascot
+    let inner_width = (area.width as usize).saturating_sub(2);
+    let text_width = before.chars().count() + 1 + after.chars().count();
+    let mascot_width = mascot.chars().count();
+    let padding = inner_width.saturating_sub(text_width + mascot_width);
+    let spaces = " ".repeat(padding);
 
     let line = Line::from(vec![
-        Span::styled(mascot, Style::default().fg(if state.running { DIM } else { AMBER })),
         Span::raw(before),
         Span::styled(at, cursor_style),
         Span::raw(after),
+        Span::raw(spaces),
+        Span::styled(mascot, mascot_style),
     ]);
 
     let paragraph = Paragraph::new(line).block(block);

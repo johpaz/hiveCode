@@ -1,12 +1,12 @@
 import * as path from "node:path"
-import { spawn, type ChildProcess } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import fs, { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { getHiveDir } from "@johpaz/hivecode-core/config/loader"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import {
   isCancel, hiveSelect, hiveNote, hiveOutro, hiveSpinner,
   runProviderSetupWizard,
+  runTelegramConnectWizard,
 } from "@johpaz/hivecode-ui"
 import { loadInitialState, saveMode } from "./repl-state"
 import type { ReplMode } from "./repl-state"
@@ -20,7 +20,7 @@ const VERSION = "1.0.0"
 
 // ─── Gateway lifecycle ────────────────────────────────────────────────────────
 
-let _gatewayChild: ChildProcess | null = null
+let _gatewayChild: ReturnType<typeof Bun.spawn> | null = null
 
 function isGatewayRunning(): boolean {
   try {
@@ -53,19 +53,19 @@ async function ensureGateway(): Promise<void> {
   const spinner = hiveSpinner("default")
   spinner.start("Iniciando Gateway...")
 
-  _gatewayChild = spawn(
-    process.execPath,
-    [process.argv[1] || "", "start", "--skip-check"],
+  _gatewayChild = Bun.spawn(
+    [process.execPath, process.argv[1] || "", "start", "--skip-check"],
     {
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdin:  "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
       env: { ...process.env, HIVE_GATEWAY_CHILD: "1" },
     }
   )
 
   const cleanup = () => {
-    if (_gatewayChild?.pid) {
-      try { process.kill(-_gatewayChild.pid, "SIGTERM") } catch { _gatewayChild?.kill("SIGTERM") }
+    if (_gatewayChild) {
+      try { _gatewayChild.kill() } catch { /* ignore */ }
     }
   }
   process.once("SIGINT",  () => { cleanup(); process.exit(0) })
@@ -188,12 +188,12 @@ async function executeTask(
 
   try {
     if (mode === "plan") {
-      await runPlan(task, { keyboard: false })
+      await runPlan(task, { keyboard: false, exitOnError: false })
     } else if (mode === "auto") {
-      await runTask(task, [], { keyboard: false })
+      await runTask(task, [], { keyboard: false, exitOnError: false })
     } else {
       // approval: plan → pedir confirmación → run
-      await runPlan(task, { keyboard: false })
+      await runPlan(task, { keyboard: false, exitOnError: false })
 
       let approval: "yes" | "no" = "no"
       if (options?.suspend && options?.resume) {
@@ -222,7 +222,7 @@ async function executeTask(
       }
 
       if (approval === "yes") {
-        await runTask(task, [], { keyboard: false })
+        await runTask(task, [], { keyboard: false, exitOnError: false })
       }
     }
   } finally {
@@ -242,6 +242,7 @@ async function handleInternalCommand(
   currentMode: ReplMode,
   provider: string,
   model: string,
+  ui?: import("@johpaz/hivecode-code/coordinator/command-parser").UiCallbacks,
 ): Promise<{ output: string; newMode?: ReplMode; newProvider?: string; newModel?: string; quickMenu?: MenuItem[] }> {
   const db = getDb()
   const ctx = getCtx(db)
@@ -251,7 +252,7 @@ async function handleInternalCommand(
     activeMode: currentMode,
     activeProvider: provider,
     activeModel: model,
-  })
+  }, ui)
 
   return {
     output:      result.output ?? "",
@@ -300,6 +301,44 @@ export async function repl(): Promise<void> {
       resume: null,
     }
 
+    // Silence console logs while TUI owns the terminal
+    logger.setConsole(false)
+
+    // Redirect stdout/stderr to a log file so nothing breaks the TUI
+    const tuiLogPath = path.join(getHiveDir(), "logs", "tui-session.log")
+    try { mkdirSync(path.dirname(tuiLogPath), { recursive: true }) } catch { /* ignore */ }
+    const tuiLogFd = fs.openSync(tuiLogPath, "a")
+    const origStdoutWrite = process.stdout.write.bind(process.stdout)
+    const origStderrWrite = process.stderr.write.bind(process.stderr)
+    const origConsoleLog   = console.log
+    const origConsoleWarn  = console.warn
+    const origConsoleError = console.error
+    const origConsoleInfo  = console.info
+    const origConsoleDebug = console.debug
+    const origConsoleTrace = console.trace
+    const writeLog = (chunk: any) => {
+      try {
+        const text = typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk)
+        fs.writeSync(tuiLogFd, text)
+      } catch {
+        // Silently ignore write errors
+      }
+    }
+    process.stdout.write = ((chunk: any, _encoding?: any, _callback?: any) => {
+      writeLog(chunk)
+      return true
+    }) as any
+    process.stderr.write = ((chunk: any, _encoding?: any, _callback?: any) => {
+      writeLog(chunk)
+      return true
+    }) as any
+    console.log   = (...args: any[]) => { writeLog(args.map(a => String(a)).join(" ") + "\n") }
+    console.warn  = (...args: any[]) => { writeLog(args.map(a => String(a)).join(" ") + "\n") }
+    console.error = (...args: any[]) => { writeLog(args.map(a => String(a)).join(" ") + "\n") }
+    console.info  = (...args: any[]) => { writeLog(args.map(a => String(a)).join(" ") + "\n") }
+    console.debug = (...args: any[]) => { writeLog(args.map(a => String(a)).join(" ") + "\n") }
+    console.trace = (...args: any[]) => { writeLog(args.map(a => String(a)).join(" ") + "\n") }
+
     await launchTui({
       initialMode:     init.mode,
       initialProvider: init.provider,
@@ -319,6 +358,17 @@ export async function repl(): Promise<void> {
       },
 
       onExit() {
+        // Restore stdout/stderr and console
+        process.stdout.write = origStdoutWrite
+        process.stderr.write = origStderrWrite
+        console.log   = origConsoleLog
+        console.warn  = origConsoleWarn
+        console.error = origConsoleError
+        console.info  = origConsoleInfo
+        console.debug = origConsoleDebug
+        console.trace = origConsoleTrace
+        try { fs.closeSync(tuiLogFd) } catch { /* ignore */ }
+        logger.setConsole(true)
         logger.info("[repl] Sesión terminada")
       },
 
@@ -328,6 +378,12 @@ export async function repl(): Promise<void> {
         if (input.startsWith("/")) {
           const result = await handleInternalCommand(
             input, currentMode, currentProvider, currentModel,
+            {
+              suspendTui:  async () => { await tuiControl.suspend!() },
+              resumeTui:   () => { tuiControl.resume!() },
+              runProviderSetupWizard,
+              runTelegramConnectWizard,
+            },
           )
           if (result.newMode)     currentMode     = result.newMode
           if (result.newProvider) currentProvider = result.newProvider

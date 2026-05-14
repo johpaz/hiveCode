@@ -8,7 +8,6 @@
 
 import * as path from "node:path"
 import * as fs from "node:fs"
-import { createServer, type Server, type Socket } from "node:net"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { runProviderSetupWizard } from "@johpaz/hivecode-ui"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
@@ -93,25 +92,17 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
   try { fs.unlinkSync(socketPath) } catch { /* ignore */ }
 
   return new Promise((resolve, reject) => {
-    let tuiSocket: Socket | null = null
-    let server:    Server | null = null
-
     // Resolves when Rust confirms it has released the TTY
     let suspendedResolve: (() => void) | null = null
+    let tuiSocket: import("bun").Socket<undefined> | null = null
+    let buf = ""
 
     const send = (msg: BunMessage) => {
-      if (tuiSocket?.writable) {
-        tuiSocket.write(JSON.stringify(msg) + "\n")
-      }
+      if (tuiSocket) tuiSocket.write(JSON.stringify(msg) + "\n")
     }
 
-    // Suspend the TUI and wait for Rust to release the TTY
-    const suspendTui = (): Promise<void> => {
-      return new Promise((res) => {
-        suspendedResolve = res
-        send({ type: "suspend" })
-      })
-    }
+    const suspendTui = (): Promise<void> =>
+      new Promise((res) => { suspendedResolve = res; send({ type: "suspend" }) })
 
     const resumeTui = () => send({ type: "resume" })
 
@@ -120,90 +111,78 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
       callbacks.tuiControl.resume = resumeTui
     }
 
-    // ── IPC server ──────────────────────────────────────────────────────────
-    server = createServer((socket) => {
-      tuiSocket = socket
-      let buf = ""
+    // ── IPC server (Bun native unix socket) ────────────────────────────────
+    let server: ReturnType<typeof Bun.listen> | null = null
+    try {
+      server = Bun.listen<undefined>({
+        unix: socketPath,
+        socket: {
+          open(s) {
+            tuiSocket = s
+          },
+          data(_s, chunk) {
+            buf += Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk)
+            const lines = buf.split("\n")
+            buf = lines.pop() ?? ""
 
-      socket.on("data", (chunk) => {
-        buf += chunk.toString()
-        const lines = buf.split("\n")
-        buf = lines.pop() ?? ""
+            for (const line of lines) {
+              const trimmed = line.trim()
+              if (!trimmed) continue
+              try {
+                const msg = JSON.parse(trimmed) as TuiMessage
 
-        for (const line of lines) {
-          const trimmed = line.trim()
-          if (!trimmed) continue
-          try {
-            const msg = JSON.parse(trimmed) as TuiMessage
+                if (msg.type === "suspended") {
+                  suspendedResolve?.()
+                  suspendedResolve = null
+                  continue
+                }
 
-            // Handle suspend confirmation inline (not via async handler)
-            if (msg.type === "suspended") {
-              suspendedResolve?.()
-              suspendedResolve = null
-              continue
+                handleTuiMessage(msg, send, suspendTui, resumeTui, callbacks).catch((err) => {
+                  logger.error("[tui-ipc] handler error", err)
+                  send({ type: "history_append", role: "system", content: `(×ᴗ×) ${(err as Error).message}` })
+                  send({ type: "status", running: false, msg: "Error" })
+                })
+              } catch {
+                logger.warn("[tui-ipc] invalid JSON:", trimmed)
+              }
             }
-
-            handleTuiMessage(msg, send, suspendTui, resumeTui, callbacks).catch((err) => {
-              logger.error("[tui-ipc] handler error", err)
-              send({
-                type: "history_append",
-                role: "system",
-                content: `(×ᴗ×) ${(err as Error).message}`,
-              })
-              send({ type: "status", running: false, msg: "Error" })
-            })
-          } catch {
-            logger.warn("[tui-ipc] invalid JSON:", trimmed)
-          }
-        }
+          },
+          close(_s) {
+            tuiSocket = null
+          },
+          error(_s, err) {
+            logger.warn("[tui-ipc] socket error:", (err as Error).message)
+          },
+        },
       })
-
-      socket.on("close", () => {
-        tuiSocket = null
-      })
-
-      socket.on("error", (err) => {
-        logger.warn("[tui-ipc] socket error:", err.message)
-      })
-    })
-
-    server.listen({ path: socketPath }, () => {
-      // Launch the TUI binary — inherits TTY so it can take over the screen
-      const proc = Bun.spawn([binPath], {
-        stdin:  "inherit",
-        stdout: "inherit",
-        stderr: "pipe",
-        env:    { ...process.env, HIVECODE_IPC: socketPath },
-      })
-
-      // Pipe Rust stderr to our logger (debug info only)
-      if (proc.stderr) {
-        const reader = proc.stderr.getReader()
-        const pump = async () => {
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-            if (process.env.HIVE_DEV) {
-              process.stderr.write(value)
-            }
-          }
-        }
-        pump().catch(() => {})
-      }
-
-      // When TUI process exits, tear everything down
-      proc.exited.then(() => {
-        callbacks.onExit?.()
-        server?.close()
-        try { fs.unlinkSync(socketPath) } catch { /* ignore */ }
-        resolve()
-      }).catch(reject)
-    })
-
-    server.on("error", (err) => {
-      logger.error("[tui-ipc] server error:", err)
+    } catch (err) {
       reject(err)
+      return
+    }
+
+    // ── Launch TUI binary (Bun.listen is synchronous — socket ready now) ───
+    const proc = Bun.spawn([binPath], {
+      stdin:  "inherit",
+      stdout: "inherit",
+      stderr: "pipe",
+      env:    { ...process.env, HIVECODE_IPC: socketPath },
     })
+
+    if (proc.stderr) {
+      const reader = proc.stderr.getReader()
+      ;(async () => {
+        for await (const chunk of { [Symbol.asyncIterator]: () => ({ next: () => reader.read() }) }) {
+          if (process.env.HIVE_DEV) process.stderr.write(chunk)
+        }
+      })().catch(() => {})
+    }
+
+    proc.exited.then(() => {
+      callbacks.onExit?.()
+      server?.stop(true)
+      try { fs.unlinkSync(socketPath) } catch { /* ignore */ }
+      resolve()
+    }).catch(reject)
   })
 }
 

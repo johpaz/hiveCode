@@ -6,7 +6,6 @@
  * Also handles Docker container deployments (hive-server in Alpine).
  */
 
-import { spawn, execSync } from "node:child_process";
 import * as path from "node:path";
 import { existsSync, readFileSync, unlinkSync, chmodSync } from "node:fs";
 import type {
@@ -222,26 +221,22 @@ export class BinaryAdapter implements InstallationAdapter {
       const executable = isBunScript ? process.execPath : this.binaryPath;
       const spawnArgs = isBunScript ? [this.binaryPath, ...args] : args;
 
-      const child = spawn(executable, spawnArgs, {
-        stdio: "inherit",
-        detached: false,
+      const child = Bun.spawn([executable, ...spawnArgs], {
+        stdin:  "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
         env: mergeEnv(process.env, {
           HIVE_HOME: this.hiveDir,
           HIVE_GATEWAY_CHILD: "0",
         }),
       });
 
-      child.on("close", (code) => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new Error(`Hive binary exited with code ${code}`));
-        }
-      });
-
-      child.on("error", (error) => {
-        reject(error);
-      });
+      child.exited
+        .then((code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`Hive binary exited with code ${code}`));
+        })
+        .catch(reject);
     });
   }
 
@@ -275,7 +270,8 @@ export class BinaryAdapter implements InstallationAdapter {
         // Try to kill by process name
         try {
           const pattern = process.platform === "win32" ? "hive.exe" : "hive";
-          execSync(`pkill -f "${pattern}"`, { stdio: "ignore" });
+          const r = Bun.spawnSync(["sh", "-c", `pkill -f "${pattern}"`], { stdin: "ignore", stdout: "ignore", stderr: "ignore" })
+          if (r.exitCode !== 0) throw new Error("not running")
           console.log("✅ Hive Gateway detenido");
         } catch {
           console.log("⚠️  Hive Gateway no está corriendo");
@@ -438,10 +434,10 @@ export class BinaryAdapter implements InstallationAdapter {
 
     // Check binary permissions (Unix-like systems)
     if (process.platform !== "win32" && existsSync(this.binaryPath)) {
-      try {
-        execSync(`test -x "${this.binaryPath}"`, { stdio: "ignore" });
+      const r = Bun.spawnSync(["sh", "-c", `test -x "${this.binaryPath}"`], { stdin: "ignore", stdout: "ignore", stderr: "ignore" })
+      if (r.exitCode === 0) {
         info.push("Binary is executable");
-      } catch {
+      } else {
         warnings.push("Binary may not be executable (try: chmod +x <binary>)");
       }
     }

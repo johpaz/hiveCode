@@ -9,7 +9,6 @@
 import { loadConfig, startGateway, logger, getHiveDir, initializeDatabase } from "@johpaz/hivecode-core";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, openSync } from "node:fs";
 import * as path from "node:path";
-import { spawn, ChildProcess } from "child_process";
 
 // Import adapter system
 import {
@@ -26,7 +25,7 @@ import {
   getDistDir,
 } from "../adapters";
 
-const children: ChildProcess[] = [];
+const children: ReturnType<typeof Bun.spawn>[] = [];
 
 /**
  * Get the active installation adapter
@@ -57,14 +56,28 @@ function cleanup() {
   if (children.length === 0) return;
   console.log("\n🧹 Limpiando procesos hijos...");
   for (const child of children) {
-    if (child.pid) {
-      try {
-        process.kill(-child.pid, "SIGTERM");
-      } catch {
-        child.kill("SIGTERM");
-      }
-    }
+    try { child.kill() } catch { /* ignore */ }
   }
+}
+
+function pipeStreamWithPrefix(stream: ReadableStream<Uint8Array> | null, log: (line: string) => void): void {
+  if (!stream) return
+  ;(async () => {
+    const reader = stream.getReader()
+    let buf = ""
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += Buffer.from(value).toString()
+        const lines = buf.split("\n")
+        buf = lines.pop() ?? ""
+        for (const line of lines) {
+          if (line.trim()) log(line)
+        }
+      }
+    } catch { /* stream closed */ }
+  })()
 }
 
 // Signal handlers
@@ -199,9 +212,11 @@ export async function start(flags: string[]): Promise<void> {
   if (daemon) {
     ensureLogDir();
     const logFile = getLogFile();
-    const child = spawn(process.execPath, [process.argv[1] || "", "start", "--skip-check"], {
-      detached: true,
-      stdio: ["ignore", openSync(logFile, "a"), openSync(logFile, "a")],
+    const logFd = openSync(logFile, "a")
+    const child = Bun.spawn([process.execPath, process.argv[1] || "", "start", "--skip-check"], {
+      stdin:  "ignore",
+      stdout: logFd,
+      stderr: logFd,
       env: { ...process.env, HIVE_GATEWAY_CHILD: "1" },
     });
     child.unref();
@@ -238,39 +253,25 @@ async function handleDevMode(
   }
 
   // Spawn Gateway child process
-  const spawnGateway = (): ReturnType<typeof spawn> => {
-    const gw = spawn(process.execPath, [process.argv[1] || "", "start", "--skip-check"], {
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
+  const spawnGateway = (): ReturnType<typeof Bun.spawn> => {
+    const gw = Bun.spawn([process.execPath, process.argv[1] || "", "start", "--skip-check"], {
+      stdin:  "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
       env: { ...process.env, HIVE_DEV: "true", HIVE_GATEWAY_CHILD: "1" },
     });
 
-    gw.stdout?.on("data", (data) => {
-      const lines = data.toString().split("\n");
-      for (const line of lines) {
-        if (line.trim()) console.log(`[Gateway] ${line}`);
-      }
-    });
+    pipeStreamWithPrefix(gw.stdout, (line) => console.log(`[Gateway] ${line}`))
+    pipeStreamWithPrefix(gw.stderr, (line) => console.error(`[Gateway] ${line}`))
 
-    gw.stderr?.on("data", (data) => {
-      const lines = data.toString().split("\n");
-      for (const line of lines) {
-        if (line.trim()) console.error(`[Gateway] ${line}`);
-      }
-    });
-
-    gw.on("error", (error) => {
-      console.error(`❌ Error iniciando Gateway: ${error.message}`);
-    });
-
-    gw.on("exit", (code) => {
+    gw.exited.then((code) => {
       if (code === 0) {
         console.log("[Gateway] Reiniciando tras setup...");
         const newGw = spawnGateway();
         const idx = children.indexOf(gw);
         if (idx !== -1) children.splice(idx, 1, newGw);
       }
-    });
+    }).catch(() => { /* ignore spawn errors */ });
 
     if (!daemon) {
       children.push(gw);
@@ -327,57 +328,38 @@ async function handleProductionMode(
   }
 
   // Spawn Gateway child process
-  const spawnGatewayProd = (): ReturnType<typeof spawn> => {
+  const spawnGatewayProd = (): ReturnType<typeof Bun.spawn> => {
     const scriptPath = process.argv[1] || "";
     const isDockerContainer = process.env.HIVE_UI_DIR === "/app/ui";
     const isBunScript = scriptPath.endsWith(".js") || scriptPath.endsWith(".ts");
 
-    let command: string;
-    let args: string[];
-
+    let cmd: string[];
     if (isDockerContainer) {
-      command = "/app/hive-server";
-      args = ["start", "--skip-check"];
+      cmd = ["/app/hive-server", "start", "--skip-check"];
     } else if (isBunScript) {
-      command = process.execPath;
-      args = [scriptPath, "start", "--skip-check"];
+      cmd = [process.execPath, scriptPath, "start", "--skip-check"];
     } else {
-      command = process.execPath;
-      args = ["start", "--skip-check"];
+      cmd = [process.execPath, "start", "--skip-check"];
     }
 
-    const gw = spawn(command, args, {
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
+    const gw = Bun.spawn(cmd, {
+      stdin:  "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
       env: { ...process.env, HIVE_GATEWAY_CHILD: "1", NO_BROWSER: "1", ...(getDistDir() ? { HIVE_DIST_DIR: getDistDir()! } : {}) },
     });
 
-    gw.stdout?.on("data", (data) => {
-      const lines = data.toString().split("\n");
-      for (const line of lines) {
-        if (line.trim()) console.log(`[Gateway] ${line}`);
-      }
-    });
+    pipeStreamWithPrefix(gw.stdout, (line) => console.log(`[Gateway] ${line}`))
+    pipeStreamWithPrefix(gw.stderr, (line) => console.error(`[Gateway] ${line}`))
 
-    gw.stderr?.on("data", (data) => {
-      const lines = data.toString().split("\n");
-      for (const line of lines) {
-        if (line.trim()) console.error(`[Gateway] ${line}`);
-      }
-    });
-
-    gw.on("error", (error) => {
-      console.error(`❌ Error iniciando Gateway: ${error.message}`);
-    });
-
-    gw.on("exit", (code) => {
+    gw.exited.then((code) => {
       if (code === 0) {
         console.log("[Gateway] Reiniciando tras setup...");
         const newGw = spawnGatewayProd();
         const idx = children.indexOf(gw);
         if (idx !== -1) children.splice(idx, 1, newGw);
       }
-    });
+    }).catch(() => { /* ignore spawn errors */ });
 
     children.push(gw);
     return gw;

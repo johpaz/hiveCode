@@ -10,41 +10,74 @@ use crate::app::{
     AppState, ReplMode, AMBER, AMBER_DIM, BLUE, CYAN, DIM, GREEN, PURPLE, RED, SECONDARY,
 };
 
-// ASCII bee — 10 lines × 28 display chars
-const BEE: [&str; 10] = [
-    "        ░░░░    ░░░░        ",
-    "      ░░░░░░░░░░░░░░░░      ",
-    "    ░░  ░░░░░░░░░░░░  ░░    ",
-    "    ░░░░░░  ████  ░░░░░░    ",
-    "    ░░░░░░  ████  ░░░░░░    ",
-    "      ░░░░░░░░░░░░░░░░      ",
-    "   ░░  ░░░░░░░░░░░░░░  ░░   ",
-    "   ░░░░░░░░░░░░░░░░░░░░░░   ",
-    "    ████░░░░░░░░░░░░████    ",
-    "      ██████████████████      ",
-];
+// ASCII bee — 12 lines × 28 display chars
+//
+// Structure: antennae (0-2) · head (3) · wings+thorax (4-6) · abdomen (7-10) · stinger (11)
+// Wings use ▒ in CYAN to visually separate from amber body (░/█).
 
 fn bee_line<'a>(i: usize, state: &'a AppState) -> Line<'a> {
-    let bee_span = Span::styled(BEE[i], Style::default().fg(AMBER).add_modifier(Modifier::BOLD));
+    let amber = Style::default().fg(AMBER).add_modifier(Modifier::BOLD);
+    let dim   = Style::default().fg(DIM);
+    let wing  = Style::default().fg(CYAN);
+
+    // Each match arm totals exactly 28 display chars.
+    let bee_spans: Vec<Span<'a>> = match i {
+        // ── antennae (diverge upward, converge to head) ────────────────────
+        0 => vec![Span::styled("        \\          /        ", dim)],
+        1 => vec![Span::styled("         \\        /         ", dim)],
+        2 => vec![Span::styled("          \\      /          ", dim)],
+        // ── head ───────────────────────────────────────────────────────────
+        3 => vec![
+            Span::styled("          ", dim),
+            Span::styled("(", amber),
+            Span::styled(" o  o ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(")", amber),
+            Span::styled("          ", dim),
+        ],
+        // ── wings (▒ cyan) flanking thorax ─────────────────────────────────
+        4 => vec![
+            Span::styled("   ", dim),
+            Span::styled("▒▒▒▒▒", wing),
+            Span::styled(" ░░░░░░░░░░ ", amber),
+            Span::styled("▒▒▒▒▒", wing),
+            Span::styled("   ", dim),
+        ],
+        5 => vec![
+            Span::styled("   ", dim),
+            Span::styled("▒▒▒▒▒", wing),
+            Span::styled(" ░░██████░░ ", amber),
+            Span::styled("▒▒▒▒▒", wing),
+            Span::styled("   ", dim),
+        ],
+        6 => vec![
+            Span::styled("   ", dim),
+            Span::styled("▒▒▒▒▒", wing),
+            Span::styled(" ░░░░░░░░░░ ", amber),
+            Span::styled("▒▒▒▒▒", wing),
+            Span::styled("   ", dim),
+        ],
+        // ── abdomen (alternating amber / dark stripes, tapering) ───────────
+        7  => vec![Span::styled("         ░░██████░░         ", amber)],
+        8  => vec![Span::styled("         ░░░░░░░░░░         ", amber)],
+        9  => vec![Span::styled("          ░░░░░░░░          ", amber)],
+        10 => vec![Span::styled("           ░░░░░░           ", amber)],
+        // ── stinger ────────────────────────────────────────────────────────
+        11 => vec![Span::styled("            ▼▼▼▼            ", amber)],
+        _  => vec![],
+    };
 
     let side: Vec<Span<'a>> = match i {
-        2 => vec![
-            Span::styled("  hivecode", Style::default().fg(ratatui::style::Color::White).add_modifier(Modifier::BOLD)),
+        3 => vec![
+            Span::styled("  hivecode", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             Span::styled(format!("  v{}", state.version), Style::default().fg(DIM)),
         ],
-        3 => vec![Span::styled(
-            "  Gateway de agentes de código",
-            Style::default().fg(DIM),
-        )],
-        4 => vec![Span::styled(
-            "  local-first · Bun runtime",
-            Style::default().fg(DIM),
-        )],
-        5 => vec![Span::styled("  @johpaz", Style::default().fg(DIM))],
+        4 => vec![Span::styled("  Gateway de agentes de código", Style::default().fg(DIM))],
+        5 => vec![Span::styled("  local-first · Bun runtime", Style::default().fg(DIM))],
+        6 => vec![Span::styled("  @johpaz", Style::default().fg(DIM))],
         _ => vec![],
     };
 
-    let mut spans = vec![bee_span];
+    let mut spans = bee_spans;
     spans.extend(side);
     Line::from(spans)
 }
@@ -108,47 +141,9 @@ fn sep_line() -> Line<'static> {
     )])
 }
 
-fn input_line(state: &AppState) -> Line<'_> {
-    let value = state.input.value();
-    let cursor = state.input.cursor;
-
-    let cursor_style = if state.cursor_visible {
-        Style::default()
-            .fg(Color::Black)
-            .bg(AMBER)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(DIM)
-    };
-
-    if value.is_empty() {
-        // Placeholder + blinking block cursor
-        return Line::from(vec![
-            Span::styled("  ⬡  ", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-            Span::styled("¿Qué quieres construir?  ", Style::default().fg(DIM)),
-            Span::styled(" ", cursor_style),
-        ]);
-    }
-
-    let chars: Vec<char> = value.chars().collect();
-    let before: String = chars[..cursor].iter().collect();
-    let (at, after) = if cursor < chars.len() {
-        (chars[cursor].to_string(), chars[cursor + 1..].iter().collect::<String>())
-    } else {
-        (" ".to_string(), String::new())
-    };
-
-    Line::from(vec![
-        Span::styled("  ⬡  ", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-        Span::raw(before),
-        Span::styled(at, cursor_style),
-        Span::raw(after),
-    ])
-}
-
 pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
-    // Content is ~23 lines; center vertically if terminal is taller
-    let content_height: u16 = 23;
+    // Content is ~24 lines; center vertically if terminal is taller
+    let content_height: u16 = 24;
     let top_pad = area.height.saturating_sub(content_height) / 2;
 
     let mut lines: Vec<Line> = Vec::new();
@@ -158,8 +153,8 @@ pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
         lines.push(Line::from(""));
     }
 
-    // ── Bee art (10 lines) ────────────────────────────────────────────────────
-    for i in 0..10 {
+    // ── Bee art (12 lines) ────────────────────────────────────────────────────
+    for i in 0..12 {
         lines.push(bee_line(i, state));
     }
 
@@ -260,11 +255,6 @@ pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
         Span::styled("  /provider · /mode · /help", Style::default().fg(DIM)),
         Span::styled("            configurar", Style::default().fg(DIM)),
     ]));
-
-    lines.push(sep_line());
-
-    // ── Input prompt ─────────────────────────────────────────────────────────
-    lines.push(input_line(state));
 
     frame.render_widget(Paragraph::new(lines), area);
 }

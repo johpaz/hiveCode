@@ -1,10 +1,6 @@
 import { mkdirSync, existsSync, accessSync, constants } from "node:fs";
 import * as path from "node:path";
 import { getDb } from "../../storage/sqlite";
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
-
-const execAsync = promisify(exec);
 
 /**
  * Valida un path de workspace
@@ -211,7 +207,7 @@ export async function handleOpenWorkspace(
       command = `xdg-open "${workspacePath}"`;
     }
 
-    await execAsync(command);
+    await Bun.spawn(["sh", "-c", command], { stdout: "ignore", stderr: "ignore" }).exited;
 
     return addCorsHeaders(
       Response.json({
