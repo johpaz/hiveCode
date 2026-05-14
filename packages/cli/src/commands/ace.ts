@@ -1,4 +1,4 @@
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
 export async function ace(subcommand?: string, args?: string[]): Promise<void> {
   const db = getDb()
@@ -29,7 +29,7 @@ export async function ace(subcommand?: string, args?: string[]): Promise<void> {
         db.query("UPDATE code_playbook SET active = 0, confidence = 0.5").run()
         console.log("✅ Playbook reset. All rules deactivated.")
       } else {
-        console.log("Usage: hive-code ace playbook <list|reset>")
+        console.log("Usage: hivecode ace playbook <list|reset>")
       }
       break
     }
@@ -49,16 +49,16 @@ export async function ace(subcommand?: string, args?: string[]): Promise<void> {
         db.query("INSERT INTO code_reflections (traces_analyzed, insights) VALUES (?, ?)").run(unanalyzed.length, "Batch analysis complete")
         console.log(`✅ ${unanalyzed.length} traces analyzed. ${Math.floor(unanalyzed.length / 5)} reflection(s) created.`)
       } else {
-        console.log("Usage: hive-code ace reflector run")
+        console.log("Usage: hivecode ace reflector run")
       }
       break
     }
 
     default:
       console.log("Usage:")
-      console.log("  hive-code ace status              Estado del ACE")
-      console.log("  hive-code ace playbook list       Listar reglas del playbook")
-      console.log("  hive-code ace playbook reset      Resetear playbook")
-      console.log("  hive-code ace reflector run       Forzar análisis")
+      console.log("  hivecode ace status              Estado del ACE")
+      console.log("  hivecode ace playbook list       Listar reglas del playbook")
+      console.log("  hivecode ace playbook reset      Resetear playbook")
+      console.log("  hivecode ace reflector run       Forzar análisis")
   }
 }

@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite"
 import * as path from "node:path"
 import * as fs from "node:fs"
 import * as os from "node:os"
-import { SCHEMA, PROJECTS_SCHEMA, CONTEXT_ENGINE_SCHEMA, MEETING_SCHEMA } from "@johpaz/hive-code-core/storage/schema"
+import { SCHEMA, PROJECTS_SCHEMA, CONTEXT_ENGINE_SCHEMA, MEETING_SCHEMA } from "@johpaz/hivecode-core/storage/schema"
 import { CODE_SCHEMA } from "../../src/narrative/schema"
 
 let db: Database

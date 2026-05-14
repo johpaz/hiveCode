@@ -11,7 +11,7 @@
  */
 
 import type { WorkerToManagerMessage } from "../workers/types"
-import { logger } from "@johpaz/hive-code-core/utils/logger"
+import { logger } from "@johpaz/hivecode-core/utils/logger"
 
 const log = logger.child("interruptions")
 

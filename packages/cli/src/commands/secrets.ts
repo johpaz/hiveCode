@@ -16,7 +16,7 @@ export async function secrets(subcommand?: string, args?: string[]): Promise<voi
 
     case "set": {
       const name = args?.[0]
-      if (!name) { console.log("Usage: hive-code secret set <name>"); return }
+      if (!name) { console.log("Usage: hivecode secret set <name>"); return }
       const value = await readPassword(`Enter value for ${name}: `)
       try {
         Bun.secrets[name] = value
@@ -31,7 +31,7 @@ export async function secrets(subcommand?: string, args?: string[]): Promise<voi
 
     case "delete": {
       const name = args?.[0]
-      if (!name) { console.log("Usage: hive-code secret delete <name>"); return }
+      if (!name) { console.log("Usage: hivecode secret delete <name>"); return }
       try {
         delete Bun.secrets[name]
         console.log(`✅ Secret '${name}' deleted.`)
@@ -43,7 +43,7 @@ export async function secrets(subcommand?: string, args?: string[]): Promise<voi
 
     case "rotate": {
       const name = args?.[0]
-      if (!name) { console.log("Usage: hive-code secret rotate <name>"); return }
+      if (!name) { console.log("Usage: hivecode secret rotate <name>"); return }
       const oldValue = await readPassword(`Enter NEW value for ${name}: `)
       try {
         Bun.secrets[name] = oldValue
@@ -57,10 +57,10 @@ export async function secrets(subcommand?: string, args?: string[]): Promise<voi
 
     default:
       console.log("Usage:")
-      console.log("  hive-code secret list           Listar secrets (solo nombres)")
-      console.log("  hive-code secret set <name>     Establecer secret")
-      console.log("  hive-code secret delete <name>  Eliminar secret")
-      console.log("  hive-code secret rotate <name>  Rotar secret")
+      console.log("  hivecode secret list           Listar secrets (solo nombres)")
+      console.log("  hivecode secret set <name>     Establecer secret")
+      console.log("  hivecode secret delete <name>  Eliminar secret")
+      console.log("  hivecode secret rotate <name>  Rotar secret")
   }
 }
 

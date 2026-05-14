@@ -2,14 +2,14 @@ import {
   hiveIntro, hiveOutro, hiveModeBar,
   hivePhaseComplete, hiveSpinner, hiveNote,
   hiveText, isCancel,
-} from "@johpaz/hive-code-ui"
-import { getExecutionMode, setExecutionMode } from "@johpaz/hive-code-core"
-import { CoordinatorManager } from "@johpaz/hive-code-code/workers/coordinator-manager"
-import { listenModeToggle, stopModeToggle } from "@johpaz/hive-code-code/modes/keyboard"
+} from "@johpaz/hivecode-ui"
+import { getExecutionMode, setExecutionMode } from "@johpaz/hivecode-core"
+import { CoordinatorManager } from "@johpaz/hivecode-code/workers/coordinator-manager"
+import { listenModeToggle, stopModeToggle } from "@johpaz/hivecode-code/modes/keyboard"
 
 export async function plan(description?: string, options?: { keyboard?: boolean }): Promise<void> {
 
-  hiveIntro("hive-code · Plan Mode")
+  hiveIntro("hivecode · Plan Mode")
   hiveModeBar("plan")
 
   if (options?.keyboard !== false) {
@@ -54,8 +54,8 @@ export async function plan(description?: string, options?: { keyboard?: boolean 
 
   hiveNote("Plan completado", [
     "Revisa el plan generado antes de ejecutar.",
-    "Usa 'hive-code run \"<desc>\"' para implementar.",
-    "Usa 'hive-code run \"<desc>\" --approval' para modo interactivo.",
+    "Usa 'hivecode run \"<desc>\"' para implementar.",
+    "Usa 'hivecode run \"<desc>\" --approval' para modo interactivo.",
   ])
 
   hiveOutro("Plan generado — revisa antes de ejecutar")

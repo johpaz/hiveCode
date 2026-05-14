@@ -114,7 +114,7 @@ export class TelegramChannel extends BaseChannel {
     }
 
     if (text === "/start" || text?.startsWith("/start@")) {
-      const agentName = "hive-code";
+      const agentName = "hivecode";
       await ctx.reply(
         `¡Hola! Soy ${agentName}, tu asistente personal.\n\n` +
         `Tu Telegram ID: <code>${userId}</code>\n\n` +

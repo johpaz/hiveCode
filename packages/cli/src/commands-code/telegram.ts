@@ -1,9 +1,9 @@
 /**
  * Telegram channel commands — connect/disconnect/status.
  *
- * hive-code telegram connect
- * hive-code telegram disconnect
- * hive-code telegram status
+ * hivecode telegram connect
+ * hivecode telegram disconnect
+ * hivecode telegram status
  */
 
 import {
@@ -13,11 +13,11 @@ import {
   hiveNote,
   hiveSpinner,
   runTelegramConnectWizard,
-} from "@johpaz/hive-code-ui"
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
+} from "@johpaz/hivecode-ui"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
 export async function telegramConnect(): Promise<void> {
-  hiveIntro("hive-code · Conectar Telegram")
+  hiveIntro("hivecode · Conectar Telegram")
 
   const result = await runTelegramConnectWizard()
   if (!result) {
@@ -51,13 +51,63 @@ export async function telegramConnect(): Promise<void> {
     `DM policy: ${result.dmPolicy}`,
     result.allowFrom.length ? `Lista blanca: ${result.allowFrom.join(", ")}` : "",
     result.groups ? "Grupos: habilitados" : "Grupos: deshabilitados",
-    "Reinicia el gateway para activar: hive-code dev",
+    "Reinicia el gateway para activar: hivecode dev",
   ].filter(Boolean))
   hiveOutro("Telegram conectado")
 }
 
+export async function telegramEdit(): Promise<void> {
+  hiveIntro("hivecode · Editar Telegram")
+
+  const db = getDb()
+  const row = db.query("SELECT * FROM channels WHERE id = 'telegram'").get() as any
+  if (!row) {
+    hiveNote("Telegram no configurado", ["No hay configuración previa.", "Usa: hivecode telegram connect"])
+    hiveOutro("Sin configuración existente", "error")
+    return
+  }
+
+  let existingConfig: Record<string, any> = {}
+  try { existingConfig = JSON.parse(Buffer.from(row.config_encrypted as string, "base64").toString()) } catch {}
+
+  hiveNote("Configuración actual", [
+    `DM Policy:   ${existingConfig.dmPolicy ?? "—"}`,
+    `Grupos:      ${existingConfig.groups ? "sí" : "no"}`,
+    existingConfig.allowFrom?.length
+      ? `Lista blanca: ${(existingConfig.allowFrom as string[]).join(", ")}`
+      : "Lista blanca: —",
+    "(El wizard pedirá los nuevos valores)",
+  ])
+
+  const result = await runTelegramConnectWizard()
+  if (!result) {
+    hiveOutro("Cancelado", "error")
+    return
+  }
+
+  const configJson = JSON.stringify({
+    dmPolicy: result.dmPolicy,
+    allowFrom: result.allowFrom,
+    groups: result.groups,
+    enabled: true,
+  })
+
+  db.query(`
+    UPDATE channels SET config_encrypted = ?, enabled = 1, status = 'connected'
+    WHERE id = 'telegram'
+  `).run(Buffer.from(configJson).toString("base64"))
+
+  try {
+    const secrets = (Bun as any).secrets
+    if (secrets?.set) secrets.set("TELEGRAM_BOT_TOKEN", result.botToken)
+  } catch {}
+
+  hivePhaseComplete("telegram", "Configuración de Telegram actualizada")
+  hiveOutro("Telegram actualizado")
+}
+
 export async function telegramDisconnect(): Promise<void> {
-  hiveIntro("hive-code · Desconectar Telegram")
+  hiveIntro("hivecode · Desconectar Telegram")
   const db = getDb()
 
   const row = db.query("SELECT id FROM channels WHERE id = 'telegram'").get() as any
@@ -76,12 +126,12 @@ export async function telegramDisconnect(): Promise<void> {
 }
 
 export async function telegramStatus(): Promise<void> {
-  hiveIntro("hive-code · Estado Telegram")
+  hiveIntro("hivecode · Estado Telegram")
   const db = getDb()
   const row = db.query("SELECT * FROM channels WHERE id = 'telegram'").get() as any
 
   if (!row) {
-    hiveNote("Telegram no configurado", ["Ejecuta: hive-code telegram connect"])
+    hiveNote("Telegram no configurado", ["Ejecuta: hivecode telegram connect"])
     hiveOutro("Sin configuración", "error")
     return
   }

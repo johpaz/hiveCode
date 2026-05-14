@@ -2,17 +2,17 @@ import {
   hiveIntro, hiveOutro, hiveModeBar,
   hivePhaseComplete, hivePhaseActive, hiveSpinner,
   hiveNote, hiveText, hiveCheckpoint, isCancel,
-} from "@johpaz/hive-code-ui"
-import { getExecutionMode, setExecutionMode } from "@johpaz/hive-code-core"
-import { CoordinatorManager } from "@johpaz/hive-code-code/workers/coordinator-manager"
-import { listenModeToggle, stopModeToggle } from "@johpaz/hive-code-code/modes/keyboard"
+} from "@johpaz/hivecode-ui"
+import { getExecutionMode, setExecutionMode } from "@johpaz/hivecode-core"
+import { CoordinatorManager } from "@johpaz/hivecode-code/workers/coordinator-manager"
+import { listenModeToggle, stopModeToggle } from "@johpaz/hivecode-code/modes/keyboard"
 
 export async function run(description?: string, flags: string[] = [], options?: { keyboard?: boolean }): Promise<void> {
 
   const approvalFlag = flags.includes("--approval") || flags.includes("-a")
   const mode = approvalFlag ? "approval" : "auto"
 
-  hiveIntro(`hive-code · ${mode === "approval" ? "Approval" : "Auto"} Mode`)
+  hiveIntro(`hivecode · ${mode === "approval" ? "Approval" : "Auto"} Mode`)
   hiveModeBar(mode)
 
   if (options?.keyboard !== false) {

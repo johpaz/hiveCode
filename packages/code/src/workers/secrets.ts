@@ -103,13 +103,13 @@ export function loadSecrets(): Record<string, string> {
   if (envCount > 0) {
     console.warn(
       `${logPrefix} ⚠️  Loaded ${envCount} key(s) from env vars. Consider migrating to Bun.secrets for better security:` +
-        `\n   bunx @johpaz/hive-code secret set <name>`
+        `\n   bunx @johpaz/hivecode secret set <name>`
     )
   }
   if (bunCount === 0 && envCount === 0) {
     console.error(
       `${logPrefix} ❌ No API keys found. Set them via:\n` +
-        `   bunx @johpaz/hive-code secret set <name>   (recommended)\n` +
+        `   bunx @johpaz/hivecode secret set <name>   (recommended)\n` +
         `   or export <PROVIDER>_API_KEY=<key>          (fallback)`
     )
   }

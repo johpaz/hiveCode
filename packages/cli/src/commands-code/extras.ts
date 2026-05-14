@@ -11,16 +11,16 @@
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveSpinner, isCancel,
-} from "@johpaz/hive-code-ui"
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
-import { executeToolByName } from "@johpaz/hive-code-code/workers/tool-bridge"
-import { createAllTools } from "@johpaz/hive-code-core/tools"
-import { loadConfig } from "@johpaz/hive-code-core/config"
+} from "@johpaz/hivecode-ui"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { executeToolByName } from "@johpaz/hivecode-code/workers/tool-bridge"
+import { createAllTools } from "@johpaz/hivecode-core/tools"
+import { loadConfig } from "@johpaz/hivecode-core/config"
 
 // ─── Mode History ────────────────────────────────────────────────────────────
 
 export async function modeHistory(): Promise<void> {
-  hiveIntro("hive-code · Historial de Modos")
+  hiveIntro("hivecode · Historial de Modos")
 
   const db = getDb()
   const rows = db.query(`
@@ -58,11 +58,11 @@ export async function modeHistory(): Promise<void> {
 export async function taskRollback(taskId?: string): Promise<void> {
 
   if (!taskId) {
-    hiveOutro("Uso: hive-code task rollback <id>", "error")
+    hiveOutro("Uso: hivecode task rollback <id>", "error")
     process.exit(1)
   }
 
-  hiveIntro("hive-code · Rollback")
+  hiveIntro("hivecode · Rollback")
 
   const spinner = hiveSpinner("default")
   spinner.start(`Revirtiendo tarea ${taskId.slice(0, 8)}...`)
@@ -102,11 +102,11 @@ export async function taskRollback(taskId?: string): Promise<void> {
 export async function taskResume(taskId?: string): Promise<void> {
 
   if (!taskId) {
-    hiveOutro("Uso: hive-code task resume <id>", "error")
+    hiveOutro("Uso: hivecode task resume <id>", "error")
     process.exit(1)
   }
 
-  hiveIntro("hive-code · Reanudar Tarea")
+  hiveIntro("hivecode · Reanudar Tarea")
 
   const db = getDb()
   const task = db.query("SELECT id, description, status, mode FROM code_tasks WHERE id = ?").get(taskId) as any
@@ -128,7 +128,7 @@ export async function taskResume(taskId?: string): Promise<void> {
     `Descripción: ${task.description?.slice(0, 60)}`,
     `Modo: ${task.mode}`,
     "",
-    "Usa 'hive-code run \"<desc>\"' para ejecutar una nueva tarea.",
+    "Usa 'hivecode run \"<desc>\"' para ejecutar una nueva tarea.",
   ])
 
   hiveOutro("Tarea reanudada")
@@ -137,13 +137,13 @@ export async function taskResume(taskId?: string): Promise<void> {
 // ─── Upgrade ─────────────────────────────────────────────────────────────────
 
 export async function upgrade(): Promise<void> {
-  hiveIntro("hive-code · Actualizar")
+  hiveIntro("hivecode · Actualizar")
 
   const spinner = hiveSpinner("default")
   spinner.start("Verificando última versión...")
 
   try {
-    const response = await fetch("https://api.github.com/repos/johpaz/hive-code/releases/latest")
+    const response = await fetch("https://api.github.com/repos/johpaz/hivecode/releases/latest")
     const data = await response.json()
     const latestVersion = data.tag_name as string
     const currentVersion = "v0.1.0"
@@ -160,7 +160,7 @@ export async function upgrade(): Promise<void> {
       `Última versión: ${latestVersion}`,
       "",
       "Para actualizar:",
-      "  bun install -g @johpaz/hive-code@latest",
+      "  bun install -g @johpaz/hivecode@latest",
       "  o descarga el binario desde GitHub Releases",
     ])
     hiveOutro("Revisa las instrucciones arriba")
@@ -175,7 +175,7 @@ export async function upgrade(): Promise<void> {
 export async function init(pathArg?: string): Promise<void> {
   const targetPath = pathArg || process.cwd()
 
-  hiveIntro("hive-code · Init")
+  hiveIntro("hivecode · Init")
 
   const spinner = hiveSpinner("default")
   spinner.start(`Inicializando ${targetPath}...`)
@@ -184,8 +184,8 @@ export async function init(pathArg?: string): Promise<void> {
     // Create .hivecode directory
     await Bun.write(`${targetPath}/.hivecode/.gitkeep`, "")
 
-    // Create default hive-code.yaml if not exists
-    const configPath = `${targetPath}/hive-code.yaml`
+    // Create default hivecode.yaml if not exists
+    const configPath = `${targetPath}/hivecode.yaml`
     const configExists = await Bun.file(configPath).exists()
 
     if (!configExists) {
@@ -206,15 +206,15 @@ coordinators:
 modes:
   default: approval
 
-# See docs: https://hive-code.io/docs
+# See docs: https://hivecode.io/docs
 `)
     }
 
     spinner.stop(`Proyecto inicializado en ${targetPath}`)
     hiveNote("Siguientes pasos", [
-      "1. Configura tus API keys: hive-code secret set <name>",
-      "2. Configura providers: hive-code provider add <name>",
-      "3. Empieza a codear: hive-code run \"implementa...\"",
+      "1. Configura tus API keys: hivecode secret set <name>",
+      "2. Configura providers: hivecode provider add <name>",
+      "3. Empieza a codear: hivecode run \"implementa...\"",
     ])
     hiveOutro("Proyecto listo")
   } catch (err) {

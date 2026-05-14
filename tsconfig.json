@@ -93,9 +93,6 @@
       "@johpaz/hive-tools/*": [
         "./packages/tools/src/*"
       ],
-      "@/*": [
-        "./packages/hive-ui/src/*"
-      ],
       "@johpaz/hive-code-code": [
         "./packages/code/src/index.ts"
       ],
@@ -115,7 +112,6 @@
   },
   "include": [
     "packages/*/src/**/*",
-    "packages/hive-ui/src/**/*",
     "tests/**/*",
     "scripts/**/*"
   ],

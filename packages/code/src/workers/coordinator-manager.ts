@@ -1,11 +1,11 @@
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
-import { logger } from "@johpaz/hive-code-core/utils/logger"
-import { createAllTools } from "@johpaz/hive-code-core/tools"
-import type { Config } from "@johpaz/hive-code-core/config"
-import { loadConfig } from "@johpaz/hive-code-core/config"
-import type { Tool } from "@johpaz/hive-code-core/tools"
-import { selectSkills, getMinimalSkills, type SkillDescriptor } from "@johpaz/hive-code-core/agent/skill-selector"
-import { syncSkillsToFTS } from "@johpaz/hive-code-core/agent/context-compiler"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { logger } from "@johpaz/hivecode-core/utils/logger"
+import { createAllTools } from "@johpaz/hivecode-core/tools"
+import type { Config } from "@johpaz/hivecode-core/config"
+import { loadConfig } from "@johpaz/hivecode-core/config"
+import type { Tool } from "@johpaz/hivecode-core/tools"
+import { selectSkills, getMinimalSkills, type SkillDescriptor } from "@johpaz/hivecode-core/agent/skill-selector"
+import { syncSkillsToFTS } from "@johpaz/hivecode-core/agent/context-compiler"
 import {
   getMode, setMode, getPhaseIndex, setPhaseIndex,
   setWorkerBusy, isWorkerBusy, setCancelled, isCancelled,
@@ -72,7 +72,7 @@ export class CoordinatorManager {
       this.createWorker(name)
     }
 
-    this.broadcastChannel = new BroadcastChannel("hive-code:control")
+    this.broadcastChannel = new BroadcastChannel("hivecode:control")
     this.broadcastChannel.onmessage = (event: any) => this.handleControlMessage(event.data as ControlMessage)
 
     log.info("[coordinator-manager] ✅ All coordinators running")
@@ -134,10 +134,19 @@ export class CoordinatorManager {
     this.activeSessionId = this.scribe.createSession(process.cwd())
     this.activeTaskId = this.scribe.createTask(this.activeSessionId, description, mode)
 
-    log.info(`[coordinator-manager] 🚀 Task ${this.activeTaskId} (mode: ${mode}): ${description}`)
+    // Resolve provider/model from code_config (set by REPL or provider add command)
+    const db = getDb()
+    const configuredProvider = (
+      db.query("SELECT value FROM code_config WHERE key = 'default_provider'").get() as any
+    )?.value ?? ""
+    const configuredModel = configuredProvider
+      ? (db.query("SELECT value FROM code_config WHERE key = ?").get(`provider_model_${configuredProvider}`) as any)?.value ?? ""
+      : ""
+
+    log.info(`[coordinator-manager] 🚀 Task ${this.activeTaskId} (mode: ${mode}, provider: ${configuredProvider || "env-default"}): ${description}`)
 
     // Create git branch for this task
-    const branchName = `hive-code/task-${this.activeTaskId}`
+    const branchName = `hivecode/task-${this.activeTaskId}`
     try {
       const gitResult = await executeToolByName(this.allTools, "git_branch", {
         action: "create",
@@ -165,6 +174,8 @@ export class CoordinatorManager {
       mode: mode ?? getMode(),
       projectPath: process.cwd(),
       secrets: this.secrets,
+      provider: configuredProvider || undefined,
+      model: configuredModel || undefined,
     }
     const archResult = await this.dispatchPhase("architecture", archTask)
 
@@ -263,6 +274,8 @@ export class CoordinatorManager {
           mode: phaseMode,
           projectPath: process.cwd(),
           secrets: this.secrets,
+          provider: configuredProvider || undefined,
+          model: configuredModel || undefined,
         }
         return { phase, task }
       })

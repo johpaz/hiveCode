@@ -9,10 +9,10 @@ import { syncMCPToolsToFTS } from "../mcp/tool-sync";
 import { AgentService, createAgentService } from "../agent/service";
 import { mkdirSync, existsSync } from "node:fs";
 import * as path from "node:path";
-import { resolveAgentId, runStartupMigrations } from "../storage/onboarding";
-import { createMCPManager, type MCPClientManager } from "@johpaz/hive-code-mcp";
+import { createMCPManager, type MCPClientManager } from "@johpaz/hivecode-mcp";
 import { setMCPManager } from "../mcp/singleton";
 import { startMCPHotReload } from "../mcp/hot-reload";
+import { resolveAgentId, runStartupMigrations } from "../storage/onboarding";
 
 
 const log = logger.child("gateway:init");
@@ -255,11 +255,11 @@ export async function initializeGateway(
     // 6. Inicializar MCP Manager y agent loop
     // MCP se inicializa con los servidores de la config + DB
     let mcpManager: MCPClientManager | null = null;
-    
+
     // Load MCP servers from DB and merge with config
     const db = getDb();
     const dbServers = db.query(`SELECT * FROM mcp_servers WHERE enabled = 1`).all() as Record<string, any>[];
-    
+
     const mcpServersFromDB: Record<string, any> = {};
     for (const server of dbServers) {
       try {
@@ -270,23 +270,23 @@ export async function initializeGateway(
           url: server.url,
           enabled: true,
         };
-        
+
         // Decrypt headers if present
         if (server.headers_encrypted && server.headers_iv) {
           const { decryptConfig } = await import("../storage/crypto");
           mcpServerConfig.headers = decryptConfig(server.headers_encrypted, server.headers_iv);
         }
-        
+
         mcpServersFromDB[server.id || server.name] = mcpServerConfig;
       } catch (error) {
         log.warn(`Failed to load MCP server ${server.name} from DB: ${(error as Error).message}`);
       }
     }
-    
+
     // Merge config MCP servers with DB servers
     const configMcpServers = config.mcp?.servers || {};
     const mergedMcpServers = { ...configMcpServers, ...mcpServersFromDB };
-    
+
     if (Object.keys(mergedMcpServers).length > 0) {
       try {
         mcpManager = createMCPManager({
@@ -296,7 +296,7 @@ export async function initializeGateway(
         await mcpManager.initialize();
         setMCPManager(mcpManager); // Save to singleton for global access
         log.info(`MCP Manager initialized with ${Object.keys(mergedMcpServers).length} server(s) from config + DB`);
-        
+
         // Start hot reload watcher for dynamic server changes
         startMCPHotReload(mcpManager);
         log.info("MCP Hot Reload started - new servers will auto-connect");
@@ -316,7 +316,7 @@ export async function initializeGateway(
         log.warn(`Empty MCP Manager initialization failed: ${(error as Error).message}`);
       }
     }
-    
+
     // Inicializar agent loop con MCP Manager
     await initializeAgentLoop(mcpManager || undefined);
 

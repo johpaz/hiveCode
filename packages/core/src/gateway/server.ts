@@ -559,8 +559,11 @@ export async function startGateway(config: Config): Promise<void> {
             const indexPath = path.join(uiDir, "index.html");
             if (!existsSync(indexPath)) {
               return new Response(
-                "UI build not found. Please run: cd packages/hive-ui && bun run build\n\n" +
-                "Or use: bun run dev (from root) which builds automatically.",
+                "Web UI not available.\n\n" +
+                "To configure hivecode, run in your terminal:\n" +
+                "  hivecode onboard\n\n" +
+                "Or add a provider directly:\n" +
+                "  hivecode provider add\n",
                 { status: 503, headers: { "Content-Type": "text/plain" } }
               );
             }
@@ -659,11 +662,11 @@ export async function startGateway(config: Config): Promise<void> {
 
           // If UI is not available, show helpful message for any non-API route
           return new Response(
-            "UI not found.\n\n" +
-            "Options:\n" +
-            "  1. Place the UI in ~/.hivecode/ui/ (copy hive-ui/dist contents there)\n" +
-            "  2. Set HIVE_UI_DIR=/path/to/ui\n" +
-            "  3. Build from source: cd packages/hive-ui && bun run build\n",
+            "Web UI not available.\n\n" +
+            "To configure hivecode, run in your terminal:\n" +
+            "  hivecode onboard\n\n" +
+            "Or add a provider directly:\n" +
+            "  hivecode provider add\n",
             { status: 404, headers: { "Content-Type": "text/plain" } }
           );
         }

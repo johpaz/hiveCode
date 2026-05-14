@@ -1,5 +1,5 @@
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
-import { getMode, isWorkerBusy, isPaused, isCancelled } from "@johpaz/hive-code-code/modes"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { getMode, isWorkerBusy, isPaused, isCancelled } from "@johpaz/hivecode-code/modes"
 
 const COORDINATORS = ["architecture", "backend", "frontend", "security", "test", "devops"]
 
@@ -19,7 +19,7 @@ export async function coordinator(subcommand?: string, args?: string[]): Promise
 
     case "status": {
       const name = args?.[0]
-      if (!name) { console.log("Usage: hive-code coordinator status <name>"); return }
+      if (!name) { console.log("Usage: hivecode coordinator status <name>"); return }
       const idx = COORDINATORS.indexOf(name)
       if (idx === -1) { console.log(`Unknown coordinator: ${name}. Use: ${COORDINATORS.join(", ")}`); return }
       const busy = isWorkerBusy(idx)
@@ -29,7 +29,7 @@ export async function coordinator(subcommand?: string, args?: string[]): Promise
 
     case "restart": {
       const name = args?.[0]
-      if (!name) { console.log("Usage: hive-code coordinator restart <name>"); return }
+      if (!name) { console.log("Usage: hivecode coordinator restart <name>"); return }
       console.log(`🔄 Restarting ${name}...`)
       console.log("   (Worker lifecycle management not yet implemented for individual restarts)")
       break
@@ -37,24 +37,24 @@ export async function coordinator(subcommand?: string, args?: string[]): Promise
 
     case "pause": {
       const name = args?.[0]
-      if (!name) { console.log("Usage: hive-code coordinator pause <name>"); return }
+      if (!name) { console.log("Usage: hivecode coordinator pause <name>"); return }
       console.log(`⏸️ ${name} paused.`)
       break
     }
 
     case "resume": {
       const name = args?.[0]
-      if (!name) { console.log("Usage: hive-code coordinator resume <name>"); return }
+      if (!name) { console.log("Usage: hivecode coordinator resume <name>"); return }
       console.log(`▶️ ${name} resumed.`)
       break
     }
 
     default:
       console.log("Usage:")
-      console.log("  hive-code coordinator list              Listar coordinadores")
-      console.log("  hive-code coordinator status <name>     Estado de coordinador")
-      console.log("  hive-code coordinator restart <name>    Reiniciar coordinador")
-      console.log("  hive-code coordinator pause <name>      Pausar coordinador")
-      console.log("  hive-code coordinator resume <name>     Reanudar coordinador")
+      console.log("  hivecode coordinator list              Listar coordinadores")
+      console.log("  hivecode coordinator status <name>     Estado de coordinador")
+      console.log("  hivecode coordinator restart <name>    Reiniciar coordinador")
+      console.log("  hivecode coordinator pause <name>      Pausar coordinador")
+      console.log("  hivecode coordinator resume <name>     Reanudar coordinador")
   }
 }

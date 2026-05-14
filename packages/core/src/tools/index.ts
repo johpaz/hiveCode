@@ -14,8 +14,7 @@ import * as filesystem from "./filesystem/index.ts";
 // Web (9)
 import * as web from "./web/index.ts";
 
-// Projects (8)
-import * as projects from "./projects/index.ts";
+
 
 // Cron (8)
 import * as cron from "./cron/index.ts";
@@ -25,9 +24,6 @@ import * as cli from "./cli/index.ts";
 
 // Agents (15)
 import * as agents from "./agents/index.ts";
-
-// Codebridge (4)
-import * as codebridge from "./codebridge/index.ts";
 
 // Code tools (16) - git + code utilities
 import * as code from "./code/index.ts";
@@ -49,8 +45,6 @@ export function createAllTools(config: Config): Tool[] {
     // WEB (9)
     ...web.createTools(),
 
-    // PROJECTS (8)
-    ...projects.createTools(),
 
     // CRON (7)
     ...cron.createTools(),
@@ -61,8 +55,6 @@ export function createAllTools(config: Config): Tool[] {
     // AGENTS (14)
     ...agents.createTools(),
 
-    // CODEBRIDGE (3)
-    ...codebridge.createTools(),
 
     // CODE TOOLS (16) - git + code utilities + analysis
     ...code.createTools(),
@@ -84,16 +76,12 @@ export function createToolsByCategory(category: string, config: Config): Tool[] 
       return filesystem.createTools();
     case "web":
       return web.createTools();
-    case "projects":
-      return projects.createTools();
     case "cron":
       return cron.createTools();
     case "cli":
       return cli.createTools();
     case "agents":
       return agents.createTools();
-    case "codebridge":
-      return codebridge.createTools();
     case "code":
       return code.createTools();
     case "core":
@@ -124,17 +112,6 @@ export {
   webSearchTool,
   webFetchTool,
 } from "./web/index.ts";
-
-export {
-  projectCreateTool,
-  projectListTool,
-  projectUpdateTool,
-  projectDoneTool,
-  projectFailTool,
-  taskCreateTool,
-  taskUpdateTool,
-  taskEvaluateTool,
-} from "./projects/index.ts";
 
 export {
   cronCreateTool,
@@ -170,11 +147,6 @@ export {
 
 
 
-export {
-  codebridgeLaunchTool,
-  codebridgeStatusTool,
-  codebridgeCancelTool,
-} from "./codebridge/index.ts";
 
 export {
   gitStatusTool,

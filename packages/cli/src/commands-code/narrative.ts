@@ -1,8 +1,8 @@
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveText, isCancel,
-} from "@johpaz/hive-code-ui"
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
+} from "@johpaz/hivecode-ui"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
 export async function narrativeShow(args: string[]): Promise<void> {
   const taskFlag = args.find(a => a.startsWith("--task="))
@@ -10,7 +10,7 @@ export async function narrativeShow(args: string[]): Promise<void> {
   const lastFlag = args.find(a => a.startsWith("--last="))
   const lastN = lastFlag ? parseInt(lastFlag.split("=")[1]) : 10
 
-  hiveIntro("hive-code · Narrativo")
+  hiveIntro("hivecode · Narrativo")
 
   const db = getDb()
 
@@ -79,11 +79,11 @@ export async function narrativeSearch(args: string[]): Promise<void> {
   const query = args[0]
 
   if (!query) {
-    hiveOutro("Uso: hive-code narrative search <query>", "error")
+    hiveOutro("Uso: hivecode narrative search <query>", "error")
     process.exit(1)
   }
 
-  hiveIntro("hive-code · Buscar en Narrativo")
+  hiveIntro("hivecode · Buscar en Narrativo")
 
   const db = getDb()
   const rows = db.query(
@@ -113,7 +113,7 @@ export async function narrativeExport(args: string[]): Promise<void> {
   const formatFlag = args.find(a => a.startsWith("--format="))
   const format = formatFlag ? formatFlag.split("=")[1] : "md"
 
-  hiveIntro("hive-code · Exportar Narrativo")
+  hiveIntro("hivecode · Exportar Narrativo")
 
   const db = getDb()
   const rows = db.query("SELECT * FROM code_narrative ORDER BY id ASC").all() as any[]

@@ -45,6 +45,10 @@ export interface CoordinatorTask {
   projectPath: string
   /** Secrets distributed by the main thread (fallback when setEnvironmentData unavailable) */
   secrets?: Record<string, string>
+  /** LLM provider to use (e.g., "anthropic", "openai", "groq") */
+  provider?: string
+  /** LLM model to use (e.g., "claude-sonnet-4-6", "gpt-4o") */
+  model?: string
   /** Tools available to this coordinator (injected by manager) */
   tools?: any[]
   /** Pre-compiled context from Context Compiler (skills, playbook, scratchpad) */

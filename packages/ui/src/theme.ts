@@ -1,11 +1,15 @@
-import { TextPrompt, SelectPrompt } from "@clack/core"
 import { BEE, BEE_COORDINATOR } from "./mascot.ts"
 import { C } from "./ansi.ts"
 import { S } from "./symbols.ts"
 
 export { C } from "./ansi.ts"
 export { S } from "./symbols.ts"
-export { isCancel } from "@clack/core"
+
+// Cancel sentinel — no external dep needed
+const CANCEL = Symbol.for("hive.cancel")
+export function isCancel(value: unknown): value is symbol {
+  return typeof value === "symbol"
+}
 
 export interface OptionLike {
   value: any;
@@ -145,52 +149,121 @@ export function hiveProgress(coordinator = "default") {
   }
 }
 
+// ─── Inline prompt helpers ────────────────────────────────────────────────────
+// Pure raw-mode TTY — no external deps.
+
+function stdinCleanup(handler: (key: string) => void) {
+  process.stdin.setRawMode(false)
+  process.stdin.removeListener("data", handler)
+  // Intentionally NOT calling pause() — pausing buffers pending stdin bytes
+  // (e.g. the \r that closed the previous prompt) which then replay into the
+  // next prompt's listener as a phantom keypress.
+}
+
 export async function hiveText(opts: {
   message: string
   placeholder?: string
+  password?: boolean
   validate?: (value: string) => string | Error | undefined
 }): Promise<string | symbol> {
-  const prompt = new TextPrompt({
-    placeholder: opts.placeholder,
-    validate: opts.validate,
-    render() {
-      const placeholder = opts.placeholder ? C.dim + opts.placeholder + C.reset : ""
-      const display = this.value || placeholder
-      let output = ` ${C.amber}${S.active}${C.reset} ${C.white}${opts.message}${C.reset}\n`
-      output += ` ${bar()} ${display}`
-      if (this.error) output += `\n ${bar()} ${C.red}${S.error} ${this.error}${C.reset}`
-      return output
-    },
+  return new Promise((resolve) => {
+    let input = ""
+    let error = ""
+    let prevLines = 0
+
+    const render = () => {
+      if (prevLines > 0) process.stdout.write(`\x1b[${prevLines}A\r\x1b[J`)
+      const display = input !== ""
+        ? opts.password
+          ? `${C.amber}${"*".repeat(input.length)}${C.reset}`
+          : `${C.white}${input}${C.reset}`
+        : opts.placeholder ? `${C.dim}${opts.placeholder}${C.reset}` : ""
+      let out = ` ${C.amber}${S.active}${C.reset} ${C.white}${opts.message}${C.reset}\n`
+      out += ` ${bar()} ${display}\n`
+      if (error) out += ` ${bar()} ${C.red}${S.error} ${error}${C.reset}\n`
+      prevLines = 2 + (error ? 1 : 0)
+      process.stdout.write(out)
+    }
+
+    render()
+    process.stdin.setRawMode(true)
+    process.stdin.resume()
+    process.stdin.setEncoding("utf8")
+
+    const onKey = (key: string) => {
+      if (key === "\x03") {
+        stdinCleanup(onKey); resolve(CANCEL)
+      } else if (key === "\x7f" || key === "\b") {
+        input = input.slice(0, -1); error = ""; render()
+      } else if (key === "\r") {
+        if (opts.validate) {
+          const err = opts.validate(input)
+          if (err) { error = err instanceof Error ? err.message : err; render(); return }
+        }
+        stdinCleanup(onKey); resolve(input)
+      } else if (key === "\x1b") {
+        stdinCleanup(onKey); resolve(CANCEL)
+      } else if (!key.startsWith("\x1b")) {
+        // single keypress or multi-char paste — filter printable chars
+        let changed = false
+        for (const ch of key) {
+          const code = ch.charCodeAt(0)
+          if (code >= 32 && code !== 127) { input += ch; changed = true }
+        }
+        if (changed) { error = ""; render() }
+      }
+    }
+
+    process.stdin.on("data", onKey)
   })
-  return prompt.prompt()
 }
 
 export async function hiveSelect<T extends OptionLike>(opts: {
   message: string
   options: T[]
 }): Promise<T["value"] | symbol> {
-  const prompt = new SelectPrompt({
-    options: opts.options,
-    render() {
-      let output = ` ${C.amber}${S.active}${C.reset} ${C.white}${opts.message}${C.reset}\n`
+  return new Promise((resolve) => {
+    let cursor = 0
+    const { options } = opts
+    let prevLines = 0
 
-      for (let i = 0; i < this.options.length; i++) {
-        const opt = this.options[i]
-        const isSelected = i === this.cursor
-        const bullet = isSelected
-          ? `${C.amber}${S.bullet}${C.reset}`
-          : `${C.dim}${S.dot}${C.reset}`
-        const label = isSelected
+    const render = () => {
+      if (prevLines > 0) process.stdout.write(`\x1b[${prevLines}A\r\x1b[J`)
+      let out = ` ${C.amber}${S.active}${C.reset} ${C.white}${opts.message}${C.reset}\n`
+      for (let i = 0; i < options.length; i++) {
+        const opt = options[i]
+        const sel = i === cursor
+        const bullet = sel ? `${C.amber}${S.bullet}${C.reset}` : `${C.dim}${S.dot}${C.reset}`
+        const label = sel
           ? `${C.white}${opt.label ?? String(opt.value)}${C.reset}`
           : `${C.dim}${opt.label ?? String(opt.value)}${C.reset}`
-
-        output += ` ${bar()} ${bullet} ${label}\n`
+        out += ` ${bar()} ${bullet} ${label}\n`
       }
+      prevLines = options.length + 1
+      process.stdout.write(out)
+    }
 
-      return output
-    },
+    render()
+    process.stdin.setRawMode(true)
+    process.stdin.resume()
+    process.stdin.setEncoding("utf8")
+
+    const onKey = (key: string) => {
+      if (key === "\x03") {
+        stdinCleanup(onKey); resolve(CANCEL)
+      } else if (key === "\x1b[A") {
+        cursor = (cursor - 1 + options.length) % options.length; render()
+      } else if (key === "\x1b[B") {
+        cursor = (cursor + 1) % options.length; render()
+      } else if (key === "\r") {
+        stdinCleanup(onKey); resolve(options[cursor].value)
+      } else if (key === "\x1b") {
+        stdinCleanup(onKey); resolve(CANCEL)
+      }
+    }
+
+    process.stdin.on("data", onKey)
   })
-  return prompt.prompt()
 }
 
 export async function hiveConfirm(opts: {
@@ -199,19 +272,48 @@ export async function hiveConfirm(opts: {
   inactive?: string
   initialValue?: boolean
 }): Promise<boolean | symbol> {
-  const { ConfirmPrompt } = await import("@clack/core")
-  const prompt = new ConfirmPrompt({
-    active: opts.active ?? "Sí",
-    inactive: opts.inactive ?? "No",
-    initialValue: opts.initialValue ?? true,
-    render() {
-      const active = this.value ? `${C.green}${opts.active ?? "Sí"}${C.reset}` : `${C.dim}${opts.active ?? "Sí"}${C.reset}`
-      const inactive = !this.value ? `${C.red}${opts.inactive ?? "No"}${C.reset}` : `${C.dim}${opts.inactive ?? "No"}${C.reset}`
-      return ` ${C.amber}${S.active}${C.reset} ${C.white}${opts.message}${C.reset} ${active} / ${inactive}`
-    },
+  return new Promise((resolve) => {
+    let value = opts.initialValue ?? true
+    const yes = opts.active ?? "Sí"
+    const no = opts.inactive ?? "No"
+    let prevLines = 0
+
+    const render = () => {
+      if (prevLines > 0) process.stdout.write(`\x1b[${prevLines}A\r\x1b[J`)
+      const yesLabel = value  ? `${C.green}${yes}${C.reset}` : `${C.dim}${yes}${C.reset}`
+      const noLabel  = !value ? `${C.red}${no}${C.reset}`   : `${C.dim}${no}${C.reset}`
+      process.stdout.write(
+        ` ${C.amber}${S.active}${C.reset} ${C.white}${opts.message}${C.reset} ${yesLabel} / ${noLabel}\n`
+      )
+      prevLines = 1
+    }
+
+    render()
+    process.stdin.setRawMode(true)
+    process.stdin.resume()
+    process.stdin.setEncoding("utf8")
+
+    const onKey = (key: string) => {
+      if (key === "\x03") {
+        stdinCleanup(onKey); resolve(CANCEL)
+      } else if (key === "\x1b[C" || key === "\x1b[D") {
+        value = !value; render()
+      } else if (key === "y" || key === "Y") {
+        value = true; render()
+      } else if (key === "n" || key === "N") {
+        value = false; render()
+      } else if (key === "\r") {
+        stdinCleanup(onKey); resolve(value)
+      } else if (key === "\x1b") {
+        stdinCleanup(onKey); resolve(CANCEL)
+      }
+    }
+
+    process.stdin.on("data", onKey)
   })
-  return prompt.prompt()
 }
+
+// ─── Checkpoint (approval flow) ───────────────────────────────────────────────
 
 export async function hiveCheckpoint(opts: {
   coordinator: string
@@ -266,9 +368,9 @@ export async function hiveCheckpoint(opts: {
     message: "¿Qué deseas hacer?",
     options: [
       { value: "approve", label: "✅ Aprobar y continuar" },
-      { value: "edit", label: "✏️ Editar el plan", hint: "escribe instrucciones adicionales" },
-      { value: "skip", label: "⏭️ Saltar esta fase" },
-      { value: "cancel", label: "❌ Cancelar todo" },
+      { value: "edit",    label: "✏️ Editar el plan" },
+      { value: "skip",    label: "⏭️ Saltar esta fase" },
+      { value: "cancel",  label: "❌ Cancelar todo" },
     ],
   })
 

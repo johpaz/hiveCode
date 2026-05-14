@@ -6,7 +6,7 @@ import {
 	executeToolByName,
 	isToolAllowed,
 } from "../../src/workers/tool-bridge"
-import type { Tool } from "@johpaz/hive-code-core/tools"
+import type { Tool } from "@johpaz/hivecode-core/tools"
 import type { PhaseName, SessionMode } from "../../src/workers/types"
 
 describe("COORDINATOR_TOOLS mapping", () => {

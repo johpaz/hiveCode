@@ -116,7 +116,7 @@ export class ChannelManager {
         case "webchat":
         case "whatsapp":
         case "slack":
-          this.log.warn(`Channel type ${channelName} is not supported in hive-code. Use Telegram instead.`);
+          this.log.warn(`Channel type ${channelName} is not supported in hivecode. Use Telegram instead.`);
           return;
 
         default:

@@ -1,13 +1,6 @@
-import { ui } from "@rezi-ui/core"
-import { createNodeApp } from "@rezi-ui/node"
-
-interface State {
-  provider: string
-  apiKey: string
-  baseUrl: string
-  model: string
-  errors: Record<string, string>
-}
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { hiveOutro, hiveText, hiveSelect, isCancel, C, S } from "../theme.ts"
+import { BEE } from "../mascot.ts"
 
 export interface ProviderSetupResult {
   provider: string
@@ -16,92 +9,109 @@ export interface ProviderSetupResult {
   model: string
 }
 
+function getModelsForProvider(providerId: string): { value: string; label: string }[] {
+  try {
+    const rows = getDb()
+      .query(
+        "SELECT id, name FROM models WHERE provider_id = ? AND model_type = 'llm' ORDER BY name",
+      )
+      .all(providerId) as { id: string; name: string }[]
+    return rows.map((r) => ({ value: r.id, label: r.name }))
+  } catch {
+    return []
+  }
+}
+
+function showWelcome(version: string): void {
+  const bee   = BEE.happy
+  const title = `hivecode  ${C.dim}v${version}${C.reset}`
+  const sub   = "Configura tu provider LLM para comenzar"
+  process.stdout.write(`\n`)
+  process.stdout.write(` ${C.amber}╔══════════════════════════════════════════╗${C.reset}\n`)
+  process.stdout.write(` ${C.amber}║${C.reset}  ${C.amber}${bee}${C.reset}  ${C.bold}${C.amber}${title}${C.reset}                ${C.amber}║${C.reset}\n`)
+  process.stdout.write(` ${C.amber}║${C.reset}  ${C.dim}${sub}${C.reset}   ${C.amber}║${C.reset}\n`)
+  process.stdout.write(` ${C.amber}╚══════════════════════════════════════════╝${C.reset}\n\n`)
+}
+
 export async function runProviderSetupWizard(
-  knownProviders: string[] = []
+  knownProviders: string[] = [],
+  version = "1.0.0",
 ): Promise<ProviderSetupResult | null> {
-  const app = createNodeApp<State>({
-    initialState: { provider: "", apiKey: "", baseUrl: "", model: "", errors: {} },
-  })
-  let result: ProviderSetupResult | null = null
+  showWelcome(version)
 
-  app.view((s) =>
-    ui.page({
-      p: 1,
-      gap: 1,
-      header: ui.header({ title: "⧁  hive-code · Configurar Provider" }),
-      body: ui.form([
-        knownProviders.length > 0
-          ? ui.field({
-              label: "Provider",
-              required: true,
-              error: s.errors.provider,
-              children: ui.select({
-                id: "provider",
-                value: s.provider,
-                options: knownProviders.map((p) => ({ label: p, value: p })),
-                onChange: (v) => app.update((prev) => ({ ...prev, provider: v })),
-              }),
-            })
-          : ui.field({
-              label: "Nombre del Provider",
-              required: true,
-              error: s.errors.provider,
-              children: ui.input({
-                id: "provider",
-                value: s.provider,
-                onInput: (v) => app.update((prev) => ({ ...prev, provider: v })),
-              }),
-            }),
-        ui.field({
-          label: "API Key",
-          required: true,
-          error: s.errors.apiKey,
-          children: ui.input({
-            id: "apiKey",
-            value: s.apiKey,
-            onInput: (v) => app.update((prev) => ({ ...prev, apiKey: v })),
-          }),
-        }),
-        ui.field({
-          label: "Base URL (opcional)",
-          children: ui.input({
-            id: "baseUrl",
-            value: s.baseUrl,
-            onInput: (v) => app.update((prev) => ({ ...prev, baseUrl: v })),
-          }),
-        }),
-        ui.field({
-          label: "Modelo por defecto (opcional)",
-          children: ui.input({
-            id: "model",
-            value: s.model,
-            onInput: (v) => app.update((prev) => ({ ...prev, model: v })),
-          }),
-        }),
-        ui.actions([
-          ui.button({
-            id: "submit",
-            label: "Guardar",
-            intent: "primary",
-            onPress: () => {
-              const errs: Record<string, string> = {}
-              if (!s.provider) errs.provider = "Requerido"
-              if (!s.apiKey) errs.apiKey = "Requerido"
-              if (Object.keys(errs).length) {
-                app.update((prev) => ({ ...prev, errors: errs }))
-                return
-              }
-              result = { provider: s.provider, apiKey: s.apiKey, baseUrl: s.baseUrl, model: s.model }
-              app.stop()
-            },
-          }),
-          ui.button({ id: "cancel", label: "Cancelar", onPress: () => app.stop() }),
-        ]),
-      ]),
+  // ── Seleccionar o escribir el nombre del provider ─────────────────────────
+  let provider = ""
+  if (knownProviders.length > 0) {
+    const sel = await hiveSelect({
+      message: "Provider:",
+      options: knownProviders.map((p) => ({ value: p, label: p })),
     })
-  )
+    if (isCancel(sel)) { hiveOutro("Cancelado", "error"); return null }
+    provider = sel as string
+  } else {
+    const inp = await hiveText({
+      message: "Nombre del provider:",
+      placeholder: "anthropic, openai, groq...",
+    })
+    if (isCancel(inp) || !inp || typeof inp !== "string") {
+      hiveOutro("Cancelado", "error"); return null
+    }
+    provider = inp
+  }
 
-  app.keys({ Escape: () => app.stop(), "ctrl+c": () => app.stop() })
-  await app.run()
-  return result
+  // ── API Key ───────────────────────────────────────────────────────────────
+  const apiKey = await hiveText({
+    message: `API Key para ${provider}:`,
+    placeholder: "sk-...",
+    password: true,
+    validate: (v) => !v.trim() ? "La API key no puede estar vacía" : undefined,
+  })
+  if (isCancel(apiKey)) { hiveOutro("Cancelado", "error"); return null }
+
+  // ── Base URL (opcional) ───────────────────────────────────────────────────
+  const baseUrl = await hiveText({
+    message: "Base URL (opcional):",
+    placeholder: "https://api.anthropic.com",
+  })
+
+  // ── Modelo: seleccionar de la DB o escribir uno personalizado ─────────────
+  let model = ""
+  const dbModels = getModelsForProvider(provider)
+
+  if (dbModels.length > 0) {
+    const modelOptions = [
+      ...dbModels,
+      { value: "__custom__", label: "Otro (escribir manualmente)" },
+    ]
+    const sel = await hiveSelect({
+      message: `Modelo para ${provider}:`,
+      options: modelOptions,
+    })
+    if (isCancel(sel)) { hiveOutro("Cancelado", "error"); return null }
+
+    if (sel === "__custom__") {
+      const custom = await hiveText({
+        message: "Nombre del modelo:",
+        placeholder: "ej: claude-sonnet-4-6, gpt-4o...",
+      })
+      if (!isCancel(custom) && custom && typeof custom === "string") model = custom
+    } else {
+      model = sel as string
+    }
+  } else {
+    // Provider sin modelos en DB — campo libre
+    const inp = await hiveText({
+      message: "Modelo por defecto (opcional):",
+      placeholder: "ej: claude-sonnet-4-6, gpt-4o, llama3-70b...",
+    })
+    if (!isCancel(inp) && inp && typeof inp === "string") model = inp
+  }
+
+  hiveOutro(`Provider ${provider} configurado`)
+  return {
+    provider,
+    apiKey,
+    baseUrl: (!isCancel(baseUrl) && baseUrl && typeof baseUrl === "string") ? baseUrl : "",
+    model,
+  }
 }

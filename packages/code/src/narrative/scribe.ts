@@ -1,5 +1,5 @@
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
-import { logger } from "@johpaz/hive-code-core/utils/logger"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { logger } from "@johpaz/hivecode-core/utils/logger"
 import type { NarrativeEntry, ADR, FileSnapshot } from "../workers/types"
 
 const log = logger.child("scribe")

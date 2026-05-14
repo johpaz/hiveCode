@@ -8,8 +8,8 @@
  * It runs a single-turn or multi-turn agent loop depending on the task.
  */
 
-import { callLLM } from "@johpaz/hive-code-core/agent/llm-client"
-import type { LLMMessage } from "@johpaz/hive-code-core/agent/llm-client"
+import { callLLM } from "@johpaz/hivecode-core/agent/llm-client"
+import type { LLMMessage } from "@johpaz/hivecode-core/agent/llm-client"
 import { readWorkerSecrets } from "./secrets"
 
 const COORDINATOR_PROVIDER = process.env.HIVE_COORDINATOR_PROVIDER || "anthropic"

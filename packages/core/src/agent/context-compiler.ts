@@ -24,7 +24,7 @@
 import { getDb } from "../storage/sqlite"
 import { logger } from "../utils/logger"
 import type { LLMMessage, LLMToolDef, ContentPart } from "./llm-client"
-import type { MCPClientManager } from "@johpaz/hive-code-mcp"
+import type { MCPClientManager } from "@johpaz/hivecode-mcp"
 import { syncToolCatalogToFTS, mcpToolFullName } from "./tool-selector"
 import { syncSkillsToFTS, getMinimalSkills, selectSkills, type SkillDescriptor } from "./skill-selector"
 import { syncPlaybookToFTS } from "./playbook-selector"

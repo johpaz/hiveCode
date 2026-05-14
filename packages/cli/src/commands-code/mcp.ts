@@ -1,29 +1,29 @@
 /**
  * MCP commands — manage MCP servers.
  *
- * hive-code mcp list
- * hive-code mcp add <url-or-name>
- * hive-code mcp remove <name>
- * hive-code mcp enable <name>
- * hive-code mcp disable <name>
- * hive-code mcp test <name>
- * hive-code mcp inspect <name>
+ * hivecode mcp list
+ * hivecode mcp add <url-or-name>
+ * hivecode mcp remove <name>
+ * hivecode mcp enable <name>
+ * hivecode mcp disable <name>
+ * hivecode mcp test <name>
+ * hivecode mcp inspect <name>
  */
 
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveSpinner, hiveText, isCancel,
-} from "@johpaz/hive-code-ui"
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
+} from "@johpaz/hivecode-ui"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
 export async function mcpList(): Promise<void> {
-  hiveIntro("hive-code · MCP Servers")
+  hiveIntro("hivecode · MCP Servers")
 
   const db = getDb()
   const rows = db.query("SELECT id, name, transport, url, command, enabled, status, tools_count FROM mcp_servers ORDER BY id").all() as any[]
 
   if (rows.length === 0) {
-    hiveNote("Sin MCPs", ["No hay servidores MCP configurados. Usa 'hive-code mcp add <url>'"])
+    hiveNote("Sin MCPs", ["No hay servidores MCP configurados. Usa 'hivecode mcp add <url>'"])
     hiveOutro("Sin MCPs")
     return
   }
@@ -44,7 +44,7 @@ export async function mcpList(): Promise<void> {
 }
 
 export async function mcpAdd(urlOrName?: string): Promise<void> {
-  hiveIntro("hive-code · Añadir MCP")
+  hiveIntro("hivecode · Añadir MCP")
 
   const input = urlOrName ?? await hiveText({
     message: "URL o nombre del MCP server:",
@@ -74,7 +74,7 @@ export async function mcpAdd(urlOrName?: string): Promise<void> {
 export async function mcpRemove(name?: string): Promise<void> {
 
   if (!name) {
-    hiveOutro("Uso: hive-code mcp remove <name>", "error")
+    hiveOutro("Uso: hivecode mcp remove <name>", "error")
     process.exit(1)
   }
 
@@ -86,7 +86,7 @@ export async function mcpRemove(name?: string): Promise<void> {
 export async function mcpEnable(name?: string): Promise<void> {
 
   if (!name) {
-    hiveOutro("Uso: hive-code mcp enable <name>", "error")
+    hiveOutro("Uso: hivecode mcp enable <name>", "error")
     process.exit(1)
   }
 
@@ -98,7 +98,7 @@ export async function mcpEnable(name?: string): Promise<void> {
 export async function mcpDisable(name?: string): Promise<void> {
 
   if (!name) {
-    hiveOutro("Uso: hive-code mcp disable <name>", "error")
+    hiveOutro("Uso: hivecode mcp disable <name>", "error")
     process.exit(1)
   }
 
@@ -108,7 +108,7 @@ export async function mcpDisable(name?: string): Promise<void> {
 }
 
 export async function mcpTest(name?: string): Promise<void> {
-  hiveIntro("hive-code · Test MCP")
+  hiveIntro("hivecode · Test MCP")
 
   const mcpId = name ?? await hiveText({
     message: "MCP a probar:",
@@ -150,7 +150,7 @@ export async function mcpTest(name?: string): Promise<void> {
 export async function mcpInspect(name?: string): Promise<void> {
 
   if (!name) {
-    hiveOutro("Uso: hive-code mcp inspect <name>", "error")
+    hiveOutro("Uso: hivecode mcp inspect <name>", "error")
     process.exit(1)
   }
 
@@ -162,7 +162,7 @@ export async function mcpInspect(name?: string): Promise<void> {
     process.exit(1)
   }
 
-  hiveIntro(`hive-code · MCP: ${row.name}`)
+  hiveIntro(`hivecode · MCP: ${row.name}`)
 
   console.log(`\n  \x1b[1mID:\x1b[0m        ${row.id}`)
   console.log(`  \x1b[1mNombre:\x1b[0m    ${row.name}`)

@@ -1,11 +1,11 @@
-import { getExecutionMode, setExecutionMode, modeCycle } from "@johpaz/hive-code-core"
+import { getExecutionMode, setExecutionMode, modeCycle } from "@johpaz/hivecode-core"
 
 export async function mode(subcommand?: string): Promise<void> {
   switch (subcommand) {
     case "plan":
       setExecutionMode("plan")
       console.log("🟡 Modo PLAN — Solo lectura. Solo el Architecture Coordinator ejecuta.")
-      console.log("   Cambia con: hive-code mode set approval")
+      console.log("   Cambia con: hivecode mode set approval")
       break
 
     case "approval":
@@ -50,7 +50,7 @@ export async function mode(subcommand?: string): Promise<void> {
     case "set": {
       const modeArg = process.argv[4]
       if (!modeArg || !["plan", "approval", "auto"].includes(modeArg)) {
-        console.log("❌ Uso: hive-code mode set <plan|approval|auto>")
+        console.log("❌ Uso: hivecode mode set <plan|approval|auto>")
         process.exit(1)
       }
       setExecutionMode(modeArg as "plan" | "approval" | "auto")
@@ -59,7 +59,7 @@ export async function mode(subcommand?: string): Promise<void> {
     }
 
     default:
-      console.log("❌ Uso: hive-code mode <get|set|status|cycle|plan|approval|auto>")
+      console.log("❌ Uso: hivecode mode <get|set|status|cycle|plan|approval|auto>")
       console.log("   get|status     - Mostrar modo actual")
       console.log("   set <mode>     - Establecer modo (plan|approval|auto)")
       console.log("   cycle          - Ciclar al siguiente modo")

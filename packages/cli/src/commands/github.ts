@@ -1,4 +1,4 @@
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
 export async function github(subcommand?: string, args?: string[]): Promise<void> {
   switch (subcommand) {
@@ -6,8 +6,8 @@ export async function github(subcommand?: string, args?: string[]): Promise<void
       console.log("🔗 GitHub OAuth flow:")
       console.log("   1. Create a GitHub Personal Access Token at:")
       console.log("      https://github.com/settings/tokens")
-      console.log("   2. Run: hive-code secret set GITHUB_TOKEN")
-      console.log("   3. Then run: hive-code github status")
+      console.log("   2. Run: hivecode secret set GITHUB_TOKEN")
+      console.log("   3. Then run: hivecode github status")
       break
 
     case "disconnect":
@@ -21,18 +21,18 @@ export async function github(subcommand?: string, args?: string[]): Promise<void
       if (!token) token = process.env.GITHUB_TOKEN
       if (!token) {
         console.log("❌ No GitHub token configured.")
-        console.log("   Run: hive-code github connect")
+        console.log("   Run: hivecode github connect")
         return
       }
       try {
         const res = await fetch("https://api.github.com/user", {
-          headers: { Authorization: `Bearer ${token}`, "User-Agent": "hive-code" },
+          headers: { Authorization: `Bearer ${token}`, "User-Agent": "hivecode" },
         })
         if (res.ok) {
           const user = await res.json() as any
           console.log(`✅ Connected as: ${user.login} (${user.name || "no name"})`)
           const rateRes = await fetch("https://api.github.com/rate_limit", {
-            headers: { Authorization: `Bearer ${token}`, "User-Agent": "hive-code" },
+            headers: { Authorization: `Bearer ${token}`, "User-Agent": "hivecode" },
           })
           if (rateRes.ok) {
             const rate = await rateRes.json() as any
@@ -50,7 +50,7 @@ export async function github(subcommand?: string, args?: string[]): Promise<void
 
     case "set-repo": {
       const repo = args?.[0]
-      if (!repo) { console.log("Usage: hive-code github set-repo <owner/repo>"); return }
+      if (!repo) { console.log("Usage: hivecode github set-repo <owner/repo>"); return }
       const db = getDb()
       db.query("INSERT OR REPLACE INTO scratchpad (thread_id, key, value) VALUES ('github', 'repo', ?)").run(repo)
       console.log(`✅ Repo set to: ${repo}`)
@@ -59,9 +59,9 @@ export async function github(subcommand?: string, args?: string[]): Promise<void
 
     default:
       console.log("Usage:")
-      console.log("  hive-code github connect           Conectar con GitHub")
-      console.log("  hive-code github disconnect        Desconectar")
-      console.log("  hive-code github status            Estado de integración")
-      console.log("  hive-code github set-repo <repo>   Configurar repositorio")
+      console.log("  hivecode github connect           Conectar con GitHub")
+      console.log("  hivecode github disconnect        Desconectar")
+      console.log("  hivecode github status            Estado de integración")
+      console.log("  hivecode github set-repo <repo>   Configurar repositorio")
   }
 }

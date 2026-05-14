@@ -1,23 +1,23 @@
 /**
  * Skill commands — manage Hive-Code skills.
  *
- * hive-code skill list
- * hive-code skill enable <name>
- * hive-code skill disable <name>
- * hive-code skill add <path>
- * hive-code skill remove <name>
- * hive-code skill inspect <name>
- * hive-code skill assign <skill> <coordinator>
+ * hivecode skill list
+ * hivecode skill enable <name>
+ * hivecode skill disable <name>
+ * hivecode skill add <path>
+ * hivecode skill remove <name>
+ * hivecode skill inspect <name>
+ * hivecode skill assign <skill> <coordinator>
  */
 
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveSpinner, hiveText, isCancel,
-} from "@johpaz/hive-code-ui"
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
+} from "@johpaz/hivecode-ui"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
 export async function skillList(): Promise<void> {
-  hiveIntro("hive-code · Skills")
+  hiveIntro("hivecode · Skills")
 
   const db = getDb()
   const rows = db.query("SELECT id, name, description, enabled, category FROM skills ORDER BY id").all() as any[]
@@ -41,7 +41,7 @@ export async function skillList(): Promise<void> {
 export async function skillEnable(name?: string): Promise<void> {
 
   if (!name) {
-    hiveOutro("Uso: hive-code skill enable <name>", "error")
+    hiveOutro("Uso: hivecode skill enable <name>", "error")
     process.exit(1)
   }
 
@@ -53,7 +53,7 @@ export async function skillEnable(name?: string): Promise<void> {
 export async function skillDisable(name?: string): Promise<void> {
 
   if (!name) {
-    hiveOutro("Uso: hive-code skill disable <name>", "error")
+    hiveOutro("Uso: hivecode skill disable <name>", "error")
     process.exit(1)
   }
 
@@ -63,7 +63,7 @@ export async function skillDisable(name?: string): Promise<void> {
 }
 
 export async function skillAdd(pathArg?: string): Promise<void> {
-  hiveIntro("hive-code · Añadir Skill")
+  hiveIntro("hivecode · Añadir Skill")
 
   const filePath = pathArg ?? await hiveText({
     message: "Ruta al archivo .md de la skill:",
@@ -97,7 +97,7 @@ export async function skillAdd(pathArg?: string): Promise<void> {
 export async function skillRemove(name?: string): Promise<void> {
 
   if (!name) {
-    hiveOutro("Uso: hive-code skill remove <name>", "error")
+    hiveOutro("Uso: hivecode skill remove <name>", "error")
     process.exit(1)
   }
 
@@ -109,7 +109,7 @@ export async function skillRemove(name?: string): Promise<void> {
 export async function skillInspect(name?: string): Promise<void> {
 
   if (!name) {
-    hiveOutro("Uso: hive-code skill inspect <name>", "error")
+    hiveOutro("Uso: hivecode skill inspect <name>", "error")
     process.exit(1)
   }
 
@@ -121,7 +121,7 @@ export async function skillInspect(name?: string): Promise<void> {
     process.exit(1)
   }
 
-  hiveIntro(`hive-code · Skill: ${row.name}`)
+  hiveIntro(`hivecode · Skill: ${row.name}`)
 
   console.log(`\n  \x1b[1mID:\x1b[0m          ${row.id}`)
   console.log(`  \x1b[1mNombre:\x1b[0m      ${row.name}`)
@@ -145,7 +145,7 @@ export async function skillAssign(args: string[]): Promise<void> {
   const coordinator = args[1]
 
   if (!skillName || !coordinator) {
-    hiveOutro("Uso: hive-code skill assign <skill> <coordinator>", "error")
+    hiveOutro("Uso: hivecode skill assign <skill> <coordinator>", "error")
     process.exit(1)
   }
 

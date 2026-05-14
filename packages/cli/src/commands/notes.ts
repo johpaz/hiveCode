@@ -1,4 +1,4 @@
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
 export async function notes(subcommand?: string, args?: string[]): Promise<void> {
   const db = getDb()
@@ -15,7 +15,7 @@ export async function notes(subcommand?: string, args?: string[]): Promise<void>
     case "add": {
       const key = args?.[0]
       const value = args?.slice(1).join(" ")
-      if (!key || !value) { console.log("Usage: hive-code note add <key> <value>"); return }
+      if (!key || !value) { console.log("Usage: hivecode note add <key> <value>"); return }
       db.query(
         "INSERT OR REPLACE INTO scratchpad (thread_id, key, value, updated_at) VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"
       ).run(threadId, key, value)
@@ -24,7 +24,7 @@ export async function notes(subcommand?: string, args?: string[]): Promise<void>
     }
     case "get": {
       const key = args?.[0]
-      if (!key) { console.log("Usage: hive-code note get <key>"); return }
+      if (!key) { console.log("Usage: hivecode note get <key>"); return }
       const row = db.query("SELECT value FROM scratchpad WHERE thread_id = ? AND key = ?").get(threadId, key) as any
       if (row) console.log(row.value)
       else console.log(`Note '${key}' not found.`)
@@ -32,16 +32,16 @@ export async function notes(subcommand?: string, args?: string[]): Promise<void>
     }
     case "delete": {
       const key = args?.[0]
-      if (!key) { console.log("Usage: hive-code note delete <key>"); return }
+      if (!key) { console.log("Usage: hivecode note delete <key>"); return }
       db.query("DELETE FROM scratchpad WHERE thread_id = ? AND key = ?").run(threadId, key)
       console.log(`✅ Note '${key}' deleted.`)
       break
     }
     default:
       console.log("Usage:")
-      console.log("  hive-code note list              Listar notas")
-      console.log("  hive-code note add <key> <val>   Añadir nota")
-      console.log("  hive-code note get <key>         Leer nota")
-      console.log("  hive-code note delete <key>      Eliminar nota")
+      console.log("  hivecode note list              Listar notas")
+      console.log("  hivecode note add <key> <val>   Añadir nota")
+      console.log("  hivecode note get <key>         Leer nota")
+      console.log("  hivecode note delete <key>      Eliminar nota")
   }
 }

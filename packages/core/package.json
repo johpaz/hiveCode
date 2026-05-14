@@ -1,9 +1,9 @@
 {
-  "name": "@johpaz/hive-code-core",
+  "name": "@johpaz/hivecode-core",
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "description": "hive-code core — Multi-AI coding engine",
+  "description": "hivecode core — Multi-AI coding engine",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
   "types": "./src/index.ts",
@@ -16,8 +16,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@johpaz/hive-code-mcp": "workspace:*",
-    "@johpaz/hive-code-skills": "workspace:*",
+    "@johpaz/hivecode-mcp": "workspace:*",
+    "@johpaz/hivecode-skills": "workspace:*",
     "@anthropic-ai/sdk": "^0.74.0",
     "@google/genai": "^1.43.0",
     "@modelcontextprotocol/sdk": "latest",

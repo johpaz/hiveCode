@@ -880,7 +880,7 @@ const gitCreatePrTool: Tool = {
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
-          "User-Agent": "hive-code",
+          "User-Agent": "hivecode",
         },
         body: JSON.stringify({ title, body, head, base }),
       })

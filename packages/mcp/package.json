@@ -1,8 +1,8 @@
 {
-  "name": "@johpaz/hive-code-mcp",
+  "name": "@johpaz/hivecode-mcp",
   "version": "0.1.0",
   "private": true,
-  "description": "hive-code MCP Client — Model Context Protocol client layer",
+  "description": "hivecode MCP Client — Model Context Protocol client layer",
   "main": "./src/index.ts",
   "license": "MIT",
   "files": [

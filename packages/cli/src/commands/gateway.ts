@@ -6,7 +6,7 @@
  * by its specific adapter, providing clean separation of concerns.
  */
 
-import { loadConfig, startGateway, logger, getHiveDir, initializeDatabase } from "@johpaz/hive-code-core";
+import { loadConfig, startGateway, logger, getHiveDir, initializeDatabase } from "@johpaz/hivecode-core";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, openSync } from "node:fs";
 import * as path from "node:path";
 import { spawn, ChildProcess } from "child_process";
@@ -121,15 +121,6 @@ function ensureLogDir(): void {
 // Hive-Code is terminal-only — no browser auto-open
 
 /**
- * Check if setup mode is needed
- */
-async function isSetupMode(): Promise<boolean> {
-  const hiveDir = getHiveDir();
-  const dbPath = path.join(hiveDir, "data", "hive.db");
-  return !existsSync(dbPath);
-}
-
-/**
  * Check if gateway is running using the adapter
  */
 async function isRunning(): Promise<boolean> {
@@ -144,22 +135,7 @@ async function isRunning(): Promise<boolean> {
     // Adapter check failed, fall through to PID check
   }
 
-  // Fallback to PID file check
-  const pidFile = await getPidFile();
-  if (!existsSync(pidFile)) return false;
 
-  const pid = parseInt(readFileSync(pidFile, "utf-8").trim(), 10);
-  if (isNaN(pid)) return false;
-
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    try {
-      unlinkSync(pidFile);
-    } catch { }
-    return false;
-  }
 }
 
 /**
@@ -169,27 +145,6 @@ async function waitForPort(port: number, timeout: number = 30000): Promise<boole
   return waitForHttpPort(port, "/health", timeout);
 }
 
-/**
- * Wait for Vite dev server
- */
-async function waitForVite(port: number, timeout: number = 30000): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}`, {
-        method: "HEAD",
-        signal: AbortSignal.timeout(200),
-      });
-      if (response.ok || response.status === 200) {
-        return true;
-      }
-    } catch {
-      // Port not ready yet
-    }
-    await Bun.sleep(200);
-  }
-  return false;
-}
 
 /**
  * Start command - main entry point

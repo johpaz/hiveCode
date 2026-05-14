@@ -19,7 +19,7 @@ import { callLLM, resolveProviderConfig, type LLMMessage } from "./llm-client"
 import { addMessage } from "./conversation-store"
 import { saveTrace, recordLLMUsage } from "./tracer"
 import { maybeCompact, clearOldToolResults } from "./compaction"
-import type { MCPClientManager } from "@johpaz/hive-code-mcp"
+import type { MCPClientManager } from "@johpaz/hivecode-mcp"
 import { compileContext } from "./context-compiler"
 import { formatToolResult } from "../utils/toon"
 import { getAverageTokenCost } from "../storage/usage"
@@ -242,7 +242,7 @@ export async function* runAgent(
       if (!canExecuteTool(toolName)) {
         const denyMsg = getBlockReason(toolName)
         log.warn(`[agent-loop] Blocked tool '${toolName}' in mode: ${currentMode}`)
-        const toolResultJS = { ok: false, error: denyMsg, hint: `Cambia a modo approval o auto con: hive-code mode set approval|auto` }
+        const toolResultJS = { ok: false, error: denyMsg, hint: `Cambia a modo approval o auto con: hivecode mode set approval|auto` }
         const toolResultLLM = formatToolResult(toolResultJS, cleanModel)
         yield { tools: { messages: [{ content: toolResultLLM, tool_call_id: tc.id }] } }
         messages.push({ role: "tool", content: toolResultLLM, tool_call_id: tc.id })

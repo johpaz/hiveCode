@@ -1,8 +1,8 @@
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveSpinner,
-} from "@johpaz/hive-code-ui"
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
+} from "@johpaz/hivecode-ui"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
 interface DoctorCheck {
   name: string
@@ -15,7 +15,7 @@ export async function doctor(flags: string[] = []): Promise<void> {
 
   const fixMode = flags.includes("--fix")
 
-  hiveIntro("hive-code · Diagnóstico")
+  hiveIntro("hivecode · Diagnóstico")
 
   const checks: DoctorCheck[] = []
 
@@ -75,28 +75,37 @@ export async function doctor(flags: string[] = []): Promise<void> {
     })
   }
 
-  // Check 4: Workers
+  // Check 4: Workers / Coordinators
   const workerSpinner = hiveSpinner("default")
-  workerSpinner.start("Verificando workers...")
-  // Workers are not running in doctor context, so we check schema instead
+  workerSpinner.start("Verificando coordinadores...")
   try {
     const db = getDb()
-    const hasCodeTables = db.query(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'code_%' LIMIT 1"
-    ).all().length > 0
+    const coordCount = (db.query(
+      "SELECT COUNT(*) as c FROM agents WHERE role = 'coordinator' AND enabled = 1"
+    ).get() as any)?.c ?? 0
+    const workerCount = (db.query(
+      "SELECT COUNT(*) as c FROM agents WHERE role = 'worker'"
+    ).get() as any)?.c ?? 0
 
-    workerSpinner.stop(hasCodeTables ? "Schema de workers listo" : "Schema no inicializado")
+    const ok = coordCount >= 6
+    workerSpinner.stop(
+      ok ? `${coordCount} coordinadores · ${workerCount} workers` : `Solo ${coordCount}/6 coordinadores`,
+      ok ? "done" : "error",
+    )
     checks.push({
       name: "Workers (Coordinators)",
-      status: hasCodeTables ? "pass" : "warn",
-      message: hasCodeTables ? "6 coordinadores disponibles" : "Schema de workers no inicializado",
+      status: ok ? "pass" : "warn",
+      message: ok
+        ? `${coordCount} coordinadores registrados · ${workerCount} workers activos`
+        : `Solo ${coordCount}/6 coordinadores — ejecuta: hivecode doctor --fix`,
     })
   } catch (err) {
-    workerSpinner.stop("Error verificando workers", "error")
+    workerSpinner.stop("Error verificando coordinadores", "error")
     checks.push({
       name: "Workers (Coordinators)",
       status: "fail",
-      message: "No se pudo verificar schema de workers",
+      message: "No se pudo verificar agentes en DB",
+      detail: (err as Error).message,
     })
   }
 
@@ -127,7 +136,7 @@ export async function doctor(flags: string[] = []): Promise<void> {
   const secretsSpinner = hiveSpinner("default")
   secretsSpinner.start("Verificando secrets...")
   try {
-    const { loadSecrets } = await import("@johpaz/hive-code-code/workers/secrets")
+    const { loadSecrets } = await import("@johpaz/hivecode-code/workers/secrets")
     const secrets = loadSecrets()
     const hasKeys = Object.keys(secrets).length > 0
     const keyNames = Object.keys(secrets).join(", ")

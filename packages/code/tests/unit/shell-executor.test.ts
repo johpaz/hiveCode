@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
-import { shellExecutorTool } from "@johpaz/hive-code-core/tools/cli"
+import { shellExecutorTool } from "@johpaz/hivecode-core/tools/cli"
 
 describe("shell_executor: naming", () => {
   test("tool name is shell_executor", () => {

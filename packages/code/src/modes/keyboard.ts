@@ -9,7 +9,7 @@
 
 import { getMode, setMode } from "../modes/session-array"
 import type { SessionMode } from "../workers/types"
-import { logger } from "@johpaz/hive-code-core/utils/logger"
+import { logger } from "@johpaz/hivecode-core/utils/logger"
 
 const log = logger.child("keyboard")
 

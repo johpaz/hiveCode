@@ -1,8 +1,8 @@
 {
-  "name": "@johpaz/hive-code-skills",
+  "name": "@johpaz/hivecode-skills",
   "version": "0.1.0",
   "private": true,
-  "description": "hive-code Skills — Code-focused skills for multi-AI coding",
+  "description": "hivecode Skills — Code-focused skills for multi-AI coding",
   "main": "./src/index.ts",
   "license": "MIT",
   "files": [

@@ -12,7 +12,7 @@ import { getDb } from "../storage/sqlite";
 import { logger } from "../utils/logger";
 import { decryptConfig } from "../storage/crypto";
 import { syncMCPToolsToDB, syncMCPToolsToFTS, clearMCPToolsFromDB } from "./tool-sync";
-import type { MCPClientManager } from "@johpaz/hive-code-mcp";
+import type { MCPClientManager } from "@johpaz/hivecode-mcp";
 
 const log = logger.child("mcp:hot-reload");
 

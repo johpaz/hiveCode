@@ -5,8 +5,8 @@
  * Idempotente: usa INSERT OR REPLACE para no perder cambios del usuario.
  */
 
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
-import { logger } from "@johpaz/hive-code-core/utils/logger"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { BUNDLED_SKILLS_DATA } from "../../skills/src/bundled-data.generated"
 
 const log = logger.child("code-seed")
@@ -252,6 +252,74 @@ function seedCommandsFts(): void {
   }
 }
 
+// ─── 4. Coordinators (6 roles fijos del sistema) ─────────────────────────────
+
+interface CoordinatorSeed {
+  id: string
+  name: string
+  description: string
+  prompt: string
+}
+
+const COORDINATOR_SEED: CoordinatorSeed[] = [
+  {
+    id: "coord-architecture",
+    name: "architecture",
+    description: "Arquitecto: analiza requisitos, diseña arquitectura y crea el plan de implementación por fases",
+    prompt: "Eres el coordinador Architecture de Hive-Code. Tu responsabilidad es analizar el proyecto, diseñar la arquitectura de software e identificar los componentes necesarios. Crea un plan detallado de implementación dividido en fases asignadas a los coordinadores backend, frontend, security, test y devops.",
+  },
+  {
+    id: "coord-backend",
+    name: "backend",
+    description: "Backend engineer: implementa APIs, lógica de negocio, modelos de datos y servicios",
+    prompt: "Eres el coordinador Backend de Hive-Code. Implementa la lógica del servidor, APIs REST/GraphQL, modelos de base de datos, servicios e integraciones con sistemas externos. Usa las herramientas disponibles para leer, escribir y verificar código.",
+  },
+  {
+    id: "coord-frontend",
+    name: "frontend",
+    description: "Frontend engineer: implementa UI, componentes, estilos y experiencia de usuario",
+    prompt: "Eres el coordinador Frontend de Hive-Code. Implementa la interfaz de usuario, componentes visuales, estilos, animaciones y experiencia del usuario. Garantiza accesibilidad y rendimiento.",
+  },
+  {
+    id: "coord-security",
+    name: "security",
+    description: "Security engineer: audita código, detecta vulnerabilidades e implementa controles de seguridad",
+    prompt: "Eres el coordinador Security de Hive-Code. Audita el código en busca de vulnerabilidades (OWASP Top 10), implementa controles de seguridad, gestiona autenticación, autorización y protección de datos sensibles.",
+  },
+  {
+    id: "coord-test",
+    name: "test",
+    description: "QA engineer: diseña y ejecuta pruebas unitarias, de integración y end-to-end",
+    prompt: "Eres el coordinador Test de Hive-Code. Diseña y ejecuta suites de pruebas unitarias, de integración y end-to-end. Garantiza cobertura adecuada del código y verifica el correcto funcionamiento del sistema.",
+  },
+  {
+    id: "coord-devops",
+    name: "devops",
+    description: "DevOps engineer: configura CI/CD, Docker, despliegues y monitoreo",
+    prompt: "Eres el coordinador DevOps de Hive-Code. Configura pipelines CI/CD, dockerización, infraestructura como código, estrategias de despliegue y sistemas de monitoreo.",
+  },
+]
+
+function seedCodeCoordinators(): void {
+  const db = getDb()
+  const stmt = db.prepare(`
+    INSERT OR REPLACE INTO agents (id, name, description, system_prompt, role, status, enabled)
+    VALUES (?, ?, ?, ?, 'coordinator', 'idle', 1)
+  `)
+
+  let count = 0
+  for (const c of COORDINATOR_SEED) {
+    try {
+      stmt.run(c.id, c.name, c.description, c.prompt)
+      count++
+    } catch (err) {
+      log.warn(`[seed] Failed to seed coordinator ${c.id}:`, (err as Error).message)
+    }
+  }
+
+  log.info(`[seed] ✅ ${count} coordinadores seeded`)
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export function seedCodeData(): void {
@@ -262,6 +330,7 @@ export function seedCodeData(): void {
     seedCodeSkills()
     seedCodePlaybook()
     seedCommandsFts()
+    seedCodeCoordinators()
     log.info("[seed] ✨ Hive-Code seed completed")
   } catch (err) {
     log.error("[seed] ❌ Hive-Code seed failed:", (err as Error).message)

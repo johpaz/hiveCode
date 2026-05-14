@@ -2,8 +2,8 @@ import { Database } from "bun:sqlite"
 import * as path from "node:path"
 import * as fs from "node:fs"
 import * as os from "node:os"
-import { SCHEMA, PROJECTS_SCHEMA, CONTEXT_ENGINE_SCHEMA, MEETING_SCHEMA } from "@johpaz/hive-code-core/storage/schema"
-import { _setDb, _resetDb } from "@johpaz/hive-code-core/storage/sqlite"
+import { SCHEMA, PROJECTS_SCHEMA, CONTEXT_ENGINE_SCHEMA, MEETING_SCHEMA } from "@johpaz/hivecode-core/storage/schema"
+import { _setDb, _resetDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { CODE_SCHEMA } from "../../src/narrative/schema"
 
 let _testDb: Database | null = null
@@ -40,4 +40,27 @@ export function cleanupTestDb(): void {
 export function resetTestDb(): void {
   cleanupTestDb()
   getTestDb()
+}
+
+export function seedProvider(
+  id: string,
+  name: string = id,
+  opts: { baseUrl?: string; enabled?: number; apiKey?: string } = {},
+): void {
+  const db = getTestDb()
+  db.query(
+    "INSERT OR REPLACE INTO providers (id, name, base_url, enabled) VALUES (?, ?, ?, ?)",
+  ).run(id, name, opts.baseUrl ?? null, opts.enabled ?? 1)
+  if (opts.apiKey) {
+    db.query("UPDATE providers SET api_key_encrypted = ? WHERE id = ?").run(
+      Buffer.from(opts.apiKey).toString("base64"),
+      id,
+    )
+  }
+}
+
+export function seedConfig(key: string, value: string): void {
+  getTestDb()
+    .query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)")
+    .run(key, value)
 }

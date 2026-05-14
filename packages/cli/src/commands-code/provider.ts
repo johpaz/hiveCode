@@ -1,128 +1,163 @@
 /**
  * Provider commands — manage LLM providers and API keys.
  *
- * hive-code provider list
- * hive-code provider add <name>
- * hive-code provider remove <name>
- * hive-code provider set-default <name>
- * hive-code provider set-model <provider> <model>
- * hive-code provider test <name>
+ * hivecode provider list
+ * hivecode provider add [name]
+ * hivecode provider edit <name>
+ * hivecode provider remove <name>
+ * hivecode provider set-default <name>
+ * hivecode provider set-model <provider> <model>
+ * hivecode provider test <name>
  */
 
 import {
-  hiveIntro, hiveOutro, hivePhaseComplete,
+  hiveIntro, hiveOutro,
   hiveNote, hiveSpinner, hiveText, hiveSelect, isCancel,
-} from "@johpaz/hive-code-ui"
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
+  runProviderSetupWizard,
+} from "@johpaz/hivecode-ui"
+
+const VERSION = "1.0.0"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+
+function modelsForProvider(providerId: string): { value: string; label: string }[] {
+  try {
+    return (getDb()
+      .query("SELECT id, name FROM models WHERE provider_id = ? AND model_type = 'llm' ORDER BY name")
+      .all(providerId) as { id: string; name: string }[])
+      .map((r) => ({ value: r.id, label: r.name }))
+  } catch { return [] }
+}
 
 export async function providerList(): Promise<void> {
-  hiveIntro("hive-code · Providers")
-
   const db = getDb()
   const rows = db.query("SELECT id, name, base_url, enabled FROM providers ORDER BY id").all() as any[]
 
+  hiveIntro("hivecode · Providers")
+
   if (rows.length === 0) {
-    hiveNote("Sin providers", ["No hay providers configurados. Usa 'hive-code provider add <name>'"])
+    hiveNote("Sin providers", ["No hay providers configurados.", "Usa: hivecode provider add <name>"])
     hiveOutro("Sin providers")
     return
   }
 
-  const defaultProvider = db.query("SELECT value FROM code_config WHERE key = 'default_provider'").get() as any
+  const defaultProvider = (db.query("SELECT value FROM code_config WHERE key = 'default_provider'").get() as any)?.value ?? ""
   const modelRows = db.query("SELECT key, value FROM code_config WHERE key LIKE 'provider_model_%'").all() as any[]
-  const modelMap = new Map(modelRows.map(r => [r.key.replace("provider_model_", ""), r.value]))
+  const modelMap = new Map(modelRows.map((r: any) => [r.key.replace("provider_model_", ""), r.value]))
 
-  for (const row of rows) {
-    const isDefault = defaultProvider?.value === row.id
-    const status = row.enabled ? "●" : "○"
-    const color = row.enabled ? "\x1b[38;5;114m" : "\x1b[38;5;240m"
-    const model = modelMap.get(row.id) || "default"
-    hivePhaseComplete(row.id, `${row.name}${isDefault ? " (default)" : ""}`)
-    process.stdout.write(`  │    ${color}${status}\x1b[0m  ${row.id}  ·  model: ${model}\n`)
-    if (row.base_url) {
-      process.stdout.write(`  │         ${row.base_url}\n`)
-    }
-    process.stdout.write(`  │\n`)
+  const lines = rows.map((r: any) => {
+    const mark   = r.enabled ? "●" : "○"
+    const def    = defaultProvider === r.id ? " ★" : "  "
+    const model  = modelMap.get(r.id) ?? "default"
+    const url    = r.base_url ?? "—"
+    return `${mark}${def} ${r.id.padEnd(12)}  ${model.padEnd(24)}  ${url}`
+  })
+  hiveNote(`${rows.length} provider${rows.length === 1 ? "" : "s"}  ·  default: ${defaultProvider || "—"}`, lines)
+
+  const action = await hiveSelect({
+    message: "¿Qué deseas hacer?",
+    options: [
+      { value: "exit",   label: "Salir" },
+      { value: "set",    label: "Cambiar provider por defecto" },
+      { value: "delete", label: "Eliminar provider" },
+      { value: "add",    label: "Agregar provider" },
+    ],
+  })
+
+  if (isCancel(action) || action === "exit") {
+    hiveOutro("Listo")
+    return
   }
 
-  hiveOutro(`${rows.length} provider(s)`)
+  if (action === "set") {
+    const sel = await hiveSelect({
+      message: "Provider por defecto:",
+      options: rows.map((r: any) => ({
+        value: r.id,
+        label: `${r.id}${defaultProvider === r.id ? " (actual)" : ""}`,
+      })),
+    })
+    if (!isCancel(sel)) {
+      db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(sel)
+      hiveOutro(`${sel} es ahora el provider por defecto`)
+    }
+    return
+  }
+
+  if (action === "delete") {
+    const sel = await hiveSelect({
+      message: "Provider a eliminar:",
+      options: rows.map((r: any) => ({ value: r.id, label: r.id })),
+    })
+    if (!isCancel(sel)) {
+      db.query("DELETE FROM providers WHERE id = ?").run(sel as string)
+      hiveOutro(`Provider ${sel} eliminado`)
+    }
+    return
+  }
+
+  if (action === "add") {
+    const known = rows.map((r: any) => r.id as string)
+    const result = await runProviderSetupWizard(known, VERSION)
+    if (!result) { hiveOutro("Cancelado", "error"); return }
+    db.query(`
+      INSERT INTO providers (id, name, base_url, enabled)
+      VALUES (?,?,?,1)
+      ON CONFLICT(id) DO UPDATE SET
+        base_url = excluded.base_url,
+        enabled  = 1
+    `).run(result.provider, result.provider, result.baseUrl || null)
+    if (result.model) {
+      db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?,?)")
+        .run(`provider_model_${result.provider}`, result.model)
+    }
+    try {
+      const secrets = (Bun as any).secrets
+      if (secrets?.set) secrets.set(`${result.provider.toUpperCase().replace(/-/g, "_")}_API_KEY`, result.apiKey)
+    } catch {
+      db.query("UPDATE providers SET api_key_encrypted = ? WHERE id = ?")
+        .run(Buffer.from(result.apiKey).toString("base64"), result.provider)
+    }
+    hiveOutro(`Provider ${result.provider} agregado`)
+  }
 }
 
 export async function providerAdd(name?: string): Promise<void> {
-  hiveIntro("hive-code · Añadir Provider")
-
-  const providerName = name ?? await hiveText({
-    message: "Nombre del provider:",
-    placeholder: "anthropic, openai, groq...",
-  })
-
-  if (isCancel(providerName) || !providerName || typeof providerName !== "string") {
-    hiveOutro("Cancelado", "error")
-    return
-  }
-
-  const apiKey = await hiveText({
-    message: `API key para ${providerName}:`,
-    placeholder: "sk-...",
-  })
-
-  if (isCancel(apiKey) || !apiKey || typeof apiKey !== "string") {
-    hiveOutro("Cancelado", "error")
-    return
-  }
-
   const db = getDb()
+  const knownProviders = (
+    db.query("SELECT id FROM providers ORDER BY id").all() as { id: string }[]
+  ).map((r) => r.id)
 
-  // Check if provider already exists
-  const existing = db.query("SELECT id FROM providers WHERE id = ?").get(providerName) as any
+  const result = await runProviderSetupWizard(knownProviders, VERSION)
+  if (!result) return
+
+  const existing = db.query("SELECT id FROM providers WHERE id = ?").get(result.provider) as any
   if (existing) {
-    hiveNote("Provider existente", [`${providerName} ya existe. Usa 'provider remove' primero.`])
+    hiveNote("Provider existente", [`${result.provider} ya existe. Usa 'provider edit' para modificarlo.`])
     hiveOutro("No se añadió", "error")
     return
   }
 
-  const baseUrl = await hiveText({
-    message: "Base URL (opcional):",
-    placeholder: "https://api...",
-  })
+  db.query("INSERT INTO providers (id, name, base_url, enabled) VALUES (?, ?, ?, 1)")
+    .run(result.provider, result.provider, result.baseUrl || null)
 
-  const model = await hiveText({
-    message: "Modelo por defecto (opcional):",
-    placeholder: "claude-sonnet-4, gpt-4o...",
-  })
-
-  db.query(`
-    INSERT INTO providers (id, name, base_url, enabled)
-    VALUES (?, ?, ?, 1)
-  `).run(
-    providerName,
-    providerName,
-    (!isCancel(baseUrl) && baseUrl && typeof baseUrl === "string") ? baseUrl : null
-  )
-
-  if (!isCancel(model) && model && typeof model === "string") {
+  if (result.model) {
     db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)")
-      .run(`provider_model_${providerName}`, model)
+      .run(`provider_model_${result.provider}`, result.model)
   }
 
-  // Store API key in Bun.secrets if available
   try {
     const secrets = (Bun as any).secrets
-    if (secrets?.set) {
-      secrets.set(`${providerName.toUpperCase().replace(/-/g, "_")}_API_KEY`, apiKey)
-    }
+    if (secrets?.set) secrets.set(`${result.provider.toUpperCase().replace(/-/g, "_")}_API_KEY`, result.apiKey)
   } catch {
-    // Fallback: store encrypted in DB
     db.query("UPDATE providers SET api_key_encrypted = ? WHERE id = ?")
-      .run(Buffer.from(apiKey).toString("base64"), providerName)
+      .run(Buffer.from(result.apiKey).toString("base64"), result.provider)
   }
-
-  hiveOutro(`Provider ${providerName} añadido`)
 }
 
 export async function providerRemove(name?: string): Promise<void> {
 
   if (!name) {
-    hiveOutro("Uso: hive-code provider remove <name>", "error")
+    hiveOutro("Uso: hivecode provider remove <name>", "error")
     process.exit(1)
   }
 
@@ -138,10 +173,106 @@ export async function providerRemove(name?: string): Promise<void> {
   hiveOutro(`Provider ${name} eliminado`)
 }
 
+export async function providerEdit(name?: string): Promise<void> {
+  hiveIntro("hivecode · Editar Provider")
+
+  const db = getDb()
+
+  let providerId = name
+  if (!providerId) {
+    const rows = db.query("SELECT id FROM providers ORDER BY id").all() as { id: string }[]
+    if (rows.length === 0) {
+      hiveOutro("Sin providers configurados", "error"); return
+    }
+    const sel = await hiveSelect({
+      message: "Provider a editar:",
+      options: rows.map((r) => ({ value: r.id, label: r.id })),
+    })
+    if (isCancel(sel)) { hiveOutro("Cancelado", "error"); return }
+    providerId = sel as string
+  }
+
+  const row = db.query("SELECT id, name, base_url FROM providers WHERE id = ?").get(providerId) as any
+  if (!row) {
+    hiveOutro(`Provider no encontrado: ${providerId}`, "error")
+    process.exit(1)
+  }
+
+  const currentModel = (
+    db.query("SELECT value FROM code_config WHERE key = ?").get(`provider_model_${providerId}`) as any
+  )?.value ?? ""
+
+  hiveNote("Valores actuales", [
+    `ID:       ${row.id}`,
+    `Base URL: ${row.base_url ?? "—"}`,
+    `Modelo:   ${currentModel || "default"}`,
+    "(Enter en blanco mantiene el valor actual)",
+  ])
+
+  // ── API Key ─────────────────────────────────────────────────────────────────
+  const apiKey = await hiveText({
+    message: "Nueva API key (Enter para mantener):",
+    placeholder: "sk-...",
+  })
+
+  // ── Base URL ─────────────────────────────────────────────────────────────────
+  const baseUrl = await hiveText({
+    message: "Nueva Base URL (Enter para mantener):",
+    placeholder: row.base_url ?? "https://api...",
+  })
+
+  // ── Modelo ───────────────────────────────────────────────────────────────────
+  let model = currentModel
+  const dbModels = modelsForProvider(providerId)
+
+  if (dbModels.length > 0) {
+    const opts = [
+      { value: "__keep__", label: `Mantener actual (${currentModel || "default"})` },
+      ...dbModels,
+      { value: "__custom__", label: "Escribir manualmente" },
+    ]
+    const sel = await hiveSelect({ message: "Modelo:", options: opts })
+    if (isCancel(sel)) { hiveOutro("Cancelado", "error"); return }
+    if (sel === "__custom__") {
+      const custom = await hiveText({ message: "Nombre del modelo:", placeholder: "claude-sonnet-4-6..." })
+      if (!isCancel(custom) && custom && typeof custom === "string") model = custom
+    } else if (sel !== "__keep__") {
+      model = sel as string
+    }
+  } else {
+    const inp = await hiveText({
+      message: `Modelo (actual: ${currentModel || "default"}, Enter para mantener):`,
+      placeholder: currentModel || "ej: gpt-4o, llama3-70b...",
+    })
+    if (!isCancel(inp) && inp && typeof inp === "string") model = inp
+  }
+
+  // ── Aplicar cambios ──────────────────────────────────────────────────────────
+  if (!isCancel(baseUrl) && baseUrl && typeof baseUrl === "string") {
+    db.query("UPDATE providers SET base_url = ? WHERE id = ?").run(baseUrl, providerId)
+  }
+
+  db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)").run(
+    `provider_model_${providerId}`, model,
+  )
+
+  if (!isCancel(apiKey) && apiKey && typeof apiKey === "string") {
+    try {
+      const secrets = (Bun as any).secrets
+      if (secrets?.set) secrets.set(`${providerId.toUpperCase().replace(/-/g, "_")}_API_KEY`, apiKey)
+    } catch {
+      db.query("UPDATE providers SET api_key_encrypted = ? WHERE id = ?")
+        .run(Buffer.from(apiKey).toString("base64"), providerId)
+    }
+  }
+
+  hiveOutro(`Provider ${providerId} actualizado`)
+}
+
 export async function providerSetDefault(name?: string): Promise<void> {
 
   if (!name) {
-    hiveOutro("Uso: hive-code provider set-default <name>", "error")
+    hiveOutro("Uso: hivecode provider set-default <name>", "error")
     process.exit(1)
   }
 
@@ -163,7 +294,7 @@ export async function providerSetModel(args: string[]): Promise<void> {
   const model = args[1]
 
   if (!providerId || !model) {
-    hiveOutro("Uso: hive-code provider set-model <provider> <model>", "error")
+    hiveOutro("Uso: hivecode provider set-model <provider> <model>", "error")
     process.exit(1)
   }
 
@@ -174,7 +305,7 @@ export async function providerSetModel(args: string[]): Promise<void> {
 }
 
 export async function providerTest(name?: string): Promise<void> {
-  hiveIntro("hive-code · Test Provider")
+  hiveIntro("hivecode · Test Provider")
 
   const db = getDb()
   const providerId = name ?? await hiveText({

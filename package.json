@@ -1,10 +1,10 @@
 {
-  "name": "@johpaz/hive-code",
+  "name": "@johpaz/hivecode",
   "version": "0.1.0",
   "description": "hive-code — Multi-AI coding swarm. Console-first. Code-focused. Multi-provider.",
   "private": true,
   "bin": {
-    "hive-code": "dist/hive-code.js"
+    "hivecode": "dist/hivecode.js"
   },
   "main": "packages/core/src/index.ts",
   "types": "packages/core/src/index.ts",
@@ -74,9 +74,9 @@
     "./cli": "./packages/cli/src/index.ts"
   },
   "files": [
-    "dist/hive.js",
-    "dist/hive.cmd",
-    "dist/hive.ps1",
+    "dist/hivecode.js",
+    "dist/hivecode.cmd",
+    "dist/hivecode.ps1",
     "dist/ui",
     "README.md",
     "LICENSE"
@@ -101,12 +101,11 @@
   ],
   "license": "MIT",
   "scripts": {
-    "hive-code": "bun packages/cli/src/index.ts",
-    "dev": "HIVE_DEV=true bun run packages/cli/src/index.ts dev",
-    "dev:prod": "bun run packages/cli/src/index.ts dev --prod",
+    "hivecode": "bun packages/cli/src/index.ts",
+    "dev": "HIVE_DEV=true bun run packages/cli/src/index.ts",
     "start": "bun run packages/cli/src/index.ts start",
-    "build": "bun packages/skills/scripts/generate-bundle.ts && bun build packages/cli/src/index.ts packages/code/src/workers/architecture.worker.ts packages/code/src/workers/backend.worker.ts packages/code/src/workers/frontend.worker.ts packages/code/src/workers/security.worker.ts packages/code/src/workers/test.worker.ts packages/code/src/workers/devops.worker.ts --bundle --outdir dist --target bun --entry-naming '[name].js' && mv dist/index.js dist/hive-code.js && bun packages/cli/scripts/postbuild.ts",
-    "build:binary": "bun build packages/cli/src/index.ts --compile --outfile ../../dist/hive-code-binary",
+    "build": "bun packages/skills/scripts/generate-bundle.ts && bun build packages/cli/src/index.ts packages/code/src/workers/architecture.worker.ts packages/code/src/workers/backend.worker.ts packages/code/src/workers/frontend.worker.ts packages/code/src/workers/security.worker.ts packages/code/src/workers/test.worker.ts packages/code/src/workers/devops.worker.ts --bundle --outdir dist --target bun --entry-naming '[name].js' && mv dist/index.js dist/hivecode.js && bun packages/cli/scripts/postbuild.ts",
+    "build:binary": "bun build packages/cli/src/index.ts --compile --outfile ../../dist/hivecode-binary",
     "prepublishOnly": "bun run build",
     "test": "bun test",
     "test:ci": "bun test --coverage",
@@ -127,11 +126,5 @@
   "devDependencies": {
     "@types/bun": "^1.3.13",
     "typescript": "6.0.2"
-  },
-  "overrides": {
-    "vite": "^8.0.0"
-  },
-  "resolutions": {
-    "vite": "^8.0.0"
   }
 }

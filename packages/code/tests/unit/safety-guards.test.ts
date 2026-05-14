@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
-import { resolveInWorkspace, expandPath } from "@johpaz/hive-code-core/tools/filesystem/workspace-guard"
+import { resolveInWorkspace, expandPath } from "@johpaz/hivecode-core/tools/filesystem/workspace-guard"
 import { checkAutomaticInterruption } from "../../src/modes/interruptions"
 import type { WorkerToManagerMessage } from "../../src/workers/types"
 

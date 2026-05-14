@@ -8,7 +8,7 @@ import { join, resolve } from "node:path"
 
 // Dist dir is at project root, not inside packages/
 const distDir = resolve(process.cwd(), "dist")
-const entry = "hive-code.js"
+const entry = "hivecode.js"
 
 if (!existsSync(distDir)) {
   mkdirSync(distDir, { recursive: true })
@@ -30,10 +30,10 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 & bun "$scriptDir/${entry}" @args
 `
 
-writeFileSync(join(distDir, "hive-code"), unixWrapper)
-chmodSync(join(distDir, "hive-code"), 0o755)
+writeFileSync(join(distDir, "hivecode"), unixWrapper)
+chmodSync(join(distDir, "hivecode"), 0o755)
 
-writeFileSync(join(distDir, "hive-code.cmd"), cmdWrapper)
-writeFileSync(join(distDir, "hive-code.ps1"), psWrapper)
+writeFileSync(join(distDir, "hivecode.cmd"), cmdWrapper)
+writeFileSync(join(distDir, "hivecode.ps1"), psWrapper)
 
 console.log("[postbuild] ✅ Shell wrappers generated")

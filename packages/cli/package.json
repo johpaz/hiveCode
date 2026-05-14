@@ -1,31 +1,32 @@
 {
-  "name": "@johpaz/hive-code-cli",
+  "name": "@johpaz/hivecode-cli",
   "version": "0.1.0",
-  "description": "hive-code CLI — Multi-AI coding tool. Console-first.",
+  "description": "hivecode CLI — Multi-AI coding tool. Console-first.",
   "bin": {
-    "hive-code": "./dist/hive-code.js"
+    "hivecode": "./dist/hivecode.js"
   },
-  "main": "./dist/hive-code.js",
+  "main": "./dist/hivecode.js",
   "license": "MIT",
   "files": [
-    "dist/hive-code.js",
-    "dist/hive-code.cmd",
-    "dist/hive-code.ps1",
+    "dist/hivecode.js",
+    "dist/hivecode.cmd",
+    "dist/hivecode.ps1",
     "README.md"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outfile dist/hive-code.js --target bun",
+    "build": "bun build src/index.ts --outfile dist/hivecode.js --target bun",
     "postbuild": "bun run scripts/postbuild.ts",
     "test": "bun test"
   },
   "dependencies": {
-    "@johpaz/hive-code-core": "workspace:*",
-    "@johpaz/hive-code-code": "workspace:*",
-    "@johpaz/hive-code-ui": "workspace:*",
+    "@johpaz/hivecode-core": "workspace:*",
+    "@johpaz/hivecode-code": "workspace:*",
+    "@johpaz/hivecode-ui": "workspace:*",
     "toon-format-parser": "1.1.3"
   },
   "devDependencies": {
-    "typescript": "6.0.2",
-    "@types/bun": "^1.3.13"
+    "@types/bun": "^1.3.13",
+    "node-pty": "^1.1.0",
+    "typescript": "6.0.2"
   }
 }

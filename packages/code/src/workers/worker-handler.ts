@@ -1,5 +1,5 @@
-import { callLLM } from "@johpaz/hive-code-core/agent/llm-client"
-import type { LLMMessage, LLMToolDef, LLMToolCall } from "@johpaz/hive-code-core/agent/llm-client"
+import { callLLM } from "@johpaz/hivecode-core/agent/llm-client"
+import type { LLMMessage, LLMToolDef, LLMToolCall } from "@johpaz/hivecode-core/agent/llm-client"
 import { readWorkerSecrets } from "./secrets"
 import { getSubAgent, isValidSubAgent, SUBAGENT_WORKER_PATH } from "./subagent-registry"
 import type {
@@ -125,8 +125,8 @@ class WorkerAgent {
     const startTime = performance.now()
 
     try {
-      const provider = COORDINATOR_PROVIDER
-      const model = COORDINATOR_MODEL
+      const provider = task.provider || COORDINATOR_PROVIDER
+      const model = task.model || COORDINATOR_MODEL
       const apiKey = resolveApiKey(provider, task.secrets)
 
       // Build initial messages
@@ -309,8 +309,8 @@ class WorkerAgent {
         systemPrompt: subAgent.systemPrompt,
         task: taskContext,
         secrets: this.task?.secrets,
-        provider: COORDINATOR_PROVIDER,
-        model: COORDINATOR_MODEL,
+        provider: this.task?.provider || COORDINATOR_PROVIDER,
+        model: this.task?.model || COORDINATOR_MODEL,
         temperature: subAgent.temperature,
         maxTokens: subAgent.maxTokens,
       })

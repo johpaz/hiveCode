@@ -1,4 +1,4 @@
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
 export interface ContextState {
   sessionId: string
@@ -10,9 +10,16 @@ export interface ContextState {
   projectPath: string
 }
 
+export interface MenuItem {
+  label: string
+  cmd: string
+  desc: string
+}
+
 export interface CommandResult {
   handled: boolean
   output?: string
+  menu?: MenuItem[]
   newState?: Partial<ContextState>
 }
 
@@ -248,6 +255,13 @@ async function handleProviderCommand(
         "  \u00b7 status    \u2014 estado de todos",
         "",
       ].join("\n"),
+      menu: [
+        { label: "list",   cmd: "/provider list",   desc: "muestra providers + modelo activo" },
+        { label: "add",    cmd: "/provider add",    desc: "agregar nuevo provider" },
+        { label: "set",    cmd: "/provider set",    desc: "cambiar provider activo" },
+        { label: "test",   cmd: "/provider test",   desc: "ping al provider" },
+        { label: "status", cmd: "/provider status", desc: "estado de todos" },
+      ],
     }
   }
 
@@ -275,7 +289,7 @@ async function handleProviderCommand(
       db.query("INSERT OR IGNORE INTO providers (id, name, enabled) VALUES (?, ?, 1)").run(name, name)
       return {
         handled: true,
-        output: `  \u2713 ${name} agregado\n\n  Configurar API key con: hive-code secret set ${name.toUpperCase()}_API_KEY\n  Activar con: /provider set ${name}`,
+        output: `  \u2713 ${name} agregado\n\n  Configurar API key con: hivecode secret set ${name.toUpperCase()}_API_KEY\n  Activar con: /provider set ${name}`,
       }
     }
     case "set": {
@@ -349,6 +363,11 @@ async function handleModelCommand(
         "  \u00b7 info      \u2014 detalles del modelo",
         "",
       ].join("\n"),
+      menu: [
+        { label: "list", cmd: "/modelo list", desc: "lista modelos disponibles por provider" },
+        { label: "set",  cmd: "/modelo set",  desc: "cambia modelo activo" },
+        { label: "info", cmd: "/modelo info", desc: "detalles del modelo" },
+      ],
     }
   }
 
@@ -425,6 +444,13 @@ async function handleMcpCommand(
         "  \u00b7 test      \u2014 verifica conexi\u00f3n y lista tools",
         "",
       ].join("\n"),
+      menu: [
+        { label: "list",    cmd: "/mcp list",    desc: "lista MCPs conectados/desconectados" },
+        { label: "add",     cmd: "/mcp add",     desc: "registra nuevo MCP" },
+        { label: "enable",  cmd: "/mcp enable",  desc: "activa MCP en sesi\u00f3n actual" },
+        { label: "disable", cmd: "/mcp disable", desc: "desactiva sin eliminar config" },
+        { label: "test",    cmd: "/mcp test",    desc: "verifica conexi\u00f3n y lista tools" },
+      ],
     }
   }
 
@@ -463,6 +489,13 @@ async function handleSkillCommand(
         "  \u00b7 add       \u2014 importa skill desde archivo .md",
         "",
       ].join("\n"),
+      menu: [
+        { label: "list",    cmd: "/skill list",    desc: "lista skills: built-in / custom / active" },
+        { label: "enable",  cmd: "/skill enable",  desc: "activa skill" },
+        { label: "disable", cmd: "/skill disable", desc: "desactiva sin eliminar" },
+        { label: "info",    cmd: "/skill info",    desc: "muestra contenido y metadata" },
+        { label: "add",     cmd: "/skill add",     desc: "importa skill desde archivo .md" },
+      ],
     }
   }
 
@@ -548,6 +581,11 @@ async function handleModeCommand(
         "  \u00b7 history   \u2014 historial de cambios",
         "",
       ].join("\n"),
+      menu: [
+        { label: "get",     cmd: "/mode get",     desc: "muestra modo actual" },
+        { label: "set",     cmd: "/mode set",     desc: "cambiar modo (plan|approval|auto)" },
+        { label: "history", cmd: "/mode history", desc: "historial de cambios" },
+      ],
     }
   }
 
@@ -597,6 +635,12 @@ async function handleTaskCommand(
         "  \u00b7 rollback  \u2014 revierte cambios de una tarea",
         "",
       ].join("\n"),
+      menu: [
+        { label: "list",     cmd: "/task list",     desc: "tareas recientes" },
+        { label: "status",   cmd: "/task status",   desc: "estado detallado + fase actual" },
+        { label: "cancel",   cmd: "/task cancel",   desc: "cancela tarea en curso" },
+        { label: "rollback", cmd: "/task rollback", desc: "revierte cambios de una tarea" },
+      ],
     }
   }
 
@@ -661,6 +705,11 @@ async function handleNarrativeCommand(
         "  \u00b7 export    \u2014 exporta narrativo completo",
         "",
       ].join("\n"),
+      menu: [
+        { label: "show",   cmd: "/narrative show",   desc: "muestra \u00faltimas N entradas" },
+        { label: "search", cmd: "/narrative search", desc: "busca en el narrativo por FTS5" },
+        { label: "export", cmd: "/narrative export", desc: "exporta narrativo completo" },
+      ],
     }
   }
 
@@ -800,7 +849,7 @@ async function handleGithubCommand(
         handled: true,
         output: token
           ? "  \u2713 GitHub: token configurado"
-          : "  \u2717 GitHub: no hay token. Configura con: hive-code github connect",
+          : "  \u2717 GitHub: no hay token. Configura con: hivecode github connect",
       }
     }
     case "whoami": {
@@ -865,7 +914,7 @@ export async function parseInternalCommand(
     case "help":
       return { handled: true, output: renderHelp(args[0]) }
     case "version":
-      return { handled: true, output: `hive-code v${VERSION}  ${GIT_HASH}` }
+      return { handled: true, output: `hivecode v${VERSION}  ${GIT_HASH}` }
     case "env": {
       const safe = ["HOME", "USER", "SHELL", "TERM", "PATH", "BUN_VERSION", "NODE_ENV"]
       const lines = safe.map(k => `  ${k}=${process.env[k] || ""}`)

@@ -1,9 +1,9 @@
 export * from "./scribe"
 export * from "./schema"
 
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { CODE_SCHEMA } from "./schema"
-import { logger } from "@johpaz/hive-code-core/utils/logger"
+import { logger } from "@johpaz/hivecode-core/utils/logger"
 
 /**
  * Initialize Hive-Code specific tables (code_sessions, code_tasks, code_narrative, etc.)

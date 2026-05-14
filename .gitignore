@@ -40,6 +40,11 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 binaries/
 
+# Rust/Cargo build artifacts (packages/tui and any future Rust crates)
+target/
+**/*.rs.bk
+*.pdb
+
 # UI bundle generado (solo para binario standalone, puede pesar 10MB+)
 # El stub vacío en src/ui-bundle.generated.ts SÍ se commitea; solo ignorar el relleno.
 # packages/cli/src/ui-bundle.generated.ts  ← NO ignorar el stub

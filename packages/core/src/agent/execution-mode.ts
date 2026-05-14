@@ -77,5 +77,5 @@ export function filterToolsByMode<T extends { name: string }>(
 }
 
 export function getBlockReason(toolName: string): string {
-  return `[PERMISSION DENIED] '${toolName}' requiere modo approval o auto. Cambia con: hive-code mode set approval|auto`
+  return `[PERMISSION DENIED] '${toolName}' requiere modo approval o auto. Cambia con: hivecode mode set approval|auto`
 }

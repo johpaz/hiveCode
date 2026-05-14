@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 
 // ─── Hive-Code Commands (SPEC.md) ───────────────────────────────────────────
-// Commands that use the new Hive-Code UI theme with @clack/core
 
 import { plan } from "./commands-code/plan"
 import { run } from "./commands-code/run"
@@ -9,16 +8,16 @@ import { narrativeShow, narrativeSearch, narrativeExport } from "./commands-code
 import { decisionList, decisionShow } from "./commands-code/decisions"
 import { doctor } from "./commands-code/doctor"
 import { dev } from "./commands-code/dev"
-import { providerList, providerAdd, providerRemove, providerSetDefault, providerSetModel, providerTest } from "./commands-code/provider"
+import { providerList, providerAdd, providerEdit, providerRemove, providerSetDefault, providerSetModel, providerTest } from "./commands-code/provider"
 import { mcpList, mcpAdd, mcpRemove, mcpEnable, mcpDisable, mcpTest, mcpInspect } from "./commands-code/mcp"
 import { skillList, skillEnable, skillDisable, skillAdd, skillRemove, skillInspect, skillAssign } from "./commands-code/skill"
 import { agentList, agentInspect, agentEdit, agentReset } from "./commands-code/agent"
 import { modeHistory, taskRollback, taskResume, upgrade, init } from "./commands-code/extras"
 import { repl } from "./commands-code/repl"
-import { telegramConnect, telegramDisconnect, telegramStatus } from "./commands-code/telegram"
+import { telegramConnect, telegramEdit, telegramDisconnect, telegramStatus } from "./commands-code/telegram"
+import { onboard } from "./commands-code/onboard"
 
-// ─── Hive Base Commands (existing, no @clack/prompts) ────────────────────────
-// These commands don't use @clack/prompts so they still work
+// ─── Hive Base Commands ───────────────────────────────────────────────────────
 
 import { start, stop, status, reload } from "./commands/gateway"
 import { mode } from "./commands/mode"
@@ -29,11 +28,11 @@ import { ace } from "./commands/ace"
 import { github } from "./commands/github"
 import { coordinator } from "./commands/coordinator"
 
-import { initializeDatabase } from "@johpaz/hive-code-core/storage/sqlite"
-import { seedAllData } from "@johpaz/hive-code-core/storage/seed"
-import { initializeCodeDatabase, validateCodeSchema } from "@johpaz/hive-code-code/narrative"
-import { seedCodeData } from "@johpaz/hive-code-code/seed"
-import { logger } from "@johpaz/hive-code-core/utils/logger"
+import { initializeDatabase } from "@johpaz/hivecode-core/storage/sqlite"
+import { seedAllData } from "@johpaz/hivecode-core/storage/seed"
+import { initializeCodeDatabase, validateCodeSchema } from "@johpaz/hivecode-code/narrative"
+import { seedCodeData } from "@johpaz/hivecode-code/seed"
+import { logger } from "@johpaz/hivecode-core/utils/logger"
 
 import pkg from "../../../package.json"
 
@@ -41,11 +40,11 @@ const VERSION = pkg.version
 
 const HELP = `
 ╔══════════════════════════════════════════╗
-║     hive-code — Multi-AI Coding Tool    ║
+║     hivecode — Multi-AI Coding Tool     ║
 ║     v${VERSION}                             ║
 ╚══════════════════════════════════════════╝
 
-Usage: hive-code <command> [subcommand] [options]
+Usage: hivecode <command> [subcommand] [options]
 
 Modos de operación:
   mode get|status            Mostrar modo actual
@@ -54,15 +53,15 @@ Modos de operación:
   mode cycle                 Ciclar al siguiente modo
 
 Gateway:
-  start [--mode <mode>]      Iniciar el gateway
-  dev [--prod]               Modo desarrollo (--prod para producción-like)
+  start [--mode <mode>]      Iniciar el gateway (daemon)
   stop                       Detener el gateway
   reload                     Recargar config
   status                     Estado del sistema
 
 Providers LLM:
   provider list              Listar providers
-  provider add <name>        Añadir provider (wizard)
+  provider add [name]        Añadir provider (wizard)
+  provider edit [name]       Editar API key, URL o modelo
   provider remove <name>     Eliminar provider
   provider set-default <n>   Provider por defecto
   provider set-model <p> <m> Asignar modelo
@@ -122,7 +121,8 @@ GitHub:
   github whoami              Ver usuario conectado
 
 Telegram:
-  telegram connect           Conectar bot de Telegram (wizard Rezi)
+  telegram connect           Conectar bot de Telegram (wizard)
+  telegram edit              Editar configuración del bot
   telegram disconnect        Desconectar bot
   telegram status            Estado e info del bot
 
@@ -157,10 +157,10 @@ Options:
   --version, -v              Mostrar versión
 
 Examples:
-  hive-code mode set auto        Modo ejecución automática
-  hive-code plan "añadir auth JWT"  Diseñar sin implementar
-  hive-code run "crear API REST"    Ejecutar tarea completa
-  hive-code doctor               Diagnosticar el sistema
+  hivecode mode set auto        Modo ejecución automática
+  hivecode plan "añadir auth JWT"  Diseñar sin implementar
+  hivecode run "crear API REST"    Ejecutar tarea completa
+  hivecode doctor               Diagnosticar el sistema
 `
 
 let _dbInitialized = false
@@ -223,6 +223,7 @@ async function main(): Promise<void> {
     case "providers": {
       if (subcommand === "list" || subcommand === undefined) await providerList()
       else if (subcommand === "add") await providerAdd(args[2])
+      else if (subcommand === "edit") await providerEdit(args[2])
       else if (subcommand === "remove") await providerRemove(args[2])
       else if (subcommand === "set-default") await providerSetDefault(args[2])
       else if (subcommand === "set-model") await providerSetModel(args.slice(2))
@@ -357,6 +358,7 @@ async function main(): Promise<void> {
     // ─── Telegram ──────────────────────────────────────────────────────────
     case "telegram": {
       if (subcommand === "connect") await telegramConnect()
+      else if (subcommand === "edit") await telegramEdit()
       else if (subcommand === "disconnect") await telegramDisconnect()
       else if (subcommand === "status") await telegramStatus()
       else {
@@ -370,7 +372,7 @@ async function main(): Promise<void> {
     }
 
     case "onboard": {
-      console.log("Onboarding — use the web setup UI at http://localhost:16120/setup")
+      await onboard(VERSION)
       break
     }
     case "migrate": {
@@ -382,7 +384,7 @@ async function main(): Promise<void> {
     case "--version":
     case "-v":
     case "version":
-      console.log(`hive-code v${VERSION}`)
+      console.log(`hivecode v${VERSION}`)
       process.exit(0)
       break
     case "--help":

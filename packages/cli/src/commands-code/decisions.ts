@@ -1,12 +1,12 @@
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote,
-} from "@johpaz/hive-code-ui"
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
+} from "@johpaz/hivecode-ui"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
 export async function decisionList(): Promise<void> {
 
-  hiveIntro("hive-code · Decisiones (ADRs)")
+  hiveIntro("hivecode · Decisiones (ADRs)")
 
   const db = getDb()
   const rows = db.query("SELECT * FROM code_decisions ORDER BY created_at DESC").all() as any[]
@@ -33,11 +33,11 @@ export async function decisionShow(args: string[]): Promise<void> {
   const id = args[0]
 
   if (!id) {
-    hiveOutro("Uso: hive-code decision show <id>", "error")
+    hiveOutro("Uso: hivecode decision show <id>", "error")
     process.exit(1)
   }
 
-  hiveIntro("hive-code · ADR")
+  hiveIntro("hivecode · ADR")
 
   const db = getDb()
   const row = db.query("SELECT * FROM code_decisions WHERE id = ?").get(id) as any

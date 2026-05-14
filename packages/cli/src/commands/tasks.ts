@@ -1,4 +1,4 @@
-import { getDb } from "@johpaz/hive-code-core/storage/sqlite"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
 export async function tasks(subcommand?: string, args?: string[]): Promise<void> {
   const db = getDb()
@@ -6,7 +6,7 @@ export async function tasks(subcommand?: string, args?: string[]): Promise<void>
   try {
     db.query("SELECT 1 FROM code_tasks LIMIT 1").get()
   } catch {
-    console.log("No code_tasks table found. Run 'hive-code migrate' first.")
+    console.log("No code_tasks table found. Run 'hivecode migrate' first.")
     return
   }
 
@@ -31,7 +31,7 @@ export async function tasks(subcommand?: string, args?: string[]): Promise<void>
     }
     case "status": {
       const id = args?.[0]
-      if (!id) { console.log("Usage: hive-code task status <id>"); return }
+      if (!id) { console.log("Usage: hivecode task status <id>"); return }
       const task = db.query("SELECT * FROM code_tasks WHERE id LIKE ?").get(`%${id}%`) as any
       if (!task) { console.log("Task not found."); return }
       console.log(`\nTask: ${task.id}`)
@@ -63,14 +63,14 @@ export async function tasks(subcommand?: string, args?: string[]): Promise<void>
     }
     case "cancel": {
       const id = args?.[0]
-      if (!id) { console.log("Usage: hive-code task cancel <id>"); return }
+      if (!id) { console.log("Usage: hivecode task cancel <id>"); return }
       db.query("UPDATE code_tasks SET status = 'cancelled', completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id LIKE ?").run(`%${id}%`)
       console.log("✅ Task cancelled.")
       break
     }
     case "rollback": {
       const id = args?.[0]
-      if (!id) { console.log("Usage: hive-code task rollback <id>"); return }
+      if (!id) { console.log("Usage: hivecode task rollback <id>"); return }
       const snapshots = db.query("SELECT * FROM code_file_snapshots WHERE task_id LIKE ? ORDER BY id DESC").all(`%${id}%`) as any[]
       if (snapshots.length === 0) { console.log("No snapshots found for this task."); return }
       console.log(`Rolling back ${snapshots.length} file(s)...`)
@@ -89,17 +89,17 @@ export async function tasks(subcommand?: string, args?: string[]): Promise<void>
     }
     case "resume": {
       const id = args?.[0]
-      if (!id) { console.log("Usage: hive-code task resume <id>"); return }
+      if (!id) { console.log("Usage: hivecode task resume <id>"); return }
       db.query("UPDATE code_tasks SET status = 'running' WHERE id LIKE ? AND status IN ('paused', 'pending')").run(`%${id}%`)
       console.log("✅ Task resumed.")
       break
     }
     default:
       console.log("Usage:")
-      console.log("  hive-code task list [status]       Listar tareas")
-      console.log("  hive-code task status <id>         Mostrar detalles de tarea")
-      console.log("  hive-code task cancel <id>         Cancelar tarea")
-      console.log("  hive-code task rollback <id>       Revertir archivos")
-      console.log("  hive-code task resume <id>         Reanudar tarea")
+      console.log("  hivecode task list [status]       Listar tareas")
+      console.log("  hivecode task status <id>         Mostrar detalles de tarea")
+      console.log("  hivecode task cancel <id>         Cancelar tarea")
+      console.log("  hivecode task rollback <id>       Revertir archivos")
+      console.log("  hivecode task resume <id>         Reanudar tarea")
   }
 }
