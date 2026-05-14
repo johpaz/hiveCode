@@ -10,7 +10,7 @@ use crate::app::{AppState, AMBER, SECONDARY};
 
 /// Renders the command suggestion popup above the input area.
 /// `footer_area` is the area of the footer region (input + statusbar).
-pub fn draw(frame: &mut Frame, state: &AppState, footer_area: Rect) {
+pub fn draw(frame: &mut Frame, state: &mut AppState, footer_area: Rect) {
     if !state.show_popup || state.suggestions.is_empty() {
         return;
     }
@@ -36,6 +36,9 @@ pub fn draw(frame: &mut Frame, state: &AppState, footer_area: Rect) {
         width: popup_width,
         height: popup_height,
     };
+
+    // Store for mouse hit-testing
+    state.popup_area = Some(popup_area);
 
     // Clear background
     frame.render_widget(Clear, popup_area);

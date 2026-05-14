@@ -6,7 +6,7 @@ use ratatui::{
 use crate::app::AppState;
 use crate::widgets::{command_popup, header, history, input, statusbar, welcome};
 
-pub fn draw(frame: &mut Frame, state: &AppState) {
+pub fn draw(frame: &mut Frame, state: &mut AppState) {
     let area = frame.area();
 
     if state.history.is_empty() {

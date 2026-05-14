@@ -4,7 +4,7 @@
   "private": true,
   "description": "hivecode MCP Client — Model Context Protocol client layer",
   "main": "./src/index.ts",
-  "license": "MIT",
+  "license": "hivecode-NC-1.0",
   "files": [
     "src/"
   ],

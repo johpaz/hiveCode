@@ -97,9 +97,10 @@ function renderSuggestions(input: string): string[] {
     "narrative", "narrative show", "narrative search", "narrative export",
     "ace", "ace status", "ace playbook list", "ace playbook reset", "ace reflector run",
     "github", "github status", "github whoami", "github set-repo",
+    "telegram", "telegram status", "telegram connect", "telegram disconnect", "telegram edit",
     "doctor", "version", "env", "help",
   ]
-  if (!prefix) return []
+  if (!prefix) return all.slice(0, 5).map(c => "/" + c)
   const match = all.filter(c => c.startsWith(prefix))
   return match.slice(0, 5).map(c => "/" + c)
 }
@@ -876,6 +877,68 @@ async function handleGithubCommand(
   }
 }
 
+async function handleTelegramCommand(
+  args: string[],
+  db: ReturnType<typeof getDb>,
+): Promise<CommandResult> {
+  const [action, ...rest] = args
+
+  if (!action || action === "status") {
+    const row = db.query("SELECT * FROM channels WHERE id = 'telegram'").get() as any
+    if (!row) {
+      return {
+        handled: true,
+        output: [
+          "",
+          "  Telegram no configurado.",
+          "",
+          "  Ejecuta en terminal:",
+          "    hivecode telegram connect",
+          "",
+        ].join("\n"),
+      }
+    }
+    let config: Record<string, any> = {}
+    try { config = JSON.parse(Buffer.from(row.config_encrypted as string, "base64").toString()) } catch {}
+    return {
+      handled: true,
+      output: [
+        "",
+        `  Estado:      ${row.status ?? "desconocido"}`,
+        `  Activo:      ${row.enabled ? "sí" : "no"}`,
+        `  DM Policy:   ${config.dmPolicy ?? "—"}`,
+        `  Grupos:      ${config.groups ? "sí" : "no"}`,
+        config.allowFrom?.length ? `  Lista blanca: ${(config.allowFrom as string[]).join(", ")}` : "",
+        "",
+      ].filter(Boolean).join("\n"),
+    }
+  }
+
+  if (action === "disconnect") {
+    db.query("UPDATE channels SET enabled = 0, status = 'disconnected' WHERE id = 'telegram'").run()
+    return { handled: true, output: "  ✓ Telegram desconectado" }
+  }
+
+  if (action === "connect" || action === "edit") {
+    return {
+      handled: true,
+      output: [
+        "",
+        `  /telegram ${action} requiere wizard interactivo.`,
+        "",
+        "  Ejecuta en terminal:",
+        `    hivecode telegram ${action}`,
+        "",
+      ].join("\n"),
+    }
+  }
+
+  return {
+    handled: true,
+    output: "opciones: status | connect | disconnect | edit\n\nEscribe /help /telegram",
+  }
+}
+
 export async function parseInternalCommand(
   input: string,
   db: ReturnType<typeof getDb>,
@@ -909,6 +972,8 @@ export async function parseInternalCommand(
       return handleAceCommand(args, db)
     case "github":
       return handleGithubCommand(args, db)
+    case "telegram":
+      return handleTelegramCommand(args, db)
     case "doctor":
       return { handled: true, output: runDoctor(db) }
     case "help":

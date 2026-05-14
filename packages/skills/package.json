@@ -4,7 +4,7 @@
   "private": true,
   "description": "hivecode Skills — Code-focused skills for multi-AI coding",
   "main": "./src/index.ts",
-  "license": "MIT",
+  "license": "hivecode-NC-1.0",
   "files": [
     "src/"
   ],

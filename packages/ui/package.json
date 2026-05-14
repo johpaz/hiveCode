@@ -4,7 +4,7 @@
   "private": true,
   "description": "hivecode UI — Terminal UI primitives, theme, mascot, and prompt components",
   "main": "./src/index.ts",
-  "license": "MIT",
+  "license": "hivecode-NC-1.0",
   "files": [
     "src/"
   ],

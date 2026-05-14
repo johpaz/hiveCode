@@ -6,7 +6,7 @@
     "hivecode": "./dist/hivecode.js"
   },
   "main": "./dist/hivecode.js",
-  "license": "MIT",
+  "license": "hivecode-NC-1.0",
   "files": [
     "dist/hivecode.js",
     "dist/hivecode.cmd",

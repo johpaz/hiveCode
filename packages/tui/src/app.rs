@@ -8,7 +8,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 use std::io::stdout;
 use tokio::sync::mpsc::Sender;
 use tokio::time::{interval, Duration};
@@ -170,6 +170,7 @@ pub struct AppState {
     pub active_coordinator: String,
     pub active_phase: String,
     pub activity_status: String,
+    pub popup_area: Option<Rect>,
 }
 
 impl Default for AppState {
@@ -201,6 +202,7 @@ impl Default for AppState {
             active_coordinator: String::new(),
             active_phase: String::new(),
             activity_status: "idle".to_string(),
+            popup_area: None,
         }
     }
 }
@@ -362,7 +364,7 @@ impl AppState {
 
     fn handle_popup_key(&mut self, key: KeyEvent, ipc_tx: &Sender<TuiMessage>) {
         match key.code {
-            KeyCode::Up if !self.suggestions.is_empty() => {
+            KeyCode::Up | KeyCode::BackTab if !self.suggestions.is_empty() => {
                 self.popup_sel = self.popup_sel
                     .saturating_add(self.suggestions.len() - 1)
                     % self.suggestions.len();
@@ -370,7 +372,7 @@ impl AppState {
                     self.input.set(cmd);
                 }
             }
-            KeyCode::Down if !self.suggestions.is_empty() => {
+            KeyCode::Down | KeyCode::Tab if !self.suggestions.is_empty() => {
                 self.popup_sel = (self.popup_sel + 1) % self.suggestions.len();
                 if let Some(cmd) = self.suggestions.get(self.popup_sel) {
                     self.input.set(cmd);
@@ -416,9 +418,46 @@ impl AppState {
         }
     }
 
-    pub fn handle_mouse(&mut self, _mouse: MouseEvent) {
-        // Mouse click on popup items handled by position tracking
-        // (Phase 2 enhancement)
+    pub fn handle_mouse(&mut self, mouse: MouseEvent, ipc_tx: &Sender<TuiMessage>) {
+        // Only handle left-clicks (Down or Up) inside the popup
+        let is_left_click = matches!(
+            mouse.kind,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                | MouseEventKind::Up(crossterm::event::MouseButton::Left)
+                | MouseEventKind::Drag(crossterm::event::MouseButton::Left)
+        );
+        if !is_left_click {
+            return;
+        }
+        let Some(area) = self.popup_area else { return };
+        let col = mouse.column;
+        let row = mouse.row;
+        if col < area.x || col >= area.x + area.width || row < area.y || row >= area.y + area.height {
+            // Click outside popup — close it
+            self.show_popup = false;
+            self.suggestions.clear();
+            self.popup_sel = 0;
+            return;
+        }
+        // Click inside popup — figure out which item (accounting for border)
+        let item_row = row.saturating_sub(area.y + 1); // +1 for top border
+        let idx = item_row as usize;
+        if idx < self.suggestions.len() {
+            self.popup_sel = idx;
+            if let Some(cmd) = self.suggestions.get(self.popup_sel).cloned() {
+                self.show_popup = false;
+                self.suggestions.clear();
+                self.input.set(&cmd);
+                self.history.push(HistoryEntry {
+                    role: Role::User,
+                    content: cmd.clone(),
+                });
+                self.input.clear();
+                self.running = true;
+                self.status_msg = "Procesando...".to_string();
+                let _ = ipc_tx.try_send(TuiMessage::Submit { input: cmd });
+            }
+        }
     }
 
     pub fn fmt_tokens(&self) -> String {
@@ -483,7 +522,7 @@ pub async fn run(screen: &str) -> Result<()> {
             terminal.draw(|frame| {
                 match screen {
                     "providers" => screens::providers::draw(frame, &state),
-                    _           => screens::repl::draw(frame, &state),
+                    _           => screens::repl::draw(frame, &mut state),
                 }
             })?;
         }
@@ -507,7 +546,7 @@ pub async fn run(screen: &str) -> Result<()> {
         }
 
         // Normal operation — events is Some
-        let mut ticker = interval(Duration::from_millis(550));
+        let mut ticker = interval(Duration::from_millis(1200));
         
         tokio::select! {
             biased;
@@ -522,9 +561,7 @@ pub async fn run(screen: &str) -> Result<()> {
                         state.handle_key(key, &ipc_tx);
                     }
                     Some(Ok(Event::Mouse(mouse))) => {
-                        if mouse.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) {
-                            state.handle_mouse(mouse);
-                        }
+                        state.handle_mouse(mouse, &ipc_tx);
                     }
                     Some(Err(_)) | None => break,
                     _ => {}

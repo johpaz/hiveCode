@@ -99,7 +99,7 @@
     "open-source",
     "colombia"
   ],
-  "license": "MIT",
+  "license": "hivecode-NC-1.0",
   "scripts": {
     "hivecode": "bun packages/cli/src/index.ts",
     "dev": "HIVE_DEV=true bun run packages/cli/src/index.ts",
