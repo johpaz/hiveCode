@@ -32,6 +32,7 @@
     "./modes/keyboard": "./src/modes/keyboard.ts",
     "./workers/tool-bridge": "./src/workers/tool-bridge.ts",
     "./workers/secrets": "./src/workers/secrets.ts",
-    "./seed": "./src/seed.ts"
+    "./seed": "./src/seed.ts",
+    "./agent/code-indexer": "./src/agent/code-indexer.ts"
   }
 }

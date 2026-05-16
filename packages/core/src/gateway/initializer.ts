@@ -87,8 +87,24 @@ export async function loadAgentConfigFromDB(
     `).get(coordinatorAgentId || "", coordinatorAgentId || "") as
       { provider_id: string | null; model_id: string | null } | undefined;
 
-    let provider = agentConfig?.provider_id || defaultProvider;
-    let model = agentConfig?.model_id || defaultModel;
+    let provider = agentConfig?.provider_id;
+    let model = agentConfig?.model_id;
+
+    // Fallback to code_config if agents table doesn't have provider/model
+    if (!provider || !model) {
+      const defaultProviderRow = db.query(`SELECT value FROM code_config WHERE key = 'default_provider'`).get() as { value: string | null } | undefined;
+      const configuredProvider = defaultProviderRow?.value;
+      if (configuredProvider) {
+        provider = configuredProvider;
+        const modelKey = `provider_model_${configuredProvider}`;
+        const modelRow = db.query(`SELECT value FROM code_config WHERE key = ?`).get(modelKey) as { value: string | null } | undefined;
+        model = modelRow?.value || defaultModel;
+      }
+    }
+
+    // Final fallback to hardcoded defaults
+    provider = provider || defaultProvider;
+    model = model || defaultModel;
 
     // Cargar API keys de los providers desde la DB
     const providers = db.query(`

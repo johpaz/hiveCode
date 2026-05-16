@@ -25,6 +25,7 @@ import { formatToolResult } from "../utils/toon"
 import { getAverageTokenCost } from "../storage/usage"
 import type { ContentPart } from "./llm-client"
 import { getExecutionMode, canExecuteTool, requiresConfirmation, getBlockReason } from "./execution-mode"
+import { broadcastThinking } from "../gateway/task-streaming"
 
 /**
  * Execute a tool by name from the available tools list
@@ -185,6 +186,16 @@ export async function* runAgent(
     if (response.usage) {
       totalInputTokens += response.usage.input_tokens
       totalOutputTokens += response.usage.output_tokens
+    }
+
+    // Bifurcate thinking blocks: reasoning_content → WS canal agent:{id}:thinking
+    // The content is persisted in DB alongside the assistant message (see below).
+    // Here we only broadcast it to dashboard subscribers for real-time display.
+    if (response.reasoning_content) {
+      broadcastThinking(opts.agentId, {
+        content: response.reasoning_content,
+        taskId: opts.threadId,
+      })
     }
 
     // Emit agent chunk (compatible with providers/index.ts)

@@ -12,7 +12,8 @@ import { providerList, providerAdd, providerEdit, providerRemove, providerSetDef
 import { mcpList, mcpAdd, mcpRemove, mcpEnable, mcpDisable, mcpTest, mcpInspect } from "./commands-code/mcp"
 import { skillList, skillEnable, skillDisable, skillAdd, skillRemove, skillInspect, skillAssign } from "./commands-code/skill"
 import { agentList, agentInspect, agentEdit, agentReset } from "./commands-code/agent"
-import { modeHistory, taskRollback, taskResume, upgrade, init } from "./commands-code/extras"
+import { modeHistory, taskRollback, taskResume, taskDebug, upgrade } from "./commands-code/extras"
+import { init } from "./commands-code/init"
 import { repl } from "./commands-code/repl"
 import { telegramConnect, telegramEdit, telegramDisconnect, telegramStatus } from "./commands-code/telegram"
 import { onboard } from "./commands-code/onboard"
@@ -333,6 +334,8 @@ async function main(): Promise<void> {
         await taskRollback(args[2])
       } else if (subcommand === "resume") {
         await taskResume(args[2])
+      } else if (subcommand === "debug") {
+        await taskDebug(args[2], args.slice(3))
       } else {
         await tasks(subcommand, args.slice(2))
       }

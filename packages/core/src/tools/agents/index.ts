@@ -686,6 +686,124 @@ export const projectUpdatesTool: Tool = {
   },
 };
 
+// ─── spawn_agent ─────────────────────────────────────────────────────────────
+
+export const spawnAgentTool: Tool = {
+  name: "spawn_agent",
+  description: "Crea un subagente dinámico efímero, lo ejecuta con su propio contexto, evalúa el resultado, y lo destruye. Úsalo para delegar subtareas específicas con propósito declarado. Spanish: crear subagente, agente dinámico, spawn, delegar subtarea",
+  parameters: {
+    type: "object",
+    properties: {
+      purpose: { type: "string", description: "Qué debe hacer este agente (descripción específica)" },
+      systemPrompt: { type: "string", description: "Identidad y reglas del agente" },
+      context: { type: "string", description: "Contexto comprimido para este agente (archivos relevantes, estado actual)" },
+      activeForm: { type: "string", description: "Mensaje en presente continuo de qué está haciendo: 'Implementando endpoint /auth/refresh...'" },
+      parallel: { type: "boolean", description: "Si debe correr en paralelo (true) o esperar resultado antes de continuar (false)" },
+      timeoutMs: { type: "number", description: "Timeout en ms (default: 120000)" },
+      providerId: { type: "string", description: "Provider ID (default: hereda del coordinador)" },
+      modelId: { type: "string", description: "Model ID (default: hereda del coordinador)" },
+    },
+    required: ["purpose", "systemPrompt", "context", "activeForm"],
+  },
+  execute: async (params: Record<string, unknown>, config?: any) => {
+    const db = getDb();
+    const purpose = params.purpose as string;
+    const systemPrompt = params.systemPrompt as string;
+    const context = params.context as string;
+    const activeForm = params.activeForm as string;
+    const timeoutMs = (params.timeoutMs as number) ?? 120_000;
+    const parentAgentId = config?.configurable?.agent_id ?? "main";
+    const threadId = config?.configurable?.thread_id ?? "default";
+
+    // Resolve provider/model from parent agent or params
+    const parentAgent = db.query<any, [string]>("SELECT provider_id, model_id FROM agents WHERE id = ?").get(parentAgentId);
+    const providerId = (params.providerId as string) ?? parentAgent?.provider_id ?? "anthropic";
+    const modelId = (params.modelId as string) ?? parentAgent?.model_id ?? "claude-sonnet-4-6";
+
+    // Create ephemeral agent record
+    const agentId = `spawn-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    const ephemeralThreadId = `${threadId}:spawn:${agentId}`;
+
+    log.info(`[spawn_agent] Creating ephemeral agent ${agentId}: ${purpose.slice(0, 80)}`);
+    log.info(`[spawn_agent] activeForm: ${activeForm}`);
+
+    const t0 = performance.now();
+
+    try {
+      // Persist ephemeral agent to DB (needed by agent-loop to resolve config)
+      db.query(`
+        INSERT INTO agents (id, name, description, system_prompt, role, status, parent_id, provider_id, model_id, max_iterations, workspace)
+        VALUES (?, ?, ?, ?, 'worker', 'idle', ?, ?, ?, 5, ?)
+      `).run(
+        agentId,
+        `spawn:${purpose.slice(0, 40)}`,
+        purpose,
+        systemPrompt,
+        parentAgentId,
+        providerId,
+        modelId,
+        config?.configurable?.workspace ?? null,
+      );
+
+      // Execute isolated with timeout
+      const { runAgentIsolated } = await import("../../agent/agent-loop.ts");
+
+      const taskWithContext = `${purpose}\n\n# CONTEXTO\n${context}`;
+
+      const resultPromise = runAgentIsolated({
+        agentId,
+        taskDescription: taskWithContext,
+        threadId: ephemeralThreadId,
+      });
+
+      const timeoutPromise = new Promise<string>((_, reject) =>
+        setTimeout(() => reject(new Error(`Agent timeout after ${timeoutMs}ms`)), timeoutMs)
+      );
+
+      const result = await Promise.race([resultPromise, timeoutPromise]);
+      const durationMs = Math.round(performance.now() - t0);
+
+      // Structural evaluation: did the agent return meaningful content?
+      const evalStructural = result && result.length > 20 && !result.startsWith("No pude");
+
+      log.info(`[spawn_agent] ${agentId} completed in ${durationMs}ms — eval: ${evalStructural ? "✅" : "⚠️"}`);
+
+      return {
+        ok: true,
+        agentId,
+        purpose,
+        status: "completed",
+        result,
+        durationMs,
+        evalStructural,
+        evalNotes: evalStructural
+          ? "Output meets minimum length and content requirements"
+          : "Output may be incomplete — review before accepting",
+      };
+    } catch (err) {
+      const durationMs = Math.round(performance.now() - t0);
+      const isTimeout = (err as Error).message.includes("timeout");
+      log.error(`[spawn_agent] ${agentId} ${isTimeout ? "timed out" : "failed"}: ${(err as Error).message}`);
+
+      return {
+        ok: false,
+        agentId,
+        purpose,
+        status: isTimeout ? "timeout" : "failed",
+        error: (err as Error).message,
+        durationMs,
+        evalStructural: false,
+      };
+    } finally {
+      // Destroy ephemeral agent record
+      try {
+        db.query("DELETE FROM agents WHERE id = ?").run(agentId);
+        log.info(`[spawn_agent] Cleaned up ephemeral agent ${agentId}`);
+      } catch { /* ignore cleanup failures */ }
+    }
+  },
+};
+
 import crypto from "crypto";
 import { getAvailableModelsTool } from "./get-available-models.ts";
 
@@ -706,5 +824,6 @@ export function createTools(): Tool[] {
     busPublishTool,
     busReadTool,
     projectUpdatesTool,
+    spawnAgentTool,
   ];
 }

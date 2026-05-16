@@ -103,11 +103,13 @@
   "scripts": {
     "hivecode": "bun packages/cli/src/index.ts",
     "dev": "HIVE_DEV=true bun run packages/cli/src/index.ts",
+    "dev:ui": "(cd packages/hive-ui && bun run dev) & HIVE_DEV=true bun run packages/cli/src/index.ts; kill %1 2>/dev/null || true",
     "start": "bun run packages/cli/src/index.ts start",
     "build": "bun packages/skills/scripts/generate-bundle.ts && bun build packages/cli/src/index.ts packages/code/src/workers/architecture.worker.ts packages/code/src/workers/backend.worker.ts packages/code/src/workers/frontend.worker.ts packages/code/src/workers/security.worker.ts packages/code/src/workers/test.worker.ts packages/code/src/workers/devops.worker.ts --bundle --outdir dist --target bun --entry-naming '[name].js' && mv dist/index.js dist/hivecode.js && bun packages/cli/scripts/postbuild.ts",
     "build:binary": "bun build packages/cli/src/index.ts --compile --outfile ../../dist/hivecode-binary",
     "prepublishOnly": "bun run build",
     "test": "bun test",
+    "test:integration": "bun test --tsconfig-override tests/tsconfig.json tests/",
     "test:ci": "bun test --coverage",
     "lint": "bunx tsc --noEmit",
     "bench": "bun run scripts/bench.ts",

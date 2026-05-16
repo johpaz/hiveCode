@@ -8,7 +8,7 @@
 
 import * as path from "node:path"
 import * as fs from "node:fs"
-import { logger } from "@johpaz/hivecode-core/utils/logger"
+import { logger, onLogEntry, removeLogListener, type LogEntry } from "@johpaz/hivecode-core/utils/logger"
 import { runProviderSetupWizard } from "@johpaz/hivecode-ui"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
@@ -34,8 +34,8 @@ export function tuiAvailable(): boolean {
 
 // ── IPC message types ─────────────────────────────────────────────────────────
 
-type BunMessage =
-  | { type: "init";           mode: string; provider: string; model: string; project_name: string; project_path: string; version: string; task_count: number; token_count: number; agent_count: number }
+export type BunMessage =
+  | { type: "init";           mode: string; provider: string; model: string; project_name: string; project_path: string; session_id: string; version: string; task_count: number; token_count: number; agent_count: number }
   | { type: "history_append"; role: string; content: string }
   | { type: "status";         running: boolean; msg: string }
   | { type: "state_update";   new_mode?: string; new_provider?: string; new_model?: string }
@@ -43,6 +43,8 @@ type BunMessage =
   | { type: "quick_menu";     items: { label: string; cmd: string; desc: string }[] }
   | { type: "shell_output";   stdout: string; stderr: string; exit_code: number }
   | { type: "activity_update"; coordinator: string; phase: string; status: string }
+  | { type: "log_entry"; timestamp: string; level: string; source: string; message: string }
+  | { type: "narrative_chunk"; coordinator: string; phase: string; content: string }
   | { type: "suspend" }
   | { type: "resume" }
 
@@ -63,6 +65,7 @@ export interface TuiCallbacks {
   initialModel:     string
   projectName:      string
   projectPath:      string
+  sessionId:        string
   version:          string
   taskCount:        number
   tokenCount:       number
@@ -71,8 +74,8 @@ export interface TuiCallbacks {
   getSuggestions: (query: string) => string[]
   onModeChange?:  (mode: string) => void
   onExit?:        () => void
-  /** Mutable ref populated by launchTui so callers can suspend/resume the TUI */
-  tuiControl?:    { suspend: (() => Promise<void>) | null; resume: (() => void) | null }
+  /** Mutable ref populated by launchTui so callers can suspend/resume/send to the TUI */
+  tuiControl?:    { suspend: (() => Promise<void>) | null; resume: (() => void) | null; send: ((msg: BunMessage) => void) | null }
 }
 
 // ── Main launcher ─────────────────────────────────────────────────────────────
@@ -101,6 +104,18 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
       if (tuiSocket) tuiSocket.write(JSON.stringify(msg) + "\n")
     }
 
+    // Subscribe to real-time logs and forward to TUI
+    const logCb = (entry: LogEntry) => {
+      send({
+        type: "log_entry",
+        timestamp: entry.timestamp,
+        level: entry.level,
+        source: entry.source,
+        message: entry.message.slice(0, 500),
+      })
+    }
+    onLogEntry(logCb)
+
     const suspendTui = (): Promise<void> =>
       new Promise((res) => { suspendedResolve = res; send({ type: "suspend" }) })
 
@@ -109,6 +124,7 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
     if (callbacks.tuiControl) {
       callbacks.tuiControl.suspend = suspendTui
       callbacks.tuiControl.resume = resumeTui
+      callbacks.tuiControl.send = send
     }
 
     // ── IPC server (Bun native unix socket) ────────────────────────────────
@@ -178,6 +194,7 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
     }
 
     proc.exited.then(() => {
+      removeLogListener(logCb)
       callbacks.onExit?.()
       server?.stop(true)
       try { fs.unlinkSync(socketPath) } catch { /* ignore */ }
@@ -211,6 +228,7 @@ async function handleTuiMessage(
         model:         callbacks.initialModel,
         project_name:  callbacks.projectName,
         project_path:  callbacks.projectPath,
+        session_id:    callbacks.sessionId,
         version:       callbacks.version,
         task_count:    callbacks.taskCount,
         token_count:   callbacks.tokenCount,

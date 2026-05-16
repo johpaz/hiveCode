@@ -11,10 +11,14 @@ use crate::app::{AppState, AMBER, DIM, GREEN, SECONDARY};
 pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1), // title
+            Constraint::Length(1), // directory + session
+            Constraint::Length(1), // mode / provider / tasks / tokens / agents
+        ])
         .split(area);
 
-    // ── Mascot + title (big text) ─────────────────────────────────────────
+    // ── Title: mascot + hivecode + version + project_name ───────────────────
     let mascot = if state.running { " (~ᴗ~) " } else { " \\(^ᴗ^)/ " };
 
     let title_line = Line::from(vec![
@@ -27,7 +31,21 @@ pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
 
     frame.render_widget(Paragraph::new(title_line), chunks[0]);
 
-    // ── Subtitle: mode / provider / tokens ───────────────────────────────
+    // ── Session ─────────────────────────────────────────────────────────────
+    let session_display = if state.session_id.is_empty() {
+        "—".to_string()
+    } else {
+        state.session_id.clone()
+    };
+
+    let session_line = Line::from(vec![
+        Span::styled("Session: ", Style::default().fg(DIM)),
+        Span::styled(session_display, Style::default().fg(SECONDARY)),
+    ]);
+
+    frame.render_widget(Paragraph::new(session_line), chunks[1]);
+
+    // ── Subtitle: mode / provider / tokens ──────────────────────────────────
     let provider_str = if state.provider.is_empty() {
         "sin provider".to_string()
     } else if state.model.is_empty() {
@@ -59,9 +77,9 @@ pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
         Span::styled("  │  ", Style::default().fg(DIM)),
         Span::styled(
             format!("{} agentes", state.agent_count),
-            Style::default().fg(if state.agent_count >= 6 { GREEN } else { crate::app::RED }),
+            Style::default().fg(if state.agent_count >= 7 { GREEN } else { crate::app::RED }),
         ),
     ]);
 
-    frame.render_widget(Paragraph::new(subtitle), chunks[1]);
+    frame.render_widget(Paragraph::new(subtitle), chunks[2]);
 }

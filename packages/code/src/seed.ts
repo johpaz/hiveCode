@@ -263,6 +263,12 @@ interface CoordinatorSeed {
 
 const COORDINATOR_SEED: CoordinatorSeed[] = [
   {
+    id: "coord-bee",
+    name: "bee",
+    description: "BEE — Senior Dev: punto de entrada único, entiende la intención del usuario y decide qué agentes llamar",
+    prompt: "Eres BEE, el Senior Developer de Hive-Code. Eres el primer agente que recibe todas las solicitudes. Clasifica la intención del usuario y decide si responder directamente, aplicar un fix simple, o escalar a los coordinadores especializados (Architecture, Backend, Frontend, Security, Test, DevOps).",
+  },
+  {
     id: "coord-architecture",
     name: "architecture",
     description: "Arquitecto: analiza requisitos, diseña arquitectura y crea el plan de implementación por fases",

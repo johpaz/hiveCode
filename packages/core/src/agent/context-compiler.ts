@@ -436,6 +436,25 @@ export async function compileContext(opts: {
       log.info(`[context-compiler] [STEP-10d] Injected ${allSkills.length} skills (${minimalSkills.length} minimal, ${discoveredSkills.length} discovered)`)
     }
 
+    // Inject developer preferences from ACE reflector (coordinator only)
+    try {
+      const devPrefs = db.query<any, []>(`
+        SELECT rule FROM code_playbook
+        WHERE source = 'preferences' AND coordinator = 'user' AND active = 1
+        ORDER BY confidence DESC LIMIT 10
+      `).all()
+      if (devPrefs.length > 0) {
+        let prefsSection = `\n\n# PREFERENCIAS DEL DESARROLLADOR\nEl desarrollador ha expresado estas preferencias en sesiones anteriores:\n\n`
+        for (const p of devPrefs) {
+          prefsSection += `- ${p.rule}\n`
+        }
+        systemPrompt += prefsSection
+        log.info(`[context-compiler] [STEP-10e] Injected ${devPrefs.length} developer preferences`)
+      }
+    } catch {
+      // code_playbook may not be initialized yet — skip silently
+    }
+
     // Inject Canvas A2UI component documentation
     systemPrompt += `\n\n# 🎨 CANVAS A2UI — Componentes disponibles para \`canvas_render\`\n` +
       `**REGLA**: Usá \`canvas_render\` con el tipo específico en vez de siempre usar \`canvas_show_card\` + markdown.\n\n` +

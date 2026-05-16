@@ -14,6 +14,18 @@ export type { Tool }
 
 /** Tools available to each coordinator (by name) */
 export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
+  bee: [
+    // Context gathering (always available)
+    "fs_read", "fs_list", "fs_exists", "fs_glob",
+    "code_search", "parse_ast", "read_narrative",
+    "git_status", "git_diff", "git_log",
+    // Write tools — BEE uses these for simple direct fixes
+    "fs_write", "fs_edit", "fs_delete",
+    "git_commit", "git_branch",
+    "check_types", "code_build", "code_test", "code_lint",
+    "run_script", "shell_executor",
+    "append_narrative", "write_decision",
+  ],
   architecture: [
     "fs_read",
     "fs_list",
@@ -147,14 +159,15 @@ export function getToolsForCoordinator(
 export async function executeToolByName(
   allTools: Tool[],
   toolName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  config?: any
 ): Promise<unknown> {
   const tool = allTools.find(t => t.name === toolName)
   if (!tool?.execute) {
     return { ok: false, error: `Tool '${toolName}' not found or not executable` }
   }
   try {
-    return await tool.execute(args)
+    return await tool.execute(args, config)
   } catch (err) {
     return {
       ok: false,

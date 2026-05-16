@@ -1,0 +1,9 @@
+{
+  "name": "@johpaz/hivecode-tests",
+  "version": "0.0.1",
+  "private": true,
+  "dependencies": {
+    "@johpaz/hivecode-code": "workspace:*",
+    "@johpaz/hivecode-core": "workspace:*"
+  }
+}

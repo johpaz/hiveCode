@@ -1,4 +1,5 @@
 export type PhaseName =
+  | "bee"
   | "architecture"
   | "backend"
   | "frontend"
@@ -32,6 +33,12 @@ export type PhaseStatus =
 
 export type SessionMode = "plan" | "approval" | "auto"
 
+export interface ConversationTurn {
+  role: "user" | "agent"
+  content: string
+  createdAt: string
+}
+
 export interface CoordinatorTask {
   taskId: string
   phaseId: number
@@ -53,6 +60,8 @@ export interface CoordinatorTask {
   tools?: any[]
   /** Pre-compiled context from Context Compiler (skills, playbook, scratchpad) */
   compiledContext?: string
+  /** Recent conversation turns in this session — gives BEE chat context */
+  conversationHistory?: ConversationTurn[]
 }
 
 export interface CoordinatorResult {
@@ -65,11 +74,13 @@ export interface CoordinatorResult {
   blockerDescription?: string
   approvalPreview?: string
   durationMs: number
+  tokensIn?: number
+  tokensOut?: number
 }
 
 /** Messages sent FROM workers TO the manager */
 export interface WorkerToManagerMessage {
-  type: "RESULT" | "TOOL_CALL"
+  type: "RESULT" | "TOOL_CALL" | "THINKING"
   taskId: string
   phaseId: number
   coordinator: string
@@ -77,6 +88,8 @@ export interface WorkerToManagerMessage {
   toolName?: string
   toolArgs?: Record<string, unknown>
   toolCallId?: string
+  /** Thinking message content (for THINKING type) */
+  content?: string
 }
 
 /** Messages sent FROM manager TO workers */
@@ -144,6 +157,23 @@ export interface Trace {
   tokensOut?: number
   analyzed?: boolean
   createdAt?: string
+}
+
+export interface BeeDecision {
+  /** How BEE decided to handle the task */
+  action: "respond" | "fix" | "architecture" | "dispatch"
+  /** Direct answer or summary of fix applied (required for "respond" and "fix") */
+  content?: string
+  /** Why BEE made this decision */
+  reason: string
+  /** Coordinators to dispatch directly (only for "dispatch" action) */
+  phases?: Array<{
+    coordinator: Exclude<PhaseName, "bee">
+    description: string
+    dependsOn: Array<Exclude<PhaseName, "bee">>
+  }>
+  /** Files BEE modified directly (only for "fix" action) */
+  filesModified?: string[]
 }
 
 export interface PlaybookRule {

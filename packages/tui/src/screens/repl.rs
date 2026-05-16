@@ -4,7 +4,7 @@ use ratatui::{
 };
 
 use crate::app::AppState;
-use crate::widgets::{command_popup, header, history, input, mascot, statusbar, welcome};
+use crate::widgets::{command_popup, header, history, input, log_panel, mascot, phase_timeline, statusbar, welcome};
 
 pub fn draw(frame: &mut Frame, state: &mut AppState) {
     let area = frame.area();
@@ -60,7 +60,34 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
         };
 
         header::draw(frame, state, header_area);
-        history::draw(frame, state, body_area);
+
+        let body_constraints = if state.show_timeline {
+            vec![Constraint::Length(16), Constraint::Fill(1)]
+        } else {
+            vec![Constraint::Fill(1)]
+        };
+        let body_parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(body_constraints)
+            .split(body_area);
+
+        let history_area = if state.show_timeline { body_parts[1] } else { body_parts[0] };
+
+        if state.show_timeline {
+            phase_timeline::draw(frame, state, body_parts[0]);
+        }
+
+        if state.show_logs {
+            let h = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(history_area);
+            history::draw(frame, state, h[0]);
+            log_panel::draw(frame, state, h[1]);
+        } else {
+            history::draw(frame, state, history_area);
+        }
+
         input::draw(frame, state, input_area);
         statusbar::draw(frame, state, status_area);
         command_popup::draw(frame, state, footer_area);

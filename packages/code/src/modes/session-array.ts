@@ -4,7 +4,7 @@ import type { SessionMode } from "../workers/types"
  * SharedArrayBuffer layout (8 bytes total):
  *   byte 0: mode (0=plan, 1=approval, 2=auto)
  *   byte 1: active phase index
- *   byte 2: workers_busy bitmask (6 bits for 6 coordinators)
+ *   byte 2: workers_busy bitmask (7 bits: 0=bee, 1=architecture, 2=backend, 3=frontend, 4=security, 5=test, 6=devops)
  *   byte 3: flags (bit 0=pause, bit 1=cancel, bit 2=shutdown)
  *   bytes 4-7: padding/reserved
  */
@@ -17,8 +17,8 @@ const SAB_SIZE = 8
 const MODE_MAP: Record<SessionMode, number> = { plan: 0, approval: 1, auto: 2 }
 const MODE_REVERSE: Record<number, SessionMode> = { 0: "plan", 1: "approval", 2: "auto" }
 
-let sab: SharedArrayBuffer
-let view: Int8Array
+let sab: SharedArrayBuffer = new SharedArrayBuffer(SAB_SIZE)
+let view: Int8Array = new Int8Array(sab)
 
 export function initSessionArray(): void {
   sab = new SharedArrayBuffer(SAB_SIZE)
@@ -55,7 +55,7 @@ export function getWorkerBitmask(): number {
 }
 
 export function setWorkerBusy(coordinatorIndex: number, busy: boolean): void {
-  if (coordinatorIndex < 0 || coordinatorIndex > 5) return
+  if (coordinatorIndex < 0 || coordinatorIndex > 6) return
   const mask = 1 << coordinatorIndex
   if (busy) {
     Atomics.or(view, BYTE_WORKERS, mask)
@@ -65,7 +65,7 @@ export function setWorkerBusy(coordinatorIndex: number, busy: boolean): void {
 }
 
 export function isWorkerBusy(coordinatorIndex: number): boolean {
-  if (coordinatorIndex < 0 || coordinatorIndex > 5) return false
+  if (coordinatorIndex < 0 || coordinatorIndex > 6) return false
   return (Atomics.load(view, BYTE_WORKERS) & (1 << coordinatorIndex)) !== 0
 }
 

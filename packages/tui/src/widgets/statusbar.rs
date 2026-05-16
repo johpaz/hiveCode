@@ -9,7 +9,7 @@ use ratatui::{
 use crate::app::{AppState, AMBER, DIM, SECONDARY};
 
 pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
-    let hints = ["/help", "  /provider", "  /mode", "  /telegram", "  [shift+tab] modo"];
+    let hints = ["/help", "  /logs", "  /provider", "  /mode", "  [ctrl+p] fases", "  [shift+tab] modo"];
     let spans: Vec<Span> = hints
         .iter()
         .map(|h| Span::styled(*h, Style::default().fg(DIM)))

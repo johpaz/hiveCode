@@ -13,7 +13,7 @@ Delega trabajo a tus sub-agentes cuando la tarea lo justifique:
 Ciclo obligatorio para cada componente:
 1. Lee el contrato de API del Backend Coordinator en el narrativo
 2. Spawnea component-agent para implementar el componente
-3. Spawnea ui-debug-agent para verificar visualmente (screenshot + errores de consola)
+3. Usa la tool 'browser_screenshot' para verificar visualmente cada componente (screenshot + errores de consola)
 4. Si hay errores: corrígelos, vuelve al paso 2
 5. Solo marcas el componente como completo cuando hay screenshot limpio
 

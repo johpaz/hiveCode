@@ -14,7 +14,113 @@ declare var self: {
 
 const COORDINATOR_PROVIDER = process.env.HIVE_COORDINATOR_PROVIDER || "anthropic"
 const COORDINATOR_MODEL = process.env.HIVE_COORDINATOR_MODEL || "claude-sonnet-4-6"
-const MAX_ITERATIONS = 10
+const MAX_ITERATIONS = 20
+
+/** Approximate max context tokens by model name (used for compaction) */
+function getMaxContextTokens(model: string): number {
+  const m = model.toLowerCase()
+  if (m.includes("gemini-3-flash") || m.includes("gemini-2.5-flash")) return 1_000_000
+  if (m.includes("gemini-3-pro") || m.includes("gemini-2.5-pro")) return 2_000_000
+  if (m.includes("gemini")) return 1_000_000
+  if (m.includes("claude-sonnet-4")) return 200_000
+  if (m.includes("claude-sonnet-3-7")) return 200_000
+  if (m.includes("claude-sonnet")) return 200_000
+  if (m.includes("claude-opus")) return 200_000
+  if (m.includes("claude-haiku")) return 200_000
+  if (m.includes("claude")) return 200_000
+  if (m.includes("gpt-4o")) return 128_000
+  if (m.includes("gpt-4-turbo")) return 128_000
+  if (m.includes("gpt-4")) return 8_192
+  if (m.includes("gpt-3.5")) return 16_385
+  if (m.includes("llama")) return 128_000
+  if (m.includes("qwen")) return 128_000
+  if (m.includes("deepseek")) return 64_000
+  // Default conservative fallback
+  return 32_000
+}
+
+/** Estimate token count from messages (approx: 3.5 chars/token for mixed en/es/code) */
+function estimateTokenCount(messages: LLMMessage[]): number {
+  let totalChars = 0
+  for (const msg of messages) {
+    totalChars += msg.role.length
+    if (typeof msg.content === "string") {
+      totalChars += msg.content.length
+    } else if (msg.tool_calls) {
+      for (const tc of msg.tool_calls) {
+        totalChars += tc.function.name.length
+        totalChars += (tc.function.arguments || "").length
+      }
+    }
+  }
+  return Math.ceil(totalChars / 3.5)
+}
+
+/**
+ * Compact tool messages if context exceeds trigger ratio.
+ * Preserves: system prompt, initial user message, last 4 messages, and any assistant messages.
+ * Compacts: older tool messages into a single summary.
+ */
+function compactMessagesIfNeeded(messages: LLMMessage[], model: string): LLMMessage[] {
+  const maxTokens = getMaxContextTokens(model)
+  const triggerTokens = Math.floor(maxTokens * 0.75)
+  const currentTokens = estimateTokenCount(messages)
+
+  if (currentTokens <= triggerTokens) {
+    return messages // No compaction needed
+  }
+
+  // We need to compact. Strategy:
+  // - Always keep first message (system) and second (initial user)
+  // - Keep last 4 messages (recent context)
+  // - Compact middle tool messages into a summary
+  const keepCount = Math.max(2, Math.min(4, Math.floor(messages.length * 0.3)))
+  const head = messages.slice(0, 2) // system + initial user
+  const tail = messages.slice(-keepCount) // recent context
+  const middle = messages.slice(2, -keepCount)
+
+  if (middle.length === 0) {
+    return messages // Nothing to compact
+  }
+
+  // Count tool messages in the middle
+  const toolMsgs = middle.filter(m => m.role === "tool")
+  if (toolMsgs.length === 0) {
+    return messages // No tool messages to compact
+  }
+
+  // Build a compact summary of middle tool results
+  const compactedTools = toolMsgs.slice(-3) // Keep last 3 tool results from middle
+  const droppedCount = toolMsgs.length - compactedTools.length
+
+  let summary = `📦 ${toolMsgs.length} tool results compacted to save context.`
+  if (droppedCount > 0) {
+    summary += ` ${droppedCount} older results summarized.`
+  }
+  for (const tm of compactedTools) {
+    const content = typeof tm.content === "string" ? tm.content : JSON.stringify(tm.content)
+    summary += "\n" + content.slice(0, 200)
+    if (content.length > 200) summary += "…"
+  }
+
+  const compactedMessage: LLMMessage = {
+    role: "user" as any,
+    content: `<system>\n${summary}\n</system>`,
+  }
+
+  // Build result: head + non-tool middle messages + compacted summary + tail
+  const nonToolMiddle = middle.filter(m => m.role !== "tool")
+  const result = [...head, ...nonToolMiddle, compactedMessage, ...tail]
+
+  const newTokens = estimateTokenCount(result)
+  // Safety: if still too large, truncate the compacted message content
+  if (newTokens > triggerTokens && compactedMessage.content) {
+    const maxCompactLen = 1500
+    compactedMessage.content = (compactedMessage.content as string).slice(0, maxCompactLen) + "\n...(truncated)\n</system>"
+  }
+
+  return result
+}
 
 /** Resolve API key using getEnvironmentData → task.secrets → env fallback */
 function resolveApiKey(provider: string, taskSecrets?: Record<string, string>): string {
@@ -103,6 +209,8 @@ class WorkerAgent {
   private iterations = 0
   private pendingToolResolvers = new Map<string, (result: unknown) => void>()
   private isRunning = false
+  private totalTokensIn = 0
+  private totalTokensOut = 0
 
   constructor(systemPrompt: string, coordinatorName: string) {
     this.coordinatorName = coordinatorName
@@ -118,6 +226,8 @@ class WorkerAgent {
     this.iterations = 0
     this.messages = []
     this.pendingToolResolvers.clear()
+    this.totalTokensIn = 0
+    this.totalTokensOut = 0
 
     // Add spawn_subagent to available tools
     this.tools = [...tools, SPAWN_SUBAGENT_TOOL]
@@ -133,8 +243,17 @@ class WorkerAgent {
       const contextBlock = task.compiledContext
         ? `\n\n${task.compiledContext}`
         : ""
+
+      // Format conversation history for BEE (gives cross-message context within a session)
+      const historyBlock = task.conversationHistory?.length
+        ? "\n\n## Conversación reciente en esta sesión:\n" +
+          task.conversationHistory
+            .map(t => `${t.role === "user" ? "Usuario" : "Agente"}: ${t.content.slice(0, 500)}`)
+            .join("\n\n")
+        : ""
+
       this.messages = [
-        { role: "system", content: this.systemPrompt + contextBlock },
+        { role: "system", content: this.systemPrompt + contextBlock + historyBlock },
         {
           role: "user",
           content: [
@@ -154,6 +273,34 @@ class WorkerAgent {
       while (this.iterations < MAX_ITERATIONS) {
         this.iterations++
 
+        // Notify main thread that we're thinking / analyzing
+        self.postMessage(JSON.stringify({
+          type: "THINKING",
+          taskId: this.task!.taskId,
+          phaseId: this.task!.phaseId,
+          coordinator: this.coordinatorName,
+          content: this.iterations === 1
+            ? `🧠 ${this.coordinatorName} analizando solicitud...`
+            : `🧠 ${this.coordinatorName} razonando (paso ${this.iterations})...`,
+        } as WorkerToManagerMessage))
+
+        // Auto-compact context if it's getting too large
+        const compactedMessages = compactMessagesIfNeeded(this.messages, model)
+        if (compactedMessages.length < this.messages.length) {
+          self.postMessage(JSON.stringify({
+            type: "THINKING",
+            taskId: this.task!.taskId,
+            phaseId: this.task!.phaseId,
+            coordinator: this.coordinatorName,
+            content: `📦 Contexto compactado: ${this.messages.length} → ${compactedMessages.length} mensajes`,
+          } as WorkerToManagerMessage))
+        }
+        this.messages = compactedMessages
+
+        // 2-minute timeout per LLM call to prevent indefinite hangs
+        const controller = new AbortController()
+        const llmTimeout = setTimeout(() => controller.abort(), 120_000)
+
         const response = await callLLM({
           provider,
           model,
@@ -162,7 +309,14 @@ class WorkerAgent {
           tools: this.tools.length > 0 ? this.tools : undefined,
           temperature: 0.3,
           maxTokens: 8192,
+          signal: controller.signal,
         })
+
+        clearTimeout(llmTimeout)
+
+        // Accumulate token usage
+        this.totalTokensIn  += response.usage?.input_tokens  ?? 0
+        this.totalTokensOut += response.usage?.output_tokens ?? 0
 
         // No tool calls → final response
         if (!response.tool_calls?.length || response.stop_reason !== "tool_calls") {
@@ -231,9 +385,11 @@ class WorkerAgent {
           phaseId: task.phaseId,
           coordinator: this.coordinatorName,
           status: "completed",
-          narrativeEntry: finalContent + "\n\n_(Reached max iterations)_",
+          narrativeEntry: finalContent + `\n\n_(Reached max iterations — ${MAX_ITERATIONS} tool calls used. The task may be too complex or the agent needs more guidance. Consider breaking the request into smaller steps.)_`,
           filesModified: [],
           durationMs,
+          tokensIn: this.totalTokensIn,
+          tokensOut: this.totalTokensOut,
         }
       }
 
@@ -245,6 +401,8 @@ class WorkerAgent {
         narrativeEntry: finalContent,
         filesModified: [],
         durationMs,
+        tokensIn: this.totalTokensIn,
+        tokensOut: this.totalTokensOut,
       }
     } catch (err) {
       const durationMs = Math.round(performance.now() - startTime)
@@ -304,7 +462,7 @@ class WorkerAgent {
       }
 
       // Send task to sub-agent
-      worker.postMessage({
+      worker.postMessage(JSON.stringify({
         type: "SUBAGENT_TASK",
         systemPrompt: subAgent.systemPrompt,
         task: taskContext,
@@ -313,7 +471,7 @@ class WorkerAgent {
         model: this.task?.model || COORDINATOR_MODEL,
         temperature: subAgent.temperature,
         maxTokens: subAgent.maxTokens,
-      })
+      }))
 
       // Timeout after 3 minutes
       setTimeout(() => {

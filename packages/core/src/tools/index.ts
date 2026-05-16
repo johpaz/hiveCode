@@ -111,6 +111,8 @@ export {
 export {
   webSearchTool,
   webFetchTool,
+  browserScreenshotTool,
+  browserCaptureClipboardTool,
 } from "./web/index.ts";
 
 export {
@@ -143,6 +145,7 @@ export {
   busPublishTool,
   busReadTool,
   projectUpdatesTool,
+  spawnAgentTool,
 } from "./agents/index.ts";
 
 

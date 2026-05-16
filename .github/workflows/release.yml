@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   build:
@@ -22,6 +23,9 @@ jobs:
           - os: ubuntu-latest
             target: bun-linux-arm64
             artifact: hive-code-linux-arm64
+          - os: ubuntu-latest
+            target: bun-linux-x64-musl
+            artifact: hive-code-linux-x64-musl
           - os: macos-latest
             target: bun-darwin-x64
             artifact: hive-code-macos-x64
@@ -31,6 +35,9 @@ jobs:
           - os: windows-latest
             target: bun-windows-x64
             artifact: hive-code-windows-x64.exe
+          - os: windows-latest
+            target: bun-windows-x64-arm64
+            artifact: hive-code-windows-arm64.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -43,10 +50,17 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Generate skill bundles
-        run: bun packages/skills/scripts/generate-bundle.ts
+      - name: Build TUI binary (Linux/macOS only)
+        if: runner.os != 'Windows'
+        run: |
+          if command -v cargo &>/dev/null; then
+            cd packages/tui && cargo build --release
+          else
+            echo "Cargo not available, skipping TUI binary"
+          fi
+        continue-on-error: true
 
-      - name: Build binary
+      - name: Build CLI binary
         run: |
           bun build packages/cli/src/index.ts \
             --compile \
@@ -60,7 +74,7 @@ jobs:
           path: ${{ matrix.artifact }}
 
   release:
-    name: Create Release
+    name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -78,6 +92,38 @@ jobs:
           files: artifacts/*
           generate_release_notes: true
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-npm:
+    name: Publish to npm
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node.js for npm publish
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Set version from tag
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          cd packages/cli
+          npm version $VERSION --no-git-tag-version
+
+      - name: Publish to npm
+        run: cd packages/cli && npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -13,6 +13,8 @@ pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
         (DIM, " Ejecutando… ")
     } else if state.show_popup {
         (AMBER, " ↑↓ navegar · Enter ejecutar · Esc cancelar ")
+    } else if state.shell_mode {
+        (GREEN, " $ shell mode — Ctrl+X para volver ")
     } else {
         (AMBER, " ¿Qué construirás hoy? (/ para comandos) ")
     };
@@ -49,14 +51,19 @@ pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
     };
 
     // Mascot face based on state — positioned at the RIGHT of the input
+    let fi = state.animation_frame as usize;
     let (mascot_face, mascot_color) = match state.mascot_state {
         MascotState::Welcome   => ("\\(^•^)/", AMBER),
-        MascotState::Thinking  => ("(~•~)",    AMBER),
-        MascotState::Completed => ("(★•★)",    GREEN),
-        MascotState::Error     => ("(x•x)",    RED),
-        MascotState::Idle      => ("(-•-)",    DIM),
-        MascotState::PlanMode  => ("(o•o)",    ratatui::style::Color::Rgb(196, 181, 253)),
-        MascotState::Approval  => ("(?•?)",    ratatui::style::Color::Rgb(252, 211, 77)),
+        MascotState::Thinking  => (["(~•~)", "(~-~)", "(~•~)", "(>•<)"][fi % 4], AMBER),
+        MascotState::Searching => (["(o•-)", "(-•o)", "(o•-)", "(-•-)"][fi % 4], ratatui::style::Color::Rgb(96, 165, 250)),
+        MascotState::Reading   => (["(^•^)", "(^-^)", "(^•^)", "(^_^)"][fi % 4], ratatui::style::Color::Rgb(167, 243, 208)),
+        MascotState::Writing   => (["(>•<)", "(>-<)", "(>•<)", "(>•.)"][fi % 4], ratatui::style::Color::Rgb(196, 181, 253)),
+        MascotState::Executing => (["(•v•)", "(•-•)", "(•v•)", "(•_•)"][fi % 4], ratatui::style::Color::Rgb(252, 211, 77)),
+        MascotState::Completed => ("(★•★)", GREEN),
+        MascotState::Error     => ("(x•x)", RED),
+        MascotState::Idle      => ("(-•-)", DIM),
+        MascotState::PlanMode  => ("(o•o)", ratatui::style::Color::Rgb(196, 181, 253)),
+        MascotState::Approval  => ("(?•?)", ratatui::style::Color::Rgb(252, 211, 77)),
     };
     let mascot = format!(" {} ", mascot_face);
     let mascot_style = Style::default()

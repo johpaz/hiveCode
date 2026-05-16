@@ -2,6 +2,32 @@ import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import type { NarrativeEntry, ADR, FileSnapshot } from "../workers/types"
 
+export interface Turn {
+  id: string
+  sessionId: string
+  taskId: string | null
+  userMessage: string
+  agentResponse: string
+  createdAt: string
+  completedAt: string | null
+}
+
+export interface FileChange {
+  filePath: string
+  changeType: "added" | "modified" | "deleted"
+  linesAdded: number
+  linesRemoved: number
+}
+
+export interface TaskMetadata {
+  tokensIn: number
+  tokensOut: number
+  filesChanged: number
+  linesAdded: number
+  linesRemoved: number
+  durationMs: number
+}
+
 const log = logger.child("scribe")
 
 function mapEntry(r: any): NarrativeEntry {
@@ -34,10 +60,48 @@ export class Scribe {
   createSession(projectPath: string): string {
     const id = Bun.randomUUIDv7()
     this.db.query(
-      "INSERT INTO code_sessions (id, project_path) VALUES (?, ?)"
+      "INSERT INTO code_sessions (id, project_path, status) VALUES (?, ?, 'active')"
     ).run(id, projectPath)
     log.info(`[scribe] Session created: ${id} (${projectPath})`)
     return id
+  }
+
+  closeSession(sessionId: string): void {
+    this.db.query(
+      "UPDATE code_sessions SET status = 'closed', last_active = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?"
+    ).run(sessionId)
+    log.info(`[scribe] Session closed: ${sessionId}`)
+  }
+
+  createTurn(sessionId: string, userMessage: string): string {
+    const id = Bun.randomUUIDv7()
+    this.db.query(
+      "INSERT INTO code_turns (id, session_id, user_message) VALUES (?, ?, ?)"
+    ).run(id, sessionId, userMessage)
+    return id
+  }
+
+  completeTurn(turnId: string, agentResponse: string, taskId?: string | null): void {
+    this.db.query(
+      "UPDATE code_turns SET agent_response = ?, task_id = ?, completed_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?"
+    ).run(agentResponse, taskId ?? null, turnId)
+  }
+
+  getRecentTurns(sessionId: string, limit = 10): Turn[] {
+    const rows = this.db.query(`
+      SELECT * FROM code_turns
+      WHERE session_id = ? AND completed_at IS NOT NULL
+      ORDER BY created_at DESC LIMIT ?
+    `).all(sessionId, limit) as any[]
+    return rows.reverse().map(r => ({
+      id: r.id,
+      sessionId: r.session_id,
+      taskId: r.task_id,
+      userMessage: r.user_message,
+      agentResponse: r.agent_response,
+      createdAt: r.created_at,
+      completedAt: r.completed_at,
+    }))
   }
 
   createTask(sessionId: string, description: string, mode: string): string {
@@ -153,6 +217,35 @@ export class Scribe {
       narrative: this.readNarrative(taskId),
       decisions: this.readDecisions().filter(d => d.taskId === taskId),
       files: this.getSnapshots(taskId),
+    }
+  }
+
+  updatePhaseMetadata(phaseId: number, tokensIn: number, tokensOut: number, durationMs: number): void {
+    this.db.query(
+      "UPDATE code_task_phases SET tokens_in = ?, tokens_out = ?, duration_ms = ? WHERE id = ?"
+    ).run(tokensIn, tokensOut, durationMs, phaseId)
+  }
+
+  updateTaskMetadata(taskId: string, meta: TaskMetadata): void {
+    this.db.query(`
+      UPDATE code_tasks SET
+        tokens_in = tokens_in + ?,
+        tokens_out = tokens_out + ?,
+        files_changed = ?,
+        lines_added = ?,
+        lines_removed = ?,
+        duration_ms = duration_ms + ?
+      WHERE id = ?
+    `).run(meta.tokensIn, meta.tokensOut, meta.filesChanged, meta.linesAdded, meta.linesRemoved, meta.durationMs, taskId)
+  }
+
+  writeFileChanges(taskId: string, phaseId: number | null, changes: FileChange[]): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO code_file_changes (task_id, phase_id, file_path, change_type, lines_added, lines_removed)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `)
+    for (const c of changes) {
+      stmt.run(taskId, phaseId, c.filePath, c.changeType, c.linesAdded, c.linesRemoved)
     }
   }
 

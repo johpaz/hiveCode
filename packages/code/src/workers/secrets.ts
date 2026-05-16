@@ -106,14 +106,6 @@ export function loadSecrets(): Record<string, string> {
         `\n   bunx @johpaz/hivecode secret set <name>`
     )
   }
-  if (bunCount === 0 && envCount === 0) {
-    console.error(
-      `${logPrefix} ❌ No API keys found. Set them via:\n` +
-        `   bunx @johpaz/hivecode secret set <name>   (recommended)\n` +
-        `   or export <PROVIDER>_API_KEY=<key>          (fallback)`
-    )
-  }
-
   return secrets
 }
 

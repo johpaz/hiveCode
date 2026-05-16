@@ -39,8 +39,12 @@ pub enum ReplMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MascotState {
-    Welcome,      // \( ^•^)/  happy, wings up
-    Thinking,     // (~•~)     squinted eyes
+    Welcome,      // \(^•^)/   happy, wings up
+    Thinking,     // (~•~)     squinted eyes, animated
+    Searching,    // (o•-)     scanning left/right, animated
+    Reading,      // (^•^)     reading, animated
+    Writing,      // (>•<)     writing, animated
+    Executing,    // (•̀ᴗ•́)   executing, animated
     Completed,    // (★•★)     star eyes
     Error,        // (x•x)     X eyes, red
     Idle,         // (-•-)     sleeping, gray
@@ -90,6 +94,7 @@ pub enum Role {
     Assistant,
     System,
     Shell,
+    Thinking,
 }
 
 impl From<&str> for Role {
@@ -98,6 +103,7 @@ impl From<&str> for Role {
             "user" => Role::User,
             "system" => Role::System,
             "shell" => Role::Shell,
+            "thinking" => Role::Thinking,
             _ => Role::Assistant,
         }
     }
@@ -107,6 +113,22 @@ impl From<&str> for Role {
 pub struct HistoryEntry {
     pub role: Role,
     pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub timestamp: String,
+    pub level: String,
+    pub source: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Phase {
+    pub name: String,
+    pub coordinator: String,
+    pub status: String,
+    pub duration_ms: Option<u64>,
 }
 
 // ── Input with cursor ────────────────────────────────────────────────────────
@@ -162,6 +184,7 @@ pub struct AppState {
     pub model: String,
     pub project_name: String,
     pub project_path: String,
+    pub session_id: String,
     pub version: String,
     pub task_count: u32,
     pub token_count: u64,
@@ -183,6 +206,12 @@ pub struct AppState {
     pub activity_status: String,
     pub popup_area: Option<Rect>,
     pub mascot_state: MascotState,
+    pub animation_frame: u8,
+    pub show_logs: bool,
+    pub show_timeline: bool,
+    pub log_entries: Vec<LogEntry>,
+    pub narrative_chunks: Vec<(String, String, String)>, // (coordinator, phase, content)
+    pub phases: Vec<Phase>,
 }
 
 impl Default for AppState {
@@ -195,6 +224,7 @@ impl Default for AppState {
             project_path: std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
+            session_id: String::new(),
             version: "1.0.0".to_string(),
             task_count: 0,
             token_count: 0,
@@ -216,11 +246,38 @@ impl Default for AppState {
             activity_status: "idle".to_string(),
             popup_area: None,
             mascot_state: MascotState::Welcome,
+            animation_frame: 0,
+            show_logs: false,
+            show_timeline: false,
+            log_entries: Vec::new(),
+            narrative_chunks: Vec::new(),
+            phases: vec![
+                Phase { name: "Analyze & Route".into(), coordinator: "bee".into(), status: "idle".into(), duration_ms: None },
+                Phase { name: "Architecture Design".into(), coordinator: "architecture".into(), status: "idle".into(), duration_ms: None },
+                Phase { name: "Backend Implementation".into(), coordinator: "backend".into(), status: "idle".into(), duration_ms: None },
+                Phase { name: "Frontend Implementation".into(), coordinator: "frontend".into(), status: "idle".into(), duration_ms: None },
+                Phase { name: "Security Audit".into(), coordinator: "security".into(), status: "idle".into(), duration_ms: None },
+                Phase { name: "Testing".into(), coordinator: "test".into(), status: "idle".into(), duration_ms: None },
+                Phase { name: "DevOps Deploy".into(), coordinator: "devops".into(), status: "idle".into(), duration_ms: None },
+            ],
         }
     }
 }
 
 impl AppState {
+    pub fn coordinator_color(&self) -> ratatui::style::Color {
+        match self.active_coordinator.as_str() {
+            "bee" => AMBER,
+            "architecture" => PURPLE,
+            "backend" => BLUE,
+            "frontend" => GREEN,
+            "security" => RED,
+            "test" => ratatui::style::Color::Rgb(252, 211, 77), // yellow
+            "devops" => DIM,
+            _ => AMBER,
+        }
+    }
+
     pub fn update_mascot_state(&mut self) {
         self.mascot_state = if self.status_msg.contains("Error") || self.status_msg.contains("(×ᴗ×)") {
             MascotState::Error
@@ -228,7 +285,6 @@ impl AppState {
             if self.history.is_empty() {
                 MascotState::Welcome
             } else if self.running {
-                // Just finished — show success briefly until next state update
                 MascotState::Completed
             } else {
                 match self.mode {
@@ -236,19 +292,24 @@ impl AppState {
                     _ => MascotState::Idle,
                 }
             }
-        } else if self.activity_status == "thinking" || self.activity_status == "running" {
-            MascotState::Thinking
-        } else if self.activity_status == "waiting" {
-            MascotState::Approval
         } else {
-            MascotState::Thinking
+            match self.activity_status.as_str() {
+                "searching" => MascotState::Searching,
+                "reading"   => MascotState::Reading,
+                "writing"   => MascotState::Writing,
+                "executing" => MascotState::Executing,
+                "done"      => MascotState::Completed,
+                "error"     => MascotState::Error,
+                "waiting"   => MascotState::Approval,
+                _           => MascotState::Thinking,
+            }
         };
     }
 
     pub fn apply_message(&mut self, msg: BunMessage) {
         match msg {
             BunMessage::Init {
-                mode, provider, model, project_name, project_path,
+                mode, provider, model, project_name, project_path, session_id,
                 version, task_count, token_count, agent_count,
             } => {
                 self.mode = ReplMode::from(mode.as_str());
@@ -256,6 +317,7 @@ impl AppState {
                 self.model = model;
                 self.project_name = project_name;
                 self.project_path = project_path;
+                self.session_id = session_id;
                 self.version = version;
                 self.task_count = task_count;
                 self.token_count = token_count;
@@ -318,7 +380,44 @@ impl AppState {
                 if !coordinator.is_empty() {
                     self.status_msg = format!("{} · {}", coordinator, status);
                 }
+                // Update phase timeline
+                for p in &mut self.phases {
+                    if p.coordinator == coordinator {
+                        p.status = status.clone();
+                        p.name = phase.clone();
+                    }
+                }
                 self.update_mascot_state();
+            }
+            BunMessage::LogEntry { timestamp, level, source, message } => {
+                self.log_entries.push(LogEntry {
+                    timestamp,
+                    level,
+                    source,
+                    message,
+                });
+                if self.log_entries.len() > 500 {
+                    self.log_entries.remove(0);
+                }
+            }
+            BunMessage::NarrativeChunk { coordinator, phase, content } => {
+                self.narrative_chunks.push((coordinator.clone(), phase.clone(), content.clone()));
+                if self.narrative_chunks.len() > 100 {
+                    self.narrative_chunks.remove(0);
+                }
+                // Render narrative chunks in the chat history so user sees agent activity
+                if !content.is_empty() {
+                    let role = if phase == "thinking" {
+                        self.mascot_state = MascotState::Thinking;
+                        Role::Thinking
+                    } else {
+                        Role::Assistant
+                    };
+                    self.history.push(HistoryEntry {
+                        role,
+                        content: format!("[{}] {}", coordinator, content),
+                    });
+                }
             }
             // Handled in the main loop before apply_message is called
             BunMessage::Suspend | BunMessage::Resume => {}
@@ -373,6 +472,22 @@ impl AppState {
                     "Shell mode — escribe comandos de shell".to_string()
                 } else {
                     "Agent mode — escribe tareas o /comandos".to_string()
+                };
+            }
+            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.show_logs = !self.show_logs;
+                self.status_msg = if self.show_logs {
+                    "Panel de logs activo [Ctrl+L para cerrar]".to_string()
+                } else {
+                    "Listo · [shift+tab] cambiar modo".to_string()
+                };
+            }
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.show_timeline = !self.show_timeline;
+                self.status_msg = if self.show_timeline {
+                    "Timeline de fases activo [Ctrl+P para cerrar]".to_string()
+                } else {
+                    "Listo · [shift+tab] cambiar modo".to_string()
                 };
             }
             KeyCode::Esc => {
@@ -548,6 +663,7 @@ pub async fn run(screen: &str) -> Result<()> {
 
             _ = ticker.tick() => {
                 state.cursor_visible = !state.cursor_visible;
+                state.animation_frame = state.animation_frame.wrapping_add(1);
             }
 
             maybe_event = events.as_mut().unwrap().next() => {

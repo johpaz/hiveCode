@@ -15,6 +15,7 @@ import type { MenuItem } from "@johpaz/hivecode-code/coordinator/command-parser"
 import { plan as runPlan } from "./plan"
 import { run as runTask } from "./run"
 import { launchTui, tuiAvailable } from "./tui-launcher"
+import { CoordinatorManager } from "@johpaz/hivecode-code/workers/coordinator-manager"
 
 const VERSION = "1.0.0"
 
@@ -176,7 +177,7 @@ async function ensureProvider(
 async function executeTask(
   task: string,
   mode: ReplMode,
-  options?: { suspend?: () => Promise<void>; resume?: () => void },
+  options?: { suspend?: () => Promise<void>; resume?: () => void; manager?: CoordinatorManager; quiet?: boolean },
 ): Promise<string> {
   // Captura todo lo que los coordinadores escriben a stdout
   const lines: string[] = []
@@ -187,13 +188,16 @@ async function executeTask(
   }
 
   try {
+    const quiet = options?.quiet ?? false
+    const manager = options?.manager
+
     if (mode === "plan") {
-      await runPlan(task, { keyboard: false, exitOnError: false })
+      await runPlan(task, { keyboard: false, exitOnError: false, manager, quiet })
     } else if (mode === "auto") {
-      await runTask(task, [], { keyboard: false, exitOnError: false })
+      await runTask(task, [], { keyboard: false, exitOnError: false, manager, quiet })
     } else {
       // approval: plan → pedir confirmación → run
-      await runPlan(task, { keyboard: false, exitOnError: false })
+      await runPlan(task, { keyboard: false, exitOnError: false, manager, quiet })
 
       let approval: "yes" | "no" = "no"
       if (options?.suspend && options?.resume) {
@@ -222,7 +226,7 @@ async function executeTask(
       }
 
       if (approval === "yes") {
-        await runTask(task, [], { keyboard: false, exitOnError: false })
+        await runTask(task, [], { keyboard: false, exitOnError: false, manager, quiet })
       }
     }
   } finally {
@@ -271,12 +275,16 @@ export async function repl(): Promise<void> {
     return
   }
 
+  // Silence ALL logs (main thread + workers + gateway) before TUI takes over
+  process.env.HIVE_LOG_CONSOLE = "false"
+  logger.setConsole(false)
+
   await ensureGateway()
   await ensureTuiBinary()
 
   const init = loadInitialState()
 
-  // Provider guard al arranque
+  // Provider guard al arranque (antes de iniciar workers, para que tengan las claves)
   if (!init.provider) {
     const configured = await ensureProvider("")
     if (configured) {
@@ -284,6 +292,12 @@ export async function repl(): Promise<void> {
       init.model    = configured.model
     }
   }
+
+  // Start coordinator workers and open a session (one per TUI lifecycle)
+  const manager = new CoordinatorManager()
+  await manager.startAll()
+  const sessionId = manager.openSession()
+  logger.info(`[repl] Session started: ${sessionId}`)
 
   const agentCount = (getDb()
     .query("SELECT COUNT(*) as c FROM agents WHERE role='coordinator' AND enabled=1")
@@ -296,13 +310,21 @@ export async function repl(): Promise<void> {
     let currentProvider: string   = init.provider
     let currentModel:    string   = init.model
 
-    const tuiControl: { suspend: (() => Promise<void>) | null; resume: (() => void) | null } = {
+    const tuiControl: { suspend: (() => Promise<void>) | null; resume: (() => void) | null; send: ((msg: import("./tui-launcher").BunMessage) => void) | null } = {
       suspend: null,
       resume: null,
+      send: null,
     }
 
-    // Silence console logs while TUI owns the terminal
-    logger.setConsole(false)
+    // Forward narrative chunks from coordinators to TUI
+    manager.setNarrativeCallback((chunk) => {
+      tuiControl.send?.({
+        type: "narrative_chunk",
+        coordinator: chunk.coordinator,
+        phase: chunk.phase,
+        content: chunk.content.slice(0, 500),
+      })
+    })
 
     // Redirect stdout/stderr to a log file so nothing breaks the TUI
     const tuiLogPath = path.join(getHiveDir(), "logs", "tui-session.log")
@@ -345,6 +367,7 @@ export async function repl(): Promise<void> {
       initialModel:    init.model,
       projectName:     path.basename(init.projectPath),
       projectPath:     init.projectPath,
+      sessionId,
       version:         VERSION,
       taskCount:       init.taskCount,
       tokenCount:      init.tokenCount,
@@ -358,6 +381,9 @@ export async function repl(): Promise<void> {
       },
 
       onExit() {
+        // Close session and stop workers
+        manager.closeSession()
+        manager.stopAll().catch(() => {})
         // Restore stdout/stderr and console
         process.stdout.write = origStdoutWrite
         process.stderr.write = origStderrWrite
@@ -402,6 +428,8 @@ export async function repl(): Promise<void> {
         if (guardResult) {
           currentProvider = provider
           currentModel    = model
+          // Recargar secrets en el manager para que los workers las reciban en la próxima tarea
+          manager.reloadSecrets()
         }
 
         if (!provider) {
@@ -411,6 +439,8 @@ export async function repl(): Promise<void> {
         const output = await executeTask(input, currentMode, {
           suspend: tuiControl.suspend ?? undefined,
           resume: tuiControl.resume ?? undefined,
+          manager,
+          quiet: true,
         })
         return {
           output,

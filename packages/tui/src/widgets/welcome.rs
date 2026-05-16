@@ -102,7 +102,7 @@ fn bar_span() -> Span<'static> {
 }
 
 fn workers_line(agent_count: u32) -> Line<'static> {
-    let count_color = if agent_count >= 6 { GREEN } else { RED };
+    let count_color = if agent_count >= 7 { GREEN } else { RED };
     let mut spans = vec![
         bar_span(),
         Span::styled("  Workers   ", Style::default().fg(DIM)),
@@ -115,6 +115,7 @@ fn workers_line(agent_count: u32) -> Line<'static> {
     if agent_count > 0 {
         spans.push(Span::styled("  ·  ", Style::default().fg(DIM)));
         let roles: &[(&str, Color)] = &[
+            ("bee",    AMBER),
             ("arch",   PURPLE),
             ("back",   BLUE),
             ("front",  CYAN),
@@ -190,7 +191,7 @@ pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
             Span::styled("  shift+tab para cambiar", Style::default().fg(DIM)),
         ]));
 
-        // Proyecto
+        // Directory
         let project_display = {
             let p = state.project_path.as_str();
             if let Some(home) = std::env::var("HOME").ok() {
@@ -201,8 +202,20 @@ pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
         };
         lines.push(Line::from(vec![
             bar_span(),
-            Span::styled("  Proyecto  ", Style::default().fg(DIM)),
+            Span::styled("  Directory ", Style::default().fg(DIM)),
             Span::styled(project_display, Style::default().fg(SECONDARY)),
+        ]));
+
+        // Session
+        let session_display = if state.session_id.is_empty() {
+            "—".to_string()
+        } else {
+            state.session_id.clone()
+        };
+        lines.push(Line::from(vec![
+            bar_span(),
+            Span::styled("  Session   ", Style::default().fg(DIM)),
+            Span::styled(session_display, Style::default().fg(SECONDARY)),
         ]));
 
         // Provider

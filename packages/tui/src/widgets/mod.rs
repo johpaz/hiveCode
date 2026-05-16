@@ -2,6 +2,8 @@ pub mod command_popup;
 pub mod header;
 pub mod history;
 pub mod input;
+pub mod log_panel;
 pub mod mascot;
+pub mod phase_timeline;
 pub mod statusbar;
 pub mod welcome;

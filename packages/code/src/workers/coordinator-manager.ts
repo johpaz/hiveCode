@@ -11,27 +11,305 @@ import {
   setWorkerBusy, isWorkerBusy, setCancelled, isCancelled,
 } from "../modes/session-array"
 import { Scribe } from "../narrative/scribe"
+import type { Turn, FileChange } from "../narrative/scribe"
 import { loadSecrets, distributeSecrets } from "./secrets"
 import { getToolsForCoordinator, executeToolByName } from "./tool-bridge"
 import { parsePlan, getDefaultPhases, groupPhasesByLevel } from "./plan-parser"
 import type { ParsedPhase } from "./plan-parser"
 import { checkAutomaticInterruption } from "../modes/interruptions"
-import { broadcastNarrative, broadcastPhase, broadcastMode } from "../modes/task-streaming"
+import { broadcastNarrative, broadcastPhase, broadcastMode, broadcastPhaseStart, broadcastPhaseEnd, broadcastTaskEnd } from "@johpaz/hivecode-core/gateway/task-streaming"
+import { validateCommand } from "@johpaz/hivecode-core/tools/code/command-validator"
+import { incrementTaskCounter, shouldRunReflector, runReflector, startReflectorCron, stopReflectorCron } from "../agent/reflector"
 import type {
-  CoordinatorTask, CoordinatorResult, ControlMessage,
+  CoordinatorTask, CoordinatorResult, BeeDecision, ControlMessage,
   PhaseName, SessionMode, CoordinatorStatus,
   WorkerToManagerMessage, ManagerToWorkerMessage,
 } from "./types"
 
 const log = logger.child("coordinator-manager")
 
+/** Parse `git diff --stat` text into per-file line counts */
+function parseGitDiffStat(stat: string): Record<string, { added: number; removed: number }> {
+  const result: Record<string, { added: number; removed: number }> = {}
+  for (const line of stat.split("\n")) {
+    // Format: " src/foo.ts | 12 +++---"
+    const m = line.match(/^\s+(.+?)\s+\|\s+\d+\s+([+\-]+)/)
+    if (!m) continue
+    const file = m[1].trim()
+    const symbols = m[2]
+    result[file] = {
+      added:   (symbols.match(/\+/g) ?? []).length,
+      removed: (symbols.match(/-/g)  ?? []).length,
+    }
+  }
+  return result
+}
+
+/** Extract and parse BEE's JSON routing decision from its narrative output */
+function parseBeeDecision(raw: string): import("./types").BeeDecision {
+  const jsonMatch = raw.match(/```json\s*([\s\S]*?)\s*```/) || raw.match(/(\{[\s\S]*?\})\s*$/)
+  if (jsonMatch) {
+    try {
+      const data = JSON.parse(jsonMatch[1])
+      return {
+        action: data.action || "architecture",
+        content: data.content,
+        reason: data.reason || "",
+        phases: data.phases,
+        filesModified: data.filesModified,
+      }
+    } catch {
+      // JSON parse failed — fall through to default
+    }
+  }
+  // BEE returned plain text: treat as a direct response to the user
+  return { action: "respond", content: raw.trim(), reason: "BEE returned non-JSON response" }
+}
+
+/** Format BEE's raw JSON output into a human-readable narrative entry */
+/** Convert a tool call into a human-readable description */
+function formatToolCallForHuman(toolName: string, args: Record<string, unknown>): string {
+  const path = (args.path as string) || (args.file as string) || ""
+  const cmd = (args.cmd as string) || (args.command as string) || ""
+  const query = (args.query as string) || (args.pattern as string) || ""
+  switch (toolName) {
+    case "fs_read":
+      return `📄 Leyendo archivo${path ? ": " + path : ""}`
+    case "fs_list":
+      return `📁 Explorando directorio${path ? ": " + path : ""}`
+    case "fs_exists":
+      return `🔍 Verificando existencia${path ? ": " + path : ""}`
+    case "fs_glob":
+      return `🌐 Buscando archivos${(args.pattern as string) ? ": " + args.pattern : ""}`
+    case "fs_write":
+      return `✏️  Escribiendo archivo${path ? ": " + path : ""}`
+    case "fs_edit":
+      return `✏️  Editando archivo${path ? ": " + path : ""}`
+    case "fs_delete":
+      return `🗑️  Eliminando archivo${path ? ": " + path : ""}`
+    case "shell_executor":
+      return `⚡ Ejecutando${cmd ? ": " + cmd.slice(0, 60) : ""}`
+    case "code_search":
+      return `🔍 Buscando código${query ? ": " + query.slice(0, 60) : ""}`
+    case "parse_ast":
+      return `🌳 Analizando AST${path ? ": " + path : ""}`
+    case "git_status":
+      return `📊 Estado del repositorio`
+    case "git_diff":
+      return `📋 Diff del repositorio`
+    case "git_log":
+      return `📜 Historial de commits`
+    case "git_branch":
+      return `🌿 Gestionando ramas`
+    case "git_commit":
+      return `💾 Commit de cambios`
+    case "check_types":
+      return `🔎 Verificando tipos`
+    case "code_build":
+      return `🏗️  Compilando proyecto`
+    case "code_test":
+      return `🧪 Ejecutando tests`
+    case "code_lint":
+      return `🧹 Linting`
+    case "read_narrative":
+      return `📖 Leyendo narrativa`
+    case "write_decision":
+      return `📝 Registrando decisión`
+    case "append_narrative":
+      return `📝 Actualizando narrativa`
+    case "run_script":
+      return `▶️  Ejecutando script`
+    case "browser_screenshot":
+      return `🖼️  Capturando pantalla${(args.url as string) ? ": " + args.url : ""}`
+    case "web_search":
+      return `🌐 Buscando web${query ? ": " + query.slice(0, 60) : ""}`
+    case "web_fetch":
+      return `🌐 Fetching${(args.url as string) ? ": " + args.url : ""}`
+    default:
+      return `🔧 ${toolName}`
+  }
+}
+
+/** Format a tool result into a human-readable <system> message for the LLM.
+ *  Inspired by Kimi CLI's tool_result_to_message().
+ */
+function formatToolResult(toolName: string, result: unknown): string {
+  const isError = result && typeof result === "object" && "ok" in (result as any) && (result as any).ok === false
+  const errorMsg = isError ? (result as any).error || "Unknown error" : ""
+
+  if (isError) {
+    return `<system>\n❌ [${toolName}]: ${errorMsg}\n</system>`
+  }
+
+  // Build human-readable summary based on tool type
+  let summary = ""
+  const r = result as any
+
+  switch (toolName) {
+    case "fs_list": {
+      const count = r?.count ?? r?.entries?.length ?? 0
+      summary = `✅ [${toolName}]: ${count} entries in ${r?.path || "."}`
+      if (r?.entries && Array.isArray(r.entries)) {
+        const lines = r.entries.slice(0, 20).map((e: any) => {
+          const size = e.size ? ` (${Math.round(e.size / 1024)}KB)` : ""
+          return `  ${e.type === "directory" ? "📁" : "📄"} ${e.name}${size}`
+        })
+        summary += "\n" + lines.join("\n")
+        if (r.entries.length > 20) summary += `\n  ... and ${r.entries.length - 20} more`
+      }
+      break
+    }
+    case "fs_read": {
+      const linesRead = r?.linesRead ?? 0
+      const totalLines = r?.totalLines ?? 0
+      summary = `✅ [${toolName}]: ${r?.path || "file"} (${linesRead}/${totalLines} lines)`
+      if (r?.content) {
+        const content = String(r.content).slice(0, 1500)
+        summary += "\n```\n" + content + (String(r.content).length > 1500 ? "\n...(truncated)" : "") + "\n```"
+      }
+      break
+    }
+    case "fs_exists": {
+      summary = `✅ [${toolName}]: ${r?.path || ""} ${r?.exists ? "exists" : "does not exist"}`
+      break
+    }
+    case "fs_glob": {
+      const matches = r?.matches || r?.files || []
+      summary = `✅ [${toolName}]: ${matches.length} matches${r?.pattern ? ` for "${r.pattern}"` : ""}`
+      if (matches.length > 0) {
+        summary += "\n" + matches.slice(0, 15).map((f: string) => `  ${f}`).join("\n")
+        if (matches.length > 15) summary += `\n  ... and ${matches.length - 15} more`
+      }
+      break
+    }
+    case "shell_executor": {
+      const exitCode = r?.exitCode ?? 0
+      const elapsed = r?.executionTimeMs ?? 0
+      summary = `${exitCode === 0 ? "✅" : "⚠️"} [${toolName}]: ${r?.command || ""} (exit=${exitCode}, ${elapsed}ms)`
+      if (r?.stdout) {
+        const stdout = String(r.stdout).slice(0, 1000)
+        summary += "\nstdout:\n```\n" + stdout + (String(r.stdout).length > 1000 ? "\n...(truncated)" : "") + "\n```"
+      }
+      if (r?.stderr) {
+        const stderr = String(r.stderr).slice(0, 500)
+        summary += "\nstderr:\n```\n" + stderr + (String(r.stderr).length > 500 ? "\n...(truncated)" : "") + "\n```"
+      }
+      break
+    }
+    case "code_search": {
+      const matches = r?.matches || []
+      summary = `✅ [${toolName}]: ${matches.length} matches${r?.query ? ` for "${r.query}"` : ""}`
+      if (matches.length > 0) {
+        summary += "\n" + matches.slice(0, 10).map((m: any) => `  ${m.file}:${m.line}: ${m.text?.slice(0, 80) || ""}`).join("\n")
+        if (matches.length > 10) summary += `\n  ... and ${matches.length - 10} more`
+      }
+      break
+    }
+    case "git_status": {
+      const staged = r?.staged || []
+      const unstaged = r?.unstaged || []
+      summary = `✅ [${toolName}]: ${staged.length} staged, ${unstaged.length} unstaged`
+      if (staged.length) summary += "\nstaged:\n" + staged.map((f: string) => `  ${f}`).join("\n")
+      if (unstaged.length) summary += "\nunstaged:\n" + unstaged.map((f: string) => `  ${f}`).join("\n")
+      break
+    }
+    case "git_diff": {
+      summary = `✅ [${toolName}]: diff retrieved${r?.path ? ` for ${r.path}` : ""}`
+      if (r?.diff) {
+        const diff = String(r.diff).slice(0, 1500)
+        summary += "\n```diff\n" + diff + (String(r.diff).length > 1500 ? "\n...(truncated)" : "") + "\n```"
+      }
+      break
+    }
+    case "git_log": {
+      const commits = r?.commits || []
+      summary = `✅ [${toolName}]: ${commits.length} commits`
+      if (commits.length > 0) {
+        summary += "\n" + commits.slice(0, 10).map((c: any) => `  ${c.hash?.slice(0, 7) || ""} — ${c.message?.slice(0, 60) || ""}`).join("\n")
+      }
+      break
+    }
+    case "parse_ast": {
+      summary = `✅ [${toolName}]: AST parsed for ${r?.file || r?.path || "file"}`
+      if (r?.summary) summary += `\n${r.summary}`
+      break
+    }
+    case "check_types": {
+      summary = `${r?.ok ? "✅" : "⚠️"} [${toolName}]: type check ${r?.ok ? "passed" : "failed"}`
+      if (r?.errors?.length) summary += "\n" + r.errors.slice(0, 10).map((e: string) => `  ${e}`).join("\n")
+      break
+    }
+    case "code_build":
+    case "code_test":
+    case "code_lint": {
+      summary = `${r?.ok ? "✅" : "⚠️"} [${toolName}]: ${r?.ok ? "success" : "failed"}`
+      if (r?.output) {
+        const output = String(r.output).slice(0, 1000)
+        summary += "\n```\n" + output + (String(r.output).length > 1000 ? "\n...(truncated)" : "") + "\n```"
+      }
+      break
+    }
+    case "browser_screenshot": {
+      summary = `${r?.ok ? "✅" : "❌"} [${toolName}]: ${r?.url || ""}`
+      if (r?.path) summary += `\nScreenshot saved to: ${r.path}`
+      if (r?.error) summary += `\nError: ${r.error}`
+      break
+    }
+    case "web_search": {
+      const results = r?.results || []
+      summary = `✅ [${toolName}]: ${results.length} results${r?.query ? ` for "${r.query}"` : ""}`
+      if (results.length > 0) {
+        summary += "\n" + results.slice(0, 5).map((res: any, i: number) =>
+          `  ${i + 1}. ${res.title || ""}\n     ${res.url || ""}\n     ${res.snippet?.slice(0, 120) || ""}`
+        ).join("\n")
+      }
+      break
+    }
+    case "web_fetch": {
+      summary = `✅ [${toolName}]: fetched ${r?.url || ""}`
+      if (r?.title) summary += `\nTitle: ${r.title}`
+      if (r?.content) {
+        const content = String(r.content).slice(0, 1500)
+        summary += "\n```\n" + content + (String(r.content).length > 1500 ? "\n...(truncated)" : "") + "\n```"
+      }
+      break
+    }
+    default:
+      // Generic fallback
+      const generic = typeof result === "string" ? result : JSON.stringify(result, null, 2)
+      summary = `✅ [${toolName}]: result\n\`\`\`\n${generic.slice(0, 1500)}${generic.length > 1500 ? "\n...(truncated)" : ""}\n\`\`\``
+  }
+
+  return `<system>\n${summary}\n</system>`
+}
+
+function formatBeeNarrative(raw: string): string {
+  const decision = parseBeeDecision(raw)
+  switch (decision.action) {
+    case "respond":
+      return decision.content || "BEE respondió directamente."
+    case "fix":
+      return decision.content || "BEE aplicó un fix directo."
+    case "dispatch": {
+      const coords = decision.phases?.map(p => p.coordinator).join(", ") || ""
+      return `BEE delegó a: ${coords}\n${decision.reason}`
+    }
+    case "architecture":
+      return `BEE decidió diseño arquitectónico\n${decision.reason}`
+    default:
+      return raw
+  }
+}
+
+// BEE is index 0 in the bitmask; coordinators follow at indices 1-6
 const COORDINATOR_NAMES: PhaseName[] = [
-  "architecture", "backend", "frontend", "security", "test", "devops",
+  "bee", "architecture", "backend", "frontend", "security", "test", "devops",
 ]
 
 const WORKER_EXT = import.meta.url.endsWith(".ts") ? ".worker.ts" : ".worker.js"
 
 const COORDINATOR_FILES: Record<PhaseName, string> = {
+  bee: new URL(`./bee${WORKER_EXT}`, import.meta.url).pathname,
   architecture: new URL(`./architecture${WORKER_EXT}`, import.meta.url).pathname,
   backend: new URL(`./backend${WORKER_EXT}`, import.meta.url).pathname,
   frontend: new URL(`./frontend${WORKER_EXT}`, import.meta.url).pathname,
@@ -47,16 +325,44 @@ export class CoordinatorManager {
   private activeSessionId: string | null = null
   private broadcastChannel: BroadcastChannel | null = null
   private pendingResolvers = new Map<string, (value: CoordinatorResult) => void>()
+  private pendingTimeouts  = new Map<string, ReturnType<typeof setTimeout>>()
   private secrets: Record<string, string> = {}
   private allTools: Tool[] = []
+  private onNarrativeChunk?: (chunk: { coordinator: string; phase: string; content: string }) => void
+
+  /** Reload secrets from Bun.secrets and providers table */
+  reloadSecrets(): void {
+    const db = getDb()
+    this.secrets = loadSecrets()
+
+    // Primary fallback: read API keys from providers table (stored by /provider wizard)
+    const providerRows = db.query(
+      "SELECT id, api_key_encrypted FROM providers WHERE enabled = 1 AND api_key_encrypted IS NOT NULL"
+    ).all() as { id: string; api_key_encrypted: string }[]
+    for (const row of providerRows) {
+      const envKey = `${row.id.toUpperCase().replace(/-/g, "_")}_API_KEY`
+      if (!this.secrets[envKey]) {
+        this.secrets[envKey] = Buffer.from(row.api_key_encrypted, "base64").toString()
+      }
+    }
+
+    const totalKeys = Object.keys(this.secrets).length
+    if (totalKeys === 0) {
+      console.info(
+        `[secrets] ℹ️  No API keys configured yet — agents will start but tasks need a provider.\n` +
+        `   Run: hivecode provider add   (or set <PROVIDER>_API_KEY env var)`
+      )
+    }
+
+    distributeSecrets(this.secrets)
+    log.info(`[coordinator-manager] Secrets reloaded — ${totalKeys} key(s)`)
+  }
 
   async startAll(): Promise<void> {
-    const db = getDb()
-    log.info("[coordinator-manager] Starting 6 coordinators...")
+    log.info("[coordinator-manager] Starting BEE + 6 coordinators...")
 
     // Load and distribute secrets BEFORE creating workers
-    this.secrets = loadSecrets()
-    distributeSecrets(this.secrets)
+    this.reloadSecrets()
 
     // Load all tools from core
     try {
@@ -75,7 +381,26 @@ export class CoordinatorManager {
     this.broadcastChannel = new BroadcastChannel("hivecode:control")
     this.broadcastChannel.onmessage = (event: any) => this.handleControlMessage(event.data as ControlMessage)
 
-    log.info("[coordinator-manager] ✅ All coordinators running")
+    startReflectorCron()
+    log.info("[coordinator-manager] ✅ BEE + all coordinators running")
+  }
+
+  /** Create a session at TUI startup — one session per TUI lifecycle */
+  openSession(): string {
+    this.activeSessionId = this.scribe.createSession(process.cwd())
+    return this.activeSessionId
+  }
+
+  /** Close the session when TUI exits */
+  closeSession(): void {
+    if (this.activeSessionId) {
+      this.scribe.closeSession(this.activeSessionId)
+      this.activeSessionId = null
+    }
+  }
+
+  getSessionId(): string | null {
+    return this.activeSessionId
   }
 
   private createWorker(name: PhaseName): void {
@@ -111,6 +436,7 @@ export class CoordinatorManager {
   }
 
   async stopAll(): Promise<void> {
+    stopReflectorCron()
     for (const [name, worker] of this.workers) {
       worker.terminate()
       log.info(`[coordinator-manager] ${name} terminated`)
@@ -131,8 +457,24 @@ export class CoordinatorManager {
     }) => Promise<"approve" | "skip" | "cancel">
   ): Promise<void> {
     mode = mode ?? getMode()
-    this.activeSessionId = this.scribe.createSession(process.cwd())
+
+    // Ensure we have a session (created at TUI startup via openSession(), fallback here)
+    if (!this.activeSessionId) {
+      this.activeSessionId = this.scribe.createSession(process.cwd())
+    }
+
+    // Create a turn for this user message — closed after we have the agent response
+    const turnId = this.scribe.createTurn(this.activeSessionId, description)
+
+    // Gather recent conversation history to give BEE context
+    const recentTurns = this.scribe.getRecentTurns(this.activeSessionId, 10)
+    const conversationHistory = recentTurns.map(t => ([
+      { role: "user" as const,  content: t.userMessage,   createdAt: t.createdAt },
+      { role: "agent" as const, content: t.agentResponse, createdAt: t.createdAt },
+    ])).flat()
+
     this.activeTaskId = this.scribe.createTask(this.activeSessionId, description, mode)
+    const taskStartTime = performance.now()
 
     // Resolve provider/model from code_config (set by REPL or provider add command)
     const db = getDb()
@@ -145,14 +487,129 @@ export class CoordinatorManager {
 
     log.info(`[coordinator-manager] 🚀 Task ${this.activeTaskId} (mode: ${mode}, provider: ${configuredProvider || "env-default"}): ${description}`)
 
-    // Create git branch for this task
+    // ── Phase 0: BEE — Senior Dev orchestrator ────────────────────────────────
+    // BEE reads project context, classifies the task, and decides how to route it.
+    const beePhaseId = this.scribe.createPhase(this.activeTaskId, "bee", "bee")
+    const beeTask: CoordinatorTask = {
+      taskId: this.activeTaskId,
+      phaseId: beePhaseId,
+      phase: "bee",
+      description,
+      narrative: "",
+      mode: mode ?? getMode(),
+      projectPath: process.cwd(),
+      conversationHistory,
+      secrets: this.secrets,
+      provider: configuredProvider || undefined,
+      model: configuredModel || undefined,
+    }
+    const beeResult = await this.dispatchPhase("bee", beeTask)
+
+    // Parse BEE's decision early so we store a human-readable narrative
+    const beeDecision = parseBeeDecision(beeResult.narrativeEntry)
+    const beeNarrative = beeResult.status === "failed" || beeResult.status === "blocked"
+      ? (beeResult.blockerDescription || beeResult.narrativeEntry || "")
+      : formatBeeNarrative(beeResult.narrativeEntry)
+
+    if (beeResult.status === "failed" || beeResult.status === "blocked") {
+      this.scribe.appendNarrative({
+        taskId: this.activeTaskId,
+        sessionId: this.activeSessionId!,
+        coordinator: "bee",
+        phase: "bee",
+        entry: beeNarrative,
+        isDraft: false,
+        isOverride: false,
+      })
+      this.scribe.updatePhaseStatus(beePhaseId, beeResult.status, beeResult.blockerDescription)
+      this.scribe.updateTaskStatus(this.activeTaskId, "failed")
+      const failMsg = beeResult.blockerDescription || "BEE failed"
+      log.error(`[coordinator-manager] ❌ BEE phase failed: ${failMsg}`)
+      throw new Error(failMsg)
+    }
+
+    this.scribe.appendNarrative({
+      taskId: this.activeTaskId,
+      sessionId: this.activeSessionId!,
+      coordinator: "bee",
+      phase: "bee",
+      entry: beeNarrative,
+      isDraft: false,
+      isOverride: false,
+    })
+    this.scribe.updatePhaseStatus(beePhaseId, "completed", beeNarrative)
+    this.scribe.updatePhaseMetadata(beePhaseId, beeResult.tokensIn ?? 0, beeResult.tokensOut ?? 0, beeResult.durationMs)
+    log.info(`[coordinator-manager] 🐝 BEE decision: ${beeDecision.action} — ${beeDecision.reason}`)
+
+    // ── Route based on BEE's decision ─────────────────────────────────────────
+
+    // RESPOND: BEE handled it directly — return the answer to the user
+    if (beeDecision.action === "respond") {
+      const response = beeDecision.content ?? ""
+      this.scribe.updateTaskStatus(this.activeTaskId, "completed")
+      this.scribe.updateTaskMetadata(this.activeTaskId, {
+        tokensIn: beeResult.tokensIn ?? 0, tokensOut: beeResult.tokensOut ?? 0,
+        filesChanged: 0, linesAdded: 0, linesRemoved: 0,
+        durationMs: Math.round(performance.now() - taskStartTime),
+      })
+      this.scribe.completeTurn(turnId, response, null)
+      if (response) process.stdout.write(response + "\n")
+      return
+    }
+
+    // FIX: BEE applied a direct fix — report the summary and finish
+    if (beeDecision.action === "fix") {
+      const response = beeDecision.content ?? ""
+      const fileChanges: FileChange[] = (beeDecision.filesModified ?? []).map(f => ({
+        filePath: f, changeType: "modified" as const, linesAdded: 0, linesRemoved: 0,
+      }))
+      if (fileChanges.length) this.scribe.writeFileChanges(this.activeTaskId, beePhaseId, fileChanges)
+      this.scribe.updateTaskStatus(this.activeTaskId, "completed")
+      this.scribe.updateTaskMetadata(this.activeTaskId, {
+        tokensIn: beeResult.tokensIn ?? 0, tokensOut: beeResult.tokensOut ?? 0,
+        filesChanged: fileChanges.length, linesAdded: 0, linesRemoved: 0,
+        durationMs: Math.round(performance.now() - taskStartTime),
+      })
+      this.scribe.completeTurn(turnId, response, this.activeTaskId)
+      if (response) process.stdout.write(response + "\n")
+      if (beeDecision.filesModified?.length) {
+        log.info(`[coordinator-manager] 🐝 BEE modified: ${beeDecision.filesModified.join(", ")}`)
+      }
+      return
+    }
+
+    // DISPATCH: BEE decided which coordinators to use directly (no architecture phase)
+    if (beeDecision.action === "dispatch" && beeDecision.phases?.length) {
+      log.info(`[coordinator-manager] 🐝 BEE dispatching directly to: ${beeDecision.phases.map(p => p.coordinator).join(", ")}`)
+      const dispatchPhases: ParsedPhase[] = beeDecision.phases.map(p => ({
+        name: p.description,
+        coordinator: p.coordinator as Exclude<PhaseName, "bee">,
+        description: p.description,
+        dependsOn: p.dependsOn as Array<Exclude<PhaseName, "bee">>,
+      }))
+      await this.executePhaseLoop(
+        dispatchPhases,
+        description,
+        beeResult.narrativeEntry,
+        undefined,
+        mode,
+        configuredProvider,
+        configuredModel,
+        onApprovalCheckpoint,
+      )
+      await this.finalizeTask(taskStartTime, turnId, "BEE dispatch completed")
+      log.info(`[coordinator-manager] ✅ Task ${this.activeTaskId} completed (BEE dispatch)`)
+      return
+    }
+
+    // ARCHITECTURE (default): Create git branch then run Architecture + specialists
     const branchName = `hivecode/task-${this.activeTaskId}`
     try {
       const gitResult = await executeToolByName(this.allTools, "git_branch", {
         action: "create",
         name: branchName,
         path: process.cwd(),
-      })
+      }, { configurable: { workspace: process.cwd() } })
       if ((gitResult as any)?.ok) {
         this.scribe.updateTaskStatus(this.activeTaskId, "planning", { branchName })
         log.info(`[coordinator-manager] 🌿 Branch created: ${branchName}`)
@@ -163,14 +620,14 @@ export class CoordinatorManager {
       log.warn(`[coordinator-manager] ⚠️  Git branch creation failed: ${(err as Error).message}`)
     }
 
-    // Phase 1: Architecture
+    // ── Phase 1: Architecture ─────────────────────────────────────────────────
     const archPhaseId = this.scribe.createPhase(this.activeTaskId, "architecture", "architecture")
     const archTask: CoordinatorTask = {
       taskId: this.activeTaskId,
       phaseId: archPhaseId,
       phase: "architecture",
       description,
-      narrative: "",
+      narrative: beeResult.narrativeEntry,
       mode: mode ?? getMode(),
       projectPath: process.cwd(),
       secrets: this.secrets,
@@ -179,34 +636,35 @@ export class CoordinatorManager {
     }
     const archResult = await this.dispatchPhase("architecture", archTask)
 
-	if (archResult.status === "failed" || archResult.status === "blocked") {
-		this.scribe.appendNarrative({
-			taskId: this.activeTaskId,
-			sessionId: this.activeSessionId!,
-			coordinator: archResult.coordinator,
-			phase: "architecture",
-			entry: archResult.narrativeEntry || archResult.blockerDescription || "",
-			isDraft: false,
-			isOverride: false,
-		})
-		this.scribe.updatePhaseStatus(archPhaseId, archResult.status, archResult.blockerDescription)
-		this.scribe.updateTaskStatus(this.activeTaskId, "failed")
-		log.error(`[coordinator-manager] ❌ Architecture phase failed: ${archResult.blockerDescription}`)
-		return
-	}
+    if (archResult.status === "failed" || archResult.status === "blocked") {
+      this.scribe.appendNarrative({
+        taskId: this.activeTaskId,
+        sessionId: this.activeSessionId!,
+        coordinator: archResult.coordinator,
+        phase: "architecture",
+        entry: archResult.narrativeEntry || archResult.blockerDescription || "",
+        isDraft: false,
+        isOverride: false,
+      })
+      this.scribe.updatePhaseStatus(archPhaseId, archResult.status, archResult.blockerDescription)
+      this.scribe.updateTaskStatus(this.activeTaskId, "failed")
+      const failMsg = archResult.blockerDescription || "Architecture coordinator failed"
+      log.error(`[coordinator-manager] ❌ Architecture phase failed: ${failMsg}`)
+      throw new Error(failMsg)
+    }
 
-	this.scribe.appendNarrative({
-		taskId: this.activeTaskId,
-		sessionId: this.activeSessionId!,
-		coordinator: archResult.coordinator,
-		phase: "architecture",
-		entry: archResult.narrativeEntry,
-		isDraft: false,
-		isOverride: false,
-	})
-	this.scribe.updatePhaseStatus(archPhaseId, "completed", archResult.narrativeEntry)
+    this.scribe.appendNarrative({
+      taskId: this.activeTaskId,
+      sessionId: this.activeSessionId!,
+      coordinator: archResult.coordinator,
+      phase: "architecture",
+      entry: archResult.narrativeEntry,
+      isDraft: false,
+      isOverride: false,
+    })
+    this.scribe.updatePhaseStatus(archPhaseId, "completed", archResult.narrativeEntry)
 
-	// Parse the architecture output into a structured plan
+    // Parse the architecture output into a structured plan
     const plan = parsePlan(archResult.narrativeEntry)
 
     // Save ADR to database
@@ -230,20 +688,130 @@ export class CoordinatorManager {
     }
 
     if (mode === "plan") {
-      this.scribe.updateTaskStatus(this.activeTaskId, "completed")
-      log.info(`[coordinator-manager] 📋 Plan mode — task completed at architecture phase`)
-      log.info(`[coordinator-manager] 📋 Planned phases: ${plan.phases.map(p => p.coordinator).join(" → ")}`)
+      // Print ADR to stdout so the TUI / executeTask captures it
+      const lines: string[] = []
+      if (plan.adr.title)        lines.push(`\n## ${plan.adr.title}\n`)
+      if (plan.adr.context)      lines.push(`**Contexto:** ${plan.adr.context}\n`)
+      if (plan.adr.decision)     lines.push(`**Decisión:** ${plan.adr.decision}\n`)
+      if (plan.adr.consequences) lines.push(`**Consecuencias:** ${plan.adr.consequences}\n`)
+      if (plan.phases.length)    lines.push(`\n**Fases:** ${plan.phases.map(p => p.coordinator).join(" → ")}\n`)
+      if (plan.risks.length)     lines.push(`\n**Riesgos:**\n${plan.risks.map(r => `- [${r.severity}] ${r.description}`).join("\n")}\n`)
+      const adrText = lines.join("")
+      if (adrText) process.stdout.write(adrText)
+
+      await this.finalizeTask(taskStartTime, turnId, adrText || archResult.narrativeEntry)
       return
     }
 
     // Execute dynamic phases from the architecture plan
     const phases = plan.phases.length > 0 ? plan.phases : getDefaultPhases()
+    await this.executePhaseLoop(
+      phases,
+      description,
+      archResult.narrativeEntry,
+      plan.interfaces,
+      mode,
+      configuredProvider,
+      configuredModel,
+      onApprovalCheckpoint,
+    )
+
+    await this.finalizeTask(taskStartTime, turnId, archResult.narrativeEntry)
+    log.info(`[coordinator-manager] ✅ Task ${this.activeTaskId} completed`)
+  }
+
+  /** Persist task-level metadata (tokens, files, duration) and close the turn */
+  private async finalizeTask(taskStartMs: number, turnId: string, agentResponse: string): Promise<void> {
+    if (!this.activeTaskId) return
+    const durationMs = Math.round(performance.now() - taskStartMs)
+
+    // Aggregate tokens from all phases
+    const db = getDb()
+    const totals = db.query<{ ti: number; to: number }, [string]>(`
+      SELECT COALESCE(SUM(tokens_in),0) AS ti, COALESCE(SUM(tokens_out),0) AS to
+      FROM code_task_phases WHERE task_id = ?
+    `).get(this.activeTaskId) ?? { ti: 0, to: 0 }
+
+    // Collect git changes after task
+    let fileChanges: FileChange[] = []
+    try {
+      const gitStat = await executeToolByName(this.allTools, "git_status", { path: process.cwd() }, { configurable: { workspace: process.cwd() } }) as any
+      const changedFiles: string[] = [
+        ...(gitStat?.staged ?? []),
+        ...(gitStat?.unstaged ?? []),
+      ].filter((v, i, a) => a.indexOf(v) === i)
+
+      // Parse git diff --stat for line counts
+      const diffStat = await executeToolByName(this.allTools, "git_diff", {
+        path: process.cwd(), stat: true,
+      }, { configurable: { workspace: process.cwd() } }) as any
+      const diffText: string = diffStat?.diff ?? ""
+      const lineStats = parseGitDiffStat(diffText)
+
+      fileChanges = changedFiles.map(f => ({
+        filePath: f,
+        changeType: "modified" as const,
+        linesAdded: lineStats[f]?.added ?? 0,
+        linesRemoved: lineStats[f]?.removed ?? 0,
+      }))
+
+      if (fileChanges.length) {
+        this.scribe.writeFileChanges(this.activeTaskId, null, fileChanges)
+      }
+    } catch { /* git tools optional */ }
+
+    const linesAdded   = fileChanges.reduce((s, f) => s + f.linesAdded,   0)
+    const linesRemoved = fileChanges.reduce((s, f) => s + f.linesRemoved, 0)
+
+    this.scribe.updateTaskMetadata(this.activeTaskId, {
+      tokensIn:     totals.ti,
+      tokensOut:    totals.to,
+      filesChanged: fileChanges.length,
+      linesAdded,
+      linesRemoved,
+      durationMs,
+    })
+    this.scribe.updateTaskStatus(this.activeTaskId, "completed")
+    this.scribe.completeTurn(turnId, agentResponse.slice(0, 2000), this.activeTaskId)
+
+    broadcastTaskEnd(this.activeTaskId, "completed", durationMs)
+
+    // ACE Reflector: auto-run every N tasks or when trace threshold is met
+    incrementTaskCounter()
+    if (shouldRunReflector(db)) {
+      runReflector(db).then((result) => {
+        if (result.rules > 0) {
+          log.info(`[coordinator-manager] ACE Reflector auto-run: ${result.rules} new rules`)
+        }
+      }).catch((err) => {
+        log.warn("[coordinator-manager] ACE Reflector auto-run failed:", (err as Error).message)
+      })
+    }
+  }
+
+  /** Execute a list of phases grouped by dependency level.
+   *  Used both by the Architecture path and BEE's direct dispatch. */
+  private async executePhaseLoop(
+    phases: ParsedPhase[],
+    description: string,
+    archNarrative: string | undefined,
+    interfaces: string | undefined,
+    mode: SessionMode,
+    provider: string,
+    model: string,
+    onApprovalCheckpoint?: (ctx: {
+      phase: string
+      phaseIndex: number
+      totalPhases: number
+      narrativeEntry: string
+      nextPhase?: string
+    }) => Promise<"approve" | "skip" | "cancel">
+  ): Promise<void> {
     const levels = groupPhasesByLevel(phases)
 
     log.info(`[coordinator-manager] 📋 Executing ${phases.length} phases in ${levels.length} level(s):`)
     for (let lvl = 0; lvl < levels.length; lvl++) {
-      const levelPhases = levels[lvl]
-      log.info(`[coordinator-manager]    Level ${lvl}: ${levelPhases.map(p => p.coordinator).join(" + ")}`)
+      log.info(`[coordinator-manager]    Level ${lvl}: ${levels[lvl].map(p => p.coordinator).join(" + ")}`)
     }
 
     let globalPhaseIndex = 0
@@ -260,7 +828,6 @@ export class CoordinatorManager {
         continue
       }
 
-      // Create tasks for all phases in this level
       const levelTasks: Array<{ phase: PhaseName; task: CoordinatorTask }> = levelPhases.map(phaseDef => {
         const phase = phaseDef.coordinator
         const task: CoordinatorTask = {
@@ -268,54 +835,57 @@ export class CoordinatorManager {
           phaseId: this.scribe.createPhase(this.activeTaskId || "current", phase, phase),
           phase,
           description,
-          adr: archResult.narrativeEntry,
-          interfaces: plan.interfaces,
-          narrative: archResult.narrativeEntry,
+          adr: archNarrative,
+          interfaces,
+          narrative: archNarrative || "",
           mode: phaseMode,
           projectPath: process.cwd(),
           secrets: this.secrets,
-          provider: configuredProvider || undefined,
-          model: configuredModel || undefined,
+          provider: provider || undefined,
+          model: model || undefined,
         }
         return { phase, task }
       })
 
-      // Dispatch all phases in this level in parallel
+      // Announce phase start to live feed
+      for (const { phase, task: t } of levelTasks) {
+        if (this.activeTaskId) broadcastPhaseStart(this.activeTaskId, phase, phase)
+      }
+
       const results = await Promise.all(
         levelTasks.map(({ phase, task }) => this.dispatchPhase(phase, task))
       )
 
-      // Check results
       for (let r = 0; r < results.length; r++) {
         const result = results[r]
         const { phase, task } = levelTasks[r]
 
-		this.scribe.appendNarrative({
-			taskId: this.activeTaskId!,
-			sessionId: this.activeSessionId!,
-			coordinator: result.coordinator,
-			phase,
-			entry: result.narrativeEntry || result.blockerDescription || "",
-			isDraft: false,
-			isOverride: false,
-		})
+        this.scribe.appendNarrative({
+          taskId: this.activeTaskId!,
+          sessionId: this.activeSessionId!,
+          coordinator: result.coordinator,
+          phase,
+          entry: result.narrativeEntry || result.blockerDescription || "",
+          isDraft: false,
+          isOverride: false,
+        })
 
-		if (result.status === "failed") {
-			this.scribe.updateTaskStatus(this.activeTaskId, "failed")
-			log.error(`[coordinator-manager] ❌ ${phase} phase failed: ${result.blockerDescription}`)
-			return
-			}
+        if (result.status === "failed") {
+          this.scribe.updateTaskStatus(this.activeTaskId!, "failed")
+          log.error(`[coordinator-manager] ❌ ${phase} phase failed: ${result.blockerDescription}`)
+          return
+        }
 
-			if (result.status === "blocked") {
-			this.scribe.updatePhaseStatus(task.phaseId, "blocked", result.blockerDescription)
-			this.scribe.updateTaskStatus(this.activeTaskId, "paused")
-			log.warn(`[coordinator-manager] ⚠️ ${phase} phase blocked: ${result.blockerDescription}`)
-			return
-			}
+        if (result.status === "blocked") {
+          this.scribe.updatePhaseStatus(task.phaseId, "blocked", result.blockerDescription)
+          this.scribe.updateTaskStatus(this.activeTaskId!, "paused")
+          log.warn(`[coordinator-manager] ⚠️ ${phase} phase blocked: ${result.blockerDescription}`)
+          return
+        }
 
-			this.scribe.updatePhaseStatus(task.phaseId, "completed", result.narrativeEntry)
+        this.scribe.updatePhaseStatus(task.phaseId, "completed", result.narrativeEntry)
+        this.scribe.updatePhaseMetadata(task.phaseId, result.tokensIn ?? 0, result.tokensOut ?? 0, result.durationMs)
 
-        // Stream phase completion to WebSocket subscribers
         if (this.activeTaskId) {
           broadcastPhase(this.activeTaskId, {
             name: phase,
@@ -323,10 +893,10 @@ export class CoordinatorManager {
             coordinator: phase,
             durationMs: result.durationMs,
           })
+          broadcastPhaseEnd(this.activeTaskId, phase, phase, result.durationMs)
         }
       }
 
-      // Approval mode checkpoint — after each level completes
       const nextLevelPhases = levels[levelIdx + 1]
       if (phaseMode === "approval" && onApprovalCheckpoint && nextLevelPhases) {
         log.info(`[coordinator-manager] 🟡 Level ${levelIdx} awaiting approval`)
@@ -340,7 +910,7 @@ export class CoordinatorManager {
         })
 
         if (decision === "cancel") {
-          this.scribe.updateTaskStatus(this.activeTaskId, "cancelled")
+          this.scribe.updateTaskStatus(this.activeTaskId!, "cancelled")
           log.info(`[coordinator-manager] ❌ Task cancelled by user at level ${levelIdx}`)
           return
         }
@@ -354,15 +924,11 @@ export class CoordinatorManager {
           continue
         }
 
-        // decision === "approve"
         log.info(`[coordinator-manager] ✅ Level ${levelIdx} approved`)
       }
 
       globalPhaseIndex += levelPhases.length
     }
-
-    this.scribe.updateTaskStatus(this.activeTaskId, "completed")
-    log.info(`[coordinator-manager] ✅ Task ${this.activeTaskId} completed`)
   }
 
   private dispatchPhase(phase: PhaseName, task: CoordinatorTask): Promise<CoordinatorResult> {
@@ -381,8 +947,10 @@ export class CoordinatorManager {
       const timeout = setTimeout(() => {
         setWorkerBusy(idx, false)
         this.pendingResolvers.delete(resolverKey)
+        this.pendingTimeouts.delete(resolverKey)
         reject(new Error(`Worker ${phase} timed out after 5 minutes`))
       }, 300_000)
+      this.pendingTimeouts.set(resolverKey, timeout)
 
     // Get tools for this coordinator
     const tools = getToolsForCoordinator(phase, this.allTools)
@@ -457,29 +1025,31 @@ export class CoordinatorManager {
   private handleWorkerMessage(name: PhaseName, rawMsg: WorkerToManagerMessage | string): void {
     const msg = typeof rawMsg === "string" ? JSON.parse(rawMsg) as WorkerToManagerMessage : rawMsg
     if (msg.type === "RESULT" && msg.result) {
-      // Write narrative entry for this phase
-      if (this.activeTaskId && this.activeSessionId) {
-        this.scribe.appendNarrative({
-          taskId: this.activeTaskId,
-          sessionId: this.activeSessionId,
-          coordinator: msg.result.coordinator,
-          phase: name,
-          entry: msg.result.narrativeEntry,
-          isDraft: false,
-          isOverride: false,
-        })
-        log.debug(`[coordinator-manager] 📝 Narrative entry saved for ${name}`)
+      // NOTE: We intentionally do NOT emit onNarrativeChunk here for the final
+      // agent response, because the caller (executeTask via runTask) already
+      // captures stdout and sends a HistoryAppend to the TUI. Emitting here
+      // would duplicate the message. Tool calls still stream in real-time
+      // via handleToolCall → onNarrativeChunk.
 
-        // Stream to WebSocket subscribers
+      // Format BEE's JSON output for WebSocket subscribers
+      let displayContent = msg.result.narrativeEntry
+      if (name === "bee" && msg.result.narrativeEntry) {
+        displayContent = formatBeeNarrative(msg.result.narrativeEntry)
+      }
+
+      // Stream to WebSocket subscribers (persisted narrative is written by runTask/executePhaseLoop)
+      if (this.activeTaskId) {
         broadcastNarrative(this.activeTaskId, {
           coordinator: msg.result.coordinator,
           phase: name,
-          content: msg.result.narrativeEntry,
+          content: displayContent,
           timestamp: new Date().toISOString(),
         })
       }
 
       const resolverKey = `${msg.taskId}:${msg.phaseId}`
+      clearTimeout(this.pendingTimeouts.get(resolverKey))
+      this.pendingTimeouts.delete(resolverKey)
       const resolver = this.pendingResolvers.get(resolverKey)
       if (resolver) {
         resolver(msg.result)
@@ -487,6 +1057,17 @@ export class CoordinatorManager {
       }
       const idx = COORDINATOR_NAMES.indexOf(name)
       setWorkerBusy(idx, false)
+      return
+    }
+
+    if (msg.type === "THINKING" && msg.content) {
+      if (this.onNarrativeChunk) {
+        this.onNarrativeChunk({
+          coordinator: name,
+          phase: "thinking",
+          content: msg.content,
+        })
+      }
       return
     }
 
@@ -517,6 +1098,16 @@ export class CoordinatorManager {
 
     log.debug(`[coordinator-manager] 🛠️ ${name} calling tool: ${msg.toolName}`)
 
+    // Stream tool call to TUI so user sees what the agent is doing
+    if (this.onNarrativeChunk) {
+      const humanDesc = formatToolCallForHuman(msg.toolName, msg.toolArgs || {})
+      this.onNarrativeChunk({
+        coordinator: name,
+        phase: msg.toolName || name,
+        content: humanDesc,
+      })
+    }
+
     // Check plan mode gate
     const mode = getMode()
     if (mode === "plan") {
@@ -529,11 +1120,11 @@ export class CoordinatorManager {
         const errorMsg = `Tool '${msg.toolName}' is disabled in PLAN mode. Only read operations are allowed.`
         log.warn(`[coordinator-manager] 🚫 Blocked ${msg.toolName} in plan mode`)
         this.writeToolTrace(name, msg.toolName, JSON.stringify(msg.toolArgs), errorMsg, false, 0n)
-        worker.postMessage({
+        worker.postMessage(JSON.stringify({
           type: "TOOL_RESULT",
           toolCallId: msg.toolCallId,
           error: errorMsg,
-        } as ManagerToWorkerMessage)
+        } as ManagerToWorkerMessage))
         return
       }
     }
@@ -560,13 +1151,37 @@ export class CoordinatorManager {
       }
     }
 
+    // Dangerous action interceptor: validate shell commands from LLM agents (TDD §14)
+    const shellTools = new Set(["code_build", "code_test", "code_lint", "run_script"])
+    if (shellTools.has(msg.toolName) && msg.toolArgs) {
+      const shellCmd = (msg.toolArgs.command || msg.toolArgs.path || "") as string
+      if (shellCmd) {
+        const cmdValidation = validateCommand(shellCmd, { workspace: process.cwd(), mode })
+        if (!cmdValidation.ok) {
+          const v = cmdValidation as { ok: false; reason: string; fatal: boolean }
+          const errorMsg = `[SAFETY] Command blocked: ${v.reason}`
+          log.warn(`[coordinator-manager] 🛡️ Blocked ${msg.toolName}: ${v.reason}`)
+          this.writeToolTrace(name, msg.toolName, JSON.stringify(msg.toolArgs).slice(0, 300), errorMsg, false, 0n)
+          worker.postMessage(JSON.stringify({
+            type: "TOOL_RESULT",
+            toolCallId: msg.toolCallId,
+            error: v.fatal
+              ? `${errorMsg} — This command is permanently blocked.`
+              : `${errorMsg} — This action requires explicit user confirmation via the APPROVAL checkpoint.`,
+          } as ManagerToWorkerMessage))
+          return
+        }
+      }
+    }
+
     // Execute the tool with timing
     const inputSummary = JSON.stringify(msg.toolArgs || {}).slice(0, 500)
     const toolStart = performance.now()
     const result = await executeToolByName(
       this.allTools,
       msg.toolName,
-      msg.toolArgs || {}
+      msg.toolArgs || {},
+      { configurable: { workspace: process.cwd() } }
     )
     const toolDurationNs = BigInt(Math.round((performance.now() - toolStart) * 1_000_000))
     const success = !(result && typeof result === "object" && "ok" in (result as any) && (result as any).ok === false)
@@ -575,11 +1190,26 @@ export class CoordinatorManager {
     // Write tool execution trace (SPEC §5.4)
     this.writeToolTrace(name, msg.toolName, inputSummary, outputSummary, success, toolDurationNs)
 
-    // Send result back to worker via string fast-path
+    // Stream tool result to TUI so user sees success/failure
+    if (this.onNarrativeChunk) {
+      const resultPreview = outputSummary.slice(0, 200)
+      const icon = success ? "✅" : "❌"
+      this.onNarrativeChunk({
+        coordinator: name,
+        phase: msg.toolName,
+        content: `${icon} ${msg.toolName} → ${resultPreview}${resultPreview.length >= 200 ? "…" : ""}`,
+      })
+    }
+
+    // Format tool result for LLM consumption (Kimi CLI style: <system> wrappers)
+    // This gives the LLM clear context about what happened instead of raw JSON
+    const formattedResult = formatToolResult(msg.toolName, result)
+
+    // Send formatted result back to worker via string fast-path
     worker.postMessage(JSON.stringify({
       type: "TOOL_RESULT",
       toolCallId: msg.toolCallId,
-      result,
+      result: formattedResult,
     } as ManagerToWorkerMessage))
 
     log.debug(`[coordinator-manager] ✅ ${msg.toolName} result sent to ${name}`)
@@ -658,5 +1288,24 @@ export class CoordinatorManager {
 
   getActiveSessionId(): string | null {
     return this.activeSessionId
+  }
+
+  setNarrativeCallback(cb: (chunk: { coordinator: string; phase: string; content: string }) => void): void {
+    this.onNarrativeChunk = cb
+  }
+
+  /** Record a user override instruction into the narrative with is_override=1. */
+  recordUserOverride(text: string): void {
+    if (!this.activeTaskId || !this.activeSessionId) return
+    this.scribe.appendNarrative({
+      taskId: this.activeTaskId,
+      sessionId: this.activeSessionId,
+      coordinator: "user",
+      phase: "override",
+      entry: text,
+      isDraft: false,
+      isOverride: true,
+    })
+    log.info(`[coordinator-manager] 📝 User override recorded: ${text.slice(0, 80)}`)
   }
 }

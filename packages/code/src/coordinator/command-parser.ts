@@ -1,4 +1,8 @@
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { logger } from "@johpaz/hivecode-core/utils/logger"
+import { runReflector } from "../agent/reflector"
+import { callLLM, resolveProviderConfig } from "@johpaz/hivecode-core/agent/llm-client"
+import { saveScratchpadNote, getScratchpad, deleteScratchpadNote } from "@johpaz/hivecode-core/agent/conversation-store"
 
 export interface ContextState {
   sessionId: string
@@ -92,24 +96,86 @@ function renderProviderList(providers: ProviderRow[], activeId: string, modelMap
   ].join("\n")
 }
 
+const ALL_COMMANDS = [
+  { command: "/ace status", category: "ace", description: "estado del aprendizaje adaptativo" },
+  { command: "/ace playbook list", category: "ace", description: "reglas aprendidas del playbook" },
+  { command: "/ace playbook reset", category: "ace", description: "reiniciar playbook" },
+  { command: "/ace reflector run", category: "ace", description: "forzar analisis de trazas" },
+  { command: "/doctor", category: "system", description: "diagnostico completo del sistema" },
+  { command: "/env", category: "system", description: "variables de entorno no sensibles" },
+  { command: "/github status", category: "github", description: "estado de token github" },
+  { command: "/github whoami", category: "github", description: "usuario autenticado en github" },
+  { command: "/github set-repo", category: "github", description: "vincular repositorio github" },
+  { command: "/help", category: "system", description: "ayuda de comandos" },
+  { command: "/logs list", category: "logs", description: "ver logs del sistema" },
+  { command: "/logs follow", category: "logs", description: "seguir logs en tiempo real" },
+  { command: "/mcp list", category: "mcp", description: "listar servidores mcp" },
+  { command: "/mcp add", category: "mcp", description: "agregar servidor mcp" },
+  { command: "/mcp load", category: "mcp", description: "cargar config mcp desde archivo" },
+  { command: "/mcp enable", category: "mcp", description: "habilitar servidor mcp" },
+  { command: "/mcp disable", category: "mcp", description: "deshabilitar servidor mcp" },
+  { command: "/mcp test", category: "mcp", description: "probar servidor mcp" },
+  { command: "/mode get", category: "mode", description: "ver modo actual" },
+  { command: "/mode set", category: "mode", description: "cambiar modo plan approval auto" },
+  { command: "/mode history", category: "mode", description: "historial de cambios de modo" },
+  { command: "/modelo list", category: "modelo", description: "listar modelos disponibles" },
+  { command: "/modelo set", category: "modelo", description: "cambiar modelo activo" },
+  { command: "/modelo info", category: "modelo", description: "informacion del modelo" },
+  { command: "/narrative show", category: "narrative", description: "mostrar entradas del narrativo" },
+  { command: "/narrative search", category: "narrative", description: "buscar en narrativo con fts5" },
+  { command: "/narrative export", category: "narrative", description: "exportar narrativo completo" },
+  { command: "/provider list", category: "provider", description: "listar providers configurados" },
+  { command: "/provider add", category: "provider", description: "agregar provider de ia" },
+  { command: "/provider set", category: "provider", description: "cambiar provider activo" },
+  { command: "/provider test", category: "provider", description: "probar conexion al provider" },
+  { command: "/provider status", category: "provider", description: "estado de todos los providers" },
+  { command: "/skill list", category: "skill", description: "listar skills disponibles" },
+  { command: "/skill enable", category: "skill", description: "habilitar skill" },
+  { command: "/skill disable", category: "skill", description: "deshabilitar skill" },
+  { command: "/skill info", category: "skill", description: "informacion de skill" },
+  { command: "/skill add", category: "skill", description: "importar skill desde archivo" },
+  { command: "/task list", category: "task", description: "listar tareas recientes" },
+  { command: "/task status", category: "task", description: "estado detallado de tarea" },
+  { command: "/task cancel", category: "task", description: "cancelar tarea en curso" },
+  { command: "/task rollback", category: "task", description: "revertir cambios de tarea" },
+  { command: "/telegram status", category: "telegram", description: "estado de telegram" },
+  { command: "/telegram connect", category: "telegram", description: "conectar telegram" },
+  { command: "/telegram disconnect", category: "telegram", description: "desconectar telegram" },
+  { command: "/telegram edit", category: "telegram", description: "editar configuracion telegram" },
+  { command: "/version", category: "system", description: "version de hivecode" },
+]
+
+export function syncCommandsToFTS(db: ReturnType<typeof getDb>): void {
+  try {
+    db.run("DELETE FROM code_commands_fts")
+    const stmt = db.prepare("INSERT INTO code_commands_fts (command, category, description) VALUES (?, ?, ?)")
+    for (const cmd of ALL_COMMANDS) {
+      stmt.run(cmd.command, cmd.category, cmd.description)
+    }
+  } catch (err) {
+    logger.warn("[command-parser] Failed to sync commands to FTS:", (err as Error).message)
+  }
+}
+
 function renderSuggestions(input: string): string[] {
   const prefix = input.startsWith("/") ? input.slice(1) : input
-  const all = [
-    "provider", "provider list", "provider add", "provider set", "provider test", "provider status",
-    "modelo", "modelo list", "modelo set", "modelo info",
-    "mcp", "mcp list", "mcp add", "mcp enable", "mcp disable", "mcp test",
-    "skill", "skill list", "skill enable", "skill disable", "skill info", "skill add",
-    "mode", "mode get", "mode set", "mode history",
-    "task", "task list", "task status", "task cancel", "task rollback",
-    "narrative", "narrative show", "narrative search", "narrative export",
-    "ace", "ace status", "ace playbook list", "ace playbook reset", "ace reflector run",
-    "github", "github status", "github whoami", "github set-repo",
-    "telegram", "telegram status", "telegram connect", "telegram disconnect", "telegram edit",
-    "doctor", "version", "env", "help",
-  ]
-  if (!prefix) return all.slice(0, 5).map(c => "/" + c)
-  const match = all.filter(c => c.startsWith(prefix))
-  return match.slice(0, 5).map(c => "/" + c)
+  if (!prefix || prefix.length < 1) {
+    return ALL_COMMANDS.slice(0, 5).map(c => c.command)
+  }
+  try {
+    const db = getDb()
+    const rows = db.query(`
+      SELECT command FROM code_commands_fts
+      WHERE code_commands_fts MATCH ?
+      ORDER BY rank
+      LIMIT 5
+    `).all(`${prefix}*`) as { command: string }[]
+    if (rows.length > 0) return rows.map(r => r.command)
+  } catch {
+    // Fallback to simple prefix match if FTS fails
+  }
+  const match = ALL_COMMANDS.filter(c => c.command.startsWith("/" + prefix))
+  return match.slice(0, 5).map(c => c.command)
 }
 
 function runDoctor(db: ReturnType<typeof getDb>): string {
@@ -495,16 +561,88 @@ async function handleMcpCommand(
   }
 
   switch (action) {
-    case "list":
-      return { handled: true, output: "\n  MCP: lista no implementada a\u00fan\n" }
-    case "add":
-      return { handled: true, output: `  \u2717 MCP add no implementado en esta versi\u00f3n` }
-    case "enable":
-      return { handled: true, output: `  \u2713 MCP ${rest[0] || ""} habilitado` }
-    case "disable":
-      return { handled: true, output: `  \u2713 MCP ${rest[0] || ""} deshabilitado` }
-    case "test":
-      return { handled: true, output: `  \u2717 MCP test no implementado en esta versi\u00f3n` }
+    case "list": {
+      const rows = db.query("SELECT id, name, transport, url, command, enabled, status, tools_count FROM mcp_servers ORDER BY id").all() as any[]
+      if (rows.length === 0) {
+        return { handled: true, output: "\n  No hay servidores MCP configurados.\n  Agrega uno con: /mcp add <url-o-nombre>\n" }
+      }
+      const lines = rows.map(r => {
+        const icon = r.enabled ? "\u25cf" : "\u25cb"
+        const status = r.status || "unknown"
+        const tools = r.tools_count ? ` (${r.tools_count} tools)` : ""
+        const endpoint = r.url || r.command || ""
+        return `  ${icon} ${r.id.padEnd(18)} ${r.transport.padEnd(6)} ${status.padEnd(12)}${endpoint}${tools}`
+      })
+      return { handled: true, output: "\n  Servidores MCP:\n\n" + lines.join("\n") + "\n" }
+    }
+    case "add": {
+      const input = rest[0]
+      if (!input) return { handled: true, output: "uso: /mcp add <url-o-nombre>\nejemplo: /mcp add http://localhost:3000/sse" }
+      const id = input.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase()
+      const isUrl = input.startsWith("http://") || input.startsWith("https://")
+      const transport = isUrl ? "sse" : "stdio"
+      db.query(`
+        INSERT OR REPLACE INTO mcp_servers (id, name, transport, url, command, enabled, active, builtin, status)
+        VALUES (?, ?, ?, ?, ?, 1, 0, 0, 'disconnected')
+      `).run(id, input, transport, isUrl ? input : null, isUrl ? null : input)
+      return { handled: true, output: `  \u2713 MCP ${id} a\u00f1adido (${transport})\n  El hot-reload lo conectar\u00e1 autom\u00e1ticamente.` }
+    }
+    case "enable": {
+      const name = rest[0]
+      if (!name) return { handled: true, output: "uso: /mcp enable <nombre>" }
+      db.query("UPDATE mcp_servers SET enabled = 1 WHERE id = ?").run(name)
+      return { handled: true, output: `  \u2713 MCP ${name} habilitado` }
+    }
+    case "disable": {
+      const name = rest[0]
+      if (!name) return { handled: true, output: "uso: /mcp disable <nombre>" }
+      db.query("UPDATE mcp_servers SET enabled = 0 WHERE id = ?").run(name)
+      return { handled: true, output: `  \u2713 MCP ${name} deshabilitado` }
+    }
+    case "test": {
+      const name = rest[0]
+      if (!name) return { handled: true, output: "uso: /mcp test <nombre>" }
+      const row = db.query("SELECT id, url, transport FROM mcp_servers WHERE id = ?").get(name) as any
+      if (!row) return { handled: true, output: `  MCP no encontrado: ${name}` }
+      try {
+        if (row.transport === "sse" && row.url) {
+          const response = await fetch(row.url, { method: "GET" })
+          return { handled: true, output: response.ok
+            ? `  \u2713 ${name} responde correctamente`
+            : `  \u2717 ${name} error HTTP ${response.status}`
+          }
+        }
+        return { handled: true, output: `  ${name} es STDIO — requiere verificaci\u00f3n manual` }
+      } catch (err) {
+        return { handled: true, output: `  \u2717 ${name} no responde: ${(err as Error).message}` }
+      }
+    }
+    case "load": {
+      const filePath = rest[0]
+      if (!filePath) return { handled: true, output: "uso: /mcp load <path>\nejemplo: /mcp load ./mcp.json" }
+      try {
+        const content = await Bun.file(filePath).text()
+        const config = JSON.parse(content)
+        const servers = config.mcpServers || config.servers || {}
+        let added = 0
+        for (const [name, srv] of Object.entries(servers) as [string, any][]) {
+          const id = name.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase()
+          const isUrl = srv.url && (srv.url.startsWith("http://") || srv.url.startsWith("https://"))
+          const transport = isUrl ? "sse" : (srv.transport || "stdio")
+          const url = isUrl ? srv.url : null
+          const command = !isUrl && srv.command ? srv.command : null
+          const args = srv.args ? JSON.stringify(srv.args) : null
+          db.query(`
+            INSERT OR REPLACE INTO mcp_servers (id, name, transport, url, command, args, enabled, active, builtin, status)
+            VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, 'disconnected')
+          `).run(id, name, transport, url, command, args)
+          added++
+        }
+        return { handled: true, output: `  \u2713 ${added} servidores MCP cargados desde ${filePath}` }
+      } catch (err) {
+        return { handled: true, output: `  \u2717 Error cargando MCP config: ${(err as Error).message}` }
+      }
+    }
     default:
       return { handled: true, output: "opciones: list | add | enable | disable | test\n\nEscribe /help /mcp" }
   }
@@ -721,7 +859,47 @@ async function handleTaskCommand(
     case "rollback": {
       const id = rest[0]
       if (!id) return { handled: true, output: "uso: /task rollback <id>" }
-      return { handled: true, output: `  \u2717 Rollback no implementado en esta versi\u00f3n` }
+      try {
+        const task = db.query("SELECT * FROM code_tasks WHERE id = ?").get(id) as any
+        if (!task) return { handled: true, output: `  Tarea no encontrada: ${id}` }
+
+        const snapshots = db.query("SELECT file_path, content FROM code_file_snapshots WHERE task_id = ?").all(id) as { file_path: string; content: string }[]
+        if (snapshots.length === 0) {
+          return { handled: true, output: `  No hay snapshots para la tarea ${id.slice(0, 8)}` }
+        }
+
+        let restored = 0
+        for (const snap of snapshots) {
+          try {
+            await Bun.write(snap.file_path, snap.content)
+            restored++
+          } catch (e) {
+            // skip files that can't be restored
+          }
+        }
+
+        db.query("UPDATE code_tasks SET status = 'cancelled' WHERE id = ?").run(id)
+
+        let gitMsg = ""
+        if (task.branch_name) {
+          try {
+            const proc = Bun.spawn({
+              cmd: ["git", "branch", "-D", task.branch_name],
+              stdout: "pipe",
+              stderr: "pipe",
+              cwd: process.cwd(),
+            })
+            await proc.exited
+            gitMsg = `\n  Rama ${task.branch_name} eliminada.`
+          } catch {
+            // ignore git errors
+          }
+        }
+
+        return { handled: true, output: `  \u2713 Rollback completo: ${restored}/${snapshots.length} archivos restaurados.${gitMsg}` }
+      } catch (err) {
+        return { handled: true, output: `  \u2717 Error en rollback: ${(err as Error).message}` }
+      }
     }
     default:
       return { handled: true, output: "opciones: list | status | cancel | rollback\n\nEscribe /help /task" }
@@ -855,7 +1033,21 @@ async function handleAceCommand(
       return { handled: true, output: "uso: /ace playbook list | /ace playbook reset" }
     }
     case "reflector": {
-      return { handled: true, output: "  \u2717 Reflector no implementado en esta versi\u00f3n" }
+      if (rest[0] !== "run") {
+        return { handled: true, output: "uso: /ace reflector run" }
+      }
+      try {
+        const result = await runReflector(db)
+        if (result.traces === 0) {
+          return { handled: true, output: "  No hay trazas pendientes de an\u00e1lisis." }
+        }
+        return {
+          handled: true,
+          output: `  \u2713 Reflector: ${result.traces} trazas analizadas, ${result.rules} reglas generadas.`,
+        }
+      } catch (err) {
+        return { handled: true, output: `  \u2717 Error en reflector: ${(err as Error).message}` }
+      }
     }
     default:
       return { handled: true, output: "opciones: status | playbook | reflector\n\nEscribe /help /ace" }
@@ -913,6 +1105,184 @@ async function handleGithubCommand(
     }
     default:
       return { handled: true, output: "opciones: status | whoami | set-repo\n\nEscribe /help /github" }
+  }
+}
+
+async function handleSessionCommand(
+  args: string[],
+  db: ReturnType<typeof getDb>,
+  ctx: ContextState,
+): Promise<CommandResult> {
+  const [action] = args
+  if (!action || action === "new") {
+    const projectPath = ctx.projectPath || process.cwd()
+    const newId = Bun.randomUUIDv7()
+    // Close current session if exists
+    if (ctx.sessionId && ctx.sessionId !== "none") {
+      db.query("UPDATE code_sessions SET status = 'closed', last_active = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?").run(ctx.sessionId)
+    }
+    db.query("INSERT INTO code_sessions (id, project_path, status) VALUES (?, ?, 'active')").run(newId, projectPath)
+    return {
+      handled: true,
+      output: `  \u2713 Nueva sesi\u00f3n: ${newId.slice(0, 8)}...`,
+      newState: { sessionId: newId },
+    }
+  }
+  return { handled: true, output: "opciones: new\n\nEscribe /session new" }
+}
+
+async function handleCompactCommand(
+  db: ReturnType<typeof getDb>,
+  ctx: ContextState,
+): Promise<CommandResult> {
+  const sessionId = ctx.sessionId
+  if (!sessionId || sessionId === "none") {
+    return { handled: true, output: "  No hay sesi\u00f3n activa para compactar." }
+  }
+
+  const rows = db.query(
+    "SELECT id, user_message, agent_response FROM code_turns WHERE session_id = ? AND completed_at IS NOT NULL ORDER BY created_at"
+  ).all(sessionId) as { id: string; user_message: string; agent_response: string }[]
+
+  if (rows.length <= 10) {
+    return { handled: true, output: `  Solo hay ${rows.length} turnos — no es necesario compactar.` }
+  }
+
+  try {
+    const transcript = rows.map((r, i) => `Turno ${i + 1}:\nUsuario: ${r.user_message.slice(0, 200)}\nAgente: ${r.agent_response.slice(0, 200)}`).join("\n\n")
+    const providerCfg = await resolveProviderConfig("openai", "gpt-4o-mini")
+    const summaryResponse = await callLLM({
+      ...providerCfg,
+      messages: [
+        {
+          role: "system",
+          content: "Resume la siguiente conversación en 3-5 oraciones, preservando decisiones importantes, preferencias del usuario y contexto necesario para continuar.",
+        },
+        { role: "user", content: transcript },
+      ],
+    })
+
+    const summary = summaryResponse.content.trim()
+    db.query(`
+      INSERT INTO summaries (thread_id, summary, messages_covered, last_message_id)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET
+        summary = excluded.summary,
+        messages_covered = excluded.messages_covered,
+        last_message_id = excluded.last_message_id,
+        updated_at = unixepoch()
+    `).run(sessionId, summary, rows.length, rows[rows.length - 1].id)
+
+    return {
+      handled: true,
+      output: `  \u2713 Conversaci\u00f3n compactada: ${rows.length} turnos \u2192 resumen.\n  Resumen: ${summary.slice(0, 150)}...`,
+    }
+  } catch (err) {
+    return { handled: true, output: `  \u2717 Error al compactar: ${(err as Error).message}` }
+  }
+}
+
+async function handleNoteCommand(
+  args: string[],
+  db: ReturnType<typeof getDb>,
+  ctx: ContextState,
+): Promise<CommandResult> {
+  const [action, key, ...valueParts] = args
+  const sessionId = ctx.sessionId || "default"
+
+  if (!action) {
+    return {
+      handled: true,
+      output: [
+        "",
+        "  \u00bfQu\u00e9 quieres hacer?",
+        "  \u25b8 add <key> <value>  \u2014 agregar nota",
+        "  \u00b7 list                 \u2014 listar notas",
+        "  \u00b7 delete <key>         \u2014 eliminar nota",
+        "",
+      ].join("\n"),
+    }
+  }
+
+  if (action === "add") {
+    if (!key || valueParts.length === 0) {
+      return { handled: true, output: "uso: /note add <key> <value>\nejemplo: /note add preferencia 'usar zod'" }
+    }
+    const value = valueParts.join(" ")
+    const isAce = value.startsWith("@ace:")
+    const cleanValue = isAce ? value.slice(5).trim() : value
+    saveScratchpadNote(sessionId, key, cleanValue, isAce ? "user-ace" : "user")
+
+    if (isAce) {
+      // Propose as playbook rule with low confidence
+      try {
+        db.query(`
+          INSERT INTO code_playbook (rule, confidence, active, coordinator, source)
+          VALUES (?, 0.3, 1, NULL, 'user-note')
+          ON CONFLICT(rule) DO UPDATE SET confidence = MIN(code_playbook.confidence + 0.05, 0.95)
+        `).run(cleanValue)
+      } catch { /* ignore duplicate errors */ }
+    }
+
+    return { handled: true, output: `  \u2713 Nota guardada: ${key}${isAce ? " (propuesta a ACE)" : ""}` }
+  }
+
+  if (action === "list") {
+    const notes = getScratchpad(sessionId)
+    if (notes.length === 0) return { handled: true, output: "  No hay notas guardadas." }
+    const lines = notes.map(n => `  \u25b8 ${n.key}: ${n.value.slice(0, 60)}`)
+    return { handled: true, output: "\n  Notas:\n\n" + lines.join("\n") + "\n" }
+  }
+
+  if (action === "delete") {
+    if (!key) return { handled: true, output: "uso: /note delete <key>" }
+    deleteScratchpadNote(sessionId, key)
+    return { handled: true, output: `  \u2713 Nota eliminada: ${key}` }
+  }
+
+  return { handled: true, output: "opciones: add | list | delete\n\nEscribe /help /note" }
+}
+
+async function handleLogsCommand(
+  args: string[],
+): Promise<CommandResult> {
+  const [action, ...rest] = args
+
+  if (!action || action === "list" || action === "show") {
+    const level = (rest.find(a => ["debug", "info", "warn", "error"].includes(a.toLowerCase()))?.toLowerCase() || undefined) as any
+    const coordinator = rest.find(a => a.startsWith("@"))?.slice(1)
+    const limit = Math.min(parseInt(rest.find(a => /^\d+$/.test(a)) || "50", 10), 200)
+
+    try {
+      const entries = await logger.queryLogs({ level, coordinator, limit })
+      if (entries.length === 0) {
+        return { handled: true, output: "\n  No hay entradas de log.\n" }
+      }
+      const lines = entries.map(e => {
+        const color = e.level === "error" ? "\u2717" : e.level === "warn" ? "\u26a0" : e.level === "debug" ? "\u25cb" : "\u2713"
+        const ts = e.timestamp.slice(11, 19) // HH:MM:SS
+        const msg = e.message.slice(0, 120)
+        return `  ${color} [${ts}] ${e.level.toUpperCase().padEnd(5)} ${msg}`
+      })
+      return {
+        handled: true,
+        output: `\n  \u00daltimos ${entries.length} logs:\n\n${lines.join("\n")}\n`,
+      }
+    } catch (err) {
+      return { handled: true, output: `  \u2717 Error leyendo logs: ${(err as Error).message}` }
+    }
+  }
+
+  if (action === "follow" || action === "tail") {
+    return {
+      handled: true,
+      output: "  Modo follow: usa el panel de logs con Ctrl+L en la TUI",
+    }
+  }
+
+  return {
+    handled: true,
+    output: "opciones: list [debug|info|warn|error] [@coordinator] [limit]\nEjemplo: /logs list info @backend 20",
   }
 }
 
@@ -1046,6 +1416,14 @@ export async function parseInternalCommand(
       return { handled: true, output: renderHelp(args[0]) }
     case "version":
       return { handled: true, output: `hivecode v${VERSION}  ${GIT_HASH}` }
+    case "logs":
+      return handleLogsCommand(args)
+    case "session":
+      return handleSessionCommand(args, db, ctxState)
+    case "compact":
+      return handleCompactCommand(db, ctxState)
+    case "note":
+      return handleNoteCommand(args, db, ctxState)
     case "env": {
       const safe = ["HOME", "USER", "SHELL", "TERM", "PATH", "BUN_VERSION", "NODE_ENV"]
       const lines = safe.map(k => `  ${k}=${process.env[k] || ""}`)

@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "paths": {
+      "@johpaz/hivecode-code": ["../packages/code/src/index.ts"],
+      "@johpaz/hivecode-code/*": ["../packages/code/src/*"],
+      "@johpaz/hivecode-core": ["../packages/core/src/index.ts"],
+      "@johpaz/hivecode-core/*": ["../packages/core/src/*"]
+    }
+  },
+  "include": ["**/*.ts"]
+}

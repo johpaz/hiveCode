@@ -4,6 +4,8 @@ export * from "./schema"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { CODE_SCHEMA } from "./schema"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
+import { syncCommandsToFTS } from "../coordinator/command-parser"
+import { seedPlaybook } from "../seed-playbook"
 
 /**
  * Initialize Hive-Code specific tables (code_sessions, code_tasks, code_narrative, etc.)
@@ -13,6 +15,8 @@ export function initializeCodeDatabase(): void {
   try {
     const db = getDb()
     db.run(CODE_SCHEMA)
+    syncCommandsToFTS(db)
+    seedPlaybook(db)
     logger.info("🗄️  Hive-Code schema initialized (code_* tables)")
   } catch (err) {
     logger.warn("⚠️  Failed to initialize Hive-Code schema:", { error: (err as Error).message })

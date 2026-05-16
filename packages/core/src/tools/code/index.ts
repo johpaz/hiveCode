@@ -1,4 +1,5 @@
 import type { Tool } from "../types.ts"
+import { validateCommand } from "./command-validator.ts"
 
 // ─── Git Status ──────────────────────────────────────────────────────────────
 
@@ -341,6 +342,18 @@ const codeBuildTool: Tool = {
         cmd = "make"
       }
     }
+    // Pre-execution validation (TDD §14)
+    const validation = validateCommand(cmd, { workspace: path })
+    if (!validation.ok) {
+      const v = validation as { ok: false; reason: string; fatal: boolean }
+      return {
+        ok: false,
+        error: `Command blocked by safety validator: ${v.reason}`,
+        hint: v.fatal
+          ? "This command is never allowed regardless of mode."
+          : "This command requires explicit user confirmation. Use a safer alternative.",
+      }
+    }
     try {
       const proc = Bun.spawn(["/bin/sh", "-c", cmd], {
         cwd: path,
@@ -401,6 +414,10 @@ const codeTestTool: Tool = {
       }
     }
     if (params.filter) cmd += ` -t "${params.filter}"`
+    const validation = validateCommand(cmd, { workspace: path })
+    if (!validation.ok) {
+      return { ok: false, error: `Command blocked by safety validator: ${(validation as any).reason}` }
+    }
     try {
       const proc = Bun.spawn(["/bin/sh", "-c", cmd], {
         cwd: path,
@@ -461,6 +478,10 @@ const codeLintTool: Tool = {
       }
     }
     if (params.fix && !cmd.includes("--fix")) cmd += " --fix"
+    const lintValidation = validateCommand(cmd, { workspace: path })
+    if (!lintValidation.ok) {
+      return { ok: false, error: `Command blocked by safety validator: ${(lintValidation as any).reason}` }
+    }
     try {
       const proc = Bun.spawn(["/bin/sh", "-c", cmd], {
         cwd: path,
@@ -695,7 +716,13 @@ const runScriptTool: Tool = {
       const proc = Bun.spawn(["bun", ...args], {
         cwd: process.cwd(),
         timeout: 60_000,
-        env: { ...process.env, NODE_ENV: "isolated" },
+        // Sandbox: minimal env — no host secrets, no API keys
+        env: {
+          PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin",
+          HOME: process.env.HOME || "/tmp",
+          TMPDIR: process.env.TMPDIR || "/tmp",
+          NODE_ENV: "isolated",
+        },
       })
       const stdout = await new Response(proc.stdout).text()
       const stderr = await new Response(proc.stderr).text()

@@ -1,4 +1,4 @@
-import { mkdirSync, unlinkSync, renameSync, existsSync } from "node:fs";
+import { mkdirSync, unlinkSync, renameSync, existsSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 import { getHiveDir, loadConfig } from "../config/loader.ts";
 
@@ -133,13 +133,14 @@ export class Logger {
   private correlationContext: LogMeta = {};
 
   constructor(config: Partial<LoggerConfig> = {}) {
+    const envSilent = process.env.HIVE_LOG_CONSOLE === "false"
     this.config = {
       level: config.level ?? "info",
       dir: config.dir ?? path.join(getHiveDir(), "logs"),
       maxSizeMB: config.maxSizeMB ?? 10,
       maxFiles: config.maxFiles ?? 5,
       redactSensitive: config.redactSensitive ?? true,
-      console: config.console ?? true,
+      console: envSilent ? false : (config.console ?? true),
     };
   }
 
@@ -378,6 +379,84 @@ export function getLogger(): Logger {
   return _logger;
 }
 
+export interface LogQueryOptions {
+  level?: LogLevel
+  coordinator?: string
+  limit?: number
+  search?: string
+}
+
+export interface LogQueryResult {
+  timestamp: string
+  level: LogLevel
+  source: string
+  message: string
+}
+
+/** Read recent log entries from log files */
+export async function queryLogs(opts: LogQueryOptions = {}): Promise<LogQueryResult[]> {
+  const config = loadConfig()
+  const logDir = expandPath(path.join(getHiveDir(), "logs"))
+  if (!existsSync(logDir)) return []
+
+  const files = readdirSync(logDir)
+    .filter(f => f.endsWith(".log") && !f.match(/\.\d+\.log$/))
+    .sort()
+    .reverse()
+
+  if (files.length === 0) return []
+
+  const limit = opts.limit ?? 50
+  const minLevel = opts.level ? LOG_LEVELS[opts.level] : 0
+  const results: LogQueryResult[] = []
+
+  for (const file of files) {
+    if (results.length >= limit) break
+    const filePath = path.join(logDir, file)
+    try {
+      const text = await Bun.file(filePath).text()
+      const lines = text.split("\n").filter(l => l.trim())
+      // Process from newest to oldest
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (results.length >= limit) break
+        const line = lines[i]
+        const parsed = parseLogLine(line)
+        if (!parsed) continue
+        if (LOG_LEVELS[parsed.level] < minLevel) continue
+        if (opts.coordinator && !parsed.message.toLowerCase().includes(`[${opts.coordinator.toLowerCase()}]`)) continue
+        if (opts.search && !parsed.message.toLowerCase().includes(opts.search.toLowerCase())) continue
+        results.push(parsed)
+      }
+    } catch {
+      // Skip unreadable files
+    }
+  }
+
+  return results.reverse()
+}
+
+function parseLogLine(line: string): LogQueryResult | null {
+  // Format: [2026-05-14T20:35:37.379Z] [INFO] message...
+  const match = line.match(/^\[(\d{4}-\d{2}-\d{2}T[^\]]+)\](?:\s+\[[^\]]+\])?\s+\[(DEBUG|INFO|WARN|ERROR)\]\s+(.*)$/i)
+  if (!match) {
+    // Try simpler format without correlation id
+    const simple = line.match(/^\[(\d{4}-\d{2}-\d{2}T[^\]]+)\]\s+\[(DEBUG|INFO|WARN|ERROR)\]\s+(.*)$/i)
+    if (!simple) return null
+    return {
+      timestamp: simple[1],
+      level: simple[2].toLowerCase() as LogLevel,
+      source: "core",
+      message: simple[3],
+    }
+  }
+  return {
+    timestamp: match[1],
+    level: match[2].toLowerCase() as LogLevel,
+    source: "core",
+    message: match[3],
+  }
+}
+
 export const logger = {
   child: (opts: any) => getLogger().child(opts),
   debug: (msg: string, meta?: unknown) => getLogger().debug(msg, meta),
@@ -391,4 +470,5 @@ export const logger = {
   setLevel: (level: any) => getLogger().setLevel(level),
   setConsole: (enabled: boolean) => getLogger().setConsole(enabled),
   setHandler: (handler: any) => { /* no-op for compatibility */ },
+  queryLogs,
 };

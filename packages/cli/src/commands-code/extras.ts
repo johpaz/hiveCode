@@ -75,7 +75,7 @@ export async function taskRollback(taskId?: string): Promise<void> {
       path: process.cwd(),
       dryRun: false,
       confirmed: true,
-    })
+    }, { configurable: { workspace: process.cwd() } })
 
     if ((result as any)?.ok) {
       spinner.stop(`Tarea ${taskId.slice(0, 8)} revertida`)
@@ -168,6 +168,172 @@ export async function upgrade(): Promise<void> {
     spinner.stop("No se pudo verificar actualizaciones", "error")
     hiveOutro("Verifica tu conexión a internet", "error")
   }
+}
+
+// ─── Task Debug ──────────────────────────────────────────────────────────────
+
+const DIM  = "\x1b[2m"
+const BOLD = "\x1b[1m"
+const RESET = "\x1b[0m"
+const CYAN  = "\x1b[38;5;87m"
+const AMBER = "\x1b[38;5;214m"
+const GREEN = "\x1b[38;5;114m"
+const RED   = "\x1b[38;5;203m"
+const PURPLE = "\x1b[38;5;141m"
+
+function fmt(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
+}
+
+function tokens(i: number, o: number): string {
+  const total = i + o
+  const usd = ((total / 1_000_000) * 3).toFixed(4)
+  return `${total.toLocaleString()} tokens (~$${usd})`
+}
+
+export async function taskDebug(taskId?: string, flags: string[] = []): Promise<void> {
+  if (!taskId) {
+    hiveOutro("Uso: hivecode task debug <id> [--phase N]", "error")
+    process.exit(1)
+  }
+
+  // Support short IDs (first 8 chars)
+  const db = getDb()
+  const task = db.query<any, [string, string]>(
+    "SELECT * FROM code_tasks WHERE id = ? OR id LIKE ? LIMIT 1"
+  ).get(taskId, `${taskId}%`) as any
+
+  if (!task) {
+    hiveOutro(`Tarea no encontrada: ${taskId}`, "error")
+    process.exit(1)
+  }
+
+  const phaseFilter = (() => {
+    const idx = flags.indexOf("--phase")
+    return idx !== -1 ? Number(flags[idx + 1]) : null
+  })()
+
+  hiveIntro(`hivecode · Debug · ${task.id.slice(0, 8)}`)
+
+  const w = process.stdout.columns || 100
+
+  // ── Task overview ──────────────────────────────────────────────────────────
+  const statusColor = task.status === "completed" ? GREEN : task.status === "failed" ? RED : AMBER
+  process.stdout.write(`\n${BOLD}TAREA${RESET}\n`)
+  process.stdout.write(`  ID          ${CYAN}${task.id}${RESET}\n`)
+  process.stdout.write(`  Descripción ${task.description}\n`)
+  process.stdout.write(`  Estado      ${statusColor}${task.status}${RESET}   Modo: ${AMBER}${task.mode}${RESET}\n`)
+  if (task.branch_name) process.stdout.write(`  Rama        ${DIM}${task.branch_name}${RESET}\n`)
+  process.stdout.write(`  Duración    ${fmt(task.duration_ms || 0)}   Tokens: ${tokens(task.tokens_in || 0, task.tokens_out || 0)}\n`)
+  process.stdout.write(`  Archivos    ${task.files_changed || 0} cambiados   +${task.lines_added || 0} / -${task.lines_removed || 0} líneas\n`)
+  process.stdout.write(`  Creada      ${DIM}${task.created_at}${RESET}\n`)
+
+  // ── Phase breakdown ────────────────────────────────────────────────────────
+  const phases = db.query<any, [string]>(
+    "SELECT * FROM code_task_phases WHERE task_id = ? ORDER BY id ASC"
+  ).all(task.id) as any[]
+
+  process.stdout.write(`\n${BOLD}FASES${RESET}  (${phases.length} total)\n`)
+
+  const phasesToShow = phaseFilter !== null
+    ? phases.filter((_, i) => i + 1 === phaseFilter)
+    : phases
+
+  if (phasesToShow.length === 0) {
+    process.stdout.write(`  ${DIM}Sin fases para --phase ${phaseFilter}${RESET}\n`)
+  }
+
+  for (let i = 0; i < phasesToShow.length; i++) {
+    const p = phasesToShow[i]
+    const phaseIdx = phases.indexOf(p) + 1
+    const sc = p.status === "completed" ? GREEN : p.status === "failed" ? RED : p.status === "skipped" ? DIM : AMBER
+    process.stdout.write(`\n  ${BOLD}${phaseIdx}. ${p.coordinator}${RESET}  ${sc}${p.status}${RESET}\n`)
+    process.stdout.write(`     Duración: ${fmt(p.duration_ms || 0)}   Tokens: ${tokens(p.tokens_in || 0, p.tokens_out || 0)}\n`)
+    if (p.started_at) process.stdout.write(`     Inicio: ${DIM}${p.started_at}${RESET}\n`)
+
+    if (p.result_summary) {
+      const preview = p.result_summary.length > 200
+        ? p.result_summary.slice(0, 200) + "…"
+        : p.result_summary
+      process.stdout.write(`     Resumen: ${preview}\n`)
+    }
+
+    // Tool traces for this phase
+    const traces = db.query<any, [string, string]>(
+      "SELECT * FROM code_traces WHERE task_id = ? AND coordinator = ? ORDER BY id ASC"
+    ).all(task.id, p.coordinator) as any[]
+
+    if (traces.length > 0) {
+      process.stdout.write(`\n     ${DIM}── Herramientas (${traces.length}) ──${RESET}\n`)
+      for (const t of traces) {
+        const icon = t.success ? `${GREEN}✓${RESET}` : `${RED}✗${RESET}`
+        const durationMs = t.duration_ns ? Math.round(Number(t.duration_ns) / 1_000_000) : 0
+        process.stdout.write(`     ${icon} ${CYAN}${t.tool_name}${RESET}  ${DIM}${fmt(durationMs)}${RESET}\n`)
+        if (t.input_summary) {
+          process.stdout.write(`       ← ${DIM}${t.input_summary.slice(0, 120)}${RESET}\n`)
+        }
+        if (t.output_summary) {
+          const out = t.output_summary.slice(0, 120)
+          const outColor = t.success ? DIM : RED
+          process.stdout.write(`       → ${outColor}${out}${RESET}\n`)
+        }
+      }
+    }
+
+    // Narrative for this phase
+    const narrativeEntries = db.query<any, [string, string]>(
+      "SELECT entry, is_override FROM code_narrative WHERE task_id = ? AND coordinator = ? ORDER BY id ASC"
+    ).all(task.id, p.coordinator) as any[]
+
+    if (narrativeEntries.length > 0) {
+      process.stdout.write(`\n     ${DIM}── Narrativo ──${RESET}\n`)
+      for (const n of narrativeEntries) {
+        const overrideTag = n.is_override ? ` ${AMBER}[OVERRIDE]${RESET}` : ""
+        const text = (n.entry as string).slice(0, 300).replace(/\n/g, "\n     ")
+        process.stdout.write(`     ${text}${overrideTag}\n`)
+      }
+    }
+  }
+
+  // ── Playbook rules active for this task's coordinators ────────────────────
+  const coordinatorNames = [...new Set(phases.map(p => p.coordinator))]
+  if (coordinatorNames.length > 0) {
+    const placeholders = coordinatorNames.map(() => "?").join(",")
+    const rules = db.query<any, string[]>(
+      `SELECT rule, coordinator, confidence FROM code_playbook
+       WHERE active = 1 AND (coordinator IN (${placeholders}) OR coordinator IS NULL)
+       ORDER BY confidence DESC LIMIT 10`
+    ).all(...coordinatorNames) as any[]
+
+    if (rules.length > 0) {
+      process.stdout.write(`\n${BOLD}PLAYBOOK ACTIVO${RESET}  (${rules.length} reglas)\n`)
+      for (const r of rules) {
+        const conf = `${Math.round(r.confidence * 100)}%`
+        process.stdout.write(`  ${GREEN}●${RESET} ${DIM}[${conf}]${RESET} ${r.rule}\n`)
+      }
+    }
+  }
+
+  // ── File changes ──────────────────────────────────────────────────────────
+  const fileChanges = db.query<any, [string]>(
+    "SELECT file_path, change_type, lines_added, lines_removed FROM code_file_changes WHERE task_id = ? ORDER BY id ASC"
+  ).all(task.id) as any[]
+
+  if (fileChanges.length > 0) {
+    process.stdout.write(`\n${BOLD}ARCHIVOS MODIFICADOS${RESET}  (${fileChanges.length})\n`)
+    for (const f of fileChanges) {
+      const typeIcon = f.change_type === "added" ? `${GREEN}A${RESET}` : f.change_type === "deleted" ? `${RED}D${RESET}` : `${AMBER}M${RESET}`
+      process.stdout.write(`  ${typeIcon} ${f.file_path}  ${DIM}+${f.lines_added} -${f.lines_removed}${RESET}\n`)
+    }
+  }
+
+  // ── PR / branch ───────────────────────────────────────────────────────────
+  if (task.pr_url) {
+    process.stdout.write(`\n${BOLD}PULL REQUEST${RESET}\n  ${CYAN}${task.pr_url}${RESET}\n`)
+  }
+
+  process.stdout.write("\n")
+  hiveOutro(phaseFilter !== null ? `Fase ${phaseFilter} de ${phases.length}` : `${phases.length} fases · ${fmt(task.duration_ms || 0)}`)
 }
 
 // ─── Init ────────────────────────────────────────────────────────────────────

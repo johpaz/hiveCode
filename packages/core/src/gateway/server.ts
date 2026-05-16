@@ -9,6 +9,7 @@ import {
   isSlashCommand,
   executeSlashCommand,
 } from "./slash-commands";
+import { subscribeTask, subscribeSession, unsubscribeAll, subscribeDashboard, unsubscribeDashboard } from "./task-streaming.ts";
 import { ChannelManager } from "../channels/manager";
 import { AgentService } from "../agent/service";
 import { AgentRunner } from "../agent/providers/index";
@@ -177,7 +178,7 @@ export async function startGateway(config: Config): Promise<void> {
         success: false,
         error: showErrors ? error.message : "Internal server error",
         ...(showErrors && { stack: error.stack }),
-        requestId: crypto.crypto.randomUUID(),
+        requestId: crypto.randomUUID(),
       }, { status: 500 });
     },
     fetch: (req) => {
@@ -517,14 +518,31 @@ export async function startGateway(config: Config): Promise<void> {
         // ── WebSocket upgrade ────────────────────────────────────────────────
         if (url.pathname === "/ws" || url.pathname === "/ws/") {
           // Auth: accept ?token=<authToken> (same as REST Bearer) as alternative to ?session=<userId>
+          let sessionId = url.searchParams.get("session") || "";
+
           if (!isDev && !gatewaySetupMode) {
             const tokenParam = url.searchParams.get("token");
             const activeToken = process.env.HIVE_AUTH_TOKEN;
             if (tokenParam && activeToken && tokenParam === activeToken) {
               // Token auth — resolve the real userId from DB
               const user = getDb().query("SELECT id FROM users LIMIT 1").get() as { id: string } | undefined;
+              if (user) sessionId = user.id;
+            } else if (tokenParam || activeToken) {
+              return new Response("Unauthorized", { status: 401 });
             }
           }
+
+          if (!sessionId) {
+            sessionId = crypto.randomUUID();
+          }
+
+          const upgraded = server.upgrade(req, {
+            data: { sessionId, authenticatedAt: Date.now() },
+          });
+          if (upgraded) {
+            return undefined as any; // Bun handles the response after upgrade
+          }
+          return new Response("WebSocket upgrade failed", { status: 500 });
         }
 
         // ── WebSocket upgrades for terminal-only mode ────────────────────────
@@ -577,14 +595,23 @@ export async function startGateway(config: Config): Promise<void> {
 
             const filePath = path.join(uiDir, subPath);
 
-            // Para index.html, inyectar script de HMR de Vite
+            // Helper: check if Vite dev server is running
+            const viteDevAvailable = await (async () => {
+              try {
+                const res = await fetch("http://localhost:5173/@vite/client", { method: "HEAD", signal: AbortSignal.timeout(300) });
+                return res.ok;
+              } catch { return false; }
+            })();
+
             if (subPath === "/index.html") {
               const indexFile = Bun.file(filePath);
               if (await indexFile.exists()) {
                 let html = await indexFile.text();
-                // Inyectar script de HMR de Vite antes de </head>
-                const hmrScript = `<script type="module" src="http://localhost:5173/@vite/client"></script>`;
-                html = html.replace("</head>", `${hmrScript}</head>`);
+                // Only inject Vite HMR if dev server is actually running
+                if (viteDevAvailable) {
+                  const hmrScript = `<script type="module" src="http://localhost:5173/@vite/client"></script>`;
+                  html = html.replace("</head>", `${hmrScript}</head>`);
+                }
                 return new Response(html, { headers: { "Content-Type": "text/html" } });
               }
             }
@@ -594,13 +621,14 @@ export async function startGateway(config: Config): Promise<void> {
               return new Response(uiFile);
             }
 
-            // SPA fallback: servir index.html para rutas de React Router
+            // SPA fallback: servir index.html for React Router routes
             const fallbackFile = Bun.file(path.join(uiDir, "index.html"));
             if (await fallbackFile.exists()) {
               let html = await fallbackFile.text();
-              // Inyectar script de HMR de Vite
-              const hmrScript = `<script type="module" src="http://localhost:5173/@vite/client"></script>`;
-              html = html.replace("</head>", `${hmrScript}</head>`);
+              if (viteDevAvailable) {
+                const hmrScript = `<script type="module" src="http://localhost:5173/@vite/client"></script>`;
+                html = html.replace("</head>", `${hmrScript}</head>`);
+              }
               return new Response(html, { headers: { "Content-Type": "text/html" } });
             }
 
@@ -1381,13 +1409,38 @@ export async function startGateway(config: Config): Promise<void> {
         // Logs subscription
         if (msg.type === "logs_subscribe") {
           logSubscribers.add(data.sessionId);
-          log.debug(`Session ${data.sessionId} subscribed to logs`);
+          subscribeDashboard(ws as any);
+          log.debug(`Session ${data.sessionId} subscribed to logs & dashboard`);
           return;
         }
 
         if (msg.type === "logs_unsubscribe") {
           logSubscribers.delete(data.sessionId);
-          log.debug(`Session ${data.sessionId} unsubscribed from logs`);
+          unsubscribeDashboard(ws as any);
+          log.debug(`Session ${data.sessionId} unsubscribed from logs & dashboard`);
+          return;
+        }
+
+        // Task / session streaming subscriptions
+        if (msg.type === "task_subscribe" && msg.metadata?.taskId) {
+          subscribeTask(ws as any, msg.metadata.taskId as string);
+          ws.send(JSON.stringify({
+            type: "status",
+            sessionId: data.sessionId,
+            status: { state: "subscribed", channel: `task:${msg.metadata.taskId}` },
+          } as OutboundMessage));
+          log.debug(`Session ${data.sessionId} subscribed to task ${msg.metadata.taskId}`);
+          return;
+        }
+
+        if (msg.type === "session_subscribe" && msg.metadata?.sessionId) {
+          subscribeSession(ws as any, msg.metadata.sessionId as string);
+          ws.send(JSON.stringify({
+            type: "status",
+            sessionId: data.sessionId,
+            status: { state: "subscribed", channel: `session:${msg.metadata.sessionId}` },
+          } as OutboundMessage));
+          log.debug(`Session ${data.sessionId} subscribed to session ${msg.metadata.sessionId}`);
           return;
         }
 
@@ -1481,7 +1534,7 @@ export async function startGateway(config: Config): Promise<void> {
 
                 // Streaming: send tokens as they arrive
                 let streamedContent = "";
-                let messageId = crypto.crypto.randomUUID();
+                let messageId = crypto.randomUUID();
 
                 const response = await runner.generate({
                   provider: dbProvider as any,
@@ -1738,7 +1791,7 @@ export async function startGateway(config: Config): Promise<void> {
 
               // Streaming: send tokens as they arrive
               let streamedContent = "";
-              let messageId = crypto.crypto.randomUUID();
+              let messageId = crypto.randomUUID();
 
               const response = await runner.generate({
                 provider: dbProvider as any,
@@ -1902,6 +1955,8 @@ export async function startGateway(config: Config): Promise<void> {
         const data = ws.data;
         log.debug(`WebSocket disconnected: ${data.sessionId}`);
         logSubscribers.delete(data.sessionId);
+        unsubscribeDashboard(ws as any);
+        unsubscribeAll(ws as any);
         sessionManager.delete(data.sessionId);
         laneQueue.cancel(data.sessionId);
 
@@ -1915,7 +1970,7 @@ export async function startGateway(config: Config): Promise<void> {
         success: false,
         error: showErrors ? error.message : "Internal server error",
         ...(showErrors && { stack: error.stack }),
-        requestId: crypto.crypto.randomUUID(),
+        requestId: crypto.randomUUID(),
       }, { status: 500 });
     },
   });
