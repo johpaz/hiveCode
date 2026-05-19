@@ -90,6 +90,9 @@ export interface WorkerToManagerMessage {
   toolCallId?: string
   /** Thinking message content (for THINKING type) */
   content?: string
+  /** Stream ID for grouping thinking chunks into a single display block.
+   *  Same streamId = same streaming block (append), different streamId = new block. */
+  streamId?: string
 }
 
 /** Messages sent FROM manager TO workers */
@@ -174,6 +177,8 @@ export interface BeeDecision {
   }>
   /** Files BEE modified directly (only for "fix" action) */
   filesModified?: string[]
+  /** Structured harness document (plan/approval modes only, for dispatch/architecture actions) */
+  harness?: string
 }
 
 export interface PlaybookRule {

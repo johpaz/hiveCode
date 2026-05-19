@@ -110,11 +110,18 @@ export async function* runAgent(
   const agentName = agent.name || opts.agentId
   const maxIterations = agent.max_iterations || 10
 
-  // Resolve LLM provider config
-  const providerCfg = await resolveProviderConfig(
-    agent.provider_id || "openai",
-    agent.model_id || "gpt-4o-mini"
-  )
+  // Resolve LLM provider config — prefer agent's provider_id, fall back to code_config
+  let provId = agent.provider_id
+  let modId = agent.model_id
+  if (!provId || !modId) {
+    const cfgRow = db.query("SELECT value FROM code_config WHERE key = 'default_provider'").get() as any
+    const fallbackProvider = cfgRow?.value || "gemini"
+    const modelKey = `provider_model_${fallbackProvider}`
+    const modelRow = db.query("SELECT value FROM code_config WHERE key = ?").get(modelKey) as any
+    provId = provId || fallbackProvider
+    modId = modId || modelRow?.value || "gemini-2.5-flash"
+  }
+  const providerCfg = await resolveProviderConfig(provId, modId)
 
   const cleanModel = providerCfg.model.replace(new RegExp(`^${providerCfg.provider}\\/`), "")
   log.info(`[agent-loop] Starting: agent=${agentName} thread=${opts.threadId} provider=${providerCfg.provider}/${cleanModel}`)
@@ -234,138 +241,99 @@ export async function* runAgent(
       })
     }
 
-    for (const tc of response.tool_calls) {
+    // Group tools to execute in parallel when possible
+    const toolCalls = response.tool_calls
+    const results: Array<{ toolResultLLM: string, id: string, name: string, ms: number }> = []
+
+    // Phase 1: Validations and Confirmations (Sequential)
+    const approvedTools: typeof toolCalls = []
+    for (const tc of toolCalls) {
       const toolName = tc.function.name
-
-      if (opts.onStep) {
-        if (response.content) {
-          await opts.onStep({ type: "text", message: response.content })
-        }
-        await opts.onStep({
-          type: "tool_call",
-          toolName,
-          message: `Calling tool: \`${toolName}\``,
-        })
-      }
-
-      // ── Execution mode check ──────────────────────────────────────
       const currentMode = getExecutionMode()
+
       if (!canExecuteTool(toolName)) {
         const denyMsg = getBlockReason(toolName)
-        log.warn(`[agent-loop] Blocked tool '${toolName}' in mode: ${currentMode}`)
         const toolResultJS = { ok: false, error: denyMsg, hint: `Cambia a modo approval o auto con: hivecode mode set approval|auto` }
         const toolResultLLM = formatToolResult(toolResultJS, cleanModel)
-        yield { tools: { messages: [{ content: toolResultLLM, tool_call_id: tc.id }] } }
-        messages.push({ role: "tool", content: toolResultLLM, tool_call_id: tc.id })
+        results.push({ toolResultLLM, id: tc.id, name: toolName, ms: 0 })
         continue
       }
 
-      // ── Confirmation prompt for dangerous tools ───────────────────
       if ((currentMode === "approval" || currentMode === "auto") && requiresConfirmation(toolName)) {
-        const paramsStr = typeof tc.function.arguments === "string"
-          ? tc.function.arguments
-          : JSON.stringify(tc.function.arguments, null, 2)
-        const promptMsg = `\n[CONFIRMAR] ¿Ejecutar \`${toolName}\` con estos parámetros?\n${paramsStr}\n\n(y/N): `
-
-        process.stdout.write(promptMsg)
-        const confirmed = await new Promise<string>((resolve) => {
-          process.stdin.once("data", (data) => {
-            resolve(data.toString().trim().toLowerCase())
-          })
-        })
-
+        const paramsStr = typeof tc.function.arguments === "string" ? tc.function.arguments : JSON.stringify(tc.function.arguments, null, 2)
+        process.stdout.write(`\n[CONFIRMAR] ¿Ejecutar \`${toolName}\`?\n${paramsStr}\n(y/N): `)
+        const confirmed = await new Promise<string>(r => process.stdin.once("data", d => r(d.toString().trim().toLowerCase())))
+        
         if (confirmed !== "y" && confirmed !== "yes") {
-          const cancelMsg = `[CANCELADO] El usuario canceló la ejecución de '${toolName}'`
-          log.info(`[agent-loop] User cancelled tool: ${toolName}`)
-          const toolResultJS = { ok: false, error: cancelMsg, hint: "Ejecución cancelada por el usuario" }
-          const toolResultLLM = formatToolResult(toolResultJS, cleanModel)
-          yield { tools: { messages: [{ content: toolResultLLM, tool_call_id: tc.id }] } }
-          messages.push({ role: "tool", content: toolResultLLM, tool_call_id: tc.id })
+          const toolResultJS = { ok: false, error: `[CANCELADO] Usuario canceló '${toolName}'`, hint: "Ejecución cancelada" }
+          results.push({ toolResultLLM: formatToolResult(toolResultJS, cleanModel), id: tc.id, name: toolName, ms: 0 })
           continue
         }
       }
+      approvedTools.push(tc)
+    }
 
+    // Phase 2: Parallel Execution
+    const executionPromises = approvedTools.map(async (tc) => {
+      const toolName = tc.function.name
       const tTool = performance.now()
-      const toolResultJS = await executeTool(
-        ctx.allTools,
-        toolName,
-        tc.function.arguments,
-        {
-          user_id: opts.userId,
-          thread_id: opts.threadId,
-          channel: opts.channel,
-          workspace: agent.workspace ?? null,
-        }
-      )
+      
+      if (opts.onStep) {
+        await opts.onStep({ type: "tool_call", toolName, message: `Executing: \`${toolName}\` (parallel)` })
+      }
+
+      const toolResultJS = await executeTool(ctx.allTools, toolName, tc.function.arguments, {
+        user_id: opts.userId,
+        thread_id: opts.threadId,
+        channel: opts.channel,
+        workspace: agent.workspace ?? null,
+      })
+      
       const toolMs = Math.round(performance.now() - tTool)
-
-      // Encode TOON only for LLM consumption (with cost calculation)
       const toolResultLLM = formatToolResult(toolResultJS, cleanModel)
+      
+      const sig = `${toolName}:${JSON.stringify(tc.function.arguments)}`
+      return { toolResultLLM, toolResultJS, id: tc.id, name: toolName, ms: toolMs, sig }
+    })
 
-      log.info(`[agent-loop] Tool ${toolName} completed in ${toolMs}ms`)
+    const parallelResults = await Promise.all(executionPromises)
+    results.push(...parallelResults)
 
-      // Log tool result preview (truncated to avoid flooding logs)
-      const resultPreview = toolResultLLM.length > 500
-        ? toolResultLLM.substring(0, 500) + `… (+${toolResultLLM.length - 500} chars)`
-        : toolResultLLM
-      log.info(`[agent-loop] Tool result [${toolName}]: ${resultPreview}`)
-
-      // Extract text for trace summary
-      const textMessage = typeof opts.userMessage === "string"
-        ? opts.userMessage
-        : Array.isArray(opts.userMessage)
-          ? opts.userMessage.filter(p => p.type === "text").map(p => (p as any).text).join("\n")
-          : String(opts.userMessage)
-
-      // Clean timestamp from message for trace
-      const cleanMessage = textMessage.replace(/^\[Timestamp:.*?\]\n/, "")
-
-      // Save tool call trace
+    // Phase 3: Post-execution (Traces, yielding, state updates)
+    for (const r of results) {
+      log.info(`[agent-loop] Tool ${r.name} completed in ${r.ms}ms`)
+      
       saveTrace({
         threadId: opts.threadId,
         agentId: opts.agentId,
         agentName,
-        toolUsed: toolName,
-        inputSummary: `${cleanMessage.substring(0, 200)} → ${toolName}`,
-        outputSummary: toolResultLLM.substring(0, 300),
-        success: !toolResultLLM.startsWith("[Tool Error]"),
-        errorMessage: toolResultLLM.startsWith("[Tool Error]") ? toolResultLLM : null,
-        durationMs: toolMs,
+        toolUsed: r.name,
+        inputSummary: `Parallel Execution: ${r.name}`,
+        outputSummary: r.toolResultLLM.substring(0, 300),
+        success: !r.toolResultLLM.startsWith("[Tool Error]"),
+        errorMessage: r.toolResultLLM.startsWith("[Tool Error]") ? r.toolResultLLM : null,
+        durationMs: r.ms,
       })
 
-      // Emit tool chunk (TOON encoded for LLM)
-      yield { tools: { messages: [{ content: toolResultLLM, tool_call_id: tc.id }] } }
+      yield { tools: { messages: [{ content: r.toolResultLLM, tool_call_id: r.id }] } }
+      if (opts.onStep) await opts.onStep({ type: "tool_result", message: r.toolResultLLM })
 
-      if (opts.onStep) {
-        await opts.onStep({ type: "tool_result", message: toolResultLLM })
-      }
-
-      // Add tool result to messages for next model call AND persist (TOON encoded)
-      messages.push({
-        role: "tool",
-        content: toolResultLLM,
-        tool_call_id: tc.id,
-      })
+      messages.push({ role: "tool", content: r.toolResultLLM, tool_call_id: r.id })
       if (!opts.isolated) {
-        addMessage(opts.threadId, "tool", toolResultLLM, {
+        addMessage(opts.threadId, "tool", r.toolResultLLM, {
           channel: opts.channel,
-          tool_call_id: tc.id,
+          tool_call_id: r.id,
         })
       }
-
-      // Dynamic tool injection: when search_knowledge finds tools (native or MCP), add them to ctx.tools
-      if (toolName === "search_knowledge") {
-        // Use JS object directly (no parse needed)
+      // Dynamic tool injection: when search_knowledge finds tools, add them to ctx.tools
+      if (r.name === "search_knowledge") {
         try {
-          const result = toolResultJS as any
+          const result = r.toolResultJS as any
           const foundTools: Array<{ name: string }> = result?.tools ?? []
           const foundMcpTools: Array<{ tool_name: string; full_name?: string; id?: string }> = result?.toolsmcp ?? []
           const currentToolNames = new Set(ctx.tools.map((t: any) => t.function?.name))
-
-          // Track which tools were injected for skill lookup
           const injectedTools: string[] = []
 
-          // Inject native tools
           for (const found of foundTools) {
             if (!currentToolNames.has(found.name)) {
               const nativeTool = ctx.allTools.find(t => t.name === found.name)
@@ -385,11 +353,7 @@ export async function* runAgent(
             }
           }
 
-          // Inject MCP tools discovered via search_knowledge(type="mcp")
           for (const found of foundMcpTools) {
-            // Use full_name (sanitized compound id) because ctx.allTools stores MCP tools
-            // under the sanitized name (e.g. "Instagram__mis_estadisticas_de_instagram"),
-            // NOT the original tool_name (e.g. "mis estadisticas de instagram").
             const mcpFullName = found.full_name || found.id
             log.debug(`[agent-loop] MCP discovery candidate: tool_name="${found.tool_name}", full_name="${found.full_name}", id="${found.id}", resolved="${mcpFullName}"`)
             if (!currentToolNames.has(mcpFullName)) {
@@ -411,12 +375,9 @@ export async function* runAgent(
             }
           }
 
-          // Inject skills associated with the injected tools
           if (injectedTools.length > 0) {
             try {
               const db = getDb()
-              // Find skills that use any of the injected tools
-              const placeholders = injectedTools.map(() => "?").join(",")
               const skillsWithTools = db.query(`
                 SELECT DISTINCT s.name, s.body, s.tools
                 FROM skills s
@@ -426,32 +387,23 @@ export async function* runAgent(
                 )
               `).all(...injectedTools.map(t => `%${t}%`)) as Array<{ name: string; body: string; tools: string }>
 
-              // Filter to only skills that actually contain the tools (not partial matches)
               const matchingSkills = skillsWithTools.filter(s => {
                 const skillTools = s.tools?.split(",").map(t => t.trim()) ?? []
                 return injectedTools.some(injected => skillTools.includes(injected))
               })
 
               if (matchingSkills.length > 0) {
-                const skillSection = matchingSkills
-                  .map(s => `## Skill: ${s.name}\n${s.body}`)
-                  .join("\n\n")
-
-                // Add skill instructions to system prompt (first message)
                 const systemMsg = messages.find(m => m.role === "system")
                 if (systemMsg && typeof systemMsg.content === "string") {
-                  // Check if we already added this skill
                   const existingSkillNames = new Set(
                     (systemMsg.content.match(/## Skill: ([^\n]+)/g) || [])
                       .map(m => m.replace("## Skill: ", "").trim())
                   )
-
                   const newSkills = matchingSkills.filter(s => !existingSkillNames.has(s.name))
                   if (newSkills.length > 0) {
                     const newSkillSection = newSkills
                       .map(s => `## Skill: ${s.name}\n${s.body}`)
                       .join("\n\n")
-
                     systemMsg.content += `\n\n--- SKILL INSTRUCTIONS (Auto-loaded) ---\n${newSkillSection}`
                     log.info(`[agent-loop] Injected ${newSkills.length} skill(s) for tools: ${newSkills.map(s => s.name).join(", ")}`)
                   }
@@ -465,9 +417,8 @@ export async function* runAgent(
           log.warn(`[agent-loop] search_knowledge tool injection failed: ${(err as Error).message}`)
         }
 
-        // Enrich the tool result with skill instructions and playbook rules
         try {
-          const result = toolResultJS as any
+          const result = r.toolResultJS as any
           const foundSkills: Array<{ name: string; body?: string }> = result?.skills ?? []
           const foundPlaybook: Array<{ rule: string; category?: string }> = result?.playbook ?? []
 
@@ -501,17 +452,16 @@ export async function* runAgent(
       }
 
       // Loop detection: same tool + same args called consecutively → break
-      const sig = `${toolName}:${JSON.stringify(tc.function.arguments)}`
-      if (sig === lastToolSignature) {
+      if (r.sig === lastToolSignature) {
         consecutiveRepeat++
         if (consecutiveRepeat >= 2) {
-          log.warn(`[agent-loop] Loop detected: "${toolName}" x${consecutiveRepeat + 1} with same args. Breaking.`)
+          log.warn(`[agent-loop] Loop detected: "${r.name}" x${consecutiveRepeat + 1} with same args. Breaking.`)
           finalContent = "No pude completar la tarea porque no encontré las herramientas necesarias para ello."
           loopDetected = true
           break
         }
       } else {
-        lastToolSignature = sig
+        lastToolSignature = r.sig
         consecutiveRepeat = 0
       }
     }

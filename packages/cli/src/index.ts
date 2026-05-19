@@ -29,10 +29,6 @@ import { ace } from "./commands/ace"
 import { github } from "./commands/github"
 import { coordinator } from "./commands/coordinator"
 
-import { initializeDatabase } from "@johpaz/hivecode-core/storage/sqlite"
-import { seedAllData } from "@johpaz/hivecode-core/storage/seed"
-import { initializeCodeDatabase, validateCodeSchema } from "@johpaz/hivecode-code/narrative"
-import { seedCodeData } from "@johpaz/hivecode-code/seed"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 
 import pkg from "../../../package.json"
@@ -164,20 +160,21 @@ Examples:
   hivecode doctor               Diagnosticar el sistema
 `
 
+import { bootstrap, registerModule } from "@johpaz/hivecode-core"
+import { HiveCodeModule } from "@johpaz/hivecode-code"
+
 let _dbInitialized = false
 
 function ensureGlobalInit(): void {
   if (_dbInitialized) return
-  // En modo normal (no dev) los logs de init van solo a archivo, no a consola
+  
   if (!process.env.HIVE_DEV) logger.setLevel("warn")
+
   try {
-    initializeDatabase()
-    initializeCodeDatabase()
-    seedAllData()
-    seedCodeData()
-    validateCodeSchema()
+    registerModule(HiveCodeModule)
+    bootstrap()
     _dbInitialized = true
-    if (process.env.HIVE_DEV) logger.info("[cli] 🚀 Global init complete — DB, schemas, seeds, validation OK")
+    if (process.env.HIVE_DEV) logger.info("[cli] 🚀 Global bootstrap complete — System is ready")
   } catch (err) {
     logger.error("[cli] ❌ Global init failed:", (err as Error).message)
     process.exit(1)

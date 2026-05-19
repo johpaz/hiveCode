@@ -10,6 +10,7 @@
  */
 
 import { logger } from "../utils/logger"
+import { getProviderApiKey } from "../storage/crypto"
 import { GeminiProvider } from "./llm-providers/gemini"
 import { AnthropicProvider } from "./llm-providers/anthropic"
 import { OllamaProvider } from "./llm-providers/ollama"
@@ -150,15 +151,8 @@ export async function resolveProviderConfig(
     .query<any, [string]>("SELECT * FROM providers WHERE id = ? AND enabled = 1")
     .get(providerId)
 
-  let apiKey = ""
-  if (providerRow?.api_key_encrypted && providerRow?.api_key_iv) {
-    try {
-      apiKey = await decryptApiKey(providerRow.api_key_encrypted, providerRow.api_key_iv)
-    } catch { /* fall through to env var */ }
-  }
-  if (!apiKey) {
-    apiKey = process.env[`${providerId.toUpperCase()}_API_KEY`] || ""
-  }
+  // TDD §38.12: API keys stored exclusively in Bun.secrets
+  let apiKey = await getProviderApiKey(providerId) || ""
 
   return {
     provider: providerId,

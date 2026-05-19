@@ -1,3 +1,90 @@
+// ─── Streaming text extractor for BEE's JSON output ──────────────────────────
+// BEE outputs JSON like {"action":"...", "reason":"...", "content":"..."}.
+// During streaming, we progressively extract readable text from partial JSON
+// so the user sees the reasoning in real-time, not raw JSON syntax.
+
+class StreamingJsonTextExtractor {
+  private buffer = ""
+  private lastEmittedIdx = 0
+
+  /** Add a token and get any new readable text to display */
+  addToken(token: string): string | null {
+    this.buffer += token
+
+    // Don't try to parse too often — wait until we have enough content
+    if (this.buffer.length < 40 && this.buffer.length - this.lastEmittedIdx < 30) {
+      return null
+    }
+
+    const readable = this.extractReadableText()
+    if (readable === null) return null
+
+    // Only emit new text since last emission
+    if (readable.length > this.lastEmittedIdx) {
+      const newText = readable.slice(this.lastEmittedIdx)
+      this.lastEmittedIdx = readable.length
+      return newText
+    }
+    return null
+  }
+
+  /** Extract readable text from accumulated buffer */
+  private extractReadableText(): string | null {
+    const trimmed = this.buffer.trimStart()
+
+    // If it doesn't look like JSON, it's plain narrative text — stream as-is
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("```")) {
+      return this.buffer
+    }
+
+    // Try to extract text from known JSON fields: reason, content, thought, thinking
+    // These regex patterns match both complete strings and strings still being streamed
+    const textFields = ["reason", "content", "thought", "thinking", "response", "message"]
+    let bestMatch = ""
+    let bestIdx = -1
+
+    for (const field of textFields) {
+      // Match "field": "value" — handles escaped quotes and partial strings
+      const regex = new RegExp(`"${field}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`, "s")
+      const match = this.buffer.match(regex)
+      if (match && match.index !== undefined) {
+        // Decode common JSON escape sequences
+        const decoded = match[1]
+          .replace(/\\n/g, "\n")
+          .replace(/\\t/g, "\t")
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, "\\")
+        if (decoded.length > bestMatch.length) {
+          bestMatch = decoded
+          bestIdx = match.index
+        }
+      }
+    }
+
+    if (bestMatch) return bestMatch
+
+    // No text field found yet — might still be streaming the JSON structure
+    // If we see a clear JSON structure with just the action field, show a status
+    const actionMatch = this.buffer.match(/"action"\s*:\s*"([^"]+)"/)
+    if (actionMatch) {
+      return `Decidiendo: ${actionMatch[1]}...`
+    }
+
+    return null
+  }
+
+  /** Get the full readable text extracted so far */
+  getFullText(): string {
+    const readable = this.extractReadableText()
+    return readable || this.buffer
+  }
+
+  reset(): void {
+    this.buffer = ""
+    this.lastEmittedIdx = 0
+  }
+}
+
 import { callLLM } from "@johpaz/hivecode-core/agent/llm-client"
 import type { LLMMessage, LLMToolDef, LLMToolCall } from "@johpaz/hivecode-core/agent/llm-client"
 import { readWorkerSecrets } from "./secrets"
@@ -14,7 +101,7 @@ declare var self: {
 
 const COORDINATOR_PROVIDER = process.env.HIVE_COORDINATOR_PROVIDER || "anthropic"
 const COORDINATOR_MODEL = process.env.HIVE_COORDINATOR_MODEL || "claude-sonnet-4-6"
-const MAX_ITERATIONS = 20
+const MAX_ITERATIONS = 40
 
 /** Approximate max context tokens by model name (used for compaction) */
 function getMaxContextTokens(model: string): number {
@@ -99,8 +186,7 @@ function compactMessagesIfNeeded(messages: LLMMessage[], model: string): LLMMess
   }
   for (const tm of compactedTools) {
     const content = typeof tm.content === "string" ? tm.content : JSON.stringify(tm.content)
-    summary += "\n" + content.slice(0, 200)
-    if (content.length > 200) summary += "…"
+    summary += "\n" + content
   }
 
   const compactedMessage: LLMMessage = {
@@ -150,6 +236,11 @@ RULES FOR TOOL USE:
 3. In PLAN mode, write tools are disabled — you can only read and analyze.
 4. Always verify files exist before writing or editing.
 5. After making changes, narrate what you did and why.
+6. CRITICAL: You MUST produce a FINAL text response (without tool calls) to complete your task. Do NOT keep calling tools indefinitely.
+   - After 3-5 tool calls, evaluate if you have enough information to respond. If yes, respond immediately.
+   - If you find yourself calling tools just to "explore more", STOP and respond with what you know.
+   - A task like "hola" or a simple question should be answered in 0-1 tool calls, NEVER 20.
+   - When you see ⚠️ STOPPING signal, you MUST respond immediately without any more tool calls.
 
 SPAWNING SUB-AGENTS:
 As the team lead, you may delegate work to specialized sub-agents using spawn_subagent.
@@ -248,7 +339,7 @@ class WorkerAgent {
       const historyBlock = task.conversationHistory?.length
         ? "\n\n## Conversación reciente en esta sesión:\n" +
           task.conversationHistory
-            .map(t => `${t.role === "user" ? "Usuario" : "Agente"}: ${t.content.slice(0, 500)}`)
+            .map(t => `${t.role === "user" ? "Usuario" : "Agente"}: ${t.content}`)
             .join("\n\n")
         : ""
 
@@ -270,10 +361,14 @@ class WorkerAgent {
 
       // Agent loop with tool execution
       let finalContent = ""
-      while (this.iterations < MAX_ITERATIONS) {
+while (this.iterations < MAX_ITERATIONS) {
         this.iterations++
+        // Each iteration gets a unique streamId so thinking chunks from
+        // the same LLM call are grouped into one streaming block,
+        // while step-start and other metadata are separate blocks.
+        const streamId = `step-${this.iterations}`
 
-        // Notify main thread that we're thinking / analyzing
+        // Notify main thread that we're thinking / analyzing (new block, no streamId)
         self.postMessage(JSON.stringify({
           type: "THINKING",
           taskId: this.task!.taskId,
@@ -297,9 +392,61 @@ class WorkerAgent {
         }
         this.messages = compactedMessages
 
+        // Inject stopping signal when approaching limit
+        // This forces the LLM to produce a final response instead of more tool calls
+        const iterationsLeft = MAX_ITERATIONS - this.iterations
+        if (iterationsLeft <= 3) {
+          this.messages.push({
+            role: "user",
+            content: `⚠️ STOPPING: You have ${iterationsLeft} iteration(s) left. You MUST produce your FINAL response now without any more tool calls. Summarize what you know and respond to the user.`,
+          })
+        }
+
         // 2-minute timeout per LLM call to prevent indefinite hangs
         const controller = new AbortController()
         const llmTimeout = setTimeout(() => controller.abort(), 120_000)
+
+        // Stream tokens in real-time so user sees what the agent is thinking
+        // For BEE: use StreamingJsonTextExtractor to show readable text, not raw JSON
+        // For other coordinators: stream tokens directly as they arrive
+        let streamBuffer = ""
+        let lastSentLength = 0
+        const isBee = this.coordinatorName === "bee"
+        const jsonExtractor = isBee ? new StreamingJsonTextExtractor() : null
+
+        const onToken = (token: string) => {
+          streamBuffer += token
+
+          if (isBee && jsonExtractor) {
+            // BEE: extract readable text from partial JSON and send incrementally
+            const newText = jsonExtractor.addToken(token)
+            if (newText) {
+              self.postMessage(JSON.stringify({
+                type: "THINKING",
+                taskId: this.task!.taskId,
+                phaseId: this.task!.phaseId,
+                coordinator: this.coordinatorName,
+                content: newText,
+                streamId,
+              } as WorkerToManagerMessage))
+            }
+          } else {
+            // Other coordinators: send new text added since last emission
+            const unSent = streamBuffer.length - lastSentLength
+            if (unSent >= 80 || (unSent > 0 && token.includes("\n"))) {
+              const newContent = streamBuffer.slice(lastSentLength)
+              lastSentLength = streamBuffer.length
+              self.postMessage(JSON.stringify({
+                type: "THINKING",
+                taskId: this.task!.taskId,
+                phaseId: this.task!.phaseId,
+                coordinator: this.coordinatorName,
+                content: newContent,
+                streamId,
+              } as WorkerToManagerMessage))
+            }
+          }
+        }
 
         const response = await callLLM({
           provider,
@@ -310,6 +457,7 @@ class WorkerAgent {
           temperature: 0.3,
           maxTokens: 8192,
           signal: controller.signal,
+          onToken,
         })
 
         clearTimeout(llmTimeout)
@@ -318,9 +466,43 @@ class WorkerAgent {
         this.totalTokensIn  += response.usage?.input_tokens  ?? 0
         this.totalTokensOut += response.usage?.output_tokens ?? 0
 
+// Stream reasoning text to main thread so the user sees what the agent is thinking
+        const content = response.content?.trim() || streamBuffer.trim()
+        if (content) {
+          let displayText = content
+          // For BEE, extract the "reason" field from its JSON routing output for final display
+          if (isBee) {
+            try {
+              const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/(\{[\s\S]*\})/)
+              if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[1] || jsonMatch[0])
+                if (parsed.reason) displayText = String(parsed.reason)
+                else if (parsed.content) displayText = String(parsed.content)
+              }
+            } catch {
+              // Not JSON, use extractor result or raw content
+              const extracted = jsonExtractor?.getFullText()
+              if (extracted && extracted.length > 10) displayText = extracted
+            }
+          }
+          if (displayText) {
+            self.postMessage(JSON.stringify({
+              type: "THINKING",
+              taskId: this.task!.taskId,
+              phaseId: this.task!.phaseId,
+              coordinator: this.coordinatorName,
+              content: displayText,
+              streamId,
+            } as WorkerToManagerMessage))
+          }
+        }
+
         // No tool calls → final response
         if (!response.tool_calls?.length || response.stop_reason !== "tool_calls") {
           finalContent = response.content?.trim() || "No output generated"
+          if (!response.content?.trim()) {
+            console.warn(`[worker-handler] ⚠️ ${this.coordinatorName} returned empty content (stop_reason=${response.stop_reason}, tokens_in=${response.usage?.input_tokens}, tokens_out=${response.usage?.output_tokens})`)
+          }
           break
         }
 
@@ -357,15 +539,16 @@ class WorkerAgent {
           localResults.push(...results)
         }
 
-        // Execute remote tools (via main thread)
-        const remoteResults: Array<{ tool_call_id: string; content: string }> = []
-        for (const tc of remoteCalls) {
+        // Execute remote tools (via main thread) in parallel
+        const remotePromises = remoteCalls.map(async (tc) => {
           const result = await this.executeToolViaMainThread(tc)
-          remoteResults.push({
+          return {
             tool_call_id: tc.id,
             content: typeof result === "string" ? result : JSON.stringify(result),
-          })
-        }
+          }
+        })
+        const remoteResults = await Promise.all(remotePromises)
+
 
         // Add all tool results to messages
         for (const tr of [...localResults, ...remoteResults]) {

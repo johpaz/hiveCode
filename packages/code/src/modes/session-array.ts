@@ -23,7 +23,7 @@ let view: Int8Array = new Int8Array(sab)
 export function initSessionArray(): void {
   sab = new SharedArrayBuffer(SAB_SIZE)
   view = new Int8Array(sab)
-  view[BYTE_MODE] = 0 // default: plan
+  view[BYTE_MODE] = 2 // default: auto (0=plan, 1=approval, 2=auto)
   view[BYTE_PHASE] = 0
   view[BYTE_WORKERS] = 0
   view[BYTE_FLAGS] = 0

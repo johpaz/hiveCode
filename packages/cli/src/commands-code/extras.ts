@@ -10,8 +10,8 @@
 
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
-  hiveNote, hiveSpinner, isCancel,
-} from "@johpaz/hivecode-ui"
+  hiveNote, hiveSpinner, hiveConfirm, isCancel,
+} from "@johpaz/hivecode-tui-primitives"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { executeToolByName } from "@johpaz/hivecode-code/workers/tool-bridge"
 import { createAllTools } from "@johpaz/hivecode-core/tools"
@@ -109,7 +109,9 @@ export async function taskResume(taskId?: string): Promise<void> {
   hiveIntro("hivecode · Reanudar Tarea")
 
   const db = getDb()
-  const task = db.query("SELECT id, description, status, mode FROM code_tasks WHERE id = ?").get(taskId) as any
+  const task = db.query(
+    "SELECT id, description, status, mode FROM code_tasks WHERE id = ? OR id LIKE ? LIMIT 1"
+  ).get(taskId, `${taskId}%`) as any
 
   if (!task) {
     hiveOutro(`Tarea no encontrada: ${taskId}`, "error")
@@ -117,21 +119,65 @@ export async function taskResume(taskId?: string): Promise<void> {
   }
 
   if (task.status !== "paused") {
-    hiveOutro(`La tarea ${taskId.slice(0, 8)} no está pausada (estado: ${task.status})`, "error")
+    hiveOutro(`La tarea ${task.id.slice(0, 8)} no está pausada (estado: ${task.status})`, "error")
     process.exit(1)
   }
 
-  db.query("UPDATE code_tasks SET status = 'running' WHERE id = ?").run(taskId)
+  // ── Recovery point ────────────────────────────────────────────────────────
+  const recovery = db.query(
+    "SELECT * FROM code_recovery_points WHERE task_id = ? ORDER BY id DESC LIMIT 1"
+  ).get(task.id) as any
 
-  hiveNote("Tarea reanudada", [
-    `ID: ${taskId}`,
+  const snapshots = db.query(
+    "SELECT file_path, content FROM code_file_snapshots WHERE task_id = ? ORDER BY id"
+  ).all(task.id) as any[]
+
+  let filesRestored = 0
+
+  if (snapshots.length > 0) {
+    const shouldRestore = await hiveConfirm({
+      message: `Hay ${snapshots.length} snapshot(s) de archivos guardados. ¿Restaurar al estado anterior?`,
+    })
+
+    if (!isCancel(shouldRestore) && shouldRestore) {
+      const spinner = hiveSpinner("default")
+      spinner.start("Restaurando archivos...")
+      for (const snap of snapshots) {
+        try {
+          await Bun.write(snap.file_path, snap.content)
+          filesRestored++
+        } catch {
+          // file path may be outside cwd — skip silently
+        }
+      }
+      spinner.stop(`${filesRestored} archivo(s) restaurado(s)`)
+    }
+  }
+
+  // ── Update task status ────────────────────────────────────────────────────
+  db.query("UPDATE code_tasks SET status = 'running' WHERE id = ?").run(task.id)
+
+  // ── Summary ───────────────────────────────────────────────────────────────
+  const lines: string[] = [
+    `ID: ${task.id}`,
     `Descripción: ${task.description?.slice(0, 60)}`,
     `Modo: ${task.mode}`,
     "",
-    "Usa 'hivecode run \"<desc>\"' para ejecutar una nueva tarea.",
-  ])
+  ]
 
-  hiveOutro("Tarea reanudada")
+  if (recovery) {
+    const completed: number[] = JSON.parse(recovery.completed_phases || "[]")
+    const pending: number[] = JSON.parse(recovery.pending_phases || "[]")
+    if (completed.length > 0) lines.push(`Fases completadas: ${completed.length}`)
+    if (pending.length > 0) lines.push(`Fases pendientes: ${pending.length}`)
+    if (recovery.git_ref) lines.push(`Git ref: ${(recovery.git_ref as string).slice(0, 8)}`)
+  }
+
+  if (filesRestored > 0) lines.push(`Archivos restaurados: ${filesRestored}`)
+  lines.push("", "Usa 'hivecode run \"<desc>\"' para continuar con una nueva ejecución.")
+
+  hiveNote("Tarea reanudada", lines)
+  hiveOutro("Listo para reanudar")
 }
 
 // ─── Upgrade ─────────────────────────────────────────────────────────────────

@@ -21,6 +21,29 @@ function parseExpiry(expiresIn: string): number {
   }
 }
 
+// In-memory revocation store (replace with Redis in v1.1)
+const revokedJTIs = new Set<string>();
+
+export function revokeJTI(jti: string): void {
+  revokedJTIs.add(jti);
+}
+
+export function isRevoked(jti: string): boolean {
+  return revokedJTIs.has(jti);
+}
+
+export function revokeAllSessions(): void {
+  revokedJTIs.clear();
+}
+
+export interface JWTPayload {
+  sub: string;
+  iat: number;
+  exp?: number;
+  jti: string;
+  [key: string]: unknown;
+}
+
 export async function sign(
   payload: object,
   secret: string,
@@ -29,7 +52,8 @@ export async function sign(
   const header = { alg: "HS256", typ: "JWT" };
   const now = Math.floor(Date.now() / 1000);
 
-  const tokenPayload: Record<string, unknown> = { ...payload, iat: now };
+  const jti = crypto.randomUUID();
+  const tokenPayload: Record<string, unknown> = { ...payload, iat: now, jti };
 
   if (options?.expiresIn) {
     tokenPayload.exp = now + parseExpiry(options.expiresIn);
@@ -45,7 +69,7 @@ export async function sign(
   return `${data}.${sigB64}`;
 }
 
-export function verify<T>(token: string, secret: string): T | null {
+export function verify<T>(token: string, secret: string): (T & JWTPayload) | null {
   try {
     const parts = token.split(".");
     if (parts.length !== 3) return null;
@@ -58,12 +82,29 @@ export function verify<T>(token: string, secret: string): T | null {
 
     if (!crypto.timingSafeEqual(expectedSig, actualSig)) return null;
 
-    const payload = JSON.parse(base64urlDecode(payloadB64!)) as T & { exp?: number; iat?: number };
+    const payload = JSON.parse(base64urlDecode(payloadB64!)) as T & JWTPayload;
 
     if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
+    if (payload.jti && isRevoked(payload.jti)) return null;
 
-    return payload as T;
+    return payload;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Check if a token needs refresh (< 5 minutes remaining).
+ */
+export function needsRefresh(token: string): boolean {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return false;
+    const payload = JSON.parse(base64urlDecode(parts[1]!)) as JWTPayload;
+    if (!payload.exp) return false;
+    const remaining = payload.exp - Math.floor(Date.now() / 1000);
+    return remaining < 300; // < 5 minutes
+  } catch {
+    return false;
   }
 }

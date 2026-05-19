@@ -141,26 +141,6 @@ CREATE TABLE IF NOT EXISTS channels (
     tools_count INTEGER DEFAULT 0
   );
 
-  -- MCP Servers: external tool providers (stdio, SSE, etc.)
-  -- MCP tools are loaded at runtime from connected servers, not stored in DB
-  CREATE TABLE IF NOT EXISTS mcp_servers (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    transport   TEXT NOT NULL,
-    command     TEXT,
-    args        TEXT,
-    env_encrypted TEXT,
-    env_iv      TEXT,
-    headers_encrypted TEXT,
-    headers_iv  TEXT,
-    url         TEXT,
-    enabled     INTEGER NOT NULL DEFAULT 1,
-    active      INTEGER NOT NULL DEFAULT 0,
-    builtin     INTEGER NOT NULL DEFAULT 0,
-    status      TEXT NOT NULL DEFAULT 'disconnected',
-    tools_count INTEGER DEFAULT 0
-  );
-
   -- Note: MCP tools are NOT stored in DB. They are loaded from MCP servers at runtime
   -- and made available directly via context-compiler (Direct Connection architecture)
 

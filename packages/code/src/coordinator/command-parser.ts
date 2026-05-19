@@ -20,11 +20,25 @@ export interface MenuItem {
   desc: string
 }
 
+export interface ModalField {
+  key: string
+  label: string
+  placeholder: string
+  required: boolean
+  secret: boolean
+  field_type: "text" | "select"
+  options?: string[]
+  default_value?: string
+}
+
 export interface UiCallbacks {
   suspendTui?: () => Promise<void>
   resumeTui?: () => void
   runProviderSetupWizard?: (knownProviders: string[], version: string) => Promise<{ provider: string; baseUrl?: string; apiKey: string; model?: string } | null>
   runTelegramConnectWizard?: () => Promise<Record<string, any> | null>
+  showConfigModal?: (command: string, title: string, fields: ModalField[]) => Promise<Record<string, string> | null>
+  showInfoModal?: (title: string, content: string) => Promise<void>
+  executeTask?: (task: string, mode: string) => Promise<string>
 }
 
 export interface CommandResult {
@@ -103,14 +117,19 @@ const ALL_COMMANDS = [
   { command: "/ace reflector run", category: "ace", description: "forzar analisis de trazas" },
   { command: "/doctor", category: "system", description: "diagnostico completo del sistema" },
   { command: "/env", category: "system", description: "variables de entorno no sensibles" },
+  { command: "/plan", category: "task", description: "diseñar tarea sin ejecutar" },
+  { command: "/run", category: "task", description: "ejecutar tarea en modo actual" },
   { command: "/github status", category: "github", description: "estado de token github" },
   { command: "/github whoami", category: "github", description: "usuario autenticado en github" },
   { command: "/github set-repo", category: "github", description: "vincular repositorio github" },
+  { command: "/github connect", category: "github", description: "conectar con github (token PAT)" },
+  { command: "/github disconnect", category: "github", description: "desconectar github" },
   { command: "/help", category: "system", description: "ayuda de comandos" },
   { command: "/logs list", category: "logs", description: "ver logs del sistema" },
   { command: "/logs follow", category: "logs", description: "seguir logs en tiempo real" },
   { command: "/mcp list", category: "mcp", description: "listar servidores mcp" },
   { command: "/mcp add", category: "mcp", description: "agregar servidor mcp" },
+  { command: "/mcp connect", category: "mcp", description: "conectar servidor mcp" },
   { command: "/mcp load", category: "mcp", description: "cargar config mcp desde archivo" },
   { command: "/mcp enable", category: "mcp", description: "habilitar servidor mcp" },
   { command: "/mcp disable", category: "mcp", description: "deshabilitar servidor mcp" },
@@ -160,7 +179,8 @@ export function syncCommandsToFTS(db: ReturnType<typeof getDb>): void {
 function renderSuggestions(input: string): string[] {
   const prefix = input.startsWith("/") ? input.slice(1) : input
   if (!prefix || prefix.length < 1) {
-    return ALL_COMMANDS.slice(0, 5).map(c => c.command)
+    console.error(`[suggestions] empty prefix, returning first 20 commands`)
+    return ALL_COMMANDS.slice(0, 20).map(c => c.command)
   }
   try {
     const db = getDb()
@@ -168,14 +188,19 @@ function renderSuggestions(input: string): string[] {
       SELECT command FROM code_commands_fts
       WHERE code_commands_fts MATCH ?
       ORDER BY rank
-      LIMIT 5
+      LIMIT 20
     `).all(`${prefix}*`) as { command: string }[]
-    if (rows.length > 0) return rows.map(r => r.command)
-  } catch {
+    if (rows.length > 0) {
+      console.error(`[suggestions] FTS match for "${prefix}*": ${rows.length} results`)
+      return rows.map(r => r.command)
+    }
+  } catch (e) {
+    console.error(`[suggestions] FTS error: ${(e as Error).message}`)
     // Fallback to simple prefix match if FTS fails
   }
   const match = ALL_COMMANDS.filter(c => c.command.startsWith("/" + prefix))
-  return match.slice(0, 5).map(c => c.command)
+  console.error(`[suggestions] prefix fallback for "${prefix}": ${match.length} results`)
+  return match.slice(0, 20).map(c => c.command)
 }
 
 function runDoctor(db: ReturnType<typeof getDb>): string {
@@ -215,7 +240,7 @@ const HELP_CATEGORIES: Record<string, { desc: string; commands: string[] }> = {
   task:      { desc: "Gestionar tareas", commands: ["/task list", "/task status", "/task cancel", "/task rollback"] },
   narrative: { desc: "Buscar en el historial", commands: ["/narrative show", "/narrative search", "/narrative export"] },
   ace:       { desc: "Aprendizaje adaptativo", commands: ["/ace status", "/ace playbook list", "/ace playbook reset", "/ace reflector run"] },
-  github:    { desc: "Integraci\u00f3n con GitHub", commands: ["/github status", "/github whoami", "/github set-repo"] },
+  github:    { desc: "Integraci\u00f3n con GitHub", commands: ["/github status", "/github whoami", "/github set-repo", "/github connect", "/github disconnect"] },
   system:    { desc: "Sistema y diagn\u00f3stico", commands: ["/doctor", "/version", "/env", "/help"] },
 }
 
@@ -352,7 +377,41 @@ async function handleProviderCommand(
       return { handled: true, output: renderProviderList(providers, ctx.activeProvider, modelMap) }
     }
     case "add": {
-      // Interactive wizard if UI callbacks available
+      // Inline modal if available
+      if (ui?.showConfigModal) {
+        const values = await ui.showConfigModal("provider_add", "Agregar Provider", [
+          { key: "id",       label: "ID del Provider", placeholder: "openai",                     required: true,  secret: false, field_type: "text" },
+          { key: "name",     label: "Nombre",           placeholder: "OpenAI",                     required: true,  secret: false, field_type: "text" },
+          { key: "api_key",  label: "API Key",          placeholder: "sk-\u2026",                       required: true,  secret: true,  field_type: "text" },
+          { key: "base_url", label: "Base URL",         placeholder: "https://api.openai.com/v1", required: false, secret: false, field_type: "text" },
+          { key: "category", label: "Categor\u00eda",        placeholder: "",                           required: false, secret: false, field_type: "select", options: ["llm", "stt", "tts"] },
+        ])
+        if (!values) return { handled: true, output: "  Configuraci\u00f3n cancelada" }
+        const providerId = values.id.trim().toLowerCase()
+        db.query(`
+          INSERT INTO providers (id, name, base_url, api_key_encrypted, enabled, category)
+          VALUES (?,?,?,?,1,?)
+          ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            base_url = excluded.base_url,
+            api_key_encrypted = excluded.api_key_encrypted,
+            enabled = 1,
+            category = excluded.category
+        `).run(
+          providerId,
+          values.name || providerId,
+          values.base_url || null,
+          Buffer.from(values.api_key).toString("base64"),
+          values.category || "llm",
+        )
+        db.query("INSERT OR REPLACE INTO code_config (key,value) VALUES ('default_provider',?)").run(providerId)
+        return {
+          handled: true,
+          output: `  \u2713 Provider ${providerId} configurado`,
+          newState: { activeProvider: providerId },
+        }
+      }
+      // Fallback: wizard if available, else non-interactive
       if (ui?.suspendTui && ui?.resumeTui && ui?.runProviderSetupWizard) {
         const known = (db.query("SELECT id FROM providers ORDER BY id").all() as { id: string }[]).map(r => r.id)
         await ui.suspendTui()
@@ -382,7 +441,6 @@ async function handleProviderCommand(
           ui.resumeTui()
         }
       }
-      // Fallback non-interactive
       const name = rest[0]
       if (!name) return {
         handled: true,
@@ -399,12 +457,31 @@ async function handleProviderCommand(
       }
     }
     case "set": {
-      const name = rest[0]
-      if (!name) {
-        const providers = db.query("SELECT name FROM providers WHERE enabled = 1").all() as { name: string }[]
+      if (ui?.showConfigModal) {
+        const providers = db.query("SELECT id, name FROM providers WHERE enabled = 1 ORDER BY name").all() as { id: string; name: string }[]
+        if (providers.length === 0) {
+          return { handled: true, output: "  No hay providers configurados.\n  Agrega uno con: /provider add" }
+        }
+        const options = providers.map(p => p.id)
+        const current = options.includes(ctx.activeProvider) ? ctx.activeProvider : options[0]
+        const values = await ui.showConfigModal("provider_set", "Cambiar Provider", [
+          { key: "provider", label: "Provider activo", placeholder: current, required: true, secret: false, field_type: "select", options, default_value: current },
+        ])
+        if (!values) return { handled: true, output: "  Cancelado" }
+        const name = values.provider || current
+        db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(name)
         return {
           handled: true,
-          output: "uso: /provider set <nombre>\ndisponibles: " + providers.map(p => p.name).join(", "),
+          output: `  \u2b22 Provider: ${name}`,
+          newState: { activeProvider: name },
+        }
+      }
+      const name = rest[0]
+      if (!name) {
+        const providers = db.query("SELECT id FROM providers WHERE enabled = 1").all() as { id: string }[]
+        return {
+          handled: true,
+          output: "uso: /provider set <nombre>\ndisponibles: " + providers.map(p => p.id).join(", "),
         }
       }
       const row = db.query("SELECT id FROM providers WHERE id = ?").get(name) as any
@@ -451,10 +528,20 @@ async function handleProviderCommand(
   }
 }
 
+interface ModelRow {
+  id: string
+  provider_id: string
+  name: string
+  model_type: string
+  context_window: number
+  enabled: number
+}
+
 async function handleModelCommand(
   args: string[],
   db: ReturnType<typeof getDb>,
   ctx: ContextState,
+  ui?: UiCallbacks,
 ): Promise<CommandResult> {
   const [action, ...rest] = args
 
@@ -464,69 +551,224 @@ async function handleModelCommand(
       output: [
         "",
         "  \u00bfQu\u00e9 quieres hacer?",
-        "  \u25b8 list      \u2014 lista modelos disponibles por provider",
+        "  \u25b8 list      \u2014 lista modelos guardados en BD",
         "  \u00b7 set       \u2014 cambia modelo activo",
-        "  \u00b7 info      \u2014 detalles del modelo",
+        "  \u00b7 add       \u2014 agrega modelo a la BD",
+        "  \u00b7 delete    \u2014 elimina modelo de la BD",
+        "  \u00b7 info      \u2014 detalles del modelo activo",
         "",
       ].join("\n"),
       menu: [
-        { label: "list", cmd: "/modelo list", desc: "lista modelos disponibles por provider" },
-        { label: "set",  cmd: "/modelo set",  desc: "cambia modelo activo" },
-        { label: "info", cmd: "/modelo info", desc: "detalles del modelo" },
+        { label: "list",   cmd: "/modelo list",   desc: "lista modelos guardados en BD" },
+        { label: "set",    cmd: "/modelo set",    desc: "cambia modelo activo" },
+        { label: "add",    cmd: "/modelo add",    desc: "agrega modelo a la BD" },
+        { label: "delete", cmd: "/modelo delete", desc: "elimina modelo de la BD" },
+        { label: "info",   cmd: "/modelo info",   desc: "detalles del modelo activo" },
       ],
     }
   }
 
   switch (action) {
     case "list": {
-      const provider = rest[0] || ctx.activeProvider
-      if (!provider) return { handled: true, output: "  No hay provider especificado o activo." }
-      const currentModel = ctx.activeModel
-      return {
-        handled: true,
-        output: [
-          "",
-          `  Modelos para ${provider}:`,
-          "",
-          `  \u25b8 ${currentModel || "default"} [ACTIVO]`,
-          "  \u00b7 (consulta la documentaci\u00f3n del provider para m\u00e1s modelos)",
-          "",
-          `  Cambiar con: /modelo set ${provider} <modelo>`,
-          "",
-        ].join("\n"),
+      const providerId = rest[0] || ctx.activeProvider
+      const activeModel = ctx.activeModel
+      const rows = providerId
+        ? (db.query("SELECT * FROM models WHERE provider_id = ? AND enabled = 1 ORDER BY name").all(providerId) as ModelRow[])
+        : (db.query("SELECT * FROM models WHERE enabled = 1 ORDER BY provider_id, name").all() as ModelRow[])
+
+      if (rows.length === 0) {
+        return {
+          handled: true,
+          output: [
+            "",
+            providerId ? `  Sin modelos para ${providerId}.` : "  Sin modelos en la BD.",
+            "  Agrega con: /modelo add",
+            "",
+          ].join("\n"),
+        }
       }
+
+      const lines: string[] = ["", `  Modelos${providerId ? ` (${providerId})` : ""}:`, ""]
+      for (const m of rows) {
+        const isActive = m.id === activeModel
+        const tag = isActive ? " [ACTIVO]" : ""
+        const prefix = isActive ? "\u25b8" : "\u00b7"
+        lines.push(`  ${prefix} ${m.id.padEnd(32)} ${m.model_type.padEnd(10)} ctx:${m.context_window}${tag}`)
+      }
+      lines.push("")
+      lines.push("  Cambiar con: /modelo set")
+      lines.push("")
+      return { handled: true, output: lines.join("\n") }
     }
+
     case "set": {
-      const provider = rest[0]
-      const model = rest[1]
-      if (!provider || !model) return {
-        handled: true,
-        output: "uso: /modelo set <provider> <modelo>\nejemplo: /modelo set anthropic claude-sonnet-4-6",
+      if (ui?.showConfigModal) {
+        const providers = db.query("SELECT id FROM providers WHERE enabled = 1 ORDER BY id").all() as { id: string }[]
+        if (providers.length === 0) {
+          return { handled: true, output: "  No hay providers configurados. Agrega uno con: /provider add" }
+        }
+        // Build combined options: "provider :: modelId" from models table
+        const dbModels = db.query(
+          "SELECT m.id, m.provider_id FROM models m WHERE m.enabled = 1 ORDER BY m.provider_id, m.id"
+        ).all() as { id: string; provider_id: string }[]
+
+        const combinedOptions = dbModels.map(m => `${m.provider_id} :: ${m.id}`)
+
+        // Fields: if models exist in BD, use select; else text
+        const currentCombo = ctx.activeProvider && ctx.activeModel
+          ? `${ctx.activeProvider} :: ${ctx.activeModel}`
+          : undefined
+        const defaultCombo = currentCombo && combinedOptions.includes(currentCombo) ? currentCombo : combinedOptions[0]
+
+        const fields: ModalField[] = combinedOptions.length > 0
+          ? [
+              { key: "combo", label: "Provider :: Modelo", placeholder: "", required: true, secret: false, field_type: "select", options: combinedOptions, default_value: defaultCombo },
+            ]
+          : [
+              { key: "provider", label: "Provider",  placeholder: ctx.activeProvider || providers[0].id, required: true,  secret: false, field_type: "select", options: providers.map(p => p.id), default_value: ctx.activeProvider || undefined },
+              { key: "model",    label: "Modelo ID", placeholder: "claude-sonnet-4-6",                   required: true,  secret: false, field_type: "text" },
+            ]
+
+        const values = await ui.showConfigModal("model_set", "Cambiar Modelo Activo", fields)
+        if (!values) return { handled: true, output: "  Cancelado" }
+
+        let providerId: string
+        let modelId: string
+        if (values.combo) {
+          const parts = values.combo.split(" :: ")
+          providerId = parts[0]?.trim() ?? ctx.activeProvider
+          modelId    = parts[1]?.trim() ?? ""
+        } else {
+          providerId = values.provider || ctx.activeProvider
+          modelId    = values.model || ""
+        }
+        if (!modelId) return { handled: true, output: "  Modelo no especificado" }
+        db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)").run(`provider_model_${providerId}`, modelId)
+        db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(providerId)
+        return {
+          handled: true,
+          output: `  \u2b22 Modelo: ${modelId}  [${providerId}]`,
+          newState: { activeProvider: providerId, activeModel: modelId },
+        }
       }
-      db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)")
-        .run(`provider_model_${provider}`, model)
+      // Non-modal fallback
+      const provider = rest[0] || ctx.activeProvider
+      const model = rest[1]
+      if (!model) {
+        const rows = db.query("SELECT id FROM models WHERE provider_id = ? AND enabled = 1 ORDER BY id").all(provider) as { id: string }[]
+        const hint = rows.length > 0 ? rows.map(r => r.id).join(", ") : "(ninguno en BD)"
+        return {
+          handled: true,
+          output: `uso: /modelo set <provider> <modelo>\nDisponibles para ${provider}: ${hint}`,
+        }
+      }
+      db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)").run(`provider_model_${provider}`, model)
       return {
         handled: true,
         output: `  \u2b22 Modelo: ${model} [${provider}]`,
         newState: { activeModel: model },
       }
     }
+
+    case "add": {
+      if (ui?.showConfigModal) {
+        const providers = db.query("SELECT id FROM providers WHERE enabled = 1 ORDER BY id").all() as { id: string }[]
+        if (providers.length === 0) {
+          return { handled: true, output: "  No hay providers configurados. Agrega uno con: /provider add" }
+        }
+        const values = await ui.showConfigModal("model_add", "Agregar Modelo", [
+          { key: "id",             label: "ID del modelo",    placeholder: "claude-sonnet-4-6",     required: true,  secret: false, field_type: "text" },
+          { key: "name",           label: "Nombre",           placeholder: "Claude Sonnet 4.6",     required: true,  secret: false, field_type: "text" },
+          { key: "provider_id",    label: "Provider",         placeholder: "",                      required: true,  secret: false, field_type: "select", options: providers.map(p => p.id) },
+          { key: "model_type",     label: "Tipo",             placeholder: "",                      required: false, secret: false, field_type: "select", options: ["llm", "stt", "tts", "vision", "embedding"] },
+          { key: "context_window", label: "Ventana contexto", placeholder: "200000",                required: false, secret: false, field_type: "text" },
+        ])
+        if (!values) return { handled: true, output: "  Cancelado" }
+        const modelId     = values.id.trim()
+        const modelName   = values.name || modelId
+        const providerId  = values.provider_id
+        const modelType   = values.model_type || "llm"
+        const ctxWindow   = parseInt(values.context_window || "20000", 10) || 20000
+        db.query(`
+          INSERT INTO models (id, provider_id, name, model_type, context_window, enabled)
+          VALUES (?, ?, ?, ?, ?, 1)
+          ON CONFLICT(id) DO UPDATE SET
+            provider_id    = excluded.provider_id,
+            name           = excluded.name,
+            model_type     = excluded.model_type,
+            context_window = excluded.context_window,
+            enabled        = 1
+        `).run(modelId, providerId, modelName, modelType, ctxWindow)
+        return {
+          handled: true,
+          output: `  \u2713 Modelo ${modelId} (${modelType}) agregado a ${providerId}`,
+        }
+      }
+      // Non-modal fallback
+      const [modelId, providerId] = rest
+      if (!modelId || !providerId) {
+        return { handled: true, output: "uso: /modelo add <id> <provider>\nejemplo: /modelo add claude-sonnet-4-6 anthropic" }
+      }
+      db.query("INSERT OR IGNORE INTO models (id, provider_id, name, model_type) VALUES (?,?,?,?)")
+        .run(modelId, providerId, modelId, "llm")
+      return { handled: true, output: `  \u2713 Modelo ${modelId} agregado a ${providerId}` }
+    }
+
+    case "delete":
+    case "remove": {
+      if (ui?.showConfigModal) {
+        const rows = db.query("SELECT id, provider_id FROM models WHERE enabled = 1 ORDER BY provider_id, id").all() as { id: string; provider_id: string }[]
+        if (rows.length === 0) return { handled: true, output: "  No hay modelos en la BD." }
+        const options = rows.map(m => `${m.provider_id} :: ${m.id}`)
+        const values = await ui.showConfigModal("model_delete", "Eliminar Modelo", [
+          { key: "combo", label: "Modelo a eliminar", placeholder: "", required: true, secret: false, field_type: "select", options },
+        ])
+        if (!values) return { handled: true, output: "  Cancelado" }
+        const parts = values.combo.split(" :: ")
+        const modelId = parts[1]?.trim()
+        if (!modelId) return { handled: true, output: "  Selecci\u00f3n inv\u00e1lida" }
+        db.query("DELETE FROM models WHERE id = ?").run(modelId)
+        return { handled: true, output: `  \u2713 Modelo ${modelId} eliminado` }
+      }
+      const modelId = rest[0]
+      if (!modelId) return { handled: true, output: "uso: /modelo delete <id>" }
+      db.query("DELETE FROM models WHERE id = ?").run(modelId)
+      return { handled: true, output: `  \u2713 Modelo ${modelId} eliminado` }
+    }
+
     case "info": {
-      const model = rest[0] || ctx.activeModel
+      const modelId = rest[0] || ctx.activeModel
+      const row = modelId
+        ? (db.query("SELECT * FROM models WHERE id = ?").get(modelId) as ModelRow | undefined)
+        : undefined
+      if (!row) {
+        return {
+          handled: true,
+          output: [
+            "",
+            `  Modelo activo: ${ctx.activeModel || "(ninguno)"}`,
+            `  Provider: ${ctx.activeProvider || "(ninguno)"}`,
+            "  (sin entrada en BD \u2014 agrega con /modelo add)",
+            "",
+          ].join("\n"),
+        }
+      }
       return {
         handled: true,
         output: [
           "",
-          `  Modelo: ${model}`,
-          `  Provider: ${ctx.activeProvider}`,
-          "  Contexto m\u00e1ximo: consultar documentaci\u00f3n del provider",
-          "  Costo: consultar documentaci\u00f3n del provider",
+          `  ID:              ${row.id}`,
+          `  Nombre:          ${row.name}`,
+          `  Provider:        ${row.provider_id}`,
+          `  Tipo:            ${row.model_type}`,
+          `  Ventana contexto: ${row.context_window.toLocaleString()} tokens`,
           "",
         ].join("\n"),
       }
     }
+
     default:
-      return { handled: true, output: "opciones: list | set | info\n\nEscribe /help /modelo" }
+      return { handled: true, output: "opciones: list | set | add | delete | info\n\nEscribe /help /modelo" }
   }
 }
 
@@ -534,6 +776,7 @@ async function handleMcpCommand(
   args: string[],
   db: ReturnType<typeof getDb>,
   ctx: ContextState,
+  ui?: UiCallbacks,
 ): Promise<CommandResult> {
   const [action, ...rest] = args
 
@@ -576,6 +819,25 @@ async function handleMcpCommand(
       return { handled: true, output: "\n  Servidores MCP:\n\n" + lines.join("\n") + "\n" }
     }
     case "add": {
+      if (ui?.showConfigModal) {
+        const values = await ui.showConfigModal("mcp_add", "Agregar Servidor MCP", [
+          { key: "id", label: "ID del servidor", placeholder: "my-mcp-server", required: true, secret: false, field_type: "text" },
+          { key: "name", label: "Nombre", placeholder: "My MCP Server", required: true, secret: false, field_type: "text" },
+          { key: "transport", label: "Transporte", placeholder: "", required: true, secret: false, field_type: "select", options: ["sse", "stdio", "http"] },
+          { key: "url", label: "URL (SSE/HTTP)", placeholder: "http://localhost:3000/sse", required: false, secret: false, field_type: "text" },
+          { key: "command", label: "Comando (STDIO)", placeholder: "npx -y @modelcontextprotocol/server-filesystem", required: false, secret: false, field_type: "text" },
+        ])
+        if (!values) return { handled: true, output: "  Configuraci\u00f3n cancelada" }
+        const id = values.id.trim().toLowerCase().replace(/[^a-zA-Z0-9_-]/g, "_")
+        const transport = values.transport || "sse"
+        const url = values.url || null
+        const command = values.command || null
+        db.query(`
+          INSERT OR REPLACE INTO mcp_servers (id, name, transport, url, command, enabled, active, builtin, status)
+          VALUES (?, ?, ?, ?, ?, 1, 0, 0, 'disconnected')
+        `).run(id, values.name || id, transport, url, command)
+        return { handled: true, output: `  \u2713 MCP ${id} a\u00f1adido (${transport})\n  El hot-reload lo conectar\u00e1 autom\u00e1ticamente.` }
+      }
       const input = rest[0]
       if (!input) return { handled: true, output: "uso: /mcp add <url-o-nombre>\nejemplo: /mcp add http://localhost:3000/sse" }
       const id = input.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase()
@@ -679,10 +941,10 @@ async function handleSkillCommand(
 
   switch (action) {
     case "list": {
-      const rows = db.query("SELECT id, name, enabled, category FROM skills ORDER BY id").all() as any[]
+      const rows = db.query("SELECT id, name, active, category FROM skills ORDER BY id").all() as any[]
       if (rows.length === 0) return { handled: true, output: "\n  No hay skills registradas.\n" }
       const lines = rows.map(r => {
-        const icon = r.enabled ? "\u25cf" : "\u25cb"
+        const icon = r.active ? "\u25cf" : "\u25cb"
         return `  ${icon}  ${r.id.padEnd(25)} ${r.category || "general"}`
       })
       return { handled: true, output: "\n" + lines.join("\n") + "\n" }
@@ -690,13 +952,13 @@ async function handleSkillCommand(
     case "enable": {
       const name = rest[0]
       if (!name) return { handled: true, output: "uso: /skill enable <nombre>" }
-      db.query("UPDATE skills SET enabled = 1 WHERE id = ?").run(name)
+      db.query("UPDATE skills SET active = 1 WHERE id = ?").run(name)
       return { handled: true, output: `  \u2713 Skill ${name} habilitada` }
     }
     case "disable": {
       const name = rest[0]
       if (!name) return { handled: true, output: "uso: /skill disable <nombre>" }
-      db.query("UPDATE skills SET enabled = 0 WHERE id = ?").run(name)
+      db.query("UPDATE skills SET active = 0 WHERE id = ?").run(name)
       return { handled: true, output: `  \u2713 Skill ${name} deshabilitada` }
     }
     case "info": {
@@ -713,7 +975,7 @@ async function handleSkillCommand(
           `  Nombre:      ${row.name || row.id}`,
           `  Descripci\u00f3n: ${row.description || "N/A"}`,
           `  Categor\u00eda:   ${row.category || "N/A"}`,
-          `  Habilitada:  ${row.enabled ? "S\u00ed" : "No"}`,
+          `  Habilitada:  ${row.active ? "S\u00ed" : "No"}`,
           "",
           `  Contenido:`,
           `  │    ${preview}...`,
@@ -729,7 +991,7 @@ async function handleSkillCommand(
         const nameMatch = content.match(/^#\s+(.+)/m)
         const skillName = nameMatch ? nameMatch[1].trim() : path.split("/").pop()?.replace(".md", "") || "custom"
         const id = skillName.toLowerCase().replace(/[^a-z0-9_-]/g, "_")
-        db.query("INSERT OR REPLACE INTO skills (id, name, description, body, enabled, category) VALUES (?, ?, ?, ?, 1, 'custom')")
+        db.query("INSERT OR REPLACE INTO skills (id, name, description, body, active, category) VALUES (?, ?, ?, ?, 1, 'custom')")
           .run(id, skillName, `Imported from ${path}`, content)
         return { handled: true, output: `  \u2713 Skill ${id} agregada desde ${path}` }
       } catch (err) {
@@ -1057,6 +1319,7 @@ async function handleAceCommand(
 async function handleGithubCommand(
   args: string[],
   db: ReturnType<typeof getDb>,
+  ui?: UiCallbacks,
 ): Promise<CommandResult> {
   const [action, ...rest] = args
 
@@ -1066,15 +1329,60 @@ async function handleGithubCommand(
       output: [
         "",
         "  \u00bfQu\u00e9 quieres hacer?",
-        "  \u25b8 status      \u2014 verifica token v\u00e1lido y permisos",
+        "  \u25b8 connect    \u2014 conectar con GitHub (token PAT)",
+        "  \u00b7 status      \u2014 verifica token v\u00e1lido y permisos",
         "  \u00b7 whoami      \u2014 muestra usuario autenticado",
+        "  \u00b7 disconnect  \u2014 desconectar GitHub",
         "  \u00b7 set-repo    \u2014 vincula a repo espec\u00edfico",
         "",
       ].join("\n"),
+      menu: [
+        { label: "connect",    cmd: "/github connect",    desc: "conectar con GitHub (token PAT)" },
+        { label: "status",     cmd: "/github status",     desc: "verifica token v\u00e1lido y permisos" },
+        { label: "whoami",     cmd: "/github whoami",     desc: "muestra usuario autenticado" },
+        { label: "disconnect", cmd: "/github disconnect", desc: "desconectar GitHub" },
+        { label: "set-repo",   cmd: "/github set-repo",   desc: "vincula a repo espec\u00edfico" },
+      ],
     }
   }
 
   switch (action) {
+    case "connect": {
+      if (ui?.showConfigModal) {
+        const values = await ui.showConfigModal("github_connect", "Conectar GitHub", [
+          { key: "token", label: "Personal Access Token", placeholder: "ghp_xxxxxxxxxxxx...", required: true, secret: true, field_type: "text" },
+        ])
+        if (!values) return { handled: true, output: "  Configuraci\u00f3n cancelada" }
+        const token = values.token.trim()
+        if (!token) return { handled: true, output: "  Token no proporcionado" }
+        try {
+          const res = await fetch("https://api.github.com/user", {
+            headers: { Authorization: `Bearer ${token}`, "User-Agent": "hivecode" },
+          })
+          if (!res.ok) return { handled: true, output: "  \u2717 Token inv\u00e1lido o expirado" }
+          const user = await res.json() as { login?: string }
+          db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('github_token', ?)").run(token)
+          return { handled: true, output: `  \u2713 GitHub conectado como ${user.login || "usuario"}` }
+        } catch (err) {
+          return { handled: true, output: `  \u2717 Error verificando token: ${(err as Error).message}` }
+        }
+      }
+      return {
+        handled: true,
+        output: [
+          "",
+          "  Para conectar con GitHub:",
+          "  1. Crea un Personal Access Token en:",
+          "     https://github.com/settings/tokens",
+          "  2. Ejecuta: hivecode secret set GITHUB_TOKEN",
+          "",
+        ].join("\n"),
+      }
+    }
+    case "disconnect": {
+      db.query("DELETE FROM code_config WHERE key = 'github_token'").run()
+      return { handled: true, output: "  \u2713 GitHub desconectado" }
+    }
     case "status": {
       const token = (db.query("SELECT value FROM code_config WHERE key = 'github_token'").get() as any)?.value
       return {
@@ -1330,6 +1638,37 @@ async function handleTelegramCommand(
   }
 
   if (action === "connect" || action === "edit") {
+    // Inline modal if available
+    if (ui?.showConfigModal) {
+      const existing = db.query("SELECT config_encrypted FROM channels WHERE id = 'telegram'").get() as any
+      let existingConfig: Record<string, any> = {}
+      if (existing?.config_encrypted) {
+        try { existingConfig = JSON.parse(Buffer.from(existing.config_encrypted, "base64").toString()) } catch {}
+      }
+      const values = await ui.showConfigModal(`telegram_${action}`, `Telegram \u2014 ${action === "connect" ? "Conectar" : "Editar"}`, [
+        { key: "bot_token", label: "Bot Token",    placeholder: "123456:ABC-DEF\u2026", required: true,  secret: true,  field_type: "text" },
+        { key: "dm_policy", label: "DM Policy",    placeholder: "",                required: false, secret: false, field_type: "select", options: ["allowAll", "allowList", "denyAll"] },
+        { key: "groups",    label: "Grupos",        placeholder: "",                required: false, secret: false, field_type: "select", options: ["no", "s\u00ed"] },
+        { key: "allow_from",label: "Lista blanca",  placeholder: "@usuario1,@usuario2", required: false, secret: false, field_type: "text" },
+      ])
+      if (!values) return { handled: true, output: "  Configuraci\u00f3n cancelada" }
+      const configJson = JSON.stringify({
+        botToken: values.bot_token,
+        dmPolicy: values.dm_policy || "allowAll",
+        groups: values.groups === "s\u00ed",
+        allowFrom: values.allow_from ? values.allow_from.split(",").map((s: string) => s.trim()).filter(Boolean) : [],
+        enabled: true,
+      })
+      db.query(`
+        INSERT OR REPLACE INTO channels (id, type, config_encrypted, enabled, status)
+        VALUES ('telegram', 'telegram', ?, 1, 'connected')
+      `).run(Buffer.from(configJson).toString("base64"))
+      return {
+        handled: true,
+        output: `  \u2713 Telegram ${action === "connect" ? "conectado" : "actualizado"}`,
+      }
+    }
+    // Fallback wizard
     if (ui?.suspendTui && ui?.resumeTui && ui?.runTelegramConnectWizard) {
       await ui.suspendTui()
       try {
@@ -1393,9 +1732,9 @@ export async function parseInternalCommand(
     case "provider":
       return handleProviderCommand(args, db, ctxState, ui)
     case "modelo":
-      return handleModelCommand(args, db, ctxState)
+      return handleModelCommand(args, db, ctxState, ui)
     case "mcp":
-      return handleMcpCommand(args, db, ctxState)
+      return handleMcpCommand(args, db, ctxState, ui)
     case "skill":
       return handleSkillCommand(args, db)
     case "mode":
@@ -1407,11 +1746,53 @@ export async function parseInternalCommand(
     case "ace":
       return handleAceCommand(args, db)
     case "github":
-      return handleGithubCommand(args, db)
+      return handleGithubCommand(args, db, ui)
     case "telegram":
       return handleTelegramCommand(args, db, ui)
-    case "doctor":
-      return { handled: true, output: runDoctor(db) }
+    case "run": {
+      const task = args.join(" ")
+      if (task && ui?.executeTask) {
+        const output = await ui.executeTask(task, ctxState.activeMode)
+        return { handled: true, output }
+      }
+      if (ui?.showConfigModal) {
+        const result = await ui.showConfigModal("run_task", "Ejecutar tarea", [
+          { key: "task", label: "Descripción de la tarea", placeholder: "Describe lo que quieres hacer...", required: true, secret: false, field_type: "text" },
+        ])
+        if (result?.task && ui.executeTask) {
+          const output = await ui.executeTask(result.task, ctxState.activeMode)
+          return { handled: true, output }
+        }
+        return { handled: true, output: result?.task ? "  Tarea ejecutada" : "  Cancelado" }
+      }
+      return { handled: true, output: "  Uso: /run <tarea> o escribe la tarea directamente" }
+    }
+    case "plan": {
+      const task = args.join(" ")
+      if (task && ui?.executeTask) {
+        const output = await ui.executeTask(task, "plan")
+        return { handled: true, output }
+      }
+      if (ui?.showConfigModal) {
+        const result = await ui.showConfigModal("plan_task", "Planificar tarea", [
+          { key: "task", label: "Descripción de la tarea", placeholder: "Describe lo que quieres planificar...", required: true, secret: false, field_type: "text" },
+        ])
+        if (result?.task && ui.executeTask) {
+          const output = await ui.executeTask(result.task, "plan")
+          return { handled: true, output }
+        }
+        return { handled: true, output: result?.task ? "  Plan generado" : "  Cancelado" }
+      }
+      return { handled: true, output: "  Uso: /plan <tarea> o escribe la tarea directamente" }
+    }
+    case "doctor": {
+      const output = runDoctor(db)
+      if (ui?.showInfoModal) {
+        await ui.showInfoModal("Diagnóstico del sistema", output)
+        return { handled: true, output: "" }
+      }
+      return { handled: true, output }
+    }
     case "help":
       return { handled: true, output: renderHelp(args[0]) }
     case "version":

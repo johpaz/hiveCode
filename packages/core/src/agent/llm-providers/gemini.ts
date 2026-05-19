@@ -159,7 +159,56 @@ export class GeminiProvider implements LLMProvider {
       }]
     }
 
-    log.info(`[llm-client] gemini/${options.model} — ${contents.length} turns, ${options.tools?.length ?? 0} tools`)
+    log.info(`[llm-client] gemini/${options.model} — ${contents.length} turns, ${options.tools?.length ?? 0} tools${options.onToken ? " (streaming)" : ""}`)
+
+    // Use streaming if onToken callback is provided, otherwise single-shot
+    if (options.onToken) {
+      const streamResponse = await ai.models.generateContentStream({ model: options.model, contents, config })
+
+      let content = ""
+      const tool_calls: LLMToolCall[] = []
+      let finishReason: string | undefined
+
+      for await (const chunk of streamResponse) {
+        const candidate = chunk.candidates?.[0]
+        if (!candidate) continue
+
+        for (const part of candidate.content?.parts ?? []) {
+          if (part.text) {
+            content += part.text
+            options.onToken(part.text)
+          }
+          if (part.functionCall) {
+            tool_calls.push({
+              id: crypto.randomUUID(),
+              type: "function",
+              function: { name: part.functionCall.name ?? "", arguments: JSON.stringify(part.functionCall.args ?? {}) },
+              thought_signature: part.thoughtSignature ?? undefined,
+            })
+          }
+        }
+
+        if (candidate.finishReason) finishReason = candidate.finishReason
+      }
+
+      const stop_reason: LLMResponse["stop_reason"] =
+        tool_calls.length > 0 ? "tool_calls"
+          : finishReason === "MAX_TOKENS" ? "max_tokens"
+            : "stop"
+
+      // Aggregate usage from the final chunk if available
+      const aggUsage = streamResponse as any
+      return {
+        content,
+        tool_calls: tool_calls.length ? tool_calls : undefined,
+        stop_reason,
+        usage: {
+          input_tokens: aggUsage?.usageMetadata?.promptTokenCount ?? 0,
+          output_tokens: aggUsage?.usageMetadata?.candidatesTokenCount ?? 0,
+          thinking_tokens: aggUsage?.usageMetadata?.thoughtsTokenCount ?? 0,
+        },
+      }
+    }
 
     const response = await ai.models.generateContent({ model: options.model, contents, config })
 

@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem},
     Frame,
@@ -8,27 +8,31 @@ use ratatui::{
 
 use crate::app::{AppState, AMBER, SECONDARY};
 
-/// Renders the command suggestion popup above the input area.
-/// `footer_area` is the area of the footer region (input + statusbar).
-pub fn draw(frame: &mut Frame, state: &mut AppState, footer_area: Rect) {
+const POPUP_BG: Color = Color::Indexed(235);
+
+/// Renders the command suggestion popup as a centered overlay.
+/// `area` is the full frame area.
+pub fn draw(frame: &mut Frame, state: &mut AppState, area: Rect) {
     if !state.show_popup || state.suggestions.is_empty() {
         return;
     }
 
-    let count = state.suggestions.len() as u16;
-    let popup_height = count + 2; // items + borders
+    let max_visible = 15;
+    let count = state.suggestions.len().min(max_visible) as u16;
+    let popup_height = (count + 2).min(area.height.saturating_sub(4)).max(5);
     let popup_width = state
         .suggestions
         .iter()
-        .map(|s| s.len() as u16 + 6) // padding + selector
+        .map(|s| s.len() as u16 + 8)
         .max()
-        .unwrap_or(30)
-        .max(36)
-        .min(footer_area.width.saturating_sub(4));
+        .unwrap_or(40)
+        .max(40)
+        .min(area.width.saturating_sub(4))
+        .min(60);
 
-    // Position popup above the footer
-    let y = footer_area.y.saturating_sub(popup_height);
-    let x = 2;
+    // Center the popup
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
 
     let popup_area = Rect {
         x,
@@ -37,27 +41,26 @@ pub fn draw(frame: &mut Frame, state: &mut AppState, footer_area: Rect) {
         height: popup_height,
     };
 
-    // Store for mouse hit-testing
     state.popup_area = Some(popup_area);
 
-    // Clear background
     frame.render_widget(Clear, popup_area);
 
-    // Build list items
-    let items: Vec<ListItem> = state
-        .suggestions
+    let items: Vec<ListItem> = state.suggestions
         .iter()
+        .take(max_visible)
         .enumerate()
         .map(|(i, cmd)| {
             let selected = i == state.popup_sel;
             let selector = if selected { "▸ " } else { "  " };
-            let style = if selected {
-                Style::default()
-                    .fg(AMBER)
-                    .add_modifier(Modifier::BOLD)
+            let (fg, bg) = if selected {
+                (AMBER, Color::Indexed(238))
             } else {
-                Style::default().fg(SECONDARY)
+                (SECONDARY, POPUP_BG)
             };
+            let style = Style::default()
+                .fg(fg)
+                .bg(bg)
+                .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() });
             ListItem::new(Line::from(vec![
                 Span::styled(selector.to_string(), style),
                 Span::styled(cmd.clone(), style),
@@ -66,11 +69,14 @@ pub fn draw(frame: &mut Frame, state: &mut AppState, footer_area: Rect) {
         .collect();
 
     let block = Block::default()
-        .title(Span::styled(" Comandos ", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(" Comandos ", Style::default().fg(AMBER).bg(POPUP_BG).add_modifier(Modifier::BOLD)))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(AMBER));
+        .border_style(Style::default().fg(AMBER))
+        .style(Style::default().bg(POPUP_BG));
 
-    let list = List::new(items).block(block);
+    let list = List::new(items)
+        .block(block)
+        .style(Style::default().bg(POPUP_BG));
     frame.render_widget(list, popup_area);
 }

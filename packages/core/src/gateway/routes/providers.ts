@@ -1,11 +1,9 @@
 import { getDb } from "../../storage/sqlite"
-import { decryptApiKey, maskApiKey, encryptApiKey, encryptConfig } from "../../storage/crypto"
+import { decryptApiKey, maskApiKey, encryptApiKey, encryptConfig, storeProviderApiKey, getProviderApiKey, hasProviderApiKey, deleteProviderApiKey } from "../../storage/crypto"
 
 export async function handleGetProviders(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
   const rawProviders = getDb().query(`
     SELECT id, name, base_url, enabled, active, num_ctx,
-      api_key_encrypted, api_key_iv,
-      CASE WHEN api_key_encrypted IS NOT NULL THEN 1 ELSE 0 END as has_api_key,
       CASE WHEN headers_encrypted IS NOT NULL THEN 1 ELSE 0 END as has_headers
     FROM providers
   `).all() as Record<string, unknown>[]
@@ -26,12 +24,13 @@ export async function handleGetProviders(req: Request, addCorsHeaders: (r: Respo
     })
   }
 
-  const providers = rawProviders.map((p) => {
+  const providers = await Promise.all(rawProviders.map(async (p) => {
+    const has_api_key = await hasProviderApiKey(p.id as string)
     let masked_api_key: string | null = null
-    if (p.api_key_encrypted && p.api_key_iv) {
+    if (has_api_key) {
       try {
-        const plain = decryptApiKey(p.api_key_encrypted as string, p.api_key_iv as string)
-        masked_api_key = maskApiKey(plain)
+        const plain = await getProviderApiKey(p.id as string)
+        if (plain) masked_api_key = maskApiKey(plain)
       } catch { /* silently ignore */ }
     }
     return {
@@ -41,12 +40,12 @@ export async function handleGetProviders(req: Request, addCorsHeaders: (r: Respo
       enabled: p.enabled,
       active: p.active,
       num_ctx: p.num_ctx ?? null,
-      has_api_key: p.has_api_key,
+      has_api_key: has_api_key ? 1 : 0,
       has_headers: p.has_headers,
       masked_api_key,
       models: modelsByProvider[p.id as string] || [],
     }
-  })
+  }))
 
   return addCorsHeaders(Response.json({ providers }), req)
 }
@@ -111,11 +110,7 @@ export async function handleUpdateProvider(req: Request, addCorsHeaders: (r: Res
   }
   if (body.config?.apiKey || body.apiKey) {
     const apiKey = body.config?.apiKey || body.apiKey
-    const { encrypted, iv } = encryptApiKey(apiKey)
-    updates.push("api_key_encrypted = ?")
-    params.push(encrypted)
-    updates.push("api_key_iv = ?")
-    params.push(iv)
+    await storeProviderApiKey(id, apiKey)
   }
   if (body.headers) {
     const { encrypted, iv } = encryptConfig(body.headers)

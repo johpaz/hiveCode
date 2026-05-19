@@ -4,7 +4,7 @@ use ratatui::{
 };
 
 use crate::app::AppState;
-use crate::widgets::{command_popup, header, history, input, log_panel, mascot, phase_timeline, statusbar, welcome};
+use crate::widgets::{command_popup, config_modal, header, history, info_modal, input, log_panel, mascot, phase_timeline, statusbar, welcome};
 
 pub fn draw(frame: &mut Frame, state: &mut AppState) {
     let area = frame.area();
@@ -24,17 +24,14 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
         input::draw(frame, state, root[1]);
         statusbar::draw(frame, state, root[2]);
 
-        // Suggestion popup anchored above the input box
-        let popup_anchor = ratatui::layout::Rect {
-            x: root[1].x,
-            y: root[0].y,
-            width: root[1].width,
-            height: root[0].height + root[1].height,
-        };
-        command_popup::draw(frame, state, popup_anchor);
-
-        // Mascot in bottom-right corner (drawn last, on top)
+        // Mascot (drawn before popup so popup appears on top)
         mascot::draw(frame, state, area);
+        // Suggestion popup as overlay (drawn after mascot)
+        command_popup::draw(frame, state, area);
+        // Config modal (on top of everything)
+        config_modal::draw(frame, state);
+        // Info modal (read-only display, on top of everything)
+        info_modal::draw(frame, state);
     } else {
         // ── Active session: header + history + input + statusbar ──────────
         let root = Layout::default()
@@ -51,13 +48,6 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
         let body_area    = root[1];
         let input_area   = root[2];
         let status_area  = root[3];
-
-        let footer_area = ratatui::layout::Rect {
-            x: input_area.x,
-            y: input_area.y,
-            width: input_area.width,
-            height: input_area.height + status_area.height,
-        };
 
         header::draw(frame, state, header_area);
 
@@ -90,9 +80,15 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
 
         input::draw(frame, state, input_area);
         statusbar::draw(frame, state, status_area);
-        command_popup::draw(frame, state, footer_area);
 
-        // Mascot in bottom-right corner
+        // Mascot (drawn before popup so popup appears on top)
         mascot::draw(frame, state, area);
+        // Suggestion popup as overlay (drawn after mascot)
+        command_popup::draw(frame, state, area);
+
+        // Config modal (on top of everything)
+        config_modal::draw(frame, state);
+        // Info modal (read-only display, on top of everything)
+        info_modal::draw(frame, state);
     }
 }

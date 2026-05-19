@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test"
 import { getTestDb, resetTestDb, cleanupTestDb, seedProvider, seedConfig } from "../../../code/tests/helpers/setup-db"
 import { loadInitialState, saveMode } from "../../src/commands-code/repl-state"
-import { fmtTokens } from "@johpaz/hivecode-ui/utils/fmt-tokens"
+import { fmtTokens } from "@johpaz/hivecode-tui-primitivesutils/fmt-tokens"
 
 // ─── carga de estado inicial ──────────────────────────────────────────────────
 

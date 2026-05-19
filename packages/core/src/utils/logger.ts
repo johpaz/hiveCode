@@ -1,6 +1,7 @@
 import { mkdirSync, unlinkSync, renameSync, existsSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 import { getHiveDir, loadConfig } from "../config/loader.ts";
+import { sanitizeForLog, sanitizeForLogValue } from "./sanitize-log.ts";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -122,8 +123,9 @@ function formatTimestamp(): string {
 function formatMessage(level: LogLevel, message: string, meta?: unknown, correlationId?: string): string {
   const timestamp = formatTimestamp();
   const corrStr = correlationId ? ` [${correlationId.slice(0, 8)}]` : "";
-  const metaStr = meta ? ` ${JSON.stringify(meta)}` : "";
-  return `[${timestamp}]${corrStr} [${level.toUpperCase()}] ${message}${metaStr}`;
+  const safeMessage = sanitizeForLog(message);
+  const metaStr = meta ? ` ${sanitizeForLogValue(meta)}` : "";
+  return `[${timestamp}]${corrStr} [${level.toUpperCase()}] ${safeMessage}${metaStr}`;
 }
 
 export class Logger {
@@ -185,11 +187,14 @@ export class Logger {
   private writeToConsole(level: LogLevel, message: string, meta?: unknown): void {
     if (!this.config.console) return;
 
+    // TDD §38.15: DEBUG logs only in dev mode
+    if (level === "debug" && process.env.NODE_ENV === "production") return;
+
     const color = COLORS[level];
     const mergedMeta = this.mergeMeta(meta);
     const displayMeta = this.config.redactSensitive && mergedMeta ? redact(mergedMeta) : mergedMeta;
     const metaStr = displayMeta && Object.keys(displayMeta as object).length > 0
-      ? ` ${JSON.stringify(displayMeta)}`
+      ? ` ${sanitizeForLogValue(displayMeta)}`
       : "";
 
     const prefix = `${COLORS.dim}${formatTimestamp()}${COLORS.reset}`;
@@ -198,7 +203,7 @@ export class Logger {
       : "";
     const levelStr = `${color}${COLORS.bright}[${level.toUpperCase().padEnd(5)}]${COLORS.reset}`;
 
-    console.log(`${prefix}${corrStr} ${levelStr} ${message}${metaStr}`);
+    console.log(`${prefix}${corrStr} ${levelStr} ${sanitizeForLog(message)}${metaStr}`);
   }
 
   private mergeMeta(meta?: unknown): LogMeta | undefined {

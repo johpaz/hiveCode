@@ -24,7 +24,7 @@ export const fsReadTool: Tool = {
       },
       offset: {
         type: "number",
-        description: "Line number to start reading from (1-indexed, default: 1)",
+        description: "Line number to start reading from (1-indexed, default: 1). Negative values read from the end: -20 reads the last 20 lines.",
       },
       limit: {
         type: "number",
@@ -41,7 +41,7 @@ export const fsReadTool: Tool = {
     } catch (e) {
       return { ok: false, error: (e as Error).message };
     }
-    const offset = (params.offset as number) ?? 1;
+    const rawOffset = (params.offset as number | undefined);
     const limit = (params.limit as number) ?? 2000;
 
     log.debug(`Reading file: ${filePath}`);
@@ -49,16 +49,34 @@ export const fsReadTool: Tool = {
     try {
       const content = await Bun.file(filePath).text();
       const lines = content.split("\n");
+      const totalLines = lines.length;
 
-      const start = Math.max(0, offset - 1);
-      const end = Math.min(lines.length, start + limit);
+      // §39.4 — warn when reading a large file without offset/limit
+      if (totalLines > 500 && rawOffset === undefined && (params.limit as number | undefined) === undefined) {
+        return {
+          ok: true,
+          path: filePath,
+          content: "",
+          totalLines,
+          linesRead: 0,
+          warning: `Archivo grande (${totalLines} líneas). Protocolo §39: usa parse_ast primero para obtener el mapa estructural, luego fs_read con offset y limit para leer solo el fragmento necesario.`,
+          requiresProtocol: true,
+        };
+      }
+
+      // Support negative offset: -20 → last 20 lines
+      const resolvedOffset = rawOffset === undefined ? 1 : rawOffset;
+      const start = resolvedOffset < 0
+        ? Math.max(0, totalLines + resolvedOffset)
+        : Math.max(0, resolvedOffset - 1);
+      const end = Math.min(totalLines, start + limit);
       const selected = lines.slice(start, end);
 
       return {
         ok: true,
         path: filePath,
         content: selected.map((line, i) => `${start + i + 1}: ${line}`).join("\n"),
-        totalLines: lines.length,
+        totalLines,
         linesRead: selected.length,
       };
     } catch (error) {

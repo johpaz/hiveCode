@@ -10,6 +10,16 @@ import type { Tool } from "../types.ts";
 import { logger } from "../../utils/logger.ts";
 import { resolveInWorkspace, getWorkspace, expandPath } from "../filesystem/workspace-guard.ts";
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+  buildSandboxCommand,
+  isSandboxAvailable,
+  buildFilesystemConfig,
+  buildNetworkConfig,
+  type SandboxConfig,
+  type SandboxResult,
+} from "./sandbox.ts";
 
 const log = logger.child("shell-executor");
 
@@ -22,28 +32,64 @@ const BLOCKED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /:\(\)\s*\{/, reason: "fork bomb pattern" },
   { pattern: /del\s+\/f\s+\/s/, reason: "recursive force delete (Windows)" },
   { pattern: /format\s+[a-z]:/i, reason: "disk format (Windows)" },
+  { pattern: /curl\s+.*\|\s*(sudo\s+)?bash/, reason: "pipe internet script to shell" },
+  { pattern: /curl\s+.*\|\s*(sudo\s+)?sh/, reason: "pipe internet script to shell" },
+  { pattern: /wget\s+.*-O\s*-\s*\|/, reason: "pipe internet script to shell" },
+  { pattern: /python\s+-c\s+.*\bexec\b/, reason: "python exec of arbitrary code" },
+  { pattern: /node\s+-e\s+.*\brequire\b/, reason: "node require of arbitrary module" },
+  { pattern: /\beval\s*\(/, reason: "eval of arbitrary code" },
+  { pattern: /\bnew\s+Function\s*\(/, reason: "new Function of arbitrary code" },
+  { pattern: /\bsudo\b/, reason: "privilege escalation (sudo)" },
+  { pattern: /\bsu\s+-/, reason: "privilege escalation (su -)" },
+  { pattern: /chmod\s+.*7/, reason: "world-writable permissions" },
+  { pattern: /chown\s+root/, reason: "change ownership to root" },
+  { pattern: /\/etc\/passwd|shadow|sudoers/, reason: "access to system credential files" },
+  { pattern: /\/proc\//, reason: "access to /proc filesystem" },
+  { pattern: /\/sys\/kernel/, reason: "access to /sys/kernel" },
+  { pattern: /Bun\.secrets/, reason: "access to Bun.secrets keystore" },
+  { pattern: /process\.env\.[A-Z_]*(?:KEY|SECRET|TOKEN)/, reason: "access to environment secrets" },
+  { pattern: /curl\s+.*\$\(cat\s+/, reason: "exfiltration via curl $(cat ...)" },
+  { pattern: /base64\s+.*\|\s*curl/, reason: "exfiltration via base64 | curl" },
 ];
 
-const ALLOWED_ENV_VARS = new Set([
-  "PATH",
-  "HOME",
-  "LANG",
-  "LC_ALL",
-  "LC_CTYPE",
-  "TERM",
-  "SHELL",
-  "USER",
-  "NODE_ENV",
-  "BUN_INSTALL",
-  "HIVE_HOME",
-])
+const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10MB
 
-function buildSandboxEnv(): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = {}
-  for (const key of ALLOWED_ENV_VARS) {
-    if (process.env[key]) env[key] = process.env[key]
+function buildSandboxEnv(workspace: string): Record<string, string | undefined> {
+  const isolatedTaskDir = workspace || path.join(os.tmpdir(), `hive-sandbox-${Date.now()}`);
+  return {
+    PATH: "/usr/local/bin:/usr/bin:/bin",
+    HOME: isolatedTaskDir,
+    TMPDIR: isolatedTaskDir,
+    LANG: "en_US.UTF-8",
+    TERM: "xterm-256color",
+    SHELL: "/bin/sh",
+    NODE_ENV: "production",
+  };
+}
+
+function isInsideWorkspace(cwd: string, workspace: string): boolean {
+  const resolved = path.resolve(cwd);
+  const wsResolved = path.resolve(expandPath(workspace));
+  const relative = path.relative(wsResolved, resolved);
+  return !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+/**
+ * Extract sandbox config from the tool config.
+ * Falls back to defaults if not configured.
+ */
+function resolveSandboxConfig(config: any, workspace: string): SandboxConfig {
+  const sandboxCfg = config?.configurable?.sandbox ?? config?.sandbox ?? {}
+
+  return {
+    enabled: sandboxCfg.enabled ?? false,
+    mode: sandboxCfg.mode ?? "permissions",
+    workspace,
+    filesystem: buildFilesystemConfig(workspace, sandboxCfg.filesystem),
+    network: buildNetworkConfig(sandboxCfg.network),
+    excludedCommands: sandboxCfg.excludedCommands ?? [],
+    failIfUnavailable: sandboxCfg.failIfUnavailable ?? false,
   }
-  return env
 }
 
 export const shellExecutorTool: Tool = {
@@ -87,6 +133,11 @@ export const shellExecutorTool: Tool = {
       return { ok: false, error: `Working directory not found: ${cwd}` };
     }
 
+    // Validate cwd is inside workspace
+    if (workspace && !isInsideWorkspace(cwd, workspace)) {
+      return { ok: false, error: `Command references path outside workspace (${workspace})` };
+    }
+
     for (const { pattern, reason } of BLOCKED_PATTERNS) {
       if (pattern.test(command)) {
         return {
@@ -96,9 +147,32 @@ export const shellExecutorTool: Tool = {
       }
     }
 
-    const sandboxEnv = buildSandboxEnv();
+    // ── Sandbox execution ──────────────────────────────────────────
+    const sandboxCfg = resolveSandboxConfig(config, workspace || cwd);
+    let useSandbox = false;
+    let sandboxResult: SandboxResult | null = null;
 
-    log.info(`Executing: ${command} (cwd=${cwd})`);
+    if (sandboxCfg.enabled) {
+      sandboxResult = buildSandboxCommand(command, sandboxCfg);
+
+      if (sandboxResult.ok) {
+        useSandbox = true;
+        log.info(`[shell-executor] Sandbox enabled (provider: ${sandboxResult.provider})`)
+      } else if (sandboxResult.error?.includes("falling back")) {
+        log.warn(`[shell-executor] Sandbox unavailable, falling back to unsandboxed: ${sandboxResult.error}`)
+        useSandbox = false;
+      } else if (sandboxResult.error?.includes("excluded")) {
+        log.info(`[shell-executor] Command excluded from sandbox, running unsandboxed`)
+        useSandbox = false;
+      } else {
+        // failIfUnavailable or other error
+        return { ok: false, error: `Sandbox error: ${sandboxResult.error}` };
+      }
+    }
+
+    const sandboxEnv = buildSandboxEnv(workspace || cwd);
+
+    log.info(`Executing: ${command} (cwd=${cwd}, sandbox=${useSandbox})`);
 
     const t0 = performance.now();
 
@@ -106,24 +180,79 @@ export const shellExecutorTool: Tool = {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-      const proc = Bun.spawn(["/bin/sh", "-c", command], {
-        cwd,
-        env: sandboxEnv,
-        signal: controller.signal,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
+      let proc: ReturnType<typeof Bun.spawn>;
+
+      if (useSandbox && sandboxResult) {
+        // Execute with sandbox isolation
+        proc = Bun.spawn(sandboxResult.command, {
+          env: sandboxEnv,
+          signal: controller.signal,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+      } else {
+        // Execute without sandbox (original behavior)
+        proc = Bun.spawn(["/bin/sh", "-c", command], {
+          cwd,
+          env: sandboxEnv,
+          signal: controller.signal,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+      }
 
       let stdout = "";
       let stderr = "";
       let exitCode: number;
+      let outputExceeded = false;
 
       try {
-        [stdout, stderr] = await Promise.all([
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
-        ]);
-        exitCode = await proc.exited;
+        // Read stdout with 10MB limit
+        const stdoutStream = proc.stdout;
+        if (stdoutStream && typeof stdoutStream === "object" && "getReader" in stdoutStream) {
+          const stdoutReader = (stdoutStream as ReadableStream<Uint8Array>).getReader();
+          const stdoutChunks: Uint8Array[] = [];
+          let stdoutBytes = 0;
+          while (true) {
+            const { done, value } = await stdoutReader.read();
+            if (done) break;
+            stdoutBytes += value.length;
+            if (stdoutBytes > MAX_OUTPUT_BYTES) {
+              outputExceeded = true;
+              break;
+            }
+            stdoutChunks.push(value);
+          }
+          stdout = new TextDecoder().decode(Buffer.concat(stdoutChunks));
+        }
+
+        // Read stderr with 10MB limit
+        const stderrStream = proc.stderr;
+        if (stderrStream && typeof stderrStream === "object" && "getReader" in stderrStream) {
+          const stderrReader = (stderrStream as ReadableStream<Uint8Array>).getReader();
+          const stderrChunks: Uint8Array[] = [];
+          let stderrBytes = 0;
+          while (true) {
+            const { done, value } = await stderrReader.read();
+            if (done) break;
+            stderrBytes += value.length;
+            if (stderrBytes > MAX_OUTPUT_BYTES) {
+              outputExceeded = true;
+              break;
+            }
+            stderrChunks.push(value);
+          }
+          stderr = new TextDecoder().decode(Buffer.concat(stderrChunks));
+        }
+
+        if (outputExceeded) {
+          try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+          exitCode = -1;
+          stderr = stderr || `Process killed: output exceeded ${MAX_OUTPUT_BYTES} bytes`;
+        } else {
+          exitCode = await proc.exited;
+        }
+
         if (exitCode !== 0 && controller.signal.aborted) {
           exitCode = -1;
           stderr = stderr || `Process killed after ${timeoutSecs}s timeout`;
@@ -146,6 +275,13 @@ export const shellExecutorTool: Tool = {
         stderr: stderr.trim(),
         executionTimeMs: elapsedMs,
         cwd,
+        sandbox: useSandbox ? {
+          enabled: true,
+          provider: sandboxResult?.provider ?? null,
+        } : {
+          enabled: false,
+          provider: null,
+        },
       };
     } catch (error) {
       log.error(`Command failed: ${(error as Error).message}`);

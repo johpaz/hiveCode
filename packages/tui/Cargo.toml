@@ -5,14 +5,18 @@ edition = "2021"
 
 [dependencies]
 ratatui      = "0.29"
+ratatui-core = "0.1"
 crossterm    = { version = "0.28", features = ["event-stream"] }
 tui-big-text = "0.7"
+tui-markdown = "0.3"
 color-eyre   = "0.6"
 tokio        = { version = "1", features = ["full"] }
 serde        = { version = "1", features = ["derive"] }
 serde_json   = "1"
 futures      = "0.3"
 textwrap     = "0.16"
+arboard      = "3"
+base64       = "0.22"
 
 [profile.release]
 strip         = true

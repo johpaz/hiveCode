@@ -12,7 +12,7 @@
 
 import * as path from "node:path"
 import * as fs from "node:fs"
-import { hiveIntro, hiveOutro, hiveNote, hiveSpinner, hiveText, isCancel } from "@johpaz/hivecode-ui"
+import { hiveIntro, hiveOutro, hiveNote, hiveSpinner, hiveText, isCancel } from "@johpaz/hivecode-tui-primitives"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 

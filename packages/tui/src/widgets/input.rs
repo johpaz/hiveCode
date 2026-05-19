@@ -70,20 +70,49 @@ pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
         .fg(mascot_color)
         .add_modifier(Modifier::BOLD);
 
-    // Calculate inner width (minus borders) to right-align mascot
+    // Calculate inner width (minus borders)
     let inner_width = (area.width as usize).saturating_sub(2);
-    let text_width = before.chars().count() + 1 + after.chars().count();
     let mascot_width = mascot.chars().count();
-    let padding = inner_width.saturating_sub(text_width + mascot_width);
+    let min_padding = 2; // minimum space between text and mascot
+    let max_text_width = inner_width.saturating_sub(mascot_width + min_padding);
+
+    // Build visible text with cursor, truncating from the LEFT if necessary
+    let text_width = before.chars().count() + 1 + after.chars().count();
+    let (visible_before, visible_at, visible_after, truncated, skip) = if text_width > max_text_width {
+        // Truncate from the beginning, keeping cursor visible
+        let overflow = text_width - max_text_width;
+        // Skip overflow + 1 to account for the "…" character we'll add
+        let skip = (overflow + 1).min(before.chars().count());
+        let b: String = before.chars().skip(skip).collect();
+        // Add ellipsis indicator if we skipped chars
+        let b = if skip > 0 { format!("…{}", b) } else { b };
+        let a = after.to_string();
+        (b, at.to_string(), a, true, skip)
+    } else {
+        (before.clone(), at.to_string(), after.clone(), false, 0)
+    };
+
+    // Recalculate padding with potentially truncated text
+    let visible_text_width = visible_before.chars().count() + visible_at.chars().count() + visible_after.chars().count();
+    let padding = inner_width.saturating_sub(visible_text_width + mascot_width).max(min_padding);
     let spaces = " ".repeat(padding);
 
-    let line = Line::from(vec![
-        Span::raw(before),
-        Span::styled(at, cursor_style),
-        Span::raw(after),
-        Span::raw(spaces),
-        Span::styled(mascot, mascot_style),
-    ]);
+    // Build spans with proper truncation indicator
+    let mut spans: Vec<Span> = Vec::new();
+    if truncated && skip > 0 {
+        // Use char-based slicing to avoid multi-byte panic
+        let remaining: String = before.chars().skip(skip).collect();
+        spans.push(Span::styled("…", Style::default().fg(DIM)));
+        spans.push(Span::raw(remaining));
+    } else {
+        spans.push(Span::raw(visible_before));
+    }
+    spans.push(Span::styled(visible_at, cursor_style));
+    spans.push(Span::raw(visible_after));
+    spans.push(Span::raw(spaces));
+    spans.push(Span::styled(mascot, mascot_style));
+
+    let line = Line::from(spans);
 
     let paragraph = Paragraph::new(line).block(block);
     frame.render_widget(paragraph, area);

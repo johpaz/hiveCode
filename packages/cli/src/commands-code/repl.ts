@@ -7,7 +7,7 @@ import {
   isCancel, hiveSelect, hiveNote, hiveOutro, hiveSpinner,
   runProviderSetupWizard,
   runTelegramConnectWizard,
-} from "@johpaz/hivecode-ui"
+} from "@johpaz/hivecode-tui-primitives"
 import { loadInitialState, saveMode } from "./repl-state"
 import type { ReplMode } from "./repl-state"
 import { parseInternalCommand, getCtx, renderSuggestions } from "@johpaz/hivecode-code/coordinator/command-parser"
@@ -18,6 +18,27 @@ import { launchTui, tuiAvailable } from "./tui-launcher"
 import { CoordinatorManager } from "@johpaz/hivecode-code/workers/coordinator-manager"
 
 const VERSION = "1.0.0"
+
+function isLikelyMarkdown(content: string): boolean {
+  if (content.includes("```")) return true
+  const lines = content.split("\n").slice(0, 5)
+  for (const l of lines) {
+    if (l.startsWith("# ") || l.startsWith("## ") || l.startsWith("### ")) return true
+  }
+  if (content.includes("**")) {
+    const first = content.indexOf("**")
+    const last = content.lastIndexOf("**")
+    if (first !== -1 && last !== -1 && first !== last) return true
+  }
+  let bulletCount = 0
+  for (const l of content.split("\n").slice(0, 10)) {
+    if (l.startsWith("- ") || l.startsWith("* ")) bulletCount++
+  }
+  if (bulletCount >= 2) return true
+  const backtickCount = (content.match(/`/g) || []).length
+  if (backtickCount >= 2) return true
+  return false
+}
 
 // ─── Gateway lifecycle ────────────────────────────────────────────────────────
 
@@ -85,9 +106,30 @@ async function ensureGateway(): Promise<void> {
 // ─── TUI binary compile-on-demand ─────────────────────────────────────────────
 
 async function ensureTuiBinary(): Promise<void> {
-  if (tuiAvailable()) return
   const tuiDir = path.join(import.meta.dir, "../../../tui")
   if (!existsSync(tuiDir)) return
+
+  const isDev = process.env.HIVE_DEV === "true"
+
+  // In dev mode, always run cargo build (debug) so the binary is up-to-date.
+  // Cargo is fast when nothing changed (~1s) and rebuilds automatically when it detects changes.
+  if (isDev) {
+    const spinner = hiveSpinner("default")
+    spinner.start("Ensuring TUI binary is up to date...")
+    const proc = Bun.spawnSync(["cargo", "build"], {
+      cwd: tuiDir,
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    if (proc.exitCode === 0) {
+      spinner.stop("TUI binary ready")
+    } else {
+      spinner.stop("TUI build failed — continuing without TUI", "error")
+    }
+    return
+  }
+
+  // Production: compile release only if binary does not exist
+  if (tuiAvailable()) return
   const spinner = hiveSpinner("default")
   spinner.start("Compilando TUI binary (primera vez)...")
   const proc = Bun.spawnSync(["cargo", "build", "--release"], {
@@ -236,7 +278,7 @@ async function executeTask(
   // Devuelve un resumen limpio (sin ANSI) para el historial Rezi
   const raw = lines.join("")
   const clean = raw.replace(/\x1b\[[0-9;]*m/g, "").replace(/\r/g, "").trim()
-  return clean.length > 1200 ? clean.slice(0, 1200) + "\n…(salida recortada)" : clean
+  return clean
 }
 
 // ─── Internal command handler ─────────────────────────────────────────────────
@@ -310,21 +352,46 @@ export async function repl(): Promise<void> {
     let currentProvider: string   = init.provider
     let currentModel:    string   = init.model
 
-    const tuiControl: { suspend: (() => Promise<void>) | null; resume: (() => void) | null; send: ((msg: import("./tui-launcher").BunMessage) => void) | null } = {
+    const tuiControl: {
+      suspend: (() => Promise<void>) | null
+      resume: (() => void) | null
+      send: ((msg: import("./tui-launcher").BunMessage) => void) | null
+      showConfigModal: ((cmd: string, title: string, fields: import("./tui-launcher").ModalField[]) => Promise<Record<string, string> | null>) | null
+      showInfoModal: ((title: string, content: string) => Promise<void>) | null
+    } = {
       suspend: null,
       resume: null,
       send: null,
+      showConfigModal: null,
+      showInfoModal: null,
     }
 
     // Forward narrative chunks from coordinators to TUI
     manager.setNarrativeCallback((chunk) => {
+      const content = chunk.content
+      const contentType = chunk.phase === "thinking"
+        ? "thinking"
+        : isLikelyMarkdown(content) ? "markdown" : "plain"
       tuiControl.send?.({
         type: "narrative_chunk",
         coordinator: chunk.coordinator,
         phase: chunk.phase,
-        content: chunk.content.slice(0, 500),
+        content,
+        content_type: contentType,
+        stream_id: (chunk as any).streamId,
       })
     })
+
+    // Forward tool worker status updates to TUI
+    manager.setWorkerUpdateCallback((update) => {
+      tuiControl.send?.({
+        type: "activity_update",
+        coordinator: `worker-${update.id}`,
+        phase: update.tool || "idle",
+        status: update.status === "busy" ? "running" : "idle",
+      })
+    })
+
 
     // Redirect stdout/stderr to a log file so nothing breaks the TUI
     const tuiLogPath = path.join(getHiveDir(), "logs", "tui-session.log")
@@ -409,6 +476,16 @@ export async function repl(): Promise<void> {
               resumeTui:   () => { tuiControl.resume!() },
               runProviderSetupWizard,
               runTelegramConnectWizard,
+              showConfigModal: tuiControl.showConfigModal ?? undefined,
+              showInfoModal: tuiControl.showInfoModal ?? undefined,
+              executeTask: async (task: string, mode: string) => {
+                return executeTask(task, mode as ReplMode, {
+                  suspend: tuiControl.suspend ?? undefined,
+                  resume: tuiControl.resume ?? undefined,
+                  manager,
+                  quiet: true,
+                })
+              },
             },
           )
           if (result.newMode)     currentMode     = result.newMode

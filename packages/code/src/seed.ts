@@ -328,7 +328,17 @@ function seedCodeCoordinators(): void {
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-export function seedCodeData(): void {
+export function seedCodeData(force = false): void {
+  const db = getDb()
+  
+  if (!force) {
+    const existing = db.query("SELECT COUNT(*) as c FROM agents WHERE role='coordinator' LIMIT 1").get() as { c: number }
+    if (existing && existing.c > 0) {
+      log.debug("[seed] ⚡ Datos de Hive-Code ya existentes, saltando seed")
+      return
+    }
+  }
+
   log.info("[seed] 🌱 Seeding Hive-Code data...")
 
   try {

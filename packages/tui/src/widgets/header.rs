@@ -27,6 +27,8 @@ pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
         Span::styled(&state.version, Style::default().fg(DIM)),
         Span::styled("  ·  ", Style::default().fg(DIM)),
         Span::styled(&state.project_name, Style::default().fg(SECONDARY)),
+        Span::styled("  ·  ", Style::default().fg(DIM)),
+        Span::styled("ALT:OFF", Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
     ]);
 
     frame.render_widget(Paragraph::new(title_line), chunks[0]);

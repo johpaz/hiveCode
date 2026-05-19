@@ -1,5 +1,5 @@
 {
-  "name": "@johpaz/hivecode-ui-web",
+  "name": "@johpaz/hivecode-tui-primitives-web",
   "version": "0.1.0",
   "private": true,
   "type": "module",

@@ -28,7 +28,7 @@
       "dependencies": {
         "@johpaz/hivecode-code": "workspace:*",
         "@johpaz/hivecode-core": "workspace:*",
-        "@johpaz/hivecode-ui": "workspace:*",
+        "@johpaz/hivecode-tui-primitives": "workspace:*",
         "toon-format-parser": "1.1.3",
       },
       "devDependencies": {
@@ -69,7 +69,7 @@
       },
     },
     "packages/hive-ui": {
-      "name": "@johpaz/hivecode-ui-web",
+      "name": "@johpaz/hivecode-tui-primitives-web",
       "version": "0.1.0",
       "dependencies": {
         "@xyflow/react": "^12.4.0",
@@ -108,8 +108,8 @@
         "typescript": "6.0.2",
       },
     },
-    "packages/ui": {
-      "name": "@johpaz/hivecode-ui",
+    "packages/tui-primitives": {
+      "name": "@johpaz/hivecode-tui-primitives",
       "version": "0.1.0",
       "dependencies": {
         "@johpaz/hivecode-core": "workspace:*",
@@ -237,9 +237,9 @@
 
     "@johpaz/hivecode-skills": ["@johpaz/hivecode-skills@workspace:packages/skills"],
 
-    "@johpaz/hivecode-ui": ["@johpaz/hivecode-ui@workspace:packages/ui"],
+    "@johpaz/hivecode-tui-primitives": ["@johpaz/hivecode-tui-primitives@workspace:packages/tui-primitives"],
 
-    "@johpaz/hivecode-ui-web": ["@johpaz/hivecode-ui-web@workspace:packages/hive-ui"],
+    "@johpaz/hivecode-tui-primitives-web": ["@johpaz/hivecode-tui-primitives-web@workspace:packages/hive-ui"],
 
     "@jridgewell/gen-mapping": ["@jridgewell/gen-mapping@0.3.13", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.0", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA=="],
 
@@ -825,7 +825,9 @@
 
     "@johpaz/hivecode-cli/toon-format-parser": ["toon-format-parser@1.1.3", "", {}, "sha512-jLsz1NK0JPyg+1OZw26khudDmT2jqaJNMAk5jfNea1pYi+RptZBGeM8FLgQvq6RYHv7P3bxS5ZKMNMpR5Op/UA=="],
 
-    "@johpaz/hivecode-ui-web/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
+    "@johpaz/hivecode-core/grammy": ["grammy@1.43.0", "", { "dependencies": { "@grammyjs/types": "3.27.3", "abort-controller": "^3.0.0", "debug": "^4.4.3", "node-fetch": "^2.7.0" } }, "sha512-7dYm06A945mXuIk/5HUlSjeyIYChW8vCEiU2dkOKKqJJzwAWxTkCc91Eqbz7TgODh2rtFFKWI/fekowWHOkmjQ=="],
+
+    "@johpaz/hivecode-tui-primitives-web/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
 
     "@tailwindcss/oxide-wasm32-wasi/@emnapi/core": ["@emnapi/core@1.10.0", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.1", "tslib": "^2.4.0" }, "bundled": true }, "sha512-yq6OkJ4p82CAfPl0u9mQebQHKPJkY7WrIuk205cTYnYe+k2Z8YBh11FrbRG/H6ihirqcacOgl2BIO8oyMQLeXw=="],
 
@@ -848,6 +850,8 @@
     "protobufjs/@types/node": ["@types/node@25.7.0", "", { "dependencies": { "undici-types": "~7.21.0" } }, "sha512-z+pdZyxE+RTQE9AcboAZCb4otwcrvgHD+GlBpPgn0emDVt0ohrTMhAwlr2Wd9nZ+nihhYFxO2pThz3C5qSu2Eg=="],
 
     "rolldown/@rolldown/pluginutils": ["@rolldown/pluginutils@1.0.1", "", {}, "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw=="],
+
+    "@johpaz/hivecode-core/grammy/@grammyjs/types": ["@grammyjs/types@3.27.3", "", {}, "sha512-yUKMLliGsGbnxu96YUJ7km7B0zy4PzeH/Jvti5705R/LeKDMqkDV4DckMSt+OrliWQpTwQljHE0QLol5zgxBkg=="],
 
     "bun-types/@types/node/undici-types": ["undici-types@7.21.0", "", {}, "sha512-w9IMgQrz4O0YN1LtB7K5P63vhlIOvC7opSmouCJ+ZywlPAlO9gIkJ+otk6LvGpAs2wg4econaCz3TvQ9xPoyuQ=="],
 

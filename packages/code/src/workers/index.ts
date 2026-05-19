@@ -9,5 +9,6 @@ export * from "./devops.worker"
 export * from "./secrets"
 export * from "./tool-bridge"
 export * from "./plan-parser"
-export * from "./subagent-prompts"
+// subagent-registry re-exports from subagent-prompts, so only export from registry to avoid duplicates
 export * from "./subagent-registry"
+export { discoverDynamicSubAgents } from "./db-discovery"

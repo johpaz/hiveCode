@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { PanelLeft, PanelRight, MessageSquare, GitBranch, Send } from 'lucide-react';
+import { PanelLeft, PanelRight, MessageSquare, GitBranch, Send, LayoutDashboard, Brain } from 'lucide-react';
 import Header from './components/Header';
 import Chat, { type ChatMessage } from './components/Chat';
 import LogPanel, { type LogEntry } from './components/LogPanel';
@@ -8,9 +8,12 @@ import Mascot from './components/Mascot';
 import FlowCanvas, { type FlowPhase } from './components/FlowCanvas';
 import HexGridBackground from './components/HexGridBackground';
 import FloatingParticles from './components/FloatingParticles';
+import Dashboard from './components/Dashboard';
+import ThinkingPanel from './components/ThinkingPanel';
+import DiffViewer from './components/DiffViewer';
 import { hiveWs, type WsMessage } from './lib/ws';
 
-type ViewMode = 'chat' | 'flow';
+type ViewMode = 'chat' | 'flow' | 'dashboard';
 
 const DEFAULT_PHASES: Phase[] = [
   { name: 'Analyze & Route', coordinator: 'bee', status: 'idle' },
@@ -23,13 +26,17 @@ const DEFAULT_PHASES: Phase[] = [
 ];
 
 export default function App() {
-  const [viewMode, setViewMode] = useState<ViewMode>('chat');
+  const [viewMode, setViewMode] = useState<ViewMode>('dashboard');
   const [showLogs, setShowLogs] = useState(true);
   const [showTimeline, setShowTimeline] = useState(true);
+  const [showThinking, setShowThinking] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [phases, setPhases] = useState<Phase[]>(DEFAULT_PHASES);
   const [flowPhases, setFlowPhases] = useState<FlowPhase[]>([]);
+  const [pendingDiff, setPendingDiff] = useState<{
+    taskId: string; phaseId: string; phase: string; diff: string
+  } | null>(null);
   const [headerState, setHeaderState] = useState({
     mode: 'plan',
     provider: 'gemini',
@@ -134,6 +141,29 @@ export default function App() {
         }
         return;
       }
+
+      if (msg.type === 'thinking') {
+        setShowThinking(true);
+        return;
+      }
+
+      if (msg.type === 'phase_end' && msg.data) {
+        const data = msg.data as { diff?: string; taskId?: string; phaseId?: string; phase?: string };
+        if (data.diff && data.taskId) {
+          setPendingDiff({
+            taskId: data.taskId,
+            phaseId: String(data.phaseId ?? ''),
+            phase: data.phase ?? 'unknown',
+            diff: data.diff,
+          });
+        }
+        return;
+      }
+
+      if (msg.type === 'task_end') {
+        setPendingDiff(null);
+        return;
+      }
     });
 
     return () => {
@@ -170,6 +200,18 @@ export default function App() {
               <div className="absolute inset-0 glass-panel opacity-50" />
               <div className="relative flex items-center gap-1">
                 <button
+                  onClick={() => setViewMode('dashboard')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium
+                    transition-all duration-200 border
+                    ${viewMode === 'dashboard'
+                      ? 'bg-white/[0.06] border-white/10 text-neutral-200 shadow-[0_0_12px_rgba(240,160,48,0.08)]'
+                      : 'border-transparent text-neutral-500 hover:text-neutral-300 hover:bg-white/[0.03]'
+                    }`}
+                >
+                  <LayoutDashboard size={12} />
+                  Dashboard
+                </button>
+                <button
                   onClick={() => setViewMode('chat')}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium
                     transition-all duration-200 border
@@ -199,6 +241,14 @@ export default function App() {
 
               <div className="relative flex items-center gap-1">
                 <button
+                  onClick={() => setShowThinking(!showThinking)}
+                  className={`transition-colors p-1.5 rounded-lg hover:bg-white/[0.03]
+                    ${showThinking ? 'text-[#56ccf2]' : 'text-neutral-500 hover:text-neutral-300'}`}
+                  title="Toggle thinking panel"
+                >
+                  <Brain size={14} />
+                </button>
+                <button
                   onClick={() => setShowTimeline(!showTimeline)}
                   className="text-neutral-500 hover:text-neutral-300 transition-colors p-1.5
                     rounded-lg hover:bg-white/[0.03]"
@@ -219,7 +269,11 @@ export default function App() {
 
             {/* Content */}
             <div className="flex-1 overflow-hidden">
-              {viewMode === 'chat' ? (
+              {viewMode === 'dashboard' ? (
+                <div className="h-full overflow-y-auto">
+                  <Dashboard />
+                </div>
+              ) : viewMode === 'chat' ? (
                 <Chat messages={messages} />
               ) : (
                 <FlowCanvas phases={flowPhases.length > 0 ? flowPhases : phases.map((p) => ({
@@ -280,8 +334,22 @@ export default function App() {
               </div>
             </div>
           )}
+
+          {/* Thinking panel */}
+          <ThinkingPanel open={showThinking} onClose={() => setShowThinking(!showThinking)} />
         </div>
       </div>
+
+      {/* DiffViewer modal */}
+      {pendingDiff && (
+        <DiffViewer
+          taskId={pendingDiff.taskId}
+          phaseId={pendingDiff.phaseId}
+          phase={pendingDiff.phase}
+          diff={pendingDiff.diff}
+          onDismiss={() => setPendingDiff(null)}
+        />
+      )}
     </div>
   );
 }

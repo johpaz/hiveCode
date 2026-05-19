@@ -1,31 +1,47 @@
 use ratatui::{
     layout::Rect,
-    style::Style,
-    text::{Line, Span},
     widgets::{List, ListItem, ListState},
     Frame,
 };
 
-use crate::app::{AppState, HistoryEntry, Role, AMBER, CYAN, DIM, GREEN, RED, SECONDARY};
+use crate::app::{AppState, HistoryEntry, Role, AMBER, CYAN, DIM, GREEN, RED, BLUE};
+use crate::markdown;
+
+pub fn get_text(history: &[HistoryEntry]) -> String {
+    history
+        .iter()
+        .map(|e| {
+            let label = match e.role {
+                Role::User      => "tú",
+                Role::Assistant => "bee",
+                Role::System    => "sys",
+                Role::Shell     => "$",
+                Role::Thinking  => "bee (thinking)",
+            };
+            format!("[{}] {}", label, e.content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
 
 pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
-    let width = area.width as usize;
+    let width = area.width.saturating_sub(2) as usize;
 
     let items: Vec<ListItem> = state
         .history
         .iter()
-        .flat_map(|entry| entry_to_items(entry, width))
+        .enumerate()
+        .flat_map(|(idx, entry)| entry_to_items(entry, width, state.copy_mode && idx == state.copy_sel))
         .collect();
 
     let list = List::new(items);
     let mut list_state = ListState::default();
-    // Always scroll to the last item
     if !state.history.is_empty() {
         list_state.select(Some(
             state
                 .history
                 .iter()
-                .flat_map(|e| entry_to_items(e, width))
+                .flat_map(|e| entry_to_items(e, width, false))
                 .count()
                 .saturating_sub(1),
         ));
@@ -34,81 +50,57 @@ pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
-fn entry_to_items(entry: &HistoryEntry, width: usize) -> Vec<ListItem<'static>> {
-    let (prefix, prefix_color) = match entry.role {
-        Role::User => ("▸ tú ", AMBER),
+fn role_prefix(role: &Role) -> (&'static str, ratatui::style::Color) {
+    match role {
+        Role::User      => ("▸ tú ", AMBER),
         Role::Assistant => ("⬢ bee ", GREEN),
-        Role::System => {
-            let is_error = entry.content.starts_with("(×ᴗ×)");
-            ("⬡ sys ", if is_error { RED } else { DIM })
-        }
-        Role::Shell => ("$ ", AMBER),
-        Role::Thinking => ("🐝 ", CYAN),
-    };
+        Role::System    => ("⬡ sys ", DIM),
+        Role::Shell     => ("$ ", AMBER),
+        Role::Thinking  => ("🐝 ", CYAN),
+    }
+}
 
-    let prefix_span = Span::styled(prefix, Style::default().fg(prefix_color));
-    let indent_span = Span::raw("      ");
-    let prefix_len = prefix.len();
-    let indent_len = 6; // "      ".len()
+fn entry_to_items(entry: &HistoryEntry, width: usize, is_selected: bool) -> Vec<ListItem<'static>> {
+    let (prefix_str, prefix_color) = role_prefix(&entry.role);
+    let prefix_color = if is_selected { BLUE } else { prefix_color };
 
-    let mut items = Vec::new();
-
-    if entry.content.contains('\n') {
-        for (i, line) in entry.content.lines().enumerate() {
-            let line_str = line.to_string();
-            let trimmed = line_str.trim_start();
-            let content_style = if trimmed.starts_with('▸') {
-                Style::default().fg(AMBER)
-            } else if trimmed.starts_with('·') {
-                Style::default().fg(SECONDARY)
-            } else if trimmed.starts_with('─') || trimmed.starts_with('═') {
-                Style::default().fg(DIM)
-            } else {
-                Style::default()
-            };
-
-            let available_width = if i == 0 {
-                width.saturating_sub(prefix_len)
-            } else {
-                width.saturating_sub(indent_len)
-            };
-
-            let wrapped = textwrap::wrap(&line_str, available_width.max(10));
-
-            for (j, wrapped_line) in wrapped.into_iter().enumerate() {
-                let content_span = Span::styled(wrapped_line.into_owned(), content_style);
-                let line_content = if i == 0 && j == 0 {
-                    Line::from(vec![prefix_span.clone(), content_span])
-                } else {
-                    Line::from(vec![indent_span.clone(), content_span])
-                };
-                items.push(ListItem::new(line_content));
-            }
-        }
-    } else {
-        let content = entry.content.clone();
-        let content_style = if entry.role == Role::System && entry.content.starts_with("(×ᴗ×)") {
-            Style::default().fg(RED)
-        } else {
-            Style::default()
-        };
-
-        let available_width = width.saturating_sub(prefix_len);
-        let wrapped = textwrap::wrap(&content, available_width.max(10));
-
-        for (j, wrapped_line) in wrapped.into_iter().enumerate() {
-            let content_span = Span::styled(wrapped_line.into_owned(), content_style);
-            let line_content = if j == 0 {
-                Line::from(vec![prefix_span.clone(), content_span])
-            } else {
-                Line::from(vec![indent_span.clone(), content_span])
-            };
-            items.push(ListItem::new(line_content));
-        }
+    // For System role with error prefix, override content color
+    if entry.role == Role::System && entry.content.starts_with("(×ᴗ×)") {
+        let lines = markdown::render_content(
+            &entry.content,
+            &entry.content_type,
+            &entry.thinking_meta,
+            width,
+            prefix_str,
+            if is_selected { BLUE } else { RED },
+            "      ",
+        );
+        return lines.into_iter().map(ListItem::new).collect();
     }
 
-    // Add a blank line between entries for readability
-    items.push(ListItem::new(Line::from("")));
+    // For Thinking role, use the compact thinking indicator
+    if entry.role == Role::Thinking {
+        let lines = markdown::render_content(
+            &entry.content,
+            &entry.content_type,
+            &entry.thinking_meta,
+            width,
+            prefix_str,
+            prefix_color,
+            "      ",
+        );
+        return lines.into_iter().map(ListItem::new).collect();
+    }
 
-    items
+    // For Markdown content, use the markdown renderer
+    let lines = markdown::render_content(
+        &entry.content,
+        &entry.content_type,
+        &entry.thinking_meta,
+        width,
+        prefix_str,
+        prefix_color,
+        "      ",
+    );
+    lines.into_iter().map(ListItem::new).collect()
 }

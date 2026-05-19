@@ -11,6 +11,7 @@ import { getDb } from "../../storage/sqlite.ts"
 import { getAgentLoop } from "../agent-loop"
 import { resolveUserId, resolveAgentId } from "../../storage/onboarding"
 import type { ContentPart } from "../llm-client"
+import { sanitizeUserMessage } from "../prompt-guard.ts"
 
 export type Provider = "openai" | "anthropic" | "gemini" | "mistral" | "kimi" | "ollama" | "openrouter" | "deepseek" | "nvidia"
 
@@ -84,9 +85,21 @@ export class AgentRunner {
     let totalInputTokens = 0
     let totalOutputTokens = 0
 
+    // Sanitize user messages for prompt injection protection
+    const sanitizedMessages = options.messages.map((msg) => {
+      if (msg.role === "user" && typeof msg.content === "string") {
+        const { sanitized, warning } = sanitizeUserMessage(msg.content);
+        if (warning) {
+          logger.warn(`[PROMPT-GUARD] ${warning} — message sanitized`);
+        }
+        return { ...msg, content: sanitized };
+      }
+      return msg;
+    });
+
     try {
       const stream = agentLoop.stream(
-        { messages: options.messages },
+        { messages: sanitizedMessages },
         {
           configurable: {
             thread_id: threadId,

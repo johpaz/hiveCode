@@ -13,7 +13,7 @@
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveSpinner, hiveText, isCancel,
-} from "@johpaz/hivecode-ui"
+} from "@johpaz/hivecode-tui-primitives"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
 export async function skillList(): Promise<void> {

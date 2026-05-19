@@ -14,7 +14,7 @@ import {
   hiveIntro, hiveOutro,
   hiveNote, hiveSpinner, hiveText, hiveSelect, isCancel,
   runProviderSetupWizard,
-} from "@johpaz/hivecode-ui"
+} from "@johpaz/hivecode-tui-primitives"
 
 const VERSION = "1.0.0"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"

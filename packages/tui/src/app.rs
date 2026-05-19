@@ -1,19 +1,19 @@
+use arboard;
+use base64::Engine;
 use color_eyre::eyre::Result;
 use crossterm::{
     event::{
         Event, EventStream, KeyCode, KeyEvent,
         KeyModifiers,
     },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
 use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
-use std::io::stdout;
+use std::io::{stdout, Write};
 use tokio::sync::mpsc::Sender;
-use tokio::time::{interval, Duration};
 
-use crate::ipc::{self, BunMessage, MenuItem, TuiMessage};
+use crate::ipc::{self, BunMessage, ModalField, MenuItem, TuiMessage};
 use crate::screens;
 
 // ── Color palette ────────────────────────────────────────────────────────────
@@ -113,6 +113,29 @@ impl From<&str> for Role {
 pub struct HistoryEntry {
     pub role: Role,
     pub content: String,
+    pub content_type: crate::markdown::ContentType,
+    pub thinking_meta: Option<crate::markdown::ThinkingMeta>,
+}
+
+#[allow(dead_code)]
+impl HistoryEntry {
+    pub fn plain(role: Role, content: String) -> Self {
+        Self { role, content, content_type: crate::markdown::ContentType::Plain, thinking_meta: None }
+    }
+    pub fn markdown(role: Role, content: String) -> Self {
+        Self { role, content, content_type: crate::markdown::ContentType::Markdown, thinking_meta: None }
+    }
+    pub fn thinking(role: Role, content: String, meta: Option<crate::markdown::ThinkingMeta>) -> Self {
+        Self { role, content, content_type: crate::markdown::ContentType::Thinking, thinking_meta: meta }
+    }
+    pub fn auto(role: Role, content: String) -> Self {
+        let content_type = if crate::markdown::is_likely_markdown(&content) {
+            crate::markdown::ContentType::Markdown
+        } else {
+            crate::markdown::ContentType::Plain
+        };
+        Self { role, content, content_type, thinking_meta: None }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +235,27 @@ pub struct AppState {
     pub log_entries: Vec<LogEntry>,
     pub narrative_chunks: Vec<(String, String, String)>, // (coordinator, phase, content)
     pub phases: Vec<Phase>,
+    pub clipboard_feedback: Option<(String, std::time::Instant)>,
+    // ─── Copy mode ───
+    pub copy_mode: bool,
+    pub copy_sel: usize,
+    pub paused: bool,
+    // ─── Streaming: track last thinking streamId for appending ───
+    pub last_thinking_stream_id: Option<String>,
+    // ─── Config modal ───
+    pub show_modal: bool,
+    pub modal_title: String,
+    pub modal_command: String,
+    pub modal_fields: Vec<ModalField>,
+    pub modal_values: Vec<String>,
+    pub modal_cursors: Vec<usize>,
+    pub modal_focused: usize,
+    pub modal_errors: Vec<bool>,
+    // ─── Info modal (read-only display) ───
+    pub show_info_modal: bool,
+    pub info_modal_title: String,
+    pub info_modal_content: String,
+    pub info_scroll_offset: usize,
 }
 
 impl Default for AppState {
@@ -251,6 +295,23 @@ impl Default for AppState {
             show_timeline: false,
             log_entries: Vec::new(),
             narrative_chunks: Vec::new(),
+            clipboard_feedback: None,
+            copy_mode: false,
+            copy_sel: 0,
+            paused: false,
+            last_thinking_stream_id: None,
+            show_modal: false,
+            modal_title: String::new(),
+            modal_command: String::new(),
+            modal_fields: Vec::new(),
+            modal_values: Vec::new(),
+            modal_cursors: Vec::new(),
+            modal_focused: 0,
+            modal_errors: Vec::new(),
+            show_info_modal: false,
+            info_modal_title: String::new(),
+            info_modal_content: String::new(),
+            info_scroll_offset: 0,
             phases: vec![
                 Phase { name: "Analyze & Route".into(), coordinator: "bee".into(), status: "idle".into(), duration_ms: None },
                 Phase { name: "Architecture Design".into(), coordinator: "architecture".into(), status: "idle".into(), duration_ms: None },
@@ -323,10 +384,19 @@ impl AppState {
                 self.token_count = token_count;
                 self.agent_count = agent_count;
             }
-            BunMessage::HistoryAppend { role, content } => {
+            BunMessage::HistoryAppend { role, content, content_type } => {
+                let r = Role::from(role.as_str());
+                let ct = match content_type.as_deref() {
+                    Some("markdown") => crate::markdown::ContentType::Markdown,
+                    Some("thinking") => crate::markdown::ContentType::Thinking,
+                    Some("plain") => crate::markdown::ContentType::Plain,
+                    _ => crate::markdown::ContentType::Plain,
+                };
                 self.history.push(HistoryEntry {
-                    role: Role::from(role.as_str()),
+                    role: r,
                     content,
+                    content_type: ct,
+                    thinking_meta: None,
                 });
             }
             BunMessage::Status { running, msg } => {
@@ -346,6 +416,7 @@ impl AppState {
                 }
             }
             BunMessage::Suggestions { items } => {
+                eprintln!("[app] Got suggestions: {} items", items.len());
                 self.suggestions = items;
                 self.popup_sel = 0;
                 self.show_popup = !self.suggestions.is_empty();
@@ -367,10 +438,7 @@ impl AppState {
                 if content.is_empty() {
                     content = format!("(código de salida: {})", exit_code);
                 }
-                self.history.push(HistoryEntry {
-                    role: Role::Shell,
-                    content,
-                });
+                self.history.push(HistoryEntry::plain(Role::Shell, content));
                 self.status_msg = format!("Shell · exit {}", exit_code);
             }
             BunMessage::ActivityUpdate { coordinator, phase, status } => {
@@ -400,7 +468,7 @@ impl AppState {
                     self.log_entries.remove(0);
                 }
             }
-            BunMessage::NarrativeChunk { coordinator, phase, content } => {
+            BunMessage::NarrativeChunk { coordinator, phase, content, content_type, stream_id } => {
                 self.narrative_chunks.push((coordinator.clone(), phase.clone(), content.clone()));
                 if self.narrative_chunks.len() > 100 {
                     self.narrative_chunks.remove(0);
@@ -413,11 +481,90 @@ impl AppState {
                     } else {
                         Role::Assistant
                     };
-                    self.history.push(HistoryEntry {
-                        role,
-                        content: format!("[{}] {}", coordinator, content),
-                    });
+                    let ct = match content_type.as_deref() {
+                        Some("markdown") => crate::markdown::ContentType::Markdown,
+                        Some("thinking") => crate::markdown::ContentType::Thinking,
+                        _ => {
+                            if phase == "thinking" {
+                                crate::markdown::ContentType::Thinking
+                            } else if crate::markdown::is_likely_markdown(&content) {
+                                crate::markdown::ContentType::Markdown
+                            } else {
+                                crate::markdown::ContentType::Plain
+                            }
+                        }
+                    };
+                    let display_content = if ct == crate::markdown::ContentType::Thinking {
+                        content.clone()
+                    } else {
+                        format!("[{}] {}", coordinator, content)
+                    };
+
+                    // For thinking chunks with a streamId: append to the last Thinking entry
+                    // if the streamId matches. This produces a single streaming text block
+                    // like ChatGPT, instead of separate "Pensando..." bubbles.
+                    // Chunks without streamId (e.g. "🧠 analizando...") start a new block.
+                    if phase == "thinking" {
+                        let should_append = stream_id.is_some()
+                            && stream_id == self.last_thinking_stream_id
+                            && self.history.last().map_or(false, |e| {
+                                e.role == Role::Thinking
+                                    && e.content_type == crate::markdown::ContentType::Thinking
+                            });
+
+                        if should_append {
+                            if let Some(last) = self.history.last_mut() {
+                                last.content.push_str(&display_content);
+                            }
+                        } else {
+                            self.history.push(HistoryEntry {
+                                role,
+                                content: display_content,
+                                content_type: ct,
+                                thinking_meta: None,
+                            });
+                            self.last_thinking_stream_id = stream_id.clone();
+                        }
+                    } else {
+                        self.history.push(HistoryEntry {
+                            role,
+                            content: display_content,
+                            content_type: ct,
+                            thinking_meta: None,
+                        });
+                    }
                 }
+            }
+            BunMessage::ShowConfigModal { command, title, fields } => {
+                let n = fields.len();
+                self.modal_command = command;
+                self.modal_title = title;
+                // Initialize values from default_value, or first option for selects
+                let values: Vec<String> = fields.iter().map(|f| {
+                    if let Some(ref dv) = f.default_value {
+                        return dv.clone();
+                    }
+                    if f.field_type == "select" {
+                        return f.options.as_ref().and_then(|o| o.first().cloned()).unwrap_or_default();
+                    }
+                    String::new()
+                }).collect();
+                self.modal_fields = fields;
+                self.modal_values = values;
+                self.modal_cursors = vec![0; n];
+                self.modal_errors = vec![false; n];
+                self.modal_focused = 0;
+                self.show_modal = true;
+                self.running = false;
+                self.status_msg = "Tab navegar · Ctrl+S guardar · Esc cancelar".to_string();
+            }
+            BunMessage::ShowInfoModal { title, content } => {
+                self.show_info_modal = true;
+                self.info_modal_title = title;
+                self.info_modal_content = content;
+                self.info_scroll_offset = 0;
+                self.running = false;
+                self.status_msg = "Esc cerrar · ↑↓ scroll".to_string();
             }
             // Handled in the main loop before apply_message is called
             BunMessage::Suspend | BunMessage::Resume => {}
@@ -429,6 +576,61 @@ impl AppState {
         key: KeyEvent,
         ipc_tx: &Sender<TuiMessage>,
     ) {
+        // Ctrl+Y — copy history to clipboard (works in any state)
+        if key.code == KeyCode::Char('y') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            let text = crate::widgets::history::get_text(&self.history);
+            let msg = match copy_to_clipboard(&text) {
+                Ok(_)  => "✅ Copiado al portapapeles".to_string(),
+                Err(e) => format!("⚠ Portapapeles: {}", e),
+            };
+            self.clipboard_feedback = Some((msg, std::time::Instant::now()));
+            return;
+        }
+
+        // Ctrl+K — toggle copy mode
+        if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.copy_mode = !self.copy_mode;
+            if self.copy_mode && !self.history.is_empty() {
+                self.copy_sel = self.history.len().saturating_sub(1);
+            }
+            self.status_msg = if self.copy_mode {
+                "Modo copia: ↑↓ navegar · Enter copiar · Esc salir".to_string()
+            } else {
+                "Listo · [shift+tab] cambiar modo".to_string()
+            };
+            return;
+        }
+
+        // Ctrl+B — copy last assistant response
+        if key.code == KeyCode::Char('b') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(entry) = self.history.iter().rev().find(|e| matches!(e.role, Role::Assistant | Role::Thinking)) {
+                let text = &entry.content;
+                let msg = match copy_to_clipboard(text) {
+                    Ok(_)  => "✅ Respuesta copiada al portapapeles".to_string(),
+                    Err(e) => format!("⚠ Portapapeles: {}", e),
+                };
+                self.clipboard_feedback = Some((msg, std::time::Instant::now()));
+            } else {
+                self.clipboard_feedback = Some(("⚠ No hay respuestas del asistente".to_string(), std::time::Instant::now()));
+            }
+            return;
+        }
+
+        if self.copy_mode {
+            self.handle_copy_mode_key(key, ipc_tx);
+            return;
+        }
+
+        if self.show_info_modal {
+            self.handle_info_modal_key(key, ipc_tx);
+            return;
+        }
+
+        if self.show_modal {
+            self.handle_modal_key(key, ipc_tx);
+            return;
+        }
+
         if self.show_popup {
             self.handle_popup_key(key, ipc_tx);
             return;
@@ -442,10 +644,7 @@ impl AppState {
             KeyCode::Enter if !self.running => {
                 let input = self.input.value();
                 if !input.trim().is_empty() {
-                    self.history.push(HistoryEntry {
-                        role: if self.shell_mode { Role::Shell } else { Role::User },
-                        content: input.clone(),
-                    });
+                    self.history.push(HistoryEntry::plain(if self.shell_mode { Role::Shell } else { Role::User }, input.clone()));
                     self.input.clear();
                     self.running = true;
                     self.show_popup = false;
@@ -481,6 +680,10 @@ impl AppState {
                 } else {
                     "Listo · [shift+tab] cambiar modo".to_string()
                 };
+            }
+            KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.paused = true;
+                self.status_msg = "\x1b[1;33m[ PAUSA ] Selecciona texto con el mouse. Presiona Enter para volver \x1b[0m".to_string();
             }
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.show_timeline = !self.show_timeline;
@@ -538,10 +741,7 @@ impl AppState {
                     self.suggestions.clear();
                     self.input.set(&cmd);
                     // Submit immediately
-                    self.history.push(HistoryEntry {
-                        role: Role::User,
-                        content: cmd.clone(),
-                    });
+                    self.history.push(HistoryEntry::plain(Role::User, cmd.clone()));
                     self.input.clear();
                     self.running = true;
                     self.status_msg = "Procesando...".to_string();
@@ -572,6 +772,188 @@ impl AppState {
         }
     }
 
+    fn handle_copy_mode_key(&mut self, key: KeyEvent, _ipc_tx: &Sender<TuiMessage>) {
+        match key.code {
+            KeyCode::Up if !self.history.is_empty() => {
+                self.copy_sel = self.copy_sel.saturating_sub(1);
+            }
+            KeyCode::Down if !self.history.is_empty() => {
+                if self.copy_sel + 1 < self.history.len() {
+                    self.copy_sel += 1;
+                }
+            }
+            KeyCode::Enter if !self.history.is_empty() => {
+                if let Some(entry) = self.history.get(self.copy_sel) {
+                    let text = &entry.content;
+                    let msg = match copy_to_clipboard(text) {
+                        Ok(_)  => "✅ Entrada copiada al portapapeles".to_string(),
+                        Err(e) => format!("⚠ Portapapeles: {}", e),
+                    };
+                    self.clipboard_feedback = Some((msg, std::time::Instant::now()));
+                }
+                self.copy_mode = false;
+                self.status_msg = "Listo · [shift+tab] cambiar modo".to_string();
+            }
+            KeyCode::Esc | KeyCode::Char('c')
+                if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.copy_mode = false;
+                self.status_msg = "Listo · [shift+tab] cambiar modo".to_string();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_info_modal_key(&mut self, key: KeyEvent, ipc_tx: &Sender<TuiMessage>) {
+        let max_scroll = self.info_modal_content.lines().count().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc => {
+                self.close_info_modal();
+                let _ = ipc_tx.try_send(TuiMessage::InfoModalClose);
+                self.status_msg = "Listo · [shift+tab] cambiar modo".to_string();
+            }
+            KeyCode::Up => {
+                if self.info_scroll_offset > 0 {
+                    self.info_scroll_offset -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if self.info_scroll_offset < max_scroll {
+                    self.info_scroll_offset += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn close_info_modal(&mut self) {
+        self.show_info_modal = false;
+        self.info_modal_title.clear();
+        self.info_modal_content.clear();
+        self.info_scroll_offset = 0;
+    }
+
+    fn handle_modal_key(&mut self, key: KeyEvent, ipc_tx: &Sender<TuiMessage>) {
+        let n = self.modal_fields.len();
+        if n == 0 { return; }
+
+        match key.code {
+            // Esc — cancel
+            KeyCode::Esc => {
+                let cmd = self.modal_command.clone();
+                self.close_modal();
+                let _ = ipc_tx.try_send(TuiMessage::ModalCancel { command: cmd });
+                self.status_msg = "Listo · [shift+tab] cambiar modo".to_string();
+            }
+            // Ctrl+S — submit
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.try_submit_modal(ipc_tx);
+            }
+            // Enter — advance field or submit on last
+            KeyCode::Enter => {
+                let field = &self.modal_fields[self.modal_focused];
+                // For select fields, cycle options on Enter too
+                if field.field_type == "select" {
+                    self.cycle_select_option(self.modal_focused);
+                } else if self.modal_focused + 1 < n {
+                    self.modal_focused += 1;
+                } else {
+                    self.try_submit_modal(ipc_tx);
+                }
+            }
+            // Tab — next field (cycle)
+            KeyCode::Tab => {
+                self.modal_focused = (self.modal_focused + 1) % n;
+            }
+            // Shift+Tab — previous field (cycle)
+            KeyCode::BackTab => {
+                self.modal_focused = (self.modal_focused + n - 1) % n;
+            }
+            // Space on select field — cycle options
+            KeyCode::Char(' ') if self.modal_fields[self.modal_focused].field_type == "select" => {
+                self.cycle_select_option(self.modal_focused);
+            }
+            // Text editing for current field
+            _ => {
+                if self.modal_fields[self.modal_focused].field_type != "select" {
+                    let cur = self.modal_cursors[self.modal_focused];
+                    let chars: Vec<char> = self.modal_values[self.modal_focused].chars().collect();
+                    let mut chars = chars;
+                    let mut cursor = cur;
+                    match key.code {
+                        KeyCode::Char(c) => {
+                            chars.insert(cursor, c);
+                            cursor += 1;
+                        }
+                        KeyCode::Backspace if cursor > 0 => {
+                            cursor -= 1;
+                            chars.remove(cursor);
+                        }
+                        KeyCode::Delete if cursor < chars.len() => {
+                            chars.remove(cursor);
+                        }
+                        KeyCode::Left if cursor > 0 => cursor -= 1,
+                        KeyCode::Right if cursor < chars.len() => cursor += 1,
+                        KeyCode::Home => cursor = 0,
+                        KeyCode::End => cursor = chars.len(),
+                        _ => {}
+                    }
+                    self.modal_values[self.modal_focused] = chars.iter().collect();
+                    self.modal_cursors[self.modal_focused] = cursor;
+                    // Clear error on edit
+                    self.modal_errors[self.modal_focused] = false;
+                }
+            }
+        }
+    }
+
+    fn cycle_select_option(&mut self, idx: usize) {
+        let field = &self.modal_fields[idx];
+        if let Some(opts) = &field.options {
+            if opts.is_empty() { return; }
+            let current = &self.modal_values[idx];
+            let pos = opts.iter().position(|o| o == current).unwrap_or(0);
+            let next = (pos + 1) % opts.len();
+            self.modal_values[idx] = opts[next].clone();
+        }
+    }
+
+    fn try_submit_modal(&mut self, ipc_tx: &Sender<TuiMessage>) {
+        // Validate required fields
+        let mut has_error = false;
+        for (i, field) in self.modal_fields.iter().enumerate() {
+            if field.required && self.modal_values[i].trim().is_empty() {
+                self.modal_errors[i] = true;
+                has_error = true;
+            }
+        }
+        if has_error {
+            self.status_msg = "Completa los campos obligatorios".to_string();
+            return;
+        }
+        let cmd = self.modal_command.clone();
+        let values: std::collections::HashMap<String, String> = self.modal_fields
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.key.clone(), self.modal_values[i].clone()))
+            .collect();
+        self.close_modal();
+        self.running = true;
+        self.status_msg = "Guardando...".to_string();
+        let _ = ipc_tx.try_send(TuiMessage::ModalSubmit { command: cmd, values });
+    }
+
+    fn close_modal(&mut self) {
+        self.show_modal = false;
+        self.modal_fields.clear();
+        self.modal_values.clear();
+        self.modal_cursors.clear();
+        self.modal_errors.clear();
+        self.modal_title.clear();
+        self.modal_command.clear();
+        self.modal_focused = 0;
+    }
+
     pub fn fmt_tokens(&self) -> String {
         let n = self.token_count;
         if n < 1_000 {
@@ -586,20 +968,40 @@ impl AppState {
 
 // ── Terminal setup / teardown ────────────────────────────────────────────────
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
+fn encode_osc52(text: &str) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    format!("\x1b]52;c;{}\x07", encoded)
+}
+
+fn set_clipboard_osc52(text: &str) {
+    print!("{}", encode_osc52(text));
+    let _ = std::io::stdout().flush();
+}
+
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.to_string())) {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            // Fallback to OSC 52 (works in modern terminals: kitty, wezterm,
+            // alacritty, foot, iTerm2, Ghostty, tmux with passthrough)
+            set_clipboard_osc52(text);
+            Ok(())
+        }
+    }
+}
+
+fn setup_terminal(clear: bool) -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     enable_raw_mode()?;
-    let mut out = stdout();
-    execute!(out, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(out);
-    Ok(Terminal::new(backend)?)
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+    if clear {
+        terminal.clear()?;
+    }
+    Ok(terminal)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) {
+    let _ = terminal.clear();
     let _ = disable_raw_mode();
-    let _ = execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-    );
     let _ = terminal.show_cursor();
 }
 
@@ -610,16 +1012,12 @@ pub async fn run(screen: &str) -> Result<()> {
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(
-            stdout(),
-            LeaveAlternateScreen,
-        );
         default_panic(info);
     }));
 
     let (mut bun_rx, ipc_tx) = ipc::connect().await?;
     let mut state = AppState::default();
-    let mut terminal = setup_terminal()?;
+    let mut terminal = setup_terminal(true)?;
     // Wrapped in Option so we can drop it on Suspend (stops the crossterm
     // background stdin-polling thread, preventing races with Bun's raw-mode reads).
     let mut events: Option<EventStream> = Some(EventStream::new());
@@ -628,7 +1026,7 @@ pub async fn run(screen: &str) -> Result<()> {
     let _ = ipc_tx.try_send(TuiMessage::Ready);
 
     loop {
-        if events.is_some() {
+        if events.is_some() && !state.paused {
             terminal.draw(|frame| {
                 match screen {
                     "providers" => screens::providers::draw(frame, &state),
@@ -645,7 +1043,7 @@ pub async fn run(screen: &str) -> Result<()> {
             // Suspended — only wait for Resume (or other IPC)
             match bun_rx.recv().await {
                 Some(BunMessage::Resume) => {
-                    terminal = setup_terminal()?;
+                    terminal = setup_terminal(true)?;
                     events = Some(EventStream::new());
                 }
                 Some(BunMessage::Suspend) => {} // already suspended, ignore
@@ -655,16 +1053,9 @@ pub async fn run(screen: &str) -> Result<()> {
             continue;
         }
 
-        // Normal operation — events is Some
-        let mut ticker = interval(Duration::from_millis(1200));
-        
+        // Normal operation — events is Some (no ticker, redraw only on events/messages)
         tokio::select! {
             biased;
-
-            _ = ticker.tick() => {
-                state.cursor_visible = !state.cursor_visible;
-                state.animation_frame = state.animation_frame.wrapping_add(1);
-            }
 
             maybe_event = events.as_mut().unwrap().next() => {
                 match maybe_event {
@@ -692,8 +1083,150 @@ pub async fn run(screen: &str) -> Result<()> {
                 }
             }
         }
+
+        // Handle pause mode (Ctrl+M) — release terminal so user can select/copy text
+        if state.paused {
+            let _ = events.take(); // drop EventStream so stdin is free
+            let _ = disable_raw_mode();
+            let _ = terminal.show_cursor();
+            // Wait for Enter in blocking mode
+            let _ = tokio::task::spawn_blocking(|| {
+                let mut buf = String::new();
+                let _ = std::io::stdin().read_line(&mut buf);
+            }).await;
+            terminal = setup_terminal(false)?;
+            events = Some(EventStream::new());
+            state.paused = false;
+            state.status_msg = "Listo · [shift+tab] cambiar modo".to_string();
+        }
     }
 
     restore_terminal(&mut terminal);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn test_encode_osc52() {
+        assert_eq!(encode_osc52("hello"), "\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(encode_osc52(""), "\x1b]52;c;\x07");
+        assert_eq!(
+            encode_osc52("Rust TUI \n🦀"),
+            "\x1b]52;c;UnVzdCBUVUkgCvCfpoA=\x07"
+        );
+    }
+
+    #[test]
+    fn test_copy_mode_toggle_with_ctrl_k() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, _rx) = tokio::sync::mpsc::channel::<TuiMessage>(10);
+            let mut state = AppState::default();
+            state.history.push(HistoryEntry::plain(Role::User, "hola".into()));
+            state.history.push(HistoryEntry::plain(Role::Assistant, "adios".into()));
+
+            let key = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL);
+            state.handle_key(key, &tx);
+
+            assert!(state.copy_mode);
+            assert_eq!(state.copy_sel, 1); // last index
+        });
+    }
+
+    #[test]
+    fn test_copy_mode_navigation() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, _rx) = tokio::sync::mpsc::channel::<TuiMessage>(10);
+            let mut state = AppState::default();
+            state.history.push(HistoryEntry::plain(Role::User, "first".into()));
+            state.history.push(HistoryEntry::plain(Role::Assistant, "second".into()));
+            state.copy_mode = true;
+            state.copy_sel = 1;
+
+            // Up
+            state.handle_copy_mode_key(
+                KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+                &tx,
+            );
+            assert_eq!(state.copy_sel, 0);
+
+            // Up again (should saturate at 0)
+            state.handle_copy_mode_key(
+                KeyEvent::new(KeyCode::Up, KeyModifiers::empty()),
+                &tx,
+            );
+            assert_eq!(state.copy_sel, 0);
+
+            // Down
+            state.handle_copy_mode_key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+                &tx,
+            );
+            assert_eq!(state.copy_sel, 1);
+
+            // Down again (should stay at last index)
+            state.handle_copy_mode_key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+                &tx,
+            );
+            assert_eq!(state.copy_sel, 1);
+        });
+    }
+
+    #[test]
+    fn test_copy_mode_exit_with_esc() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, _rx) = tokio::sync::mpsc::channel::<TuiMessage>(10);
+            let mut state = AppState::default();
+            state.copy_mode = true;
+            state.copy_sel = 0;
+
+            state.handle_copy_mode_key(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+                &tx,
+            );
+
+            assert!(!state.copy_mode);
+        });
+    }
+
+    #[test]
+    fn test_copy_mode_copy_and_exit_with_enter() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, _rx) = tokio::sync::mpsc::channel::<TuiMessage>(10);
+            let mut state = AppState::default();
+            state.history.push(HistoryEntry::plain(Role::User, "copy me".into()));
+            state.copy_mode = true;
+            state.copy_sel = 0;
+
+            state.handle_copy_mode_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+                &tx,
+            );
+
+            assert!(!state.copy_mode);
+            assert!(state.clipboard_feedback.is_some());
+        });
+    }
+
+    #[test]
+    fn test_ctrl_c_in_normal_mode_exits() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, _rx) = tokio::sync::mpsc::channel::<TuiMessage>(10);
+            let mut state = AppState::default();
+
+            let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+            state.handle_key(key, &tx);
+
+            assert!(state.should_quit);
+        });
+    }
 }

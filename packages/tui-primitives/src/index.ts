@@ -6,7 +6,6 @@ export {
   hivePhaseActive,
   hiveNote,
   hiveSpinner,
-  hiveProgress,
   hiveText,
   hiveSelect,
   hiveConfirm,
@@ -21,8 +20,6 @@ export {
 export type { OptionLike } from "./theme.ts"
 
 export { C } from "./ansi.ts"
-
-export { fmtTokens } from "./utils/fmt-tokens.ts"
 
 export { BEE, BEE_FULL, BEE_COORDINATOR } from "./mascot.ts"
 

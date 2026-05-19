@@ -1,6 +1,6 @@
 /**
- * Filesystem Tools - 7 tools
- * 
+ * Filesystem Tools - 8 tools
+ *
  * @category filesystem
  */
 
@@ -12,6 +12,7 @@ import { fsDeleteTool } from "./fs-delete.ts";
 import { fsListTool } from "./fs-list.ts";
 import { fsGlobTool } from "./fs-glob.ts";
 import { fsExistsTool } from "./fs-exists.ts";
+import { searchInFilesTool } from "./search-in-files.ts";
 
 export function createTools(): Tool[] {
   return [
@@ -22,6 +23,7 @@ export function createTools(): Tool[] {
     fsListTool,
     fsGlobTool,
     fsExistsTool,
+    searchInFilesTool,
   ];
 }
 
@@ -32,3 +34,4 @@ export * from "./fs-delete.ts";
 export * from "./fs-list.ts";
 export * from "./fs-glob.ts";
 export * from "./fs-exists.ts";
+export * from "./search-in-files.ts";

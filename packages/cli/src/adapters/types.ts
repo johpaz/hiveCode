@@ -43,8 +43,6 @@ export interface GatewayConfig {
   uiPort?: number;
   /** WebSocket port for real-time connections */
   wsPort: number;
-  /** Code Bridge port for development tools */
-  codeBridgePort: number;
   /** Public URL for external access */
   publicUrl?: string;
   /** Whether to open browser on start */
@@ -170,7 +168,6 @@ export const gatewayConfigSchema = z.object({
   port: z.number().int().min(1).max(65535).default(16120),
   uiPort: z.number().int().min(1).max(65535).optional(),
   wsPort: z.number().int().min(1).max(65535).default(16120),
-  codeBridgePort: z.number().int().min(1).max(65535).default(18791),
   publicUrl: z.string().url().optional(),
   openBrowser: z.boolean().default(true),
   daemon: z.boolean().default(false),
@@ -207,7 +204,6 @@ export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
   host: "127.0.0.1",
   port: 16120,
   wsPort: 16120,
-  codeBridgePort: 18791,
   openBrowser: true,
   daemon: false,
 };
@@ -217,6 +213,6 @@ export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
  */
 export const PORTS = {
   GATEWAY: 16120,
-  CODE_BRIDGE: 18791,
+  UI: 16121,
   VITE_DEV: 5173,
 } as const;

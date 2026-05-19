@@ -3,7 +3,7 @@ import { logger } from "../utils/logger.ts";
 import * as path from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import { getHiveDir } from "../config/loader.ts";
-import { SCHEMA, PROJECTS_SCHEMA, CONTEXT_ENGINE_SCHEMA, MEETING_SCHEMA } from "./schema.ts";
+
 
 function getDbPath(): string {
     return path.join(getHiveDir(), "data", "hivecode.db");
@@ -29,7 +29,7 @@ export function _resetDb(): void {
 }
 
 
-export function initializeDatabase(extraSchemas?: string[]): Database {
+export function initializeDatabase(): Database {
     const hiveDir = getHiveDir();
     const dir = path.join(hiveDir, "data");
     if (!existsSync(dir)) {
@@ -37,11 +37,9 @@ export function initializeDatabase(extraSchemas?: string[]): Database {
     }
 
     const dbPath = getDbPath();
-    const dbFileExists = existsSync(dbPath);
-
     _db = new Database(dbPath, { create: true });
 
-    // ── Pragmas WAL y performance (SPEC §3.2) ──
+    // ── Pragmas WAL y performance ──
     try {
         _db.run(`PRAGMA journal_mode = WAL`);
         _db.run(`PRAGMA synchronous = NORMAL`);
@@ -50,200 +48,12 @@ export function initializeDatabase(extraSchemas?: string[]): Database {
         _db.run(`PRAGMA mmap_size = 268435456`);    // 256 MB
         _db.run(`PRAGMA foreign_keys = ON`);
         const jm = _db.query(`PRAGMA journal_mode`).get() as { journal_mode: string };
-        logger.info(`🗄️  SQLite initialized — journal_mode: ${jm?.journal_mode || "unknown"}, path: ${dbPath}`);
+        logger.info(`🗄️  SQLite initialized — mode: ${jm?.journal_mode || "unknown"}, path: ${dbPath}`);
     } catch (pragmaErr) {
-        logger.warn("⚠️  Failed to set SQLite pragmas:", { error: (pragmaErr as Error).message });
-    }
-
-    // ── Pre-schema migration: drop legacy cron tables before SCHEMA exec ──
-    // This must happen BEFORE SCHEMA runs, because CREATE TABLE IF NOT EXISTS
-    // will skip if the old table exists, leaving us with the wrong schema.
-    try {
-        const cronJobsCols = _db.query(`PRAGMA table_info(cron_jobs)`).all() as any[];
-        if (cronJobsCols.length > 0) {
-            const cronColNames = cronJobsCols.map((c: any) => c.name);
-            const needsMigration = cronColNames.includes("enabled")
-                || cronColNames.includes("user_id")
-                || !cronColNames.includes("status")
-                || !cronColNames.includes("task");
-
-            if (needsMigration) {
-                logger.info("🛠️  Dropping legacy cron_jobs table for schema rebuild...");
-                // Drop FK references first
-                try { _db.run(`DROP TRIGGER IF EXISTS update_cron_jobs_updated_at`); } catch { }
-                try { _db.run(`DROP TRIGGER IF EXISTS update_scheduled_tasks_updated_at`); } catch { }
-                try { _db.run(`DROP TABLE IF EXISTS task_runs`); } catch { }
-                _db.run(`DROP TABLE cron_jobs`);
-                logger.info("✅ Legacy cron_jobs table dropped — will be recreated by SCHEMA");
-            }
-        }
-
-        // Also drop scheduled_tasks if it exists (will be recreated with new name)
-        const stCheck = _db.query(`SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_tasks'`).all() as any[];
-        if (stCheck.length > 0) {
-            logger.info("🛠️  Dropping legacy scheduled_tasks table...");
-            try { _db.run(`DROP TRIGGER IF EXISTS update_scheduled_tasks_updated_at`); } catch { }
-            _db.run(`DROP TABLE scheduled_tasks`);
-            logger.info("✅ Legacy scheduled_tasks table dropped");
-        }
-
-        // Drop old indexes that reference legacy columns
-        try { _db.run(`DROP INDEX IF EXISTS idx_cron_jobs_user`); } catch { }
-        try { _db.run(`DROP INDEX IF EXISTS idx_cron_jobs_enabled`); } catch { }
-        try { _db.run(`DROP INDEX IF EXISTS idx_cron_jobs_next_run`); } catch { }
-        try { _db.run(`DROP INDEX IF EXISTS idx_scheduled_tasks_status`); } catch { }
-        try { _db.run(`DROP INDEX IF EXISTS idx_scheduled_tasks_type`); } catch { }
-        try { _db.run(`DROP INDEX IF EXISTS idx_scheduled_tasks_next_run`); } catch { }
-        try { _db.run(`DROP INDEX IF EXISTS idx_scheduled_tasks_agent`); } catch { }
-    } catch (preSchemaErr) {
-        logger.warn("⚠️  Pre-schema migration check failed:", { error: (preSchemaErr as Error).message });
-    }
-
-    _db.run(SCHEMA);
-    _db.run(PROJECTS_SCHEMA);
-    _db.run(CONTEXT_ENGINE_SCHEMA);
-    _db.run(MEETING_SCHEMA);
-
-    ensureSchemaSync();
-
-    // ── Extra schemas (e.g. Hive-Code tables) ──
-    if (extraSchemas && extraSchemas.length > 0) {
-        for (const schema of extraSchemas) {
-            try {
-                _db.run(schema);
-                logger.info("🗄️  Extra schema applied successfully");
-            } catch (schemaErr) {
-                logger.warn("⚠️  Failed to apply extra schema:", { error: (schemaErr as Error).message });
-            }
-        }
+        logger.warn("⚠️  Failed to set SQLite pragmas:", (pragmaErr as Error).message);
     }
 
     return _db;
-}
-
-function ensureColumnExists(tableName: string, columnName: string, columnDefinition: string): void {
-    if (!_db) return;
-    try {
-        const info = _db.query(`PRAGMA table_info(${tableName})`).all() as any[];
-        const exists = info.some((col: any) => col.name === columnName);
-
-        if (!exists) {
-            logger.info(`🛠️  Añadiendo columna faltante '${columnName}' a la tabla '${tableName}'`);
-            _db.run(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`);
-        }
-    } catch (err) {
-        logger.warn(`⚠️  No se pudo verificar/añadir la columna '${columnName}' en '${tableName}':`, { error: (err as Error).message });
-    }
-}
-
-function ensureSchemaSync(): void {
-    if (!_db) return;
-
-    // Sync users (auth columns)
-    ensureColumnExists("users", "email", "TEXT");
-    ensureColumnExists("users", "password_hash", "TEXT");
-
-    // Sync mcp_servers
-    ensureColumnExists("mcp_servers", "tools_count", "INTEGER DEFAULT 0");
-    ensureColumnExists("mcp_servers", "status", "TEXT NOT NULL DEFAULT 'disconnected'");
-    ensureColumnExists("mcp_servers", "env_encrypted", "TEXT");
-    ensureColumnExists("mcp_servers", "env_iv", "TEXT");
-    ensureColumnExists("mcp_servers", "headers_encrypted", "TEXT");
-    ensureColumnExists("mcp_servers", "headers_iv", "TEXT");
-
-    // Sync providers
-    ensureColumnExists("providers", "api_key_encrypted", "TEXT");
-    ensureColumnExists("providers", "api_key_iv", "TEXT");
-    ensureColumnExists("providers", "headers_encrypted", "TEXT");
-    ensureColumnExists("providers", "headers_iv", "TEXT");
-    ensureColumnExists("providers", "num_ctx", "INTEGER");
-    ensureColumnExists("providers", "num_gpu", "INTEGER DEFAULT -1");
-
-    // Sync agents (new Context Engine columns — safe no-ops if already present)
-    ensureColumnExists("agents", "headers_encrypted", "TEXT");
-    ensureColumnExists("agents", "headers_iv", "TEXT");
-    ensureColumnExists("agents", "system_prompt", "TEXT");
-    ensureColumnExists("agents", "role", "TEXT NOT NULL DEFAULT 'coordinator'");
-    ensureColumnExists("agents", "tools_json", "TEXT");
-    ensureColumnExists("agents", "skills_json", "TEXT");
-    ensureColumnExists("agents", "parent_id", "TEXT");
-    ensureColumnExists("agents", "max_iterations", "INTEGER NOT NULL DEFAULT 10");
-    ensureColumnExists("agents", "updated_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-    ensureColumnExists("agents", "workspace", "TEXT");
-
-    // Sync tasks (new Context Engine columns)
-    ensureColumnExists("tasks", "priority", "INTEGER NOT NULL DEFAULT 0");
-    ensureColumnExists("tasks", "depends_on", "TEXT");
-    ensureColumnExists("tasks", "error", "TEXT");
-    ensureColumnExists("tasks", "completed_at", "INTEGER");
-
-    // Sync tools (new columns)
-    ensureColumnExists("tools", "created_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-    ensureColumnExists("tools", "updated_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-
-    // Sync skills (new columns)
-    ensureColumnExists("skills", "created_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-    ensureColumnExists("skills", "updated_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-
-    // ── Cron Jobs: ensure triggers and columns are correct ──
-    // Triggers: clean up old references and recreate
-    try {
-        _db.run(`DROP TRIGGER IF EXISTS update_scheduled_tasks_updated_at`);
-        _db.run(`DROP TRIGGER IF EXISTS update_cron_jobs_updated_at`);
-        _db.run(`CREATE TRIGGER IF NOT EXISTS update_cron_jobs_updated_at
-            AFTER UPDATE ON cron_jobs
-            BEGIN
-                UPDATE cron_jobs SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = NEW.id;
-            END`);
-    } catch (triggerErr) {
-        logger.warn("⚠️  Failed to recreate trigger:", { error: (triggerErr as Error).message });
-    }
-
-    // Ensure new columns exist (for incremental upgrades)
-    ensureColumnExists("cron_jobs", "task", "TEXT NOT NULL DEFAULT ''");
-    ensureColumnExists("cron_jobs", "status", "TEXT NOT NULL DEFAULT 'active'");
-    ensureColumnExists("cron_jobs", "task_type", "TEXT NOT NULL DEFAULT 'recurring'");
-    ensureColumnExists("cron_jobs", "start_at", "TEXT");
-    ensureColumnExists("cron_jobs", "stop_at", "TEXT");
-    ensureColumnExists("cron_jobs", "dom_and_dow", "INTEGER NOT NULL DEFAULT 0");
-    ensureColumnExists("cron_jobs", "fire_at", "TEXT");
-    ensureColumnExists("cron_jobs", "protect", "INTEGER NOT NULL DEFAULT 1");
-    ensureColumnExists("cron_jobs", "interval_sec", "INTEGER");
-    ensureColumnExists("cron_jobs", "agent_id", "TEXT");
-    ensureColumnExists("cron_jobs", "completed_at", "TEXT");
-
-    // Context Engine tables — ensure created_at/updated_at columns exist
-    ensureColumnExists("conversations", "created_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-    ensureColumnExists("conversations", "updated_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-    ensureColumnExists("conversations", "content_multimodal", "TEXT");
-    ensureColumnExists("conversations", "reasoning_content", "TEXT"); // Kimi K2 thinking round-trip
-    ensureColumnExists("summaries", "created_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-    ensureColumnExists("summaries", "updated_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-    ensureColumnExists("scratchpad", "created_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-    ensureColumnExists("scratchpad", "updated_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-    ensureColumnExists("traces", "created_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-    ensureColumnExists("reflections", "created_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-    ensureColumnExists("playbook", "created_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-    ensureColumnExists("playbook", "updated_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-    ensureColumnExists("tool_cache", "created_at", "INTEGER NOT NULL DEFAULT (unixepoch())");
-
-    // hive_capabilities: create if not exists (applied via CONTEXT_ENGINE_SCHEMA IF NOT EXISTS)
-    // No column migrations needed — table is seeded fresh each startup via INSERT OR REPLACE
-
-    // Data migrations: fix known bad base_url values from old seeds
-    if (_db) {
-        // Sync channels — vision columns for multimodal support
-        ensureColumnExists("channels", "vision_enabled", "INTEGER NOT NULL DEFAULT 0");
-        ensureColumnExists("channels", "ocr_provider", "TEXT");
-        ensureColumnExists("channels", "vision_provider", "TEXT");
-        ensureColumnExists("channels", "vision_model_id", "TEXT");
-
-        _db.query(`UPDATE providers SET base_url = 'https://api.groq.com/openai/v1' WHERE id = 'groq' AND base_url = 'https://api.groq.com/v1'`).run();
-        _db.query(`UPDATE providers SET base_url = 'https://api.openai.com/v1' WHERE id = 'openai' AND base_url = 'https://api.openai.com'`).run();
-        // Fix Gemini base_url: the @google/genai SDK already knows the correct URL internally.
-        // Passing /v1beta as baseUrl causes it to double-append the path → 404.
-        _db.query(`UPDATE providers SET base_url = NULL WHERE id = 'gemini' AND base_url = 'https://generativelanguage.googleapis.com/v1beta'`).run();
-    }
 }
 
 

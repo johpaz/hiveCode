@@ -9,23 +9,44 @@
 import * as path from "node:path"
 import * as fs from "node:fs"
 import { logger, onLogEntry, removeLogListener, type LogEntry } from "@johpaz/hivecode-core/utils/logger"
-import { runProviderSetupWizard } from "@johpaz/hivecode-ui"
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+
+function isLikelyMarkdown(content: string): boolean {
+  if (content.includes("```")) return true
+  for (const l of content.split("\n").slice(0, 5)) {
+    if (l.startsWith("# ") || l.startsWith("## ") || l.startsWith("### ")) return true
+  }
+  if (content.includes("**")) {
+    const first = content.indexOf("**")
+    const last = content.lastIndexOf("**")
+    if (first !== -1 && last !== -1 && first !== last) return true
+  }
+  let bulletCount = 0
+  for (const l of content.split("\n").slice(0, 10)) {
+    if (l.startsWith("- ") || l.startsWith("* ")) bulletCount++
+  }
+  if (bulletCount >= 2) return true
+  const backtickCount = (content.match(/`/g) || []).length
+  if (backtickCount >= 2) return true
+  return false
+}
 
 // ── Locate the binary ─────────────────────────────────────────────────────────
 
 function tuiBinPath(): string {
-  const releaseBin = path.join(
-    import.meta.dir,
-    "../../../tui/target/release/hivecode-tui",
+  const candidates = [
+    // Running from dist/ bundle — binary sits next to hivecode.js
+    path.join(path.dirname(process.argv[1] || ""), "hivecode-tui"),
+    // Dev mode: source tree (packages/cli/src/commands-code/ → packages/tui/)
+    path.join(import.meta.dir, "../../../tui/target/release/hivecode-tui"),
+    path.join(import.meta.dir, "../../../tui/target/debug/hivecode-tui"),
+  ]
+
+  const existing = candidates.filter(p => fs.existsSync(p))
+  if (existing.length === 0) return ""
+
+  return existing.reduce((best, cur) =>
+    fs.statSync(cur).mtimeMs > fs.statSync(best).mtimeMs ? cur : best
   )
-  const debugBin = path.join(
-    import.meta.dir,
-    "../../../tui/target/debug/hivecode-tui",
-  )
-  if (fs.existsSync(releaseBin)) return releaseBin
-  if (fs.existsSync(debugBin))   return debugBin
-  return ""
 }
 
 export function tuiAvailable(): boolean {
@@ -34,9 +55,20 @@ export function tuiAvailable(): boolean {
 
 // ── IPC message types ─────────────────────────────────────────────────────────
 
+export interface ModalField {
+  key: string
+  label: string
+  placeholder: string
+  required: boolean
+  secret: boolean
+  field_type: "text" | "select"
+  options?: string[]
+  default_value?: string
+}
+
 export type BunMessage =
   | { type: "init";           mode: string; provider: string; model: string; project_name: string; project_path: string; session_id: string; version: string; task_count: number; token_count: number; agent_count: number }
-  | { type: "history_append"; role: string; content: string }
+  | { type: "history_append"; role: string; content: string; content_type?: string }
   | { type: "status";         running: boolean; msg: string }
   | { type: "state_update";   new_mode?: string; new_provider?: string; new_model?: string }
   | { type: "suggestions";    items: string[] }
@@ -44,7 +76,9 @@ export type BunMessage =
   | { type: "shell_output";   stdout: string; stderr: string; exit_code: number }
   | { type: "activity_update"; coordinator: string; phase: string; status: string }
   | { type: "log_entry"; timestamp: string; level: string; source: string; message: string }
-  | { type: "narrative_chunk"; coordinator: string; phase: string; content: string }
+  | { type: "narrative_chunk"; coordinator: string; phase: string; content: string; content_type?: string; stream_id?: string }
+  | { type: "show_config_modal"; command: string; title: string; fields: ModalField[] }
+  | { type: "show_info_modal"; title: string; content: string }
   | { type: "suspend" }
   | { type: "resume" }
 
@@ -54,6 +88,9 @@ type TuiMessage =
   | { type: "suggestions_request";  query: string }
   | { type: "mode_change";          mode: string }
   | { type: "shell_execute";        command: string }
+  | { type: "modal_submit";         command: string; values: Record<string, string> }
+  | { type: "modal_cancel";         command: string }
+  | { type: "info_modal_close" }
   | { type: "suspended" }
   | { type: "exit" }
 
@@ -74,8 +111,14 @@ export interface TuiCallbacks {
   getSuggestions: (query: string) => string[]
   onModeChange?:  (mode: string) => void
   onExit?:        () => void
-  /** Mutable ref populated by launchTui so callers can suspend/resume/send to the TUI */
-  tuiControl?:    { suspend: (() => Promise<void>) | null; resume: (() => void) | null; send: ((msg: BunMessage) => void) | null }
+  /** Mutable ref populated by launchTui so callers can suspend/resume/send/showModal */
+  tuiControl?:    {
+    suspend: (() => Promise<void>) | null
+    resume: (() => void) | null
+    send: ((msg: BunMessage) => void) | null
+    showConfigModal: ((command: string, title: string, fields: ModalField[]) => Promise<Record<string, string> | null>) | null
+    showInfoModal: ((title: string, content: string) => Promise<void>) | null
+  }
 }
 
 // ── Main launcher ─────────────────────────────────────────────────────────────
@@ -97,6 +140,8 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
   return new Promise((resolve, reject) => {
     // Resolves when Rust confirms it has released the TTY
     let suspendedResolve: (() => void) | null = null
+    let modalResolve: ((values: Record<string, string> | null) => void) | null = null
+    let infoModalResolve: (() => void) | null = null
     let tuiSocket: import("bun").Socket<undefined> | null = null
     let buf = ""
 
@@ -111,7 +156,7 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
         timestamp: entry.timestamp,
         level: entry.level,
         source: entry.source,
-        message: entry.message.slice(0, 500),
+        message: entry.message,
       })
     }
     onLogEntry(logCb)
@@ -121,10 +166,24 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
 
     const resumeTui = () => send({ type: "resume" })
 
+    const showConfigModal = (command: string, title: string, fields: ModalField[]): Promise<Record<string, string> | null> => {
+      console.error(`[tui-ipc] showConfigModal: ${command} - ${title}`)
+      send({ type: "show_config_modal", command, title, fields })
+      return new Promise((res) => { modalResolve = res })
+    }
+
+    const showInfoModal = (title: string, content: string): Promise<void> => {
+      console.error(`[tui-ipc] showInfoModal: ${title}`)
+      send({ type: "show_info_modal", title, content })
+      return new Promise((res) => { infoModalResolve = res })
+    }
+
     if (callbacks.tuiControl) {
       callbacks.tuiControl.suspend = suspendTui
       callbacks.tuiControl.resume = resumeTui
       callbacks.tuiControl.send = send
+      callbacks.tuiControl.showConfigModal = showConfigModal
+      callbacks.tuiControl.showInfoModal = showInfoModal
     }
 
     // ── IPC server (Bun native unix socket) ────────────────────────────────
@@ -150,6 +209,24 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
                 if (msg.type === "suspended") {
                   suspendedResolve?.()
                   suspendedResolve = null
+                  continue
+                }
+
+                if (msg.type === "modal_submit") {
+                  modalResolve?.(msg.values)
+                  modalResolve = null
+                  continue
+                }
+
+                if (msg.type === "modal_cancel") {
+                  modalResolve?.(null)
+                  modalResolve = null
+                  continue
+                }
+
+                if (msg.type === "info_modal_close") {
+                  infoModalResolve?.()
+                  infoModalResolve = null
                   continue
                 }
 
@@ -203,20 +280,13 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
   })
 }
 
-// ── Provider wizard detection ────────────────────────────────────────────────
-
-function isProviderWizardCommand(input: string): boolean {
-  // Matches: /provider, /prov, /provider add, /provider add <name>
-  return /^\/prov(ider)?(\s+(add(\s+\w+)?)?)?$/i.test(input.trim())
-}
-
 // ── Message router ────────────────────────────────────────────────────────────
 
 async function handleTuiMessage(
   msg: TuiMessage,
   send: (m: BunMessage) => void,
-  suspendTui: () => Promise<void>,
-  resumeTui: () => void,
+  _suspendTui: () => Promise<void>,
+  _resumeTui: () => void,
   callbacks: TuiCallbacks,
 ): Promise<void> {
   switch (msg.type) {
@@ -238,54 +308,17 @@ async function handleTuiMessage(
 
     case "suggestions_request": {
       const items = callbacks.getSuggestions(msg.query)
+      console.error(`[tui-ipc] suggestions_request query="${msg.query}" -> ${items.length} items`)
       send({ type: "suggestions", items })
       break
     }
 
     case "submit": {
       const input = msg.input
-
-      // Provider wizard — suspend TUI, run interactive wizard, resume
-      if (isProviderWizardCommand(input)) {
-        await suspendTui()
-        try {
-          const db = getDb()
-          const known = (db.query("SELECT id FROM providers ORDER BY id").all() as { id: string }[]).map(r => r.id)
-          const result = await runProviderSetupWizard(known, callbacks.version)
-
-          if (result) {
-            db.query(`
-              INSERT INTO providers (id, name, base_url, api_key_encrypted, enabled)
-              VALUES (?,?,?,?,1)
-              ON CONFLICT(id) DO UPDATE SET
-                base_url = excluded.base_url,
-                api_key_encrypted = excluded.api_key_encrypted,
-                enabled = 1
-            `).run(result.provider, result.provider, result.baseUrl || null, Buffer.from(result.apiKey).toString("base64"))
-            db.query("INSERT OR REPLACE INTO code_config (key,value) VALUES ('default_provider',?)").run(result.provider)
-            if (result.model)
-              db.query("INSERT OR REPLACE INTO code_config (key,value) VALUES (?,?)").run(`provider_model_${result.provider}`, result.model)
-
-            resumeTui()
-            send({ type: "state_update", new_provider: result.provider, new_model: result.model || undefined })
-            send({ type: "history_append", role: "assistant", content: `✓ Provider ${result.provider} configurado` })
-          } else {
-            resumeTui()
-            send({ type: "history_append", role: "system", content: "(×ᴗ×) Configuración cancelada" })
-          }
-        } catch (err) {
-          resumeTui()
-          send({ type: "history_append", role: "system", content: `(×ᴗ×) ${(err as Error).message}` })
-        }
-        send({ type: "status", running: false, msg: "Listo · [shift+tab] cambiar modo" })
-        break
-      }
-
-      // Normal command / task execution
       try {
         send({ type: "activity_update", coordinator: "agent", phase: input, status: "thinking" })
         const result = await callbacks.onSubmit(input)
-        send({ type: "history_append", role: "assistant", content: result.output })
+        send({ type: "history_append", role: "assistant", content: result.output, content_type: isLikelyMarkdown(result.output) ? "markdown" : "plain" })
         send({ type: "status",         running: false,    msg: "Listo · [shift+tab] cambiar modo" })
         send({ type: "activity_update", coordinator: "", phase: "", status: "idle" })
         if (result.newMode || result.newProvider || result.newModel) {

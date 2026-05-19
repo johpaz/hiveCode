@@ -9,7 +9,8 @@ import {
   isSlashCommand,
   executeSlashCommand,
 } from "./slash-commands";
-import { subscribeTask, subscribeSession, unsubscribeAll, subscribeDashboard, unsubscribeDashboard } from "./task-streaming.ts";
+import { subscribeTask, subscribeSession, unsubscribeAll, subscribeDashboard, unsubscribeDashboard, onBeeEvent } from "./task-streaming.ts";
+import type { TelegramChannel } from "../channels/telegram.ts";
 import { ChannelManager } from "../channels/manager";
 import { AgentService } from "../agent/service";
 import { AgentRunner } from "../agent/providers/index";
@@ -64,9 +65,20 @@ import { handleGetChatHistory, handleGetNotes } from "./routes/chat";
 import { handleChat as handlePostChat } from "./routes/chat";
 import { handleGetConfig } from "./routes/config";
 import { handleGetWorkspace, handleUpdateWorkspace, handleValidateWorkspace, handleCreateWorkspace, handleOpenWorkspace } from "./routes/workspace";
-import { getNarration, expandPath, addCorsHeaders, CORS_ORIGINS, redactConfig } from "./helpers";
+import { getNarration, expandPath, addCorsHeaders, buildCorsPreflight, isAllowedOrigin, redactConfig, applySecurityHeaders, checkRateLimit, ensureGatewayToken, validateGatewayToken, getGatewayToken } from "./helpers";
+import { ensureTlsCredentials, loadTlsCredentials, shouldRenewCert } from "../utils/tls";
+import {
+  handleAuthLogin,
+  handleAuthRegister,
+  handleAuthRefresh,
+  handleAuthLogout,
+  handleAuthStatus,
+  handleAuthRevokeAll,
+} from "./routes/auth";
 
 const logSubscribers = new Set<string>();
+const wsInactivityTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const WS_INACTIVITY_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 // Helpers imported from ./helpers/index.ts
 // - getNarration, TOOL_NARRATIONS
@@ -137,25 +149,11 @@ export async function startGateway(config: Config): Promise<void> {
 
   log.info(`Starting gateway on ${host}:${port}`);
 
-  // ── Auto-generate auth token if not provided ─────────────────────────────
-  // Priority: HIVE_AUTH_TOKEN env var > persisted token file > generate new
-  const tokenFile = path.join(getHiveDir(), ".auth_token");
-  if (!process.env.HIVE_AUTH_TOKEN) {
-    if (existsSync(tokenFile)) {
-      process.env.HIVE_AUTH_TOKEN = readFileSync(tokenFile, "utf-8").trim();
-      log.info("🔑 Auth token loaded from persistent storage");
-    } else {
-      const generated = crypto.randomUUID().replace(/-/g, "");
-      process.env.HIVE_AUTH_TOKEN = generated;
-      mkdirSync(path.dirname(tokenFile), { recursive: true });
-      writeFileSync(tokenFile, generated, { mode: 0o600 });
-      log.info("🔑 Auth token auto-generated and persisted");
-    }
-  } else {
-    // User provided token via env — persist it so it's visible in the file too
-    writeFileSync(tokenFile, process.env.HIVE_AUTH_TOKEN, { mode: 0o600 });
-    log.info("🔑 Auth token loaded from environment variable");
-  }
+  // ── Initialize gateway token via Bun.secrets ────────────────────────────
+  // TDD §38.4: 256-bit entropy, OS keystore, timingSafeEqual validation
+  // All authentication now uses Bun.secrets exclusively — no env var fallback
+  await ensureGatewayToken();
+  log.info("🔑 Gateway token initialized in Bun.secrets");
 
   // ── Inicialización modular con manejo de errores ──────────────────────────
   let agent: AgentService;
@@ -166,36 +164,40 @@ export async function startGateway(config: Config): Promise<void> {
   // ── Bind port immediately so parent health-check doesn't timeout ──────────
   // The full handler is loaded via server.reload() once initialization finishes
   const showErrors = process.env.NODE_ENV !== "production";
+  const isDev = process.env.HIVE_DEV === "true" || process.env.HIVE_DEV === "1";
+
+  // Load or generate TLS credentials (skip in dev mode for HMR compatibility)
+  const tlsCreds = !isDev ? await ensureTlsCredentials() : null;
+  if (tlsCreds) {
+    log.info("🔒 TLS enabled with self-signed ECDSA P-256 certificate");
+  }
 
   let server = Bun.serve<WebSocketData>({
     port,
     hostname: host,
+    tls: tlsCreds ? { cert: tlsCreds.cert, key: tlsCreds.key } : undefined,
     idleTimeout: 0,  // Disable 10s idle timeout — SSE streams can run for minutes
     development: showErrors,
     error(error) {
       log.error(`[gateway] Unhandled error: ${error.message}`);
-      return Response.json({
+      return applySecurityHeaders(Response.json({
         success: false,
         error: showErrors ? error.message : "Internal server error",
         ...(showErrors && { stack: error.stack }),
         requestId: crypto.randomUUID(),
-      }, { status: 500 });
+      }, { status: 500 }));
     },
     fetch: (req) => {
-      const origin = req.headers.get("Origin") ?? ""
-      const isLocalhost = origin.includes("localhost") || origin.includes("127.0.0.1") || origin.includes("0.0.0.0")
-      const corsHeaders = isLocalhost ? {
-        "Access-Control-Allow-Origin": origin,
-        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept, X-Requested-With",
-        "Access-Control-Allow-Credentials": "true",
-      } : {}
-      if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders })
-      const pathname = new URL(req.url).pathname
-      if (pathname === "/health" || pathname === "/health/") {
-        return Response.json({ status: "starting" }, { headers: corsHeaders })
+      const origin = req.headers.get("Origin") ?? "";
+      if (req.method === "OPTIONS") {
+        const preflight = buildCorsPreflight(req, port);
+        return preflight;
       }
-      return Response.json({ status: "starting" }, { status: 503, headers: corsHeaders })
+      const pathname = new URL(req.url).pathname;
+      if (pathname === "/health" || pathname === "/health/") {
+        return applySecurityHeaders(Response.json({ status: "starting" }));
+      }
+      return applySecurityHeaders(Response.json({ status: "starting" }, { status: 503 }));
     },
     websocket: { open() { }, message() { }, close() { } },
   });
@@ -246,13 +248,40 @@ export async function startGateway(config: Config): Promise<void> {
       await channelManager.send(channel, sessionId, { content, type: "progress" });
     });
 
+    // Bridge BeeEvents → Telegram notifications
+    if (!gatewaySetupMode) {
+      onBeeEvent(async (event) => {
+        const telegram = channelManager.getChannel("telegram") as TelegramChannel | undefined;
+        if (!telegram) return;
+        try {
+          if (event.type === "task_end") {
+            if (event.status === "completed") {
+              await telegram.sendNotification(`✅ *Tarea completada* (${Math.round(event.durationMs / 1000)}s)`);
+            } else {
+              await telegram.sendNotification(`❌ *Tarea ${event.status}*`);
+            }
+          } else if (event.type === "error") {
+            await telegram.sendNotification(`🚨 *Error*: ${event.message}`);
+          } else if (event.type === "phase_end") {
+            const { getExecutionMode } = await import("../agent/execution-mode");
+            const mode = getExecutionMode();
+            if (mode === "approval") {
+              await telegram.sendApprovalRequest({
+                taskId: event.taskId,
+                phaseId: event.coordinator,
+                phase: event.phase,
+                summary: `Coordinador: ${event.coordinator} · ${Math.round(event.durationMs / 1000)}s`,
+              });
+            }
+          }
+        } catch { /* non-critical */ }
+      });
+    }
+
     if (gatewaySetupMode) {
       log.info("🎉 Setup mode: gateway running — open http://localhost:" + port + "/setup to configure");
     } else {
       log.info("✅ Gateway initialization completed successfully");
-
-
-
     }
   } catch (error) {
     log.error(`❌ Gateway initialization failed: ${(error as Error).message}`);
@@ -421,18 +450,27 @@ export async function startGateway(config: Config): Promise<void> {
     }
   });
 
-  // ── Auth helper ──────────────────────────────────────────────────────────
-  const isDev = process.env.HIVE_DEV === "true" || process.env.HIVE_DEV === "1";
-  const authToken = process.env.HIVE_AUTH_TOKEN;
+  // ── WebSocket inactivity timeout helpers ────────────────────────────────
+  function setInactivityTimer(ws: any) {
+    const sessionId = ws.data.sessionId;
+    clearInactivityTimer(sessionId);
+    const timer = setTimeout(() => {
+      log.warn(`[WS] Session ${sessionId} closed due to inactivity timeout (2h)`);
+      try { ws.close(1000, "Inactivity timeout"); } catch { /* ignore */ }
+    }, WS_INACTIVITY_TIMEOUT_MS);
+    wsInactivityTimers.set(sessionId, timer);
+  }
 
-  function checkAuth(req: Request, url: URL): boolean {
-    // Si hay token configurado, respetarlo siempre (dev o prod)
-    if (authToken) {
-      const bearer = req.headers.get("authorization")?.replace("Bearer ", "");
-      if (bearer === authToken) return true;
-      // Fall through to individual endpoint checks
+  function clearInactivityTimer(sessionId: string) {
+    const timer = wsInactivityTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      wsInactivityTimers.delete(sessionId);
     }
+  }
 
+  // ── Auth helper ──────────────────────────────────────────────────────────
+  async function checkAuth(req: Request, url: URL): Promise<boolean> {
     // En setup mode (sin usuarios), bypass total — el wizard no tiene token aún
     if (gatewaySetupMode) return true;
 
@@ -444,39 +482,25 @@ export async function startGateway(config: Config): Promise<void> {
     if (url.pathname === "/api/auth/login") return true;
     if (url.pathname === "/api/auth/recover") return true;
 
-    // Users endpoint is public when no credentials configured (matches /api/auth/status behavior)
-    // This allows the UI to load user data when login is not configured yet
-    if (url.pathname === "/api/users" && req.method === "GET") {
-      try {
-        const user = getDb().query(
-          `SELECT email, password_hash FROM users LIMIT 1`
-        ).get() as { email: string | null; password_hash: string | null } | null;
-        const hasCredentials = !!(user?.email && user?.password_hash);
-        // Allow access if no credentials configured
-        if (!hasCredentials) return true;
-      } catch {
-        // If DB query fails, fall through to token check
-      }
+    // Health check is public
+    if (url.pathname === "/health" || url.pathname === "/health/") return true;
+
+    // Validate gateway token via X-Hive-Token or Authorization Bearer
+    const xHiveToken = req.headers.get("x-hive-token");
+    const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+    const provided = xHiveToken || bearer || url.searchParams.get("token");
+
+    if (provided) {
+      return await validateGatewayToken(provided);
     }
 
-    // Si no hay credenciales configuradas (modo open), bypass total — el UI
-    // no tiene token en localStorage porque nunca pasó por login.
-    // Coincide con el comportamiento de AuthGuard: status.hasCredentials === false → open.
-    try {
-      const user = getDb().query(
-        `SELECT email, password_hash FROM users LIMIT 1`
-      ).get() as { email: string | null; password_hash: string | null } | null;
-      const hasCredentials = !!(user?.email && user?.password_hash);
-      if (!hasCredentials) return true;
-    } catch {
-      // Si falla la consulta, caemos al chequeo de token
+    // In dev mode, allow requests without token from localhost origins
+    if (isDev) {
+      const origin = req.headers.get("origin") ?? "";
+      if (origin.includes("localhost") || origin.includes("127.0.0.1")) return true;
     }
 
-    const activeToken = process.env.HIVE_AUTH_TOKEN;
-    if (!activeToken) return true;
-    const authHeader = req.headers.get("authorization");
-    const provided = authHeader?.replace(/^Bearer\s+/i, "") ?? url.searchParams.get("token");
-    return provided === activeToken;
+    return false;
   }
 
   // Reload with full handler now that initialization is complete
@@ -499,37 +523,46 @@ export async function startGateway(config: Config): Promise<void> {
 
         // ── CORS preflight ────────────────────────────────────────────────────
         if (req.method === "OPTIONS") {
-          const origin = req.headers.get("Origin");
-          if (origin && (origin.includes("localhost") || origin.includes("127.0.0.1") || origin.includes("0.0.0.0") || CORS_ORIGINS.some(o => origin.includes(o.replace("http://", ""))))) {
-            return new Response(null, {
-              status: 204,
-              headers: {
-                "Access-Control-Allow-Origin": origin,
-                "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept, X-Requested-With",
-                "Access-Control-Allow-Credentials": "true",
-                "Access-Control-Max-Age": "86400",
-              },
-            });
-          }
-          return new Response(null, { status: 204 });
+          const preflight = buildCorsPreflight(req, port);
+          return applySecurityHeaders(preflight);
+        }
+
+        // ── Rate limiting ─────────────────────────────────────────────────────
+        const rateLimit = checkRateLimit(req);
+        if (!rateLimit.allowed) {
+          log.warn(`[RATE] ${req.method} ${url.pathname} blocked — retry after ${rateLimit.retryAfter}s`);
+          return applySecurityHeaders(
+            new Response(
+              JSON.stringify({ error: "rate_limit_exceeded", retryAfter: rateLimit.retryAfter }),
+              {
+                status: 429,
+                headers: {
+                  "Content-Type": "application/json",
+                  "Retry-After": String(rateLimit.retryAfter),
+                },
+              }
+            )
+          );
         }
 
         // ── WebSocket upgrade ────────────────────────────────────────────────
         if (url.pathname === "/ws" || url.pathname === "/ws/") {
-          // Auth: accept ?token=<authToken> (same as REST Bearer) as alternative to ?session=<userId>
           let sessionId = url.searchParams.get("session") || "";
 
-          if (!isDev && !gatewaySetupMode) {
-            const tokenParam = url.searchParams.get("token");
-            const activeToken = process.env.HIVE_AUTH_TOKEN;
-            if (tokenParam && activeToken && tokenParam === activeToken) {
-              // Token auth — resolve the real userId from DB
+          // Validate gateway token via query param (headers unavailable in WS upgrade)
+          const tokenParam = url.searchParams.get("token");
+          const tokenValid = await validateGatewayToken(tokenParam);
+
+          if (!gatewaySetupMode) {
+            if (!tokenValid) {
+              log.warn(`[WS] Unauthorized upgrade attempt — invalid or missing token`);
+              return applySecurityHeaders(new Response("Unauthorized", { status: 401 }));
+            }
+            // Token valid — resolve the real userId from DB
+            try {
               const user = getDb().query("SELECT id FROM users LIMIT 1").get() as { id: string } | undefined;
               if (user) sessionId = user.id;
-            } else if (tokenParam || activeToken) {
-              return new Response("Unauthorized", { status: 401 });
-            }
+            } catch { /* ignore */ }
           }
 
           if (!sessionId) {
@@ -542,7 +575,7 @@ export async function startGateway(config: Config): Promise<void> {
           if (upgraded) {
             return undefined as any; // Bun handles the response after upgrade
           }
-          return new Response("WebSocket upgrade failed", { status: 500 });
+          return applySecurityHeaders(new Response("WebSocket upgrade failed", { status: 500 }));
         }
 
         // ── WebSocket upgrades for terminal-only mode ────────────────────────
@@ -552,6 +585,18 @@ export async function startGateway(config: Config): Promise<void> {
         if (url.pathname === "/health" || url.pathname === "/health/") {
           const uptime = Math.floor((Date.now() - startTime) / 1000);
           return addCorsHeaders(Response.json({ status: "ok", version: _pkgVersion, uptime }), req);
+        }
+
+        // ── Dev Token Endpoint (localhost-only) ─────────────────────────────
+        // Allows the dashboard to obtain the gateway token securely when running locally.
+        if (url.pathname === "/api/auth/token" && req.method === "GET") {
+          const clientIP = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "127.0.0.1";
+          const origin = req.headers.get("origin");
+          if (clientIP === "127.0.0.1" && (!origin || origin.includes("localhost") || origin.includes("127.0.0.1"))) {
+            const token = await getGatewayToken();
+            return addCorsHeaders(Response.json({ token }), req, port);
+          }
+          return addCorsHeaders(new Response("Forbidden", { status: 403 }), req, port);
         }
 
         // ── Dashboard / UI ────────────────────────────────────────────────────
@@ -704,9 +749,10 @@ export async function startGateway(config: Config): Promise<void> {
         }
 
         // ── Rutas que requieren autenticación ────────────────────────────────
-        if (!checkAuth(req, url)) {
+        if (!(await checkAuth(req, url))) {
           log.warn(`[AUTH] Unauthorized request to ${url.pathname} from ${req.headers.get("origin")} `);
-          return addCorsHeaders(new Response("Unauthorized", { status: 401 }), req);
+          const unauthorized = addCorsHeaders(new Response("Unauthorized", { status: 401 }), req, port);
+          return unauthorized;
         }
 
         // ── Status ───────────────────────────────────────────────────────────
@@ -737,6 +783,26 @@ export async function startGateway(config: Config): Promise<void> {
         // ── System Stats ───────────────────────────────────────────────────
         if (url.pathname === "/api/system-stats" || url.pathname === "/api/system-stats/") {
           return await handleGetSystemStats(req, addCorsHeaders, startTime)
+        }
+
+        // ── Auth Endpoints ──────────────────────────────────────────────────
+        if (url.pathname === "/api/auth/login" && req.method === "POST") {
+          return await handleAuthLogin(req, addCorsHeaders);
+        }
+        if (url.pathname === "/api/auth/register" && req.method === "POST") {
+          return await handleAuthRegister(req, addCorsHeaders);
+        }
+        if (url.pathname === "/api/auth/refresh" && req.method === "POST") {
+          return await handleAuthRefresh(req, addCorsHeaders);
+        }
+        if (url.pathname === "/api/auth/logout" && req.method === "POST") {
+          return await handleAuthLogout(req, addCorsHeaders);
+        }
+        if (url.pathname === "/api/auth/status" && req.method === "GET") {
+          return await handleAuthStatus(req, addCorsHeaders);
+        }
+        if (url.pathname === "/api/auth/revoke-all-sessions" && req.method === "POST") {
+          return await handleAuthRevokeAll(req, addCorsHeaders);
         }
 
         // ── Version Check ──────────────────────────────────────────────────
@@ -1337,6 +1403,19 @@ export async function startGateway(config: Config): Promise<void> {
 
         log.debug(`WebSocket connected: ${data.sessionId} `);
 
+        // Start inactivity timeout (2h)
+        setInactivityTimer(ws);
+
+        // Start server-side ping every 30s
+        const pingInterval = setInterval(() => {
+          if (ws.readyState === 1) {
+            ws.send(JSON.stringify({ type: "ping", sessionId: data.sessionId }));
+          } else {
+            clearInterval(pingInterval);
+          }
+        }, 30_000);
+        (ws as any)._pingInterval = pingInterval;
+
         sessionManager.create(data.sessionId, ws);
 
         const channel = channelManager?.getChannel("webchat") as any;
@@ -1376,6 +1455,9 @@ export async function startGateway(config: Config): Promise<void> {
 
       async message(ws, message) {
         const data = ws.data;
+
+        // Reset inactivity timer on any message
+        setInactivityTimer(ws);
 
         let msg: InboundMessage;
         try {
@@ -1954,6 +2036,9 @@ export async function startGateway(config: Config): Promise<void> {
       close(ws) {
         const data = ws.data;
         log.debug(`WebSocket disconnected: ${data.sessionId}`);
+        clearInactivityTimer(data.sessionId);
+        const pingInterval = (ws as any)._pingInterval;
+        if (pingInterval) clearInterval(pingInterval);
         logSubscribers.delete(data.sessionId);
         unsubscribeDashboard(ws as any);
         unsubscribeAll(ws as any);

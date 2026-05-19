@@ -248,25 +248,7 @@ pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
     // ── Commands ──────────────────────────────────────────────────────────────
     lines.push(Line::from(vec![
         bar_span(),
-        Span::styled("  hivecode run    ", Style::default().fg(GREEN)),
-        Span::styled("\"<tarea>\"", Style::default().fg(DIM)),
-        Span::styled("   ejecutar en modo actual", Style::default().fg(DIM)),
-    ]));
-    lines.push(Line::from(vec![
-        bar_span(),
-        Span::styled("  hivecode plan   ", Style::default().fg(PURPLE)),
-        Span::styled("\"<tarea>\"", Style::default().fg(DIM)),
-        Span::styled("   solo diseñar, sin tocar", Style::default().fg(DIM)),
-    ]));
-    lines.push(Line::from(vec![
-        bar_span(),
-        Span::styled("  hivecode doctor ", Style::default().fg(BLUE)),
-        Span::styled("              diagnóstico del sistema", Style::default().fg(DIM)),
-    ]));
-    lines.push(Line::from(vec![
-        bar_span(),
-        Span::styled("  /provider · /mode · /help", Style::default().fg(DIM)),
-        Span::styled("            configurar", Style::default().fg(DIM)),
+        Span::styled("  Escribe / para ver todos los comandos disponibles", Style::default().fg(DIM)),
     ]));
 
     frame.render_widget(Paragraph::new(lines), area);

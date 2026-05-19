@@ -17,8 +17,13 @@ export class TelegramChannel extends BaseChannel {
   private log = logger.child("telegram");
   private chatIdCache: Map<string, number> = new Map();
   private messageIdCache: Map<string, number> = new Map();
-  // Deduplication: records recently processed message_ids to avoid double sends
   private recentlyProcessed: Map<number, number> = new Map();
+  /** Pending approval callbacks keyed by "taskId:phaseId" */
+  private approvalResolvers: Map<string, (decision: "approve" | "skip") => void> = new Map();
+  /** Active approval timeouts keyed by "taskId:phaseId" */
+  private approvalTimeouts: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  /** Chat ID to use for proactive notifications (set on first authorized message) */
+  private notifyChatId: number | null = null;
 
   constructor(accountId: string, config: TelegramConfig) {
     super();
@@ -45,6 +50,38 @@ export class TelegramChannel extends BaseChannel {
 
     this.bot.on("message", async (ctx: Context) => {
       await this.handleTelegramMessage(ctx);
+    });
+
+    // Inline keyboard callbacks
+    this.bot.on("callback_query:data", async (ctx) => {
+      const data = ctx.callbackQuery.data;
+      const db = getDb();
+      try {
+        if (data.startsWith("cancel_task:")) {
+          const taskId = data.slice("cancel_task:".length);
+          db.query("UPDATE code_tasks SET status = 'cancelled' WHERE id = ?").run(taskId);
+          await ctx.editMessageText(`❌ Tarea <code>${taskId.slice(0, 8)}</code> cancelada.`, { parse_mode: "HTML" });
+        } else if (data === "cancel_abort") {
+          await ctx.editMessageText("↩️ Cancelación abortada.");
+        } else if (data.startsWith("approve_phase:")) {
+          const [, taskId, phaseId] = data.split(":");
+          const resolver = this.approvalResolvers.get(`${taskId}:${phaseId}`);
+          if (resolver) { resolver("approve"); this.approvalResolvers.delete(`${taskId}:${phaseId}`); }
+          await ctx.editMessageText("✅ Fase aprobada — continuando...");
+        } else if (data.startsWith("skip_phase:")) {
+          const [, taskId, phaseId] = data.split(":");
+          const resolver = this.approvalResolvers.get(`${taskId}:${phaseId}`);
+          if (resolver) { resolver("skip"); this.approvalResolvers.delete(`${taskId}:${phaseId}`); }
+          await ctx.editMessageText("⏭ Fase saltada.");
+        } else if (data.startsWith("mode:")) {
+          const newMode = data.slice("mode:".length);
+          db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('active_mode', ?)").run(newMode);
+          await ctx.editMessageText(`🎛 Modo cambiado a: <code>${newMode}</code>`, { parse_mode: "HTML" });
+        }
+      } catch (e) {
+        this.log.error(`Callback error: ${(e as Error).message}`);
+      }
+      await ctx.answerCallbackQuery().catch(() => {});
     });
 
     // Note: edited_message intentionally NOT handled — editing a message
@@ -139,6 +176,211 @@ export class TelegramChannel extends BaseChannel {
       return;
     }
 
+    // ── Extended commands ───────────────────────────────────────────────────
+
+    if (text === "/status" || text?.startsWith("/status@")) {
+      try {
+        const db = getDb();
+        const config = db.query("SELECT value FROM code_config WHERE key = 'active_provider'").get() as any;
+        const mode = db.query("SELECT value FROM code_config WHERE key = 'active_mode'").get() as any;
+        const activeTask = db.query(
+          "SELECT id, description, status FROM code_tasks WHERE status IN ('running','planning') ORDER BY created_at DESC LIMIT 1"
+        ).get() as any;
+        const tokenSum = db.query(
+          "SELECT COALESCE(SUM(tokens_in + tokens_out), 0) as total FROM code_tasks WHERE created_at > datetime('now', '-24 hours')"
+        ).get() as any;
+        const cost = ((tokenSum?.total ?? 0) / 1_000_000 * 3).toFixed(4);
+
+        await ctx.reply(
+          `🐝 <b>Estado de hivecode</b>\n\n` +
+          `Provider: <code>${config?.value ?? "N/A"}</code>\n` +
+          `Modo: <code>${mode?.value ?? "auto"}</code>\n` +
+          `Costo hoy: <b>~$${cost}</b>\n` +
+          (activeTask ? `\n✅ Tarea activa:\n<code>${activeTask.description?.slice(0, 60)}</code>` : "\n💤 Sin tarea activa"),
+          { parse_mode: "HTML" }
+        );
+      } catch (e) {
+        await ctx.reply(`❌ Error: ${(e as Error).message}`);
+      }
+      return;
+    }
+
+    if (text === "/tareas" || text?.startsWith("/tareas@")) {
+      try {
+        const db = getDb();
+        const tasks = db.query(
+          "SELECT id, description, status, created_at FROM code_tasks ORDER BY created_at DESC LIMIT 5"
+        ).all() as any[];
+        if (tasks.length === 0) {
+          await ctx.reply("📋 Sin tareas registradas.");
+          return;
+        }
+        const lines = tasks.map(t =>
+          `${t.status === "completed" ? "✅" : t.status === "failed" ? "❌" : "🔄"} ` +
+          `<code>${t.id.slice(0, 8)}</code> — ${t.description?.slice(0, 50)}`
+        );
+        await ctx.reply(`📋 <b>Últimas tareas:</b>\n\n${lines.join("\n")}`, { parse_mode: "HTML" });
+      } catch (e) {
+        await ctx.reply(`❌ Error: ${(e as Error).message}`);
+      }
+      return;
+    }
+
+    if (text === "/narrativo" || text?.startsWith("/narrativo@")) {
+      try {
+        const db = getDb();
+        const entries = db.query(
+          "SELECT coordinator, phase, entry FROM code_narrative ORDER BY id DESC LIMIT 5"
+        ).all() as any[];
+        if (entries.length === 0) {
+          await ctx.reply("📖 Sin entradas en el narrativo.");
+          return;
+        }
+        const lines = entries.map(e =>
+          `<b>[${e.coordinator}/${e.phase}]</b>\n${e.entry?.slice(0, 120)}…`
+        );
+        await ctx.reply(`📖 <b>Narrativo reciente:</b>\n\n${lines.join("\n\n")}`, { parse_mode: "HTML" });
+      } catch (e) {
+        await ctx.reply(`❌ Error: ${(e as Error).message}`);
+      }
+      return;
+    }
+
+    if (text?.startsWith("/buscar ") || text?.startsWith("/buscar@")) {
+      const query = text.replace(/^\/buscar(@\S+)?\s*/, "").trim();
+      if (!query) { await ctx.reply("Uso: /buscar <términos>"); return; }
+      try {
+        const db = getDb();
+        const rows = db.query(
+          "SELECT n.coordinator, n.entry FROM code_narrative n JOIN code_narrative_fts fts ON n.id = fts.rowid WHERE code_narrative_fts MATCH ? LIMIT 3"
+        ).all(`${query}*`) as any[];
+        if (rows.length === 0) {
+          await ctx.reply(`🔍 Sin resultados para: <i>${query}</i>`, { parse_mode: "HTML" });
+          return;
+        }
+        const lines = rows.map(r => `<b>[${r.coordinator}]</b> ${r.entry?.slice(0, 100)}…`);
+        await ctx.reply(`🔍 <b>Resultados:</b>\n\n${lines.join("\n\n")}`, { parse_mode: "HTML" });
+      } catch (e) {
+        await ctx.reply(`❌ Error: ${(e as Error).message}`);
+      }
+      return;
+    }
+
+    if (text === "/costo" || text?.startsWith("/costo@")) {
+      try {
+        const db = getDb();
+        const row = db.query(
+          "SELECT COALESCE(SUM(tokens_in), 0) as ti, COALESCE(SUM(tokens_out), 0) as to_ FROM code_tasks WHERE created_at > datetime('now', '-24 hours')"
+        ).get() as any;
+        const total = (row?.ti ?? 0) + (row?.to_ ?? 0);
+        const usd = (total / 1_000_000 * 3).toFixed(4);
+        await ctx.reply(
+          `💰 <b>Costo (últimas 24h)</b>\n\nTokens: <code>${total.toLocaleString()}</code>\nUSD: <b>~$${usd}</b>`,
+          { parse_mode: "HTML" }
+        );
+      } catch (e) {
+        await ctx.reply(`❌ Error: ${(e as Error).message}`);
+      }
+      return;
+    }
+
+    if (text === "/modo" || text?.startsWith("/modo@")) {
+      try {
+        const db = getDb();
+        const cfg = db.query("SELECT value FROM code_config WHERE key = 'active_mode'").get() as any;
+        const current = cfg?.value ?? "auto";
+        await ctx.reply(
+          `🎛 <b>Modo actual:</b> <code>${current}</code>\n\nCambia con los botones:`,
+          {
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [[
+                { text: current === "plan" ? "✅ plan" : "plan", callback_data: "mode:plan" },
+                { text: current === "approval" ? "✅ approval" : "approval", callback_data: "mode:approval" },
+                { text: current === "auto" ? "✅ auto" : "auto", callback_data: "mode:auto" },
+              ]],
+            },
+          }
+        );
+      } catch (e) {
+        await ctx.reply(`❌ Error: ${(e as Error).message}`);
+      }
+      return;
+    }
+
+    if (text === "/pausa" || text?.startsWith("/pausa@")) {
+      try {
+        const db = getDb();
+        const task = db.query(
+          "SELECT id FROM code_tasks WHERE status = 'running' ORDER BY created_at DESC LIMIT 1"
+        ).get() as any;
+        if (!task) { await ctx.reply("💤 Sin tarea activa para pausar."); return; }
+        db.query("UPDATE code_tasks SET status = 'paused' WHERE id = ?").run(task.id);
+        await ctx.reply(`⏸ Tarea <code>${task.id.slice(0, 8)}</code> pausada.`, { parse_mode: "HTML" });
+      } catch (e) {
+        await ctx.reply(`❌ Error: ${(e as Error).message}`);
+      }
+      return;
+    }
+
+    if (text === "/reanudar" || text?.startsWith("/reanudar@")) {
+      try {
+        const db = getDb();
+        const task = db.query(
+          "SELECT id FROM code_tasks WHERE status = 'paused' ORDER BY created_at DESC LIMIT 1"
+        ).get() as any;
+        if (!task) { await ctx.reply("💤 Sin tarea pausada para reanudar."); return; }
+        db.query("UPDATE code_tasks SET status = 'running' WHERE id = ?").run(task.id);
+        await ctx.reply(`▶️ Tarea <code>${task.id.slice(0, 8)}</code> reanudada.`, { parse_mode: "HTML" });
+      } catch (e) {
+        await ctx.reply(`❌ Error: ${(e as Error).message}`);
+      }
+      return;
+    }
+
+    if (text === "/cancelar" || text?.startsWith("/cancelar@")) {
+      try {
+        const db = getDb();
+        const task = db.query(
+          "SELECT id, description FROM code_tasks WHERE status IN ('running','planning') ORDER BY created_at DESC LIMIT 1"
+        ).get() as any;
+        if (!task) { await ctx.reply("💤 Sin tarea activa para cancelar."); return; }
+        await ctx.reply(
+          `⚠️ ¿Cancelar tarea <code>${task.id.slice(0, 8)}</code>?\n<i>${task.description?.slice(0, 60)}</i>`,
+          {
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [[
+                { text: "❌ Sí, cancelar", callback_data: `cancel_task:${task.id}` },
+                { text: "⬅️ No", callback_data: "cancel_abort" },
+              ]],
+            },
+          }
+        );
+      } catch (e) {
+        await ctx.reply(`❌ Error: ${(e as Error).message}`);
+      }
+      return;
+    }
+
+    if (text === "/doctor" || text?.startsWith("/doctor@")) {
+      try {
+        const db = getDb();
+        const providers = db.query("SELECT name, status FROM providers LIMIT 3").all() as any[];
+        const tasks = db.query("SELECT COUNT(*) as n FROM code_tasks WHERE status = 'running'").get() as any;
+        const lines = [
+          `🩺 <b>Doctor hivecode</b>\n`,
+          `DB: ✅ conectada`,
+          `Providers: ${providers.length > 0 ? providers.map(p => `${p.name} (${p.status})`).join(", ") : "ninguno configurado"}`,
+          `Tareas activas: ${tasks?.n ?? 0}`,
+        ];
+        await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+      } catch (e) {
+        await ctx.reply(`❌ Error: ${(e as Error).message}`);
+      }
+      return;
+    }
+
     if (!isGroup && !this.isUserAllowed(chatId)) {
       this.log.debug(`Message from unauthorized user: ${chatId}`);
       const rejectMsg = this.config.dmPolicy === "allowlist"
@@ -157,6 +399,11 @@ export class TelegramChannel extends BaseChannel {
 
     if (isGroup && !(this.config.groups ?? false)) {
       return;
+    }
+
+    // Track chat for proactive notifications (first authorized chat wins)
+    if (!this.notifyChatId) {
+      this.notifyChatId = message.chat.id;
     }
 
   let content = text;
@@ -289,15 +536,82 @@ export class TelegramChannel extends BaseChannel {
   }
 
   private getHelpMessage(_userId: string): string {
-    return `📚 <b>Comandos disponibles:</b>
+    return `📚 <b>Comandos de hivecode:</b>
 
-<code>/myid</code> - Muestra tu Telegram ID
-<code>/start</code> - Iniciar conversación
-<code>/help</code> - Mostrar esta ayuda
-<code>/stop</code> - Detener tarea actual
-<code>/new</code> - Reiniciar sesión
+<b>Estado</b>
+<code>/status</code>     — Estado del sistema (provider, modo, costo)
+<code>/tareas</code>     — Últimas 5 tareas
+<code>/narrativo</code>  — Últimas 5 entradas del narrativo
+<code>/buscar &lt;q&gt;</code> — Buscar en el narrativo
+<code>/costo</code>      — Costo acumulado del día
+<code>/doctor</code>     — Diagnóstico del sistema
 
-💡 <i>Envía un mensaje para comenzar.</i>`;
+<b>Control</b>
+<code>/modo</code>       — Ver y cambiar modo (plan/approval/auto)
+<code>/pausa</code>      — Pausar tarea activa
+<code>/reanudar</code>   — Reanudar tarea pausada
+<code>/cancelar</code>   — Cancelar tarea activa
+
+<b>Sistema</b>
+<code>/myid</code>       — Tu Telegram ID
+<code>/start</code>      — Iniciar conversación
+<code>/help</code>       — Esta ayuda
+<code>/stop</code>       — Detener bot
+<code>/new</code>        — Reiniciar sesión
+
+💡 <i>Envía texto libre para lanzar una tarea nueva.</i>`;
+  }
+
+  /** Proactively send a text notification to the last authorized chat */
+  async sendNotification(text: string): Promise<void> {
+    if (!this.bot || !this.notifyChatId) return;
+    try {
+      await this.bot.api.sendMessage(this.notifyChatId, text, { parse_mode: "HTML" });
+    } catch (e) {
+      this.log.warn(`sendNotification failed: ${(e as Error).message}`);
+    }
+  }
+
+  /** Send approval request for a completed phase and wait for user response (30 min timeout) */
+  async sendApprovalRequest(opts: {
+    taskId: string;
+    phaseId: string;
+    phase: string;
+    summary: string;
+  }): Promise<"approve" | "skip" | "timeout"> {
+    if (!this.bot || !this.notifyChatId) return "approve"; // no bot → auto-approve
+    const key = `${opts.taskId}:${opts.phaseId}`;
+
+    try {
+      await this.bot.api.sendMessage(
+        this.notifyChatId,
+        `📋 <b>Fase completada: ${opts.phase}</b>\n\n${opts.summary.slice(0, 600)}`,
+        {
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "✅ Aprobar", callback_data: `approve_phase:${opts.taskId}:${opts.phaseId}` },
+              { text: "⏭ Saltar", callback_data: `skip_phase:${opts.taskId}:${opts.phaseId}` },
+            ], [
+              { text: "❌ Cancelar tarea", callback_data: `cancel_task:${opts.taskId}` },
+            ]],
+          },
+        }
+      );
+    } catch (e) {
+      this.log.warn(`sendApprovalRequest failed: ${(e as Error).message}`);
+      return "approve";
+    }
+
+    return new Promise<"approve" | "skip" | "timeout">((resolve) => {
+      this.approvalResolvers.set(key, resolve as any);
+      const timeout = setTimeout(() => {
+        this.approvalResolvers.delete(key);
+        this.approvalTimeouts.delete(key);
+        resolve("timeout");
+      }, 30 * 60 * 1000);
+      this.approvalTimeouts.set(key, timeout);
+    });
   }
 
   async stop(): Promise<void> {

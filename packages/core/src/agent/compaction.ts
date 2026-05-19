@@ -110,10 +110,17 @@ export async function compactThread(
     "SELECT provider_id, model_id FROM agents WHERE role = 'coordinator' LIMIT 1"
   ).get()
 
-  const providerCfg = await resolveProviderConfig(
-    coordinator?.provider_id || "openai",
-    coordinator?.model_id || "gpt-4o-mini"
-  )
+  let provId = coordinator?.provider_id
+  let modId = coordinator?.model_id
+  if (!provId || !modId) {
+    const cfgRow = db.query("SELECT value FROM code_config WHERE key = 'default_provider'").get() as any
+    const fallbackProvider = cfgRow?.value || "gemini"
+    const modelKey = `provider_model_${fallbackProvider}`
+    const modelRow = db.query("SELECT value FROM code_config WHERE key = ?").get(modelKey) as any
+    provId = provId || fallbackProvider
+    modId = modId || modelRow?.value || "gemini-2.5-flash"
+  }
+  const providerCfg = await resolveProviderConfig(provId, modId)
 
   const summaryResponse = await callLLM({
     ...providerCfg,

@@ -24,6 +24,7 @@ export * from "./storage/sqlite.ts";
 export * from "./storage/schema.ts";
 export * from "./storage/seed.ts";
 export * from "./storage/crypto.ts";
+export * from "./storage/bootstrapper.ts";
 
 // Tools (main index)
 export { createAllTools, createToolsByCategory } from "./tools/index.ts";

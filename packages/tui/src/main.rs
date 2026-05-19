@@ -2,6 +2,7 @@ use color_eyre::eyre::Result;
 
 mod app;
 mod ipc;
+mod markdown;
 mod screens;
 mod widgets;
 

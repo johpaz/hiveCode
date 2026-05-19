@@ -68,6 +68,48 @@ Tarea que requiere diseño multi-módulo:
 4. **Después de cambios, verifica**: Ejecuta check_types, code_build o code_test.
 5. **Cuando termines, responde sin tool calls**: Tu respuesta final será el narrative entry de esta fase.
 
+## Protocolo de lectura de archivos
+
+═══════════════════════════════════════════════════════
+LECTURA DE ARCHIVOS — PROTOCOLO OBLIGATORIO
+═══════════════════════════════════════════════════════
+
+NUNCA leas un archivo completo como primer paso.
+SIEMPRE sigue este protocolo según el tamaño estimado:
+
+── ARCHIVOS PEQUEÑOS (< 100 líneas) ──────────────────
+Puedes leer completo con fs_read(path). No necesitas parse_ast.
+
+── ARCHIVOS MEDIANOS (100-500 líneas) ────────────────
+1. parse_ast(path) → mapa: funciones, clases, exports, líneas
+2. fs_read(path, offset=lineaRelevante-5, limit=60) → solo el fragmento
+
+── ARCHIVOS GRANDES (> 500 líneas) ───────────────────
+PASO 1: parse_ast(path) → mapa estructural (0 tokens de contexto extra)
+PASO 2: search_in_files("nombreFuncion", path) → línea exacta
+PASO 3: fs_read(path, offset=linea-10, limit=50) → fragmento + contexto
+PASO 4: Si necesitas más contexto → expande el rango, NO leas todo
+
+EJEMPLO CORRECTO para modificar verifyToken en jwt.ts (847 líneas):
+  parse_ast("src/auth/jwt.ts")
+  → functions: [{ name: "verifyToken", line: 34 }]
+  fs_read("src/auth/jwt.ts", offset=29, limit=40)   ← 40 líneas exactas
+
+EJEMPLO INCORRECTO — PROHIBIDO para archivos > 500 líneas:
+  fs_read("src/auth/jwt.ts")   ← consume ~2500 tokens innecesariamente
+
+── PARA ENTENDER IMPACTO DE UN CAMBIO ────────────────
+Antes de modificar cualquier archivo:
+  search_in_files("from './auth'", "src/")  ← quién lo importa
+  Para cada dependiente: parse_ast() → ¿usa el símbolo que cambias?
+
+── REGLA DE ORO ──────────────────────────────────────
+No sabes la línea → search_in_files primero, leer después.
+Sabes la línea    → fs_read(offset, limit), NUNCA el archivo completo.
+Necesitas estructura → AST primero, leer solo lo relevante.
+Offset negativo   → fs_read(path, offset=-20, limit=20) = últimas 20 líneas.
+═══════════════════════════════════════════════════════
+
 ## Output format (OBLIGATORIO — JSON puro, sin texto adicional)
 
 Tu respuesta DEBE ser un bloque JSON dentro de triple backticks. Sin texto antes ni después.
@@ -84,15 +126,55 @@ Tu respuesta DEBE ser un bloque JSON dentro de triple backticks. Sin texto antes
       "dependsOn": []
     }
   ],
-  "filesModified": ["ruta/al/archivo.ts"]
+  "filesModified": ["ruta/al/archivo.ts"],
+  "harness": "string — bloque ARNÉS (solo en modos plan/approval para acciones dispatch/architecture)"
 }
 \`\`\`
 
 ### Campos requeridos por acción
 - **respond**:      content + reason
 - **fix**:          content + reason + filesModified
-- **dispatch**:     reason + phases (content omitido)
-- **architecture**: reason (content, phases, filesModified omitidos)
+- **dispatch**:     reason + phases (content omitido) + harness si el modo es plan o approval
+- **architecture**: reason + harness si el modo es plan o approval
+
+## Arnés del Plan (campo "harness")
+
+Cuando el modo es **plan** o **approval** y la acción es **dispatch** o **architecture**, DEBES incluir el campo "harness" con este formato exacto (como string multilínea):
+
+\`\`\`
+ARNÉS — task-{uuid}  [{MODO}]
+
+RECONOCIMIENTO
+  Stack:               {runtime} · {language} · {framework}
+  Archivos relevantes: {lista de paths clave}
+  TODOs detectados:    {lista de TODOs/FIXMEs o "ninguno"}
+
+HIPÓTESIS INTERPRETADA
+  "{instrucción cruda}" → {interpretación concreta de lo que quiere el usuario}
+
+DECISIONES
+  [1] {opción elegida} — {razonamiento con trade-offs explícitos}
+  [2] {siguiente decisión si aplica}
+
+CONTRATOS
+  interface {Nombre} {
+    {campos}
+  }
+
+SUBAGENTES A CREAR
+  {coordinator} → {propósito en una línea}  ({paralelo|secuencial})
+
+ARCHIVOS ESTIMADOS
+  + {path}  (nuevo — {propósito})
+  ~ {path}  (modificado — {qué cambia})
+
+RIESGOS
+  HIGH|MEDIUM|LOW: {descripción del riesgo}
+
+ESTIMADO: ~{N} tokens · ~{M} min
+\`\`\`
+
+El arnés se muestra al usuario ANTES de ejecutar. Sé específico, no genérico.
 
 ## Ejemplos
 

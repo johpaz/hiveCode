@@ -9,6 +9,7 @@
 import { loadConfig, startGateway, logger, getHiveDir, initializeDatabase } from "@johpaz/hivecode-core";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, openSync } from "node:fs";
 import * as path from "node:path";
+import { embeddedUI } from "../ui-bundle.generated";
 
 // Import adapter system
 import {
@@ -47,7 +48,67 @@ export function resetAdapter(): void {
   _adapter = null;
 }
 
-// Hive-Code is terminal-only — no UI server
+/**
+ * Start UI server — serves hive-ui from embedded bundle (binary) or dist/ui (js bundle).
+ * Injects the gateway URL so the React app connects to the right API.
+ */
+function startUIServer(gatewayPort: number, uiPort: number): void {
+  const useEmbedded = embeddedUI.size > 0
+
+  // Resolve UI directory: env override → dist/ui → no UI
+  let uiDir: string | null = null
+  if (!useEmbedded) {
+    const candidates = [
+      process.env.HIVE_UI_DIR,                                         // explicit override (dev mode)
+      path.join(path.dirname(process.argv[1] || ""), "ui"),            // dist/ui (bundle)
+    ].filter(Boolean) as string[]
+
+    for (const c of candidates) {
+      if (existsSync(c)) { uiDir = c; break }
+    }
+  }
+
+  if (!useEmbedded && !uiDir) return  // no UI assets available
+
+  const configScript = `<script>window.__HIVECODE_CONFIG__={"apiUrl":"http://localhost:${gatewayPort}","wsUrl":"ws://localhost:${gatewayPort}"}</script>`
+
+  Bun.serve({
+    hostname: "0.0.0.0",
+    port: uiPort,
+    async fetch(req) {
+      const url = new URL(req.url)
+      let subPath = url.pathname === "/" ? "/index.html" : url.pathname
+      if (!path.extname(subPath)) subPath = "/index.html"
+
+      if (useEmbedded) {
+        const entry = embeddedUI.get(subPath) ?? embeddedUI.get("/index.html")!
+        if (subPath === "/index.html" || !embeddedUI.has(subPath)) {
+          const html = entry.data.toString("utf8").replace("</head>", `${configScript}</head>`)
+          return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } })
+        }
+        return new Response(entry.data as unknown as Uint8Array, { headers: { "Content-Type": entry.mime } })
+      }
+
+      const filePath = path.join(uiDir!, subPath)
+      const file = Bun.file(filePath)
+      if (!(await file.exists())) {
+        const index = Bun.file(path.join(uiDir!, "index.html"))
+        if (await index.exists()) {
+          const html = (await index.text()).replace("</head>", `${configScript}</head>`)
+          return new Response(html, { headers: { "Content-Type": "text/html" } })
+        }
+        return new Response("Not found", { status: 404 })
+      }
+      if (subPath === "/index.html") {
+        const html = (await file.text()).replace("</head>", `${configScript}</head>`)
+        return new Response(html, { headers: { "Content-Type": "text/html" } })
+      }
+      return new Response(file)
+    },
+  })
+
+  console.log(`   UI:          http://localhost:${uiPort}`)
+}
 
 /**
  * Cleanup child processes on exit
@@ -297,14 +358,14 @@ async function handleDevMode(
 
   console.log("✅ Gateway listo\n");
 
+  startUIServer(gatewayConfig.port, PORTS.UI);
+
   console.log(`
 ╔════════════════════════════════════════╗
 ║  🐝  Hive-Code — Modo Desarrollo       ║
 ╠════════════════════════════════════════╣
 ║  API:       http://127.0.0.1:${gatewayConfig.port.toString().padEnd(5)}║
 ║  WebSocket: ws://127.0.0.1:${gatewayConfig.port.toString().padEnd(5)}ws ║
-╠════════════════════════════════════════╣
-║  Terminal-only — no UI, no browser     ║
 ╚════════════════════════════════════════╝
 `);
 
@@ -367,14 +428,14 @@ async function handleProductionMode(
 
   spawnGatewayProd();
 
+  startUIServer(gatewayConfig.port, PORTS.UI);
+
   console.log(`
 ╔════════════════════════════════════════╗
 ║  🐝  Hive-Code — Modo Producción       ║
 ╠════════════════════════════════════════╣
 ║  API:       http://127.0.0.1:${gatewayConfig.port.toString().padEnd(5)}║
 ║  WebSocket: ws://127.0.0.1:${gatewayConfig.port.toString().padEnd(5)}ws ║
-╠════════════════════════════════════════╣
-║  Terminal-only — no UI, no browser     ║
 ╚════════════════════════════════════════╝
 `);
 }

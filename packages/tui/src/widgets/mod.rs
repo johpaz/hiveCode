@@ -1,6 +1,8 @@
 pub mod command_popup;
+pub mod config_modal;
 pub mod header;
 pub mod history;
+pub mod info_modal;
 pub mod input;
 pub mod log_panel;
 pub mod mascot;

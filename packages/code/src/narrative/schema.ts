@@ -226,4 +226,17 @@ CREATE TABLE IF NOT EXISTS code_graph (
 );
 CREATE INDEX IF NOT EXISTS idx_code_graph_session ON code_graph(session_id);
 CREATE INDEX IF NOT EXISTS idx_code_graph_file ON code_graph(file_path);
+
+-- Recovery points: per-phase checkpoints to resume interrupted tasks
+CREATE TABLE IF NOT EXISTS code_recovery_points (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id           TEXT NOT NULL REFERENCES code_tasks(id),
+  phase_id          INTEGER REFERENCES code_task_phases(id),
+  git_ref           TEXT,              -- commit hash at checkpoint time
+  completed_phases  TEXT DEFAULT '[]', -- JSON array of completed phase IDs
+  pending_phases    TEXT DEFAULT '[]', -- JSON array of remaining phase IDs
+  last_narrative_id INTEGER,           -- rowid of last narrative entry
+  created_at        TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_recovery_task ON code_recovery_points(task_id);
 `;

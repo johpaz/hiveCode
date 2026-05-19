@@ -7,7 +7,7 @@
 import {
   hiveIntro, hiveOutro, hiveNote, isCancel,
   runProviderSetupWizard,
-} from "@johpaz/hivecode-ui"
+} from "@johpaz/hivecode-tui-primitives"
 
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 

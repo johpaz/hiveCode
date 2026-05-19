@@ -1,10 +1,11 @@
 /**
  * Secret management for workers.
  *
- * Reads API keys from Bun.secrets (OS keystore) first,
- * falls back to Bun.env with a loud warning.
- *
+ * Reads API keys exclusively from Bun.secrets (OS keystore).
  * Distributes secrets to workers via setEnvironmentData + postMessage fallback.
+ *
+ * No env var fallbacks — all secrets must be stored via:
+ *   bunx @johpaz/hivecode secret set <name>
  */
 
 const logPrefix = "[secrets]"
@@ -46,7 +47,7 @@ function listBunSecrets(): string[] {
   return []
 }
 
-const PROVIDER_ENV_KEYS = [
+const PROVIDER_SECRET_NAMES = [
   "ANTHROPIC_API_KEY",
   "OPENAI_API_KEY",
   "GEMINI_API_KEY",
@@ -63,49 +64,45 @@ const PROVIDER_ENV_KEYS = [
 ]
 
 /**
- * Load all secrets from Bun.secrets and env vars.
- * Bun.secrets takes precedence.
+ * Load all secrets from Bun.secrets exclusively.
+ * Returns a warning list of any secrets that could not be found.
  */
 export function loadSecrets(): Record<string, string> {
   const secrets: Record<string, string> = {}
-  let bunCount = 0
-  let envCount = 0
+  let found = 0
+  const missing: string[] = []
 
-  // 1. Try Bun.secrets (OS keystore) — preferred
-  for (const keyName of listBunSecrets()) {
-    const value = readBunSecret(keyName)
+  for (const name of listBunSecrets()) {
+    const value = readBunSecret(name)
     if (value) {
-      secrets[keyName] = value
-      bunCount++
+      secrets[name] = value
+      found++
     }
   }
 
-  // 2. Fallback to env vars for known provider keys
-  for (const envKey of PROVIDER_ENV_KEYS) {
-    if (secrets[envKey]) continue // already from Bun.secrets
-    const envValue = process.env[envKey]
-    if (envValue) {
-      secrets[envKey] = envValue
-      envCount++
+  // Check for expected provider keys
+  for (const name of PROVIDER_SECRET_NAMES) {
+    if (!secrets[name]) {
+      missing.push(name)
     }
   }
 
-  // 3. HIVE_COORDINATOR_PROVIDER / MODEL
-  const coordinatorProvider =
-    readBunSecret("HIVE_COORDINATOR_PROVIDER") || process.env.HIVE_COORDINATOR_PROVIDER || "anthropic"
-  const coordinatorModel =
-    readBunSecret("HIVE_COORDINATOR_MODEL") || process.env.HIVE_COORDINATOR_MODEL || "claude-sonnet-4-6"
+  // Also load coordinator config from Bun.secrets
+  const coordinatorProvider = readBunSecret("HIVE_COORDINATOR_PROVIDER") || "anthropic"
+  const coordinatorModel = readBunSecret("HIVE_COORDINATOR_MODEL") || "claude-sonnet-4-6"
+  secrets["HIVE_COORDINATOR_PROVIDER"] = coordinatorProvider
+  secrets["HIVE_COORDINATOR_MODEL"] = coordinatorModel
 
-  // Log summary (never log values)
-  if (bunCount > 0) {
-    console.info(`${logPrefix} ✅ Loaded ${bunCount} key(s) from Bun.secrets (OS keystore)`)
+  if (found > 0) {
+    console.info(`${logPrefix} ✅ Loaded ${found} key(s) from Bun.secrets (OS keystore)`)
+  } else {
+    console.warn(`${logPrefix} ⚠️  No secrets found in Bun.secrets. Run: bunx @johpaz/hivecode secret set <name>`)
   }
-  if (envCount > 0) {
-    console.warn(
-      `${logPrefix} ⚠️  Loaded ${envCount} key(s) from env vars. Consider migrating to Bun.secrets for better security:` +
-        `\n   bunx @johpaz/hivecode secret set <name>`
-    )
+
+  if (missing.length > 0 && missing.length < PROVIDER_SECRET_NAMES.length) {
+    console.info(`${logPrefix} ℹ️  Missing provider keys in Bun.secrets: ${missing.join(", ")}`)
   }
+
   return secrets
 }
 

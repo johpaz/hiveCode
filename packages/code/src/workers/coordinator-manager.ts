@@ -17,7 +17,7 @@ import { getToolsForCoordinator, executeToolByName } from "./tool-bridge"
 import { parsePlan, getDefaultPhases, groupPhasesByLevel } from "./plan-parser"
 import type { ParsedPhase } from "./plan-parser"
 import { checkAutomaticInterruption } from "../modes/interruptions"
-import { broadcastNarrative, broadcastPhase, broadcastMode, broadcastPhaseStart, broadcastPhaseEnd, broadcastTaskEnd } from "@johpaz/hivecode-core/gateway/task-streaming"
+import { broadcastNarrative, broadcastPhase, broadcastMode, broadcastPhaseStart, broadcastPhaseEnd, broadcastTaskEnd, broadcastThinking } from "@johpaz/hivecode-core/gateway/task-streaming"
 import { validateCommand } from "@johpaz/hivecode-core/tools/code/command-validator"
 import { incrementTaskCounter, shouldRunReflector, runReflector, startReflectorCron, stopReflectorCron } from "../agent/reflector"
 import type {
@@ -47,23 +47,109 @@ function parseGitDiffStat(stat: string): Record<string, { added: number; removed
 
 /** Extract and parse BEE's JSON routing decision from its narrative output */
 function parseBeeDecision(raw: string): import("./types").BeeDecision {
-  const jsonMatch = raw.match(/```json\s*([\s\S]*?)\s*```/) || raw.match(/(\{[\s\S]*?\})\s*$/)
-  if (jsonMatch) {
+  if (!raw || !raw.trim()) {
+    return { action: "respond", content: "", reason: "Empty response from LLM" }
+  }
+
+  // Strategy 1: Extract JSON from markdown code blocks (```json ... ```)
+  const codeBlockMatch = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
+  if (codeBlockMatch) {
     try {
-      const data = JSON.parse(jsonMatch[1])
+      const data = JSON.parse(codeBlockMatch[1])
       return {
         action: data.action || "architecture",
         content: data.content,
         reason: data.reason || "",
         phases: data.phases,
         filesModified: data.filesModified,
+        harness: data.harness,
       }
     } catch {
-      // JSON parse failed — fall through to default
+      // JSON in code block failed — try to repair common issues
+      const repaired = repairJson(codeBlockMatch[1])
+      if (repaired) {
+        try {
+          const data = JSON.parse(repaired)
+          return {
+            action: data.action || "architecture",
+            content: data.content,
+            reason: data.reason || "",
+            phases: data.phases,
+            filesModified: data.filesModified,
+            harness: data.harness,
+          }
+        } catch {
+          // Repaired JSON still failed — fall through
+        }
+      }
     }
   }
-  // BEE returned plain text: treat as a direct response to the user
+
+  // Strategy 2: Find the last top-level JSON object (greedy match for closing brace)
+  const jsonObjMatch = raw.match(/\{[\s\S]*"action"[\s\S]*\}/)
+  if (jsonObjMatch) {
+    try {
+      const data = JSON.parse(jsonObjMatch[0])
+      return {
+        action: data.action || "architecture",
+        content: data.content,
+        reason: data.reason || "",
+        phases: data.phases,
+        filesModified: data.filesModified,
+        harness: data.harness,
+      }
+    } catch {
+      const repaired = repairJson(jsonObjMatch[0])
+      if (repaired) {
+        try {
+          const data = JSON.parse(repaired)
+          return {
+            action: data.action || "architecture",
+            content: data.content,
+            reason: data.reason || "",
+            phases: data.phases,
+            filesModified: data.filesModified,
+            harness: data.harness,
+          }
+        } catch {
+          // Repaired JSON still failed — fall through
+        }
+      }
+    }
+  }
+
+  // Strategy 3: Try to parse the entire response as JSON
+  try {
+    const data = JSON.parse(raw)
+    return {
+      action: data.action || "architecture",
+      content: data.content,
+      reason: data.reason || "",
+      phases: data.phases,
+      filesModified: data.filesModified,
+      harness: data.harness,
+    }
+  } catch {
+    // Not JSON at all
+  }
+
+  // Strategy 4: BEE returned plain text — treat as a direct response to the user
   return { action: "respond", content: raw.trim(), reason: "BEE returned non-JSON response" }
+}
+
+/** Attempt to repair common JSON issues from LLM output */
+function repairJson(input: string): string | null {
+  let s = input.trim()
+  // Remove trailing commas before } or ]
+  s = s.replace(/,\s*([}\]])/g, "$1")
+  // Add missing closing braces/brackets
+  const opens = (s.match(/{/g) || []).length
+  const closes = (s.match(/}/g) || []).length
+  if (opens > closes) s += "}".repeat(opens - closes)
+  const openBrackets = (s.match(/\[/g) || []).length
+  const closeBrackets = (s.match(/]/g) || []).length
+  if (openBrackets > closeBrackets) s += "]".repeat(openBrackets - closeBrackets)
+  return s
 }
 
 /** Format BEE's raw JSON output into a human-readable narrative entry */
@@ -133,6 +219,27 @@ function formatToolCallForHuman(toolName: string, args: Record<string, unknown>)
 /** Format a tool result into a human-readable <system> message for the LLM.
  *  Inspired by Kimi CLI's tool_result_to_message().
  */
+// Smart truncation: show head + tail for large outputs (like OpenHands/Cline)
+// Keeps the beginning (context) and the end (most relevant recent output)
+const MAX_DISPLAY_CHARS = 10_000
+const MAX_DISPLAY_LINES = 500
+function smartTruncate(text: string, maxChars = MAX_DISPLAY_CHARS): string {
+  if (text.length <= maxChars) return text
+  const headLen = Math.floor(maxChars * 0.3)
+  const tailLen = Math.floor(maxChars * 0.7)
+  return text.slice(0, headLen) + `\n... [${text.length - headLen - tailLen} chars omitted] ...\n` + text.slice(-tailLen)
+}
+
+function smartTruncateLines(text: string, maxLines = MAX_DISPLAY_LINES): string {
+  const lines = text.split("\n")
+  if (lines.length <= maxLines) return text
+  const headLines = Math.floor(maxLines * 0.3)
+  const tailLines = Math.floor(maxLines * 0.7)
+  const head = lines.slice(0, headLines).join("\n")
+  const tail = lines.slice(-tailLines).join("\n")
+  return head + `\n... [${lines.length - headLines - tailLines} lines omitted] ...\n` + tail
+}
+
 function formatToolResult(toolName: string, result: unknown): string {
   const isError = result && typeof result === "object" && "ok" in (result as any) && (result as any).ok === false
   const errorMsg = isError ? (result as any).error || "Unknown error" : ""
@@ -150,12 +257,11 @@ function formatToolResult(toolName: string, result: unknown): string {
       const count = r?.count ?? r?.entries?.length ?? 0
       summary = `✅ [${toolName}]: ${count} entries in ${r?.path || "."}`
       if (r?.entries && Array.isArray(r.entries)) {
-        const lines = r.entries.slice(0, 20).map((e: any) => {
+        const lines = r.entries.map((e: any) => {
           const size = e.size ? ` (${Math.round(e.size / 1024)}KB)` : ""
           return `  ${e.type === "directory" ? "📁" : "📄"} ${e.name}${size}`
         })
-        summary += "\n" + lines.join("\n")
-        if (r.entries.length > 20) summary += `\n  ... and ${r.entries.length - 20} more`
+        summary += "\n" + smartTruncateLines(lines.join("\n"))
       }
       break
     }
@@ -164,8 +270,7 @@ function formatToolResult(toolName: string, result: unknown): string {
       const totalLines = r?.totalLines ?? 0
       summary = `✅ [${toolName}]: ${r?.path || "file"} (${linesRead}/${totalLines} lines)`
       if (r?.content) {
-        const content = String(r.content).slice(0, 1500)
-        summary += "\n```\n" + content + (String(r.content).length > 1500 ? "\n...(truncated)" : "") + "\n```"
+        summary += "\n```\n" + smartTruncate(String(r.content)) + "\n```"
       }
       break
     }
@@ -177,8 +282,7 @@ function formatToolResult(toolName: string, result: unknown): string {
       const matches = r?.matches || r?.files || []
       summary = `✅ [${toolName}]: ${matches.length} matches${r?.pattern ? ` for "${r.pattern}"` : ""}`
       if (matches.length > 0) {
-        summary += "\n" + matches.slice(0, 15).map((f: string) => `  ${f}`).join("\n")
-        if (matches.length > 15) summary += `\n  ... and ${matches.length - 15} more`
+        summary += "\n" + smartTruncateLines(matches.map((f: string) => `  ${f}`).join("\n"))
       }
       break
     }
@@ -187,12 +291,10 @@ function formatToolResult(toolName: string, result: unknown): string {
       const elapsed = r?.executionTimeMs ?? 0
       summary = `${exitCode === 0 ? "✅" : "⚠️"} [${toolName}]: ${r?.command || ""} (exit=${exitCode}, ${elapsed}ms)`
       if (r?.stdout) {
-        const stdout = String(r.stdout).slice(0, 1000)
-        summary += "\nstdout:\n```\n" + stdout + (String(r.stdout).length > 1000 ? "\n...(truncated)" : "") + "\n```"
+        summary += "\nstdout:\n```\n" + smartTruncate(smartTruncateLines(String(r.stdout))) + "\n```"
       }
       if (r?.stderr) {
-        const stderr = String(r.stderr).slice(0, 500)
-        summary += "\nstderr:\n```\n" + stderr + (String(r.stderr).length > 500 ? "\n...(truncated)" : "") + "\n```"
+        summary += "\nstderr:\n```\n" + smartTruncate(smartTruncateLines(String(r.stderr))) + "\n```"
       }
       break
     }
@@ -200,8 +302,7 @@ function formatToolResult(toolName: string, result: unknown): string {
       const matches = r?.matches || []
       summary = `✅ [${toolName}]: ${matches.length} matches${r?.query ? ` for "${r.query}"` : ""}`
       if (matches.length > 0) {
-        summary += "\n" + matches.slice(0, 10).map((m: any) => `  ${m.file}:${m.line}: ${m.text?.slice(0, 80) || ""}`).join("\n")
-        if (matches.length > 10) summary += `\n  ... and ${matches.length - 10} more`
+        summary += "\n" + smartTruncateLines(matches.map((m: any) => `  ${m.file}:${m.line}: ${m.text || ""}`).join("\n"))
       }
       break
     }
@@ -216,8 +317,7 @@ function formatToolResult(toolName: string, result: unknown): string {
     case "git_diff": {
       summary = `✅ [${toolName}]: diff retrieved${r?.path ? ` for ${r.path}` : ""}`
       if (r?.diff) {
-        const diff = String(r.diff).slice(0, 1500)
-        summary += "\n```diff\n" + diff + (String(r.diff).length > 1500 ? "\n...(truncated)" : "") + "\n```"
+        summary += "\n```diff\n" + smartTruncate(smartTruncateLines(String(r.diff))) + "\n```"
       }
       break
     }
@@ -225,7 +325,7 @@ function formatToolResult(toolName: string, result: unknown): string {
       const commits = r?.commits || []
       summary = `✅ [${toolName}]: ${commits.length} commits`
       if (commits.length > 0) {
-        summary += "\n" + commits.slice(0, 10).map((c: any) => `  ${c.hash?.slice(0, 7) || ""} — ${c.message?.slice(0, 60) || ""}`).join("\n")
+        summary += "\n" + commits.map((c: any) => `  ${c.hash?.slice(0, 7) || ""} — ${c.message || ""}`).join("\n")
       }
       break
     }
@@ -236,7 +336,7 @@ function formatToolResult(toolName: string, result: unknown): string {
     }
     case "check_types": {
       summary = `${r?.ok ? "✅" : "⚠️"} [${toolName}]: type check ${r?.ok ? "passed" : "failed"}`
-      if (r?.errors?.length) summary += "\n" + r.errors.slice(0, 10).map((e: string) => `  ${e}`).join("\n")
+      if (r?.errors?.length) summary += "\n" + r.errors.map((e: string) => `  ${e}`).join("\n")
       break
     }
     case "code_build":
@@ -244,8 +344,7 @@ function formatToolResult(toolName: string, result: unknown): string {
     case "code_lint": {
       summary = `${r?.ok ? "✅" : "⚠️"} [${toolName}]: ${r?.ok ? "success" : "failed"}`
       if (r?.output) {
-        const output = String(r.output).slice(0, 1000)
-        summary += "\n```\n" + output + (String(r.output).length > 1000 ? "\n...(truncated)" : "") + "\n```"
+        summary += "\n```\n" + smartTruncate(smartTruncateLines(String(r.output))) + "\n```"
       }
       break
     }
@@ -259,8 +358,8 @@ function formatToolResult(toolName: string, result: unknown): string {
       const results = r?.results || []
       summary = `✅ [${toolName}]: ${results.length} results${r?.query ? ` for "${r.query}"` : ""}`
       if (results.length > 0) {
-        summary += "\n" + results.slice(0, 5).map((res: any, i: number) =>
-          `  ${i + 1}. ${res.title || ""}\n     ${res.url || ""}\n     ${res.snippet?.slice(0, 120) || ""}`
+        summary += "\n" + results.map((res: any, i: number) =>
+          `  ${i + 1}. ${res.title || ""}\n     ${res.url || ""}\n     ${res.snippet || ""}`
         ).join("\n")
       }
       break
@@ -269,15 +368,14 @@ function formatToolResult(toolName: string, result: unknown): string {
       summary = `✅ [${toolName}]: fetched ${r?.url || ""}`
       if (r?.title) summary += `\nTitle: ${r.title}`
       if (r?.content) {
-        const content = String(r.content).slice(0, 1500)
-        summary += "\n```\n" + content + (String(r.content).length > 1500 ? "\n...(truncated)" : "") + "\n```"
+        summary += "\n```\n" + smartTruncate(String(r.content)) + "\n```"
       }
       break
     }
     default:
       // Generic fallback
       const generic = typeof result === "string" ? result : JSON.stringify(result, null, 2)
-      summary = `✅ [${toolName}]: result\n\`\`\`\n${generic.slice(0, 1500)}${generic.length > 1500 ? "\n...(truncated)" : ""}\n\`\`\``
+      summary = `✅ [${toolName}]: result\n\`\`\`\n${smartTruncate(generic)}\n\`\`\``
   }
 
   return `<system>\n${summary}\n</system>`
@@ -328,7 +426,11 @@ export class CoordinatorManager {
   private pendingTimeouts  = new Map<string, ReturnType<typeof setTimeout>>()
   private secrets: Record<string, string> = {}
   private allTools: Tool[] = []
-  private onNarrativeChunk?: (chunk: { coordinator: string; phase: string; content: string }) => void
+  private toolWorkerPool: Bun.Worker[] = []
+  private idleToolWorkers: Bun.Worker[] = []
+  private toolResolvers = new Map<string, (res: any) => void>()
+  private onNarrativeChunk?: (chunk: { coordinator: string; phase: string; content: string; streamId?: string }) => void
+  private onWorkerUpdate?: (update: { type: "tool_worker"; id: number; status: "idle" | "busy"; tool?: string }) => void
 
   /** Reload secrets from Bun.secrets and providers table */
   reloadSecrets(): void {
@@ -381,8 +483,55 @@ export class CoordinatorManager {
     this.broadcastChannel = new BroadcastChannel("hivecode:control")
     this.broadcastChannel.onmessage = (event: any) => this.handleControlMessage(event.data as ControlMessage)
 
+    this.initToolPool(4)
+
     startReflectorCron()
-    log.info("[coordinator-manager] ✅ BEE + all coordinators running")
+    log.info("[coordinator-manager] ✅ BEE + all coordinators running (Tool Pool: 4 workers)")
+  }
+
+  private initToolPool(size: number): void {
+    const workerPath = new URL("./tool.worker.ts", import.meta.url).pathname
+    for (let i = 0; i < size; i++) {
+      const worker = new (Worker as any)(workerPath, { smol: true }) as Bun.Worker
+      worker.onmessage = (msg: MessageEvent) => {
+        const data = typeof msg.data === "string" ? JSON.parse(msg.data) : msg.data
+        if (data.type === "TOOL_RESULT") {
+          const resolver = this.toolResolvers.get(data.toolCallId)
+          if (resolver) {
+            resolver(data.result || { ok: false, error: data.error })
+            this.toolResolvers.delete(data.toolCallId)
+          }
+          this.idleToolWorkers.push(worker)
+          const workerId = this.toolWorkerPool.indexOf(worker)
+          if (this.onWorkerUpdate) this.onWorkerUpdate({ type: "tool_worker", id: workerId, status: "idle" })
+        }
+      }
+      this.toolWorkerPool.push(worker)
+      this.idleToolWorkers.push(worker)
+    }
+  }
+
+  private async executeInToolWorker(toolName: string, toolArgs: any, config: any): Promise<any> {
+    const worker = this.idleToolWorkers.pop()
+    if (!worker) {
+      // Fallback to main thread if pool is busy
+      return executeToolByName(this.allTools, toolName, toolArgs, config)
+    }
+
+    const toolCallId = Bun.randomUUIDv7()
+    const workerId = this.toolWorkerPool.indexOf(worker)
+    if (this.onWorkerUpdate) this.onWorkerUpdate({ type: "tool_worker", id: workerId, status: "busy", tool: toolName })
+
+    return new Promise((resolve) => {
+      this.toolResolvers.set(toolCallId, resolve)
+      worker.postMessage({
+        type: "TOOL_TASK",
+        toolName,
+        toolArgs,
+        toolCallId,
+        config,
+      })
+    })
   }
 
   /** Create a session at TUI startup — one session per TUI lifecycle */
@@ -540,6 +689,26 @@ export class CoordinatorManager {
     this.scribe.updatePhaseStatus(beePhaseId, "completed", beeNarrative)
     this.scribe.updatePhaseMetadata(beePhaseId, beeResult.tokensIn ?? 0, beeResult.tokensOut ?? 0, beeResult.durationMs)
     log.info(`[coordinator-manager] 🐝 BEE decision: ${beeDecision.action} — ${beeDecision.reason}`)
+
+    // Persist harness to narrative so CLI/UI can display it before execution
+    if (beeDecision.harness && this.activeTaskId && this.activeSessionId) {
+      this.scribe.appendNarrative({
+        taskId: this.activeTaskId,
+        sessionId: this.activeSessionId,
+        coordinator: "bee",
+        phase: "harness",
+        entry: beeDecision.harness,
+        isDraft: false,
+        isOverride: false,
+      })
+      // Emit to live feed so Vite UI / TUI can render it immediately
+      if (this.activeTaskId) broadcastNarrative(this.activeTaskId, {
+        coordinator: "bee",
+        phase: "harness",
+        content: beeDecision.harness,
+        timestamp: new Date().toISOString(),
+      })
+    }
 
     // ── Route based on BEE's decision ─────────────────────────────────────────
 
@@ -727,10 +896,10 @@ export class CoordinatorManager {
 
     // Aggregate tokens from all phases
     const db = getDb()
-    const totals = db.query<{ ti: number; to: number }, [string]>(`
-      SELECT COALESCE(SUM(tokens_in),0) AS ti, COALESCE(SUM(tokens_out),0) AS to
+    const totals = db.query<{ ti: number; tout: number }, [string]>(`
+      SELECT COALESCE(SUM(tokens_in),0) AS ti, COALESCE(SUM(tokens_out),0) AS tout
       FROM code_task_phases WHERE task_id = ?
-    `).get(this.activeTaskId) ?? { ti: 0, to: 0 }
+    `).get(this.activeTaskId) ?? { ti: 0, tout: 0 }
 
     // Collect git changes after task
     let fileChanges: FileChange[] = []
@@ -765,14 +934,14 @@ export class CoordinatorManager {
 
     this.scribe.updateTaskMetadata(this.activeTaskId, {
       tokensIn:     totals.ti,
-      tokensOut:    totals.to,
+      tokensOut:    totals.tout,
       filesChanged: fileChanges.length,
       linesAdded,
       linesRemoved,
       durationMs,
     })
     this.scribe.updateTaskStatus(this.activeTaskId, "completed")
-    this.scribe.completeTurn(turnId, agentResponse.slice(0, 2000), this.activeTaskId)
+    this.scribe.completeTurn(turnId, agentResponse, this.activeTaskId)
 
     broadcastTaskEnd(this.activeTaskId, "completed", durationMs)
 
@@ -826,6 +995,19 @@ export class CoordinatorManager {
         log.info(`[coordinator-manager] 📋 Switched to plan — skipping level ${levelIdx}`)
         globalPhaseIndex += levelPhases.length
         continue
+      }
+
+      // Recovery checkpoint: save progress before dispatching each level
+      if (this.activeTaskId) {
+        const completedPhaseIds = levels
+          .slice(0, levelIdx)
+          .flat()
+          .map((_, i) => i)
+        const pendingPhaseIds = levels
+          .slice(levelIdx)
+          .flat()
+          .map((_, i) => levelIdx + i)
+        this.scribe.saveRecoveryPoint(this.activeTaskId, null, completedPhaseIds, pendingPhaseIds)
       }
 
       const levelTasks: Array<{ phase: PhaseName; task: CoordinatorTask }> = levelPhases.map(phaseDef => {
@@ -1016,7 +1198,7 @@ export class CoordinatorManager {
 
     // 3. Recent scratchpad / narrative context
     if (narrative) {
-      sections.push(`# PROJECT NARRATIVE\n${narrative.slice(0, 3000)}${narrative.length > 3000 ? "\n...(truncated)" : ""}`)
+      sections.push(`# PROJECT NARRATIVE\n${narrative}`)
     }
 
     return sections.join("\n\n")
@@ -1066,7 +1248,12 @@ export class CoordinatorManager {
           coordinator: name,
           phase: "thinking",
           content: msg.content,
+          streamId: (msg as any).streamId,
         })
+      }
+      // Also broadcast thinking events to WebSocket subscribers (ThinkingPanel in UI)
+      if (this.activeTaskId) {
+        broadcastThinking(name, { content: msg.content, taskId: this.activeTaskId })
       }
       return
     }
@@ -1105,8 +1292,10 @@ export class CoordinatorManager {
         coordinator: name,
         phase: msg.toolName || name,
         content: humanDesc,
+        streamId: msg.toolCallId,
       })
     }
+
 
     // Check plan mode gate
     const mode = getMode()
@@ -1161,7 +1350,7 @@ export class CoordinatorManager {
           const v = cmdValidation as { ok: false; reason: string; fatal: boolean }
           const errorMsg = `[SAFETY] Command blocked: ${v.reason}`
           log.warn(`[coordinator-manager] 🛡️ Blocked ${msg.toolName}: ${v.reason}`)
-          this.writeToolTrace(name, msg.toolName, JSON.stringify(msg.toolArgs).slice(0, 300), errorMsg, false, 0n)
+          this.writeToolTrace(name, msg.toolName, JSON.stringify(msg.toolArgs).slice(0, 2000), errorMsg, false, 0n)
           worker.postMessage(JSON.stringify({
             type: "TOOL_RESULT",
             toolCallId: msg.toolCallId,
@@ -1174,32 +1363,42 @@ export class CoordinatorManager {
       }
     }
 
-    // Execute the tool with timing
-    const inputSummary = JSON.stringify(msg.toolArgs || {}).slice(0, 500)
+    // Execute the tool with timing (Heavy tools go to the worker pool)
+    const inputSummary = JSON.stringify(msg.toolArgs || {}).slice(0, 2000)
     const toolStart = performance.now()
-    const result = await executeToolByName(
-      this.allTools,
-      msg.toolName,
-      msg.toolArgs || {},
-      { configurable: { workspace: process.cwd() } }
-    )
+    
+    const heavyTools = new Set(["code_search", "parse_ast", "check_types", "code_build", "code_test", "code_lint", "shell_executor"])
+    let result: any
+
+    if (heavyTools.has(msg.toolName!)) {
+      result = await this.executeInToolWorker(msg.toolName!, msg.toolArgs || {}, { configurable: { workspace: process.cwd() } })
+    } else {
+      result = await executeToolByName(
+        this.allTools,
+        msg.toolName!,
+        msg.toolArgs || {},
+        { configurable: { workspace: process.cwd() } }
+      )
+    }
+    
     const toolDurationNs = BigInt(Math.round((performance.now() - toolStart) * 1_000_000))
     const success = !(result && typeof result === "object" && "ok" in (result as any) && (result as any).ok === false)
-    const outputSummary = typeof result === "string" ? result.slice(0, 500) : JSON.stringify(result).slice(0, 500)
+    const outputSummary = typeof result === "string" ? result.slice(0, 2000) : JSON.stringify(result).slice(0, 2000)
 
     // Write tool execution trace (SPEC §5.4)
     this.writeToolTrace(name, msg.toolName, inputSummary, outputSummary, success, toolDurationNs)
 
-    // Stream tool result to TUI so user sees success/failure
+    // Stream tool result to TUI so user sees success/failure — use human-readable format
     if (this.onNarrativeChunk) {
-      const resultPreview = outputSummary.slice(0, 200)
-      const icon = success ? "✅" : "❌"
+      const formattedForHuman = formatToolResult(msg.toolName, result)
       this.onNarrativeChunk({
         coordinator: name,
         phase: msg.toolName,
-        content: `${icon} ${msg.toolName} → ${resultPreview}${resultPreview.length >= 200 ? "…" : ""}`,
+        content: formattedForHuman,
+        streamId: msg.toolCallId,
       })
     }
+
 
     // Format tool result for LLM consumption (Kimi CLI style: <system> wrappers)
     // This gives the LLM clear context about what happened instead of raw JSON
@@ -1292,6 +1491,10 @@ export class CoordinatorManager {
 
   setNarrativeCallback(cb: (chunk: { coordinator: string; phase: string; content: string }) => void): void {
     this.onNarrativeChunk = cb
+  }
+
+  setWorkerUpdateCallback(cb: (update: { type: "tool_worker"; id: number; status: "idle" | "busy"; tool?: string }) => void): void {
+    this.onWorkerUpdate = cb
   }
 
   /** Record a user override instruction into the narrative with is_override=1. */

@@ -122,32 +122,7 @@ export function hiveSpinner(coordinator = "default") {
   }
 }
 
-export function hiveProgress(coordinator = "default") {
-  const color = COORDINATOR_COLOR[coordinator] ?? C.amber
-  const BAR_WIDTH = 10
 
-  return {
-    render(current: number, total: number, label: string) {
-      const pct = Math.round((current / total) * 100)
-      const filled = Math.round((current / total) * BAR_WIDTH)
-      const empty = BAR_WIDTH - filled
-      const barStr = `${"■".repeat(filled)}${"□".repeat(empty)}`
-
-      process.stdout.write(
-        `${C.clearLine} ${color}${S.active}${C.reset} ` +
-        `${C.dim}${label}${C.reset} ` +
-        `${C.amber}${barStr}${C.reset} ` +
-        `${C.white}${pct}%${C.reset} ` +
-        `${C.dim}${current}/${total}${C.reset}`
-      )
-    },
-    stop(message: string) {
-      process.stdout.write(
-        `${C.clearLine} ${color}${S.done}${C.reset} ${message}\n`
-      )
-    },
-  }
-}
 
 // ─── Inline prompt helpers ────────────────────────────────────────────────────
 // Pure raw-mode TTY — no external deps.

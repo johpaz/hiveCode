@@ -1,5 +1,6 @@
 use color_eyre::eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -25,6 +26,7 @@ pub enum BunMessage {
     HistoryAppend {
         role: String,
         content: String,
+        content_type: Option<String>,
     },
     Status {
         running: bool,
@@ -61,6 +63,17 @@ pub enum BunMessage {
         coordinator: String,
         phase: String,
         content: String,
+        content_type: Option<String>,
+        stream_id: Option<String>,
+    },
+    ShowConfigModal {
+        command: String,
+        title: String,
+        fields: Vec<ModalField>,
+    },
+    ShowInfoModal {
+        title: String,
+        content: String,
     },
     Suspend,
     Resume,
@@ -73,6 +86,18 @@ pub struct MenuItem {
     pub desc: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModalField {
+    pub key: String,
+    pub label: String,
+    pub placeholder: String,
+    pub required: bool,
+    pub secret: bool,
+    pub field_type: String, // "text" | "select"
+    pub options: Option<Vec<String>>,
+    pub default_value: Option<String>,
+}
+
 // ── Messages Rust → Bun ──────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -83,6 +108,9 @@ pub enum TuiMessage {
     SuggestionsRequest { query: String },
     ModeChange { mode: String },
     ShellExecute { command: String },
+    ModalSubmit { command: String, values: HashMap<String, String> },
+    ModalCancel { command: String },
+    InfoModalClose,
     Suspended,
     Exit,
 }
@@ -101,10 +129,14 @@ pub async fn connect() -> Result<(
 
     let socket_path = std::env::var("HIVECODE_IPC").unwrap_or_default();
 
+    eprintln!("[ipc] HIVECODE_IPC='{}' exists={}", socket_path, Path::new(&socket_path).exists());
+
     if !socket_path.is_empty() && Path::new(&socket_path).exists() {
         let stream = UnixStream::connect(&socket_path)
             .await
             .with_context(|| format!("connecting to IPC socket {socket_path}"))?;
+
+        eprintln!("[ipc] Connected to Bun socket");
 
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);

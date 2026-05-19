@@ -158,6 +158,19 @@ export function broadcastThinking(agentId: string, thinking: {
     },
   });
 
+  // Send to task subscribers if taskId is provided
+  if (thinking.taskId) {
+    const subscribers = taskSubscribers.get(thinking.taskId);
+    if (subscribers) {
+      for (const ws of subscribers) {
+        if (ws.readyState === 1) {
+          try { ws.send(msg); } catch { unsubscribeAll(ws); }
+        }
+      }
+    }
+  }
+
+  // Send to global dashboard subscribers
   for (const ws of dashboardSubscribers) {
     if (ws.readyState === 1) {
       try { ws.send(msg); } catch { unsubscribeAll(ws); }
@@ -187,6 +200,15 @@ function toolToBeeState(toolName: string): BeeState {
   return "thinking";
 }
 
+type BeeEventListener = (event: BeeEvent) => void;
+const beeEventListeners = new Set<BeeEventListener>();
+
+/** Register a callback that fires on every BeeEvent (e.g. for Telegram bridging). Returns unsubscribe fn. */
+export function onBeeEvent(fn: BeeEventListener): () => void {
+  beeEventListeners.add(fn);
+  return () => beeEventListeners.delete(fn);
+}
+
 function broadcastBeeEvent(event: BeeEvent): void {
   const msg = JSON.stringify({ channel: `task:${event.taskId}:bee`, type: "bee_event", data: event });
   const subscribers = taskSubscribers.get(event.taskId);
@@ -198,6 +220,7 @@ function broadcastBeeEvent(event: BeeEvent): void {
   for (const ws of dashboardSubscribers) {
     if (ws.readyState === 1) { try { ws.send(msg); } catch { unsubscribeAll(ws); } }
   }
+  for (const fn of beeEventListeners) { try { fn(event); } catch {} }
 }
 
 export function broadcastToolStart(taskId: string, agentId: string, tool: string, activeForm?: string): void {

@@ -212,6 +212,51 @@ export class Scribe {
     this.db.query("DELETE FROM code_file_snapshots WHERE task_id = ?").run(taskId)
   }
 
+  saveRecoveryPoint(taskId: string, phaseId: number | null, completedPhases: number[], pendingPhases: number[]): void {
+    let gitRef: string | null = null
+    try {
+      const proc = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: process.cwd() })
+      if (proc.exitCode === 0) gitRef = proc.stdout.toString().trim()
+    } catch { /* no git repo — silently skip */ }
+
+    const lastNarrativeId = (this.db.query(
+      "SELECT MAX(id) as mid FROM code_narrative WHERE task_id = ?"
+    ).get(taskId) as any)?.mid ?? null
+
+    this.db.query(
+      `INSERT INTO code_recovery_points
+         (task_id, phase_id, git_ref, completed_phases, pending_phases, last_narrative_id)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(
+      taskId,
+      phaseId,
+      gitRef,
+      JSON.stringify(completedPhases),
+      JSON.stringify(pendingPhases),
+      lastNarrativeId,
+    )
+  }
+
+  getLatestRecoveryPoint(taskId: string): {
+    id: number; taskId: string; phaseId: number | null; gitRef: string | null;
+    completedPhases: number[]; pendingPhases: number[]; lastNarrativeId: number | null; createdAt: string;
+  } | null {
+    const row = this.db.query(
+      "SELECT * FROM code_recovery_points WHERE task_id = ? ORDER BY id DESC LIMIT 1"
+    ).get(taskId) as any
+    if (!row) return null
+    return {
+      id: row.id,
+      taskId: row.task_id,
+      phaseId: row.phase_id,
+      gitRef: row.git_ref,
+      completedPhases: JSON.parse(row.completed_phases || "[]"),
+      pendingPhases: JSON.parse(row.pending_phases || "[]"),
+      lastNarrativeId: row.last_narrative_id,
+      createdAt: row.created_at,
+    }
+  }
+
   getTaskContext(taskId: string): { narrative: NarrativeEntry[]; decisions: ADR[]; files: FileSnapshot[] } {
     return {
       narrative: this.readNarrative(taskId),
