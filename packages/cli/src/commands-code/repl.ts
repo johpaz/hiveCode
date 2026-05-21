@@ -104,40 +104,27 @@ async function ensureGateway(): Promise<void> {
 }
 
 // ─── TUI binary compile-on-demand ─────────────────────────────────────────────
+// En dev mode el script package.json ya corrió `cargo build` antes de arrancar,
+// así que aquí solo compilamos si el binario no existe todavía.
 
 async function ensureTuiBinary(): Promise<void> {
   const tuiDir = path.join(import.meta.dir, "../../../hivetui")
   if (!existsSync(tuiDir)) return
+  if (tuiAvailable()) return
 
   const isDev = process.env.HIVE_DEV === "true"
+  const args  = isDev ? ["cargo", "build"] : ["cargo", "build", "--release"]
 
-  if (isDev) {
-    const spinner = hiveSpinner("default")
-    spinner.start("Compilando hivetui...")
-    const proc = Bun.spawnSync(["cargo", "build"], {
-      cwd: tuiDir,
-      stdio: ["ignore", "pipe", "pipe"],
-    })
-    if (proc.exitCode === 0) {
-      spinner.stop("hivetui listo")
-    } else {
-      spinner.stop("hivetui build falló — continuando sin TUI", "error")
-    }
-    return
-  }
-
-  // Producción: compilar release solo si no existe el binario
-  if (tuiAvailable()) return
   const spinner = hiveSpinner("default")
   spinner.start("Compilando hivetui (primera vez)...")
-  const proc = Bun.spawnSync(["cargo", "build", "--release"], {
+  const proc = Bun.spawnSync(args, {
     cwd: tuiDir,
     stdio: ["ignore", "pipe", "pipe"],
   })
   if (proc.exitCode === 0) {
     spinner.stop("hivetui compilado")
   } else {
-    spinner.stop("No se pudo compilar hivetui — continuando sin TUI", "error")
+    spinner.stop("hivetui build falló — continuando sin TUI", "error")
   }
 }
 

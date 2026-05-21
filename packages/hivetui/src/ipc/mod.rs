@@ -182,6 +182,7 @@ pub enum TuiMessage {
     Ready,
     Submit { input: String },
     Rollback { checkpoint_id: String },
+    ModeChange { mode: String },
     ModalSubmit { command: String, values: std::collections::HashMap<String, String> },
     ModalCancel { command: String },
     Exit,

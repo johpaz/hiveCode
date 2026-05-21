@@ -28,12 +28,14 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
 
         canvas.print(area.x + 1, y, dot, dot_style);
 
-        let max_name = (area.w.saturating_sub(5) as usize).min(14);
+        let max_name = (area.w.saturating_sub(7) as usize).min(14);
         let name: String = w.name.chars().take(max_name).collect();
-        canvas.print(area.x + 3, y, &name, Style::new().fg(name_color(&w.name)).bold());
+        let wcolor = name_color(&w.name);
+        canvas.print(area.x + 3, y, "⬡ ", Style::new().fg(wcolor));
+        canvas.print(area.x + 5, y, &name, Style::new().fg(wcolor).bold());
 
         if let Some(ref detail) = w.detail {
-            let detail_x = area.x + 3 + name.len() as u16 + 1;
+            let detail_x = area.x + 5 + name.len() as u16 + 1;
             if detail_x < area.right().saturating_sub(1) {
                 let avail = area.right().saturating_sub(detail_x + 1) as usize;
                 let shown: String = detail.chars().take(avail).collect();

@@ -1,3 +1,55 @@
+/// Tab activo en el layout principal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabId {
+    #[default]
+    Focus,
+    Plan,
+    Code,
+    Review,
+    Dashboard,
+}
+
+impl TabId {
+    pub fn from_num(n: u8) -> Option<Self> {
+        match n {
+            1 => Some(TabId::Focus),
+            2 => Some(TabId::Plan),
+            3 => Some(TabId::Code),
+            4 => Some(TabId::Review),
+            5 => Some(TabId::Dashboard),
+            _ => None,
+        }
+    }
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "focus"     => Some(TabId::Focus),
+            "plan"      => Some(TabId::Plan),
+            "code"      => Some(TabId::Code),
+            "review"    => Some(TabId::Review),
+            "dashboard" => Some(TabId::Dashboard),
+            _ => None,
+        }
+    }
+    pub fn label(&self) -> &'static str {
+        match self {
+            TabId::Focus     => "FOCUS",
+            TabId::Plan      => "PLAN",
+            TabId::Code      => "CODE",
+            TabId::Review    => "REVIEW",
+            TabId::Dashboard => "DASHBOARD",
+        }
+    }
+    pub fn num(&self) -> u8 {
+        match self {
+            TabId::Focus     => 1,
+            TabId::Plan      => 2,
+            TabId::Code      => 3,
+            TabId::Review    => 4,
+            TabId::Dashboard => 5,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReplMode {
     #[default]

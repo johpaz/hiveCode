@@ -1,4 +1,5 @@
 use std::io::{stdin, stdout, IsTerminal, Stdout, Write};
+use chrono::Local;
 use color_eyre::eyre::{bail, Result};
 use crossterm::{
     cursor::MoveTo,
@@ -39,6 +40,9 @@ pub async fn run() -> Result<()> {
     state.cursor_visible = true;
     state.history_nav_mode = false;
     state.history_hscroll = 0;
+    state.show_workers = true;
+    state.show_welcome = true;
+    state.clock = Local::now().format("%H:%M:%S").to_string();
     let mut events = EventStream::new();
     let mut tick = time::interval(Duration::from_millis(120));
     let mut should_quit = false;
@@ -64,9 +68,12 @@ pub async fn run() -> Result<()> {
                 state.apply_message(msg);
                 session.draw(&mut state)?;
             }
-            // 4. Tick del cursor
+            // 4. Tick del cursor, reloj y animación bee
             _ = tick.tick() => {
                 state.cursor_visible = !state.cursor_visible;
+                state.anim_tick = (state.anim_tick + 1) % 8;
+                state.slow_tick = (state.slow_tick + 1) % 30;
+                state.clock = Local::now().format("%H:%M:%S").to_string();
                 session.draw(&mut state)?;
             }
             // 5. Eventos de teclado y ratón

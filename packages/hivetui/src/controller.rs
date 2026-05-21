@@ -12,8 +12,8 @@ use crossterm::{
 
 use crate::{
     ipc::TuiMessage,
-    state::{AppState, HistoryEntry, InfoModalState, ModalState, Role},
-    widgets::{command_popup, history},
+    state::{AppState, HistoryEntry, InfoModalState, ModalState, ReplMode, Role, TabId},
+    widgets::{command_popup, history, tabbar},
 };
 
 pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
@@ -68,12 +68,14 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 return false;
             }
             KeyCode::Enter => {
-                let input = state.input.value().trim().to_string();
-                // Comandos locales que no van a Bun
-                match input.as_str() {
+                let raw = state.input.value().trim().to_string();
+                let mut parts = raw.splitn(2, ' ');
+                let cmd = parts.next().unwrap_or("");
+                let arg = parts.next().unwrap_or("").trim();
+                state.input.clear();
+                state.command_popup_selected = 0;
+                match cmd {
                     "/help" => {
-                        state.input.clear();
-                        state.command_popup_selected = 0;
                         state.modal = ModalState::Info(InfoModalState {
                             title: "Comandos disponibles".to_string(),
                             content: help_text(),
@@ -81,23 +83,61 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                         });
                         return false;
                     }
-                    "/logs" => {
-                        state.input.clear();
-                        state.command_popup_selected = 0;
+                    "/logs" if arg.is_empty() => {
                         state.logs.visible = !state.logs.visible;
                         return false;
                     }
                     "/clear" => {
-                        state.input.clear();
-                        state.command_popup_selected = 0;
                         state.history.entries.clear();
                         state.history.selected = None;
                         return false;
                     }
+                    "/quit" | "/exit" => {
+                        return true; // app.rs envía TuiMessage::Exit
+                    }
+                    "/mode" => {
+                        let new_mode = if arg.is_empty() {
+                            state.session.mode.next()
+                        } else {
+                            ReplMode::from(arg)
+                        };
+                        state.session.mode = new_mode;
+                        state.dirty.session = true;
+                        state.pending_ipc.push(TuiMessage::ModeChange {
+                            mode: state.session.mode.as_str().to_string(),
+                        });
+                        return false;
+                    }
+                    "/timeline" => {
+                        state.show_workers = !state.show_workers;
+                        return false;
+                    }
+                    "/copy" => {
+                        state.history_nav_mode = true;
+                        if !state.history.entries.is_empty() {
+                            state.history.selected =
+                                Some(state.history.entries.len().saturating_sub(1));
+                        }
+                        return false;
+                    }
+                    "/layout" => {
+                        if let Some(tab) = TabId::from_name(arg) {
+                            state.active_tab = tab;
+                        } else if let Ok(n) = arg.parse::<u8>() {
+                            if let Some(tab) = TabId::from_num(n) {
+                                state.active_tab = tab;
+                            }
+                        }
+                        return false;
+                    }
+                    "/welcome" => {
+                        state.show_welcome = true;
+                        state.active_tab = TabId::Focus;
+                        return false;
+                    }
                     _ => {
-                        // Resto de comandos (/mode, /provider, /timeline…) → Bun
-                        state.command_popup_selected = 0;
-                        // Caer al handler normal de Enter
+                        // Todos los demás (/provider, /modelo, /github, /telegram…) → Bun
+                        state.input.set(&raw);
                     }
                 }
             }
@@ -115,7 +155,28 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         }
     }
 
+    // Mientras welcome visible: 1-5 dismiss + cambiar tab; Esc solo dismiss
+    if state.show_welcome && state.history.entries.is_empty() {
+        if let (KeyModifiers::NONE, KeyCode::Char(n @ '1'..='5')) = (key.modifiers, key.code) {
+            state.show_welcome = false;
+            if let Some(tab) = TabId::from_num(n as u8 - b'0') {
+                state.active_tab = tab;
+            }
+            return false;
+        }
+        if key.code == KeyCode::Esc {
+            state.show_welcome = false;
+            return false;
+        }
+    }
+
     match (key.modifiers, key.code) {
+        // Teclas 1-5 cambian de tab (solo cuando no se está escribiendo)
+        (KeyModifiers::NONE, KeyCode::Char(n @ '1'..='5')) if state.input.value().is_empty() && !state.history_nav_mode => {
+            if let Some(tab) = TabId::from_num(n as u8 - b'0') {
+                state.active_tab = tab;
+            }
+        }
         (_, KeyCode::Esc) => {
             state.history_nav_mode = false;
             state.history_hscroll = 0;
@@ -196,7 +257,10 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         (_, KeyCode::Up) if !state.history_nav_mode => state.input.history_up(),
         (_, KeyCode::Down) if !state.history_nav_mode => state.input.history_down(),
         (_, KeyCode::Enter) => {
-            if state.history_nav_mode {
+            // Salir de la pantalla de bienvenida con Enter (input vacío)
+            if state.show_welcome && state.history.entries.is_empty() && state.input.value().is_empty() {
+                state.show_welcome = false;
+            } else if state.history_nav_mode {
                 if let Some(idx) = state.history.selected {
                     if let Some(entry) = state.history.entries.get(idx) {
                         state.input.set(&entry.content);
@@ -206,6 +270,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
             } else {
                 let submitted = state.input.submit();
                 if !submitted.trim().is_empty() {
+                    state.show_welcome = false; // entrar al chat al enviar el primer mensaje
                     state.history.entries.push(HistoryEntry {
                         role: Role::User,
                         content: submitted,
@@ -233,6 +298,16 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
             move_history_selection(state, 1);
         }
         MouseEventKind::Down(MouseButton::Left) => {
+            // Click en la fila del tabbar (fila 1)
+            if mouse.row == 1 {
+                if let Some((w, _h)) = terminal::size().ok() {
+                    let tabbar_area = crate::term::Rect::new(0, 1, w, 1);
+                    if let Some(tab) = tabbar::tab_at_col(tabbar_area, mouse.column) {
+                        state.active_tab = tab;
+                        return;
+                    }
+                }
+            }
             let history_area = history_rect_from_size(terminal::size().ok());
             if let Some(area) = history_area {
                 if let Some(entry_idx) = history::entry_at_y(state, area, mouse.row) {
@@ -269,8 +344,9 @@ fn history_rect_from_size(size: Option<(u16, u16)>) -> Option<crate::term::Rect>
     let (w, h) = size?;
 
     let area = crate::term::Rect::new(0, 0, w, h);
-    let vertical = area.vsplit(&[3, 0, 4, 1]);
-    vertical.get(1).copied()
+    // Layout: header(1) + tabbar(1) + content(fill) + checkpoint(1) + conflict(1) + input(4) + statusbar(1)
+    let vertical = area.vsplit(&[1, 1, 0, 1, 1, 4, 1]);
+    vertical.get(2).copied()
 }
 
 fn move_history_selection(state: &mut AppState, delta: isize) {
@@ -497,10 +573,11 @@ mod tests {
         let mut state = mk_state_with_entries(3);
         state.history.selected = Some(0);
 
+        // Layout: header(1)+tabbar(1)+content(y=2). Entry 2 is at row y+1+2=5.
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 3,
-            row: 6,
+            row: 5,
             modifiers: KeyModifiers::NONE,
         };
         handle_mouse_event(&mut state, click);
@@ -516,10 +593,11 @@ mod tests {
         state.history_nav_mode = true;
         state.input.set("draft");
 
+        // Layout: header(1)+tabbar(1)+content(y=2). Entry 2 is at row y+1+2=5.
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Right),
             column: 3,
-            row: 6,
+            row: 5,
             modifiers: KeyModifiers::NONE,
         };
         handle_mouse_event(&mut state, click);
@@ -593,16 +671,73 @@ fn help_text() -> String {
 Comandos de hivetui
 ═══════════════════
 
+Locales (TUI)
+─────────────
 /help        Mostrar esta pantalla
-/mode        Cambiar modo de operación (plan/aprobación/auto)
-/provider    Configurar provider LLM y API key
-/logs        Mostrar/ocultar panel de logs
+/quit /exit  Salir de hivetui
 /clear       Limpiar el historial de conversación
-/timeline    Ver checkpoints y rollbacks
+/logs        Mostrar/ocultar panel de logs
+/timeline    Mostrar/ocultar panel de workers
+/copy        Activar modo navegación/copia del historial
+
+Modo de ejecución
+─────────────────
+/mode                    Ciclar modo (plan → aprobación → auto)
+/mode plan|aprobación|auto  Fijar modo directamente
+/mode get                Mostrar modo actual
+/mode history            Historial de cambios de modo
+
+Provider y Modelo
+─────────────────
+/provider list|add|set|test|status
+/modelo list|set|add|delete|info
+
+Integraciones
+─────────────
+/github connect|status|whoami|disconnect|set-repo
+/telegram connect|edit|disconnect|status
+
+Herramientas del sistema
+────────────────────────
+/mcp list|add|enable|disable|test
+/skill list|enable|disable|info|add
+
+Tareas y Ejecución
+──────────────────
+/task list|status|cancel|rollback
+/run <tarea>   Ejecutar tarea en modo actual
+/plan <tarea>  Planificar sin ejecutar
+/stop          Detener tarea en curso
+
+Búsqueda y Aprendizaje
+──────────────────────
+/narrative show|search|export
+/ace status|playbook list|playbook reset|reflector run
+
+Notas y Sistema
+───────────────
+/note add|list|delete
+/logs list|follow
+/doctor   Diagnóstico del sistema
+/version  Versión de hivecode
+/env      Variables de entorno seguras
+/session new
+/compact  Compactar contexto
+/status   Estado de la sesión
+
+Vistas (tabs)
+═════════════
+1 / /layout focus      Vista principal de chat
+2 / /layout plan       Razonamiento + mapa de archivos
+3 / /layout code       Cambios en código + workers
+4 / /layout review     Revisión + aprobación
+5 / /layout dashboard  Panel de todos los workers
+/welcome               Volver a la pantalla de bienvenida
 
 Atajos de teclado
 ═════════════════
 
+1-5          Cambiar de tab directamente
 Tab          Entrar/salir de modo navegación
 Shift+←/→   Scroll horizontal en la entrada seleccionada
 Ctrl+L       Cargar entrada seleccionada al input

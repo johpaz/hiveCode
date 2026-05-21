@@ -4,6 +4,7 @@ pub struct Checkpoint {
     pub description: String,
     pub file_count: u32,
     pub agent: String,
+    pub time: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -39,6 +40,7 @@ mod tests {
                 description: format!("checkpoint {index}"),
                 file_count: index,
                 agent: "bee".to_string(),
+                time: String::new(),
             });
         }
 

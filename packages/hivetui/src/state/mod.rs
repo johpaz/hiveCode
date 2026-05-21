@@ -20,7 +20,7 @@ pub use history::{HistoryEntry, HistoryState, Role};
 pub use input::InputState;
 pub use logs::{LogEntry, LogState};
 pub use modal::{ConfigModalState, InfoModalState, ModalField, ModalFieldKind, ModalState};
-pub use session::{ReplMode, SessionState};
+pub use session::{ReplMode, SessionState, TabId};
 pub use thought::{ThoughtChunk, ThoughtStreamState};
 pub use workers::{Worker, WorkerState, WorkerStatus};
 
@@ -51,6 +51,20 @@ pub struct AppState {
     pub modal_focused: usize,
     /// Mensajes IPC pendientes de enviar (escritos por controller, drenados por app.rs).
     pub pending_ipc: Vec<crate::ipc::TuiMessage>,
+    /// Controla si el panel derecho de workers está visible (toggle con /timeline).
+    pub show_workers: bool,
+    /// Tab activo en el layout principal (1-5).
+    pub active_tab: TabId,
+    /// Reloj en formato HH:MM:SS, actualizado en cada tick.
+    pub clock: String,
+    /// Costo acumulado de la sesión (ej. "$0.042").
+    pub cost: String,
+    /// Muestra la pantalla de bienvenida cuando no hay historial.
+    pub show_welcome: bool,
+    /// Contador de animación (0-7) que avanza cada tick para la bee del input.
+    pub anim_tick: u8,
+    /// Contador lento para el bob de la bee del welcome (avanza cada tick, ciclo 30 = 3.6s).
+    pub slow_tick: u16,
 }
 
 impl AppState {
@@ -147,7 +161,8 @@ impl AppState {
 
             // ── Checkpoints ────────────────────────────────────────────────────
             BunMessage::CheckpointCreated { id, description, file_count, agent } => {
-                self.checkpoints.push(Checkpoint { id, description, file_count, agent });
+                let time = chrono::Local::now().format("%H:%M").to_string();
+                self.checkpoints.push(Checkpoint { id, description, file_count, agent, time });
                 self.dirty.checkpoints = true;
             }
 
