@@ -1,87 +1,32 @@
-use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
-    Frame,
-};
+use crate::app::AppState;
+use crate::term::{Canvas, Color, Rect, Style, AMBER, DIM, GREEN, SECONDARY};
 
-use crate::app::{AppState, AMBER, DIM, GREEN, SECONDARY};
+pub fn draw(canvas: &mut Canvas, state: &AppState, rect: Rect) {
+    if rect.h == 0 { return; }
+    let bg = Color::Indexed(234);
+    canvas.fill_rect(rect, ' ', Style::new().bg(bg));
 
-pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // title
-            Constraint::Length(1), // directory + session
-            Constraint::Length(1), // mode / provider / tasks / tokens / agents
-        ])
-        .split(area);
+    // Línea 0: proyecto + sesión
+    let title = format!(" ◆ {} ", state.project_name);
+    canvas.print(rect.x, rect.y, &title, Style::new().fg(AMBER).bold().bg(bg));
 
-    // ── Title: mascot + hivecode + version + project_name ───────────────────
-    let mascot = if state.running { " (~ᴗ~) " } else { " \\(^ᴗ^)/ " };
+    let session = if state.session_id.is_empty() { "—".to_string() } else { state.session_id.clone() };
+    let sess_str = format!("session: {}", session);
+    let sess_x = rect.right().saturating_sub(sess_str.chars().count() as u16 + 1);
+    canvas.print(sess_x, rect.y, &sess_str, Style::new().fg(DIM).bg(bg));
 
-    let title_line = Line::from(vec![
-        Span::styled(mascot, Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-        Span::styled(" hivecode ", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
-        Span::styled(&state.version, Style::default().fg(DIM)),
-        Span::styled("  ·  ", Style::default().fg(DIM)),
-        Span::styled(&state.project_name, Style::default().fg(SECONDARY)),
-        Span::styled("  ·  ", Style::default().fg(DIM)),
-        Span::styled("ALT:OFF", Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
-    ]);
+    // Línea 1: provider + model + workers
+    if rect.h >= 2 {
+        let prov = format!(" {} · {} ", state.provider, state.model);
+        canvas.print(rect.x, rect.y + 1, &prov, Style::new().fg(GREEN).bg(bg));
 
-    frame.render_widget(Paragraph::new(title_line), chunks[0]);
+        let wcount = format!("{} workers", state.workers.len());
+        let w_x = rect.right().saturating_sub(wcount.chars().count() as u16 + 1);
+        canvas.print(w_x, rect.y + 1, &wcount, Style::new().fg(SECONDARY).bg(bg));
+    }
 
-    // ── Session ─────────────────────────────────────────────────────────────
-    let session_display = if state.session_id.is_empty() {
-        "—".to_string()
-    } else {
-        state.session_id.clone()
-    };
-
-    let session_line = Line::from(vec![
-        Span::styled("Session: ", Style::default().fg(DIM)),
-        Span::styled(session_display, Style::default().fg(SECONDARY)),
-    ]);
-
-    frame.render_widget(Paragraph::new(session_line), chunks[1]);
-
-    // ── Subtitle: mode / provider / tokens ──────────────────────────────────
-    let provider_str = if state.provider.is_empty() {
-        "sin provider".to_string()
-    } else if state.model.is_empty() {
-        state.provider.clone()
-    } else {
-        format!("{}  ·  {}", state.provider, state.model)
-    };
-
-    let subtitle = Line::from(vec![
-        Span::styled(
-            format!(" {} ", state.mode.label()),
-            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  │  ", Style::default().fg(DIM)),
-        Span::styled(
-            provider_str,
-            Style::default().fg(if state.provider.is_empty() { crate::app::RED } else { GREEN }),
-        ),
-        Span::styled("  │  ", Style::default().fg(DIM)),
-        Span::styled(
-            format!("{} tareas", state.task_count),
-            Style::default().fg(SECONDARY),
-        ),
-        Span::styled("  │  ", Style::default().fg(DIM)),
-        Span::styled(
-            format!("{} tok", state.fmt_tokens()),
-            Style::default().fg(DIM),
-        ),
-        Span::styled("  │  ", Style::default().fg(DIM)),
-        Span::styled(
-            format!("{} agentes", state.agent_count),
-            Style::default().fg(if state.agent_count >= 7 { GREEN } else { crate::app::RED }),
-        ),
-    ]);
-
-    frame.render_widget(Paragraph::new(subtitle), chunks[2]);
+    // Línea 2: separador
+    if rect.h >= 3 {
+        canvas.hline(rect.x, rect.y + 2, rect.w, '─', Style::new().fg(DIM).bg(bg));
+    }
 }

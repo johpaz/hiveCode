@@ -19,6 +19,9 @@ export * from "./channels/manager.ts";
 export * from "./channels/base.ts";
 export * from "./channels/telegram.ts";
 
+// Session DB (TDD v2 — per-session SQLite)
+export * from "./db/index.ts";
+
 // Storage
 export * from "./storage/sqlite.ts";
 export * from "./storage/schema.ts";

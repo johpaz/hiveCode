@@ -1,79 +1,29 @@
-use ratatui::{
-    layout::Rect,
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
-    Frame,
-};
-use std::time::Duration;
+use crate::app::AppState;
+use crate::term::{Canvas, Color, Rect, Style, AMBER, DIM, GREEN, SECONDARY};
 
-use crate::app::{AppState, AMBER, DIM, GREEN, SECONDARY};
+pub fn draw(canvas: &mut Canvas, state: &AppState, rect: Rect) {
+    if rect.h == 0 { return; }
+    let y  = rect.y;
+    let bg = Color::Indexed(235);
+    canvas.fill_rect(rect, ' ', Style::new().bg(bg));
 
-pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
-    let hints = ["/help", "  /logs", "  /provider", "  /mode", "  [ctrl+p] fases", "  [ctrl+m] liberar  [ctrl+k] copiar"];
-    let spans: Vec<Span> = hints
-        .iter()
-        .map(|h| Span::styled(*h, Style::default().fg(DIM)))
-        .collect();
-
-    // Copy mode indicator
-    if state.copy_mode {
-        let msg = "Modo copia: ↑↓ navegar · Enter copiar · Esc salir";
-        let line = Line::from(vec![
-            Span::styled(
-                format!("{:width$}", msg, width = area.width as usize),
-                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(line), area);
-        return;
-    }
-
-    // Clipboard feedback — show for 2 seconds after Ctrl+Y
-    if let Some((ref msg, instant)) = state.clipboard_feedback {
-        if instant.elapsed() < Duration::from_secs(2) {
-            let color = if msg.starts_with('✅') { GREEN } else { AMBER };
-            let line = Line::from(vec![
-                Span::styled(
-                    format!("{:width$}", msg, width = area.width as usize),
-                    Style::default().fg(color),
-                ),
-            ]);
-            frame.render_widget(Paragraph::new(line), area);
-            return;
-        }
-    }
-
-    // Right side: status message
-    let status = if state.activity_status == "idle" || state.active_coordinator.is_empty() {
-        Span::styled(
-            format!("  {}  ", state.status_msg),
-            Style::default().fg(if state.running { AMBER } else { SECONDARY }),
-        )
-    } else {
-        // Activity indicator: show coordinator + phase
-        let indicator = "◉";
-        let text = if !state.active_phase.is_empty() {
-            format!(
-                "  {} {}: {}  ",
-                indicator, state.active_coordinator, state.active_phase
-            )
-        } else {
-            format!("  {} {}  ", indicator, state.active_coordinator)
-        };
-        Span::styled(
-            text,
-            Style::default()
-                .fg(AMBER)
-                .add_modifier(Modifier::BOLD),
-        )
+    let mode_label = format!(" {} ", state.mode.label());
+    let mode_fg = match state.mode {
+        crate::app::ReplMode::Plan     => AMBER,
+        crate::app::ReplMode::Approval => Color::Rgb(252, 211, 77),
+        crate::app::ReplMode::Auto     => GREEN,
     };
+    canvas.print(rect.x, y, &mode_label, Style::new().fg(mode_fg).bold().bg(bg));
 
-    let line = Line::from({
-        let mut all = spans;
-        all.push(status);
-        all
-    });
+    let sep_x = rect.x + mode_label.chars().count() as u16 + 1;
+    canvas.print(sep_x, y, "│", Style::new().fg(DIM).bg(bg));
 
-    frame.render_widget(Paragraph::new(line), area);
+    let msg_x   = sep_x + 2;
+    let max_msg = rect.w.saturating_sub(msg_x - rect.x + 10) as usize;
+    let msg     = if state.status_msg.len() > max_msg { &state.status_msg[..max_msg] } else { &state.status_msg };
+    canvas.print(msg_x, y, msg, Style::new().fg(SECONDARY).bg(bg));
+
+    let tok_str = format!(" {} tokens ", state.fmt_tokens());
+    let tok_x   = rect.right().saturating_sub(tok_str.chars().count() as u16);
+    canvas.print(tok_x, y, &tok_str, Style::new().fg(DIM).bg(bg));
 }

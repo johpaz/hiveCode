@@ -75,6 +75,21 @@
 "./tools/filesystem/workspace-guard": "./src/tools/filesystem/workspace-guard.ts",
     "./tools/projects": "./src/tools/projects/index.ts",
     "./tools/web": "./src/tools/web/index.ts",
-    "./scheduler/dag": "./src/scheduler/dag/index.ts"
+    "./scheduler/dag": "./src/scheduler/dag/index.ts",
+    "./db": "./src/db/index.ts",
+    "./db/client": "./src/db/client.ts",
+    "./db/schema": "./src/db/schema.ts",
+    "./db/repos/sessions": "./src/db/repos/sessions.ts",
+    "./db/repos/messages": "./src/db/repos/messages.ts",
+    "./db/repos/agent-context": "./src/db/repos/agent-context.ts",
+    "./db/repos/agent-conflicts": "./src/db/repos/agent-conflicts.ts",
+    "./db/repos/agent-awareness": "./src/db/repos/agent-awareness.ts",
+    "./db/repos/checkpoints": "./src/db/repos/checkpoints.ts",
+    "./db/repos/adrs": "./src/db/repos/adrs.ts",
+    "./db/repos/file-risks": "./src/db/repos/file-risks.ts",
+    "./ipc": "./src/ipc/index.ts",
+    "./ipc/protocol": "./src/ipc/protocol.ts",
+    "./ipc/envelope": "./src/ipc/envelope.ts",
+    "./ipc/server": "./src/ipc/server.ts"
   }
 }

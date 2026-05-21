@@ -1,17 +1,38 @@
-use ratatui::{
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-};
+use crate::term::{Style, AMBER, DIM, GREEN, RED};
 
-use crate::app::{AMBER, DIM, GREEN};
+// ── Tipos de representación de texto estilizado ───────────────────────────────
+//
+// En ratatui existían `Span` (texto + estilo) y `Line` (Vec<Span>).
+// Los reemplazamos con nuestros propios tipos sin dependencia externa.
+//
+// Por qué `type StyledLine = Vec<Segment>` y no `struct StyledLine(Vec<Segment>)`:
+// ─────────────────────────────────────────────────────────────────────────────────
+// Un *type alias* es transparente: `StyledLine` y `Vec<Segment>` son el mismo tipo.
+// Podemos usar todos los métodos de Vec directamente (push, iter, len, etc.).
+// Un newtype struct requeriría `.0` o impl Deref para acceder al Vec interno.
+// Para un alias interno de conveniencia, el type alias es suficiente.
 
-mod core_style {
-    pub use ratatui_core::style::{Color as CColor, Modifier as CModifier, Style as CStyle};
+/// Un segmento de texto con estilo uniforme (equivalente a ratatui Span).
+#[derive(Clone, Debug)]
+pub struct Segment {
+    pub text:  String,
+    pub style: Style,
+}
 
-    pub fn indexed(i: u8) -> CColor {
-        CColor::Indexed(i)
+impl Segment {
+    pub fn new(text: impl Into<String>, style: Style) -> Self {
+        Self { text: text.into(), style }
+    }
+
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self { text: text.into(), style: Style::default() }
     }
 }
+
+/// Una línea de texto formada por segmentos estilizados (equivalente a ratatui Line).
+pub type StyledLine = Vec<Segment>;
+
+// ── ContentType y ThinkingMeta (sin cambios) ─────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentType {
@@ -23,107 +44,13 @@ pub enum ContentType {
 #[derive(Debug, Clone)]
 pub struct ThinkingMeta {
     pub elapsed_secs: u32,
-    pub token_count: u32,
+    pub token_count:  u32,
 }
 
-fn c_style(fg: core_style::CColor, modifiers: core_style::CModifier) -> core_style::CStyle {
-    core_style::CStyle::default().fg(fg).add_modifier(modifiers)
-}
-
-fn c_style_bg(fg: core_style::CColor, bg: core_style::CColor) -> core_style::CStyle {
-    core_style::CStyle::default().fg(fg).bg(bg)
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct HiveStyleSheet;
-
-impl tui_markdown::StyleSheet for HiveStyleSheet {
-    fn heading(&self, level: u8) -> core_style::CStyle {
-        match level {
-            1 => c_style(core_style::indexed(214), core_style::CModifier::BOLD | core_style::CModifier::UNDERLINED),
-            2 => c_style(core_style::indexed(214), core_style::CModifier::BOLD),
-            3 => c_style(core_style::indexed(45), core_style::CModifier::BOLD),
-            4 | 5 | 6 => c_style(core_style::indexed(45), core_style::CModifier::ITALIC),
-            _ => c_style(core_style::indexed(45), core_style::CModifier::empty()),
-        }
-    }
-
-    fn code(&self) -> core_style::CStyle {
-        c_style_bg(core_style::indexed(114), core_style::indexed(236))
-    }
-
-    fn link(&self) -> core_style::CStyle {
-        c_style(core_style::indexed(45), core_style::CModifier::UNDERLINED)
-    }
-
-    fn blockquote(&self) -> core_style::CStyle {
-        c_style(core_style::indexed(248), core_style::CModifier::empty())
-    }
-
-    fn heading_meta(&self) -> core_style::CStyle {
-        c_style(core_style::indexed(240), core_style::CModifier::empty())
-    }
-
-    fn metadata_block(&self) -> core_style::CStyle {
-        c_style(core_style::indexed(136), core_style::CModifier::empty())
-    }
-}
-
-fn convert_color(c: ratatui_core::style::Color) -> Color {
-    match c {
-        ratatui_core::style::Color::Indexed(i) => Color::Indexed(i),
-        ratatui_core::style::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
-        ratatui_core::style::Color::White => Color::White,
-        ratatui_core::style::Color::Black => Color::Black,
-        ratatui_core::style::Color::Gray => Color::Gray,
-        ratatui_core::style::Color::DarkGray => Color::DarkGray,
-        ratatui_core::style::Color::Red => Color::Red,
-        ratatui_core::style::Color::Green => Color::Green,
-        ratatui_core::style::Color::Yellow => Color::Yellow,
-        ratatui_core::style::Color::Blue => Color::Blue,
-        ratatui_core::style::Color::Magenta => Color::Magenta,
-        ratatui_core::style::Color::Cyan => Color::Cyan,
-        ratatui_core::style::Color::LightRed => Color::LightRed,
-        ratatui_core::style::Color::LightGreen => Color::LightGreen,
-        ratatui_core::style::Color::LightYellow => Color::LightYellow,
-        ratatui_core::style::Color::LightBlue => Color::LightBlue,
-        ratatui_core::style::Color::LightMagenta => Color::LightMagenta,
-        ratatui_core::style::Color::LightCyan => Color::LightCyan,
-        _ => Color::default(),
-    }
-}
-
-fn convert_modifier(m: ratatui_core::style::Modifier) -> Modifier {
-    let mut out = Modifier::empty();
-    if m.contains(ratatui_core::style::Modifier::BOLD) { out |= Modifier::BOLD; }
-    if m.contains(ratatui_core::style::Modifier::ITALIC) { out |= Modifier::ITALIC; }
-    if m.contains(ratatui_core::style::Modifier::UNDERLINED) { out |= Modifier::UNDERLINED; }
-    if m.contains(ratatui_core::style::Modifier::DIM) { out |= Modifier::DIM; }
-    if m.contains(ratatui_core::style::Modifier::CROSSED_OUT) { out |= Modifier::CROSSED_OUT; }
-    if m.contains(ratatui_core::style::Modifier::REVERSED) { out |= Modifier::REVERSED; }
-    if m.contains(ratatui_core::style::Modifier::SLOW_BLINK) { out |= Modifier::SLOW_BLINK; }
-    if m.contains(ratatui_core::style::Modifier::RAPID_BLINK) { out |= Modifier::RAPID_BLINK; }
-    out
-}
-
-fn convert_style(s: ratatui_core::style::Style) -> Style {
-    let mut style = Style::default();
-    if let Some(fg) = s.fg {
-        style = style.fg(convert_color(fg));
-    }
-    if let Some(bg) = s.bg {
-        style = style.bg(convert_color(bg));
-    }
-    if !s.add_modifier.is_empty() {
-        style = style.add_modifier(convert_modifier(s.add_modifier));
-    }
-    style
-}
+// ── Detección heurística ──────────────────────────────────────────────────────
 
 pub fn is_likely_markdown(content: &str) -> bool {
-    if content.contains("```") {
-        return true;
-    }
+    if content.contains("```") { return true; }
     for l in content.lines().take(5) {
         if l.starts_with("# ") || l.starts_with("## ") || l.starts_with("### ") {
             return true;
@@ -131,285 +58,241 @@ pub fn is_likely_markdown(content: &str) -> bool {
     }
     if content.contains("**") {
         let first = content.find("**");
-        let last = content.rfind("**");
-        if first.is_some() && last.is_some() && first != last {
-            return true;
-        }
+        let last  = content.rfind("**");
+        if first.is_some() && last.is_some() && first != last { return true; }
     }
-    let bullet_count = content.lines().take(10).filter(|l| l.starts_with("- ") || l.starts_with("* ")).count();
-    if bullet_count >= 2 {
-        return true;
-    }
-    let backtick_count = content.matches('`').count();
-    if backtick_count >= 2 {
-        return true;
-    }
-    false
+    let bullets = content.lines().take(10)
+        .filter(|l| l.starts_with("- ") || l.starts_with("* ")).count();
+    if bullets >= 2 { return true; }
+    content.matches('`').count() >= 2
 }
 
 pub fn is_likely_diff(content: &str) -> bool {
-    let mut diff_markers = 0u32;
-    for line in content.lines().take(10) {
-        if line.starts_with("diff ") || line.starts_with("--- ") || line.starts_with("+++ ") || line.starts_with("@@") {
-            diff_markers += 1;
-        }
-    }
-    diff_markers >= 2
+    let markers = content.lines().take(10).filter(|l| {
+        l.starts_with("diff ") || l.starts_with("--- ") ||
+        l.starts_with("+++ ") || l.starts_with("@@")
+    }).count();
+    markers >= 2
 }
+
+// ── Renderizado a Vec<StyledLine> ────────────────────────────────────────────
+//
+// Las funciones siguientes convierten texto plano/markdown/diff/thinking en
+// una lista de líneas estilizadas que los widgets pueden imprimir en el Canvas.
+//
+// `width` controla el wrapping (máximo de caracteres por línea).
+// `prefix` es el indicador de rol ("▸ " para usuario, "  " para asistente, etc.)
 
 pub fn render_content(
-    content: &str,
+    content:      &str,
     content_type: &ContentType,
     thinking_meta: &Option<ThinkingMeta>,
-    width: usize,
-    prefix: &str,
-    prefix_color: Color,
-    indent: &str,
-) -> Vec<Line<'static>> {
+    width:        usize,
+    prefix:       &str,
+    prefix_style: Style,
+    indent:       &str,
+) -> Vec<StyledLine> {
     match content_type {
-        ContentType::Thinking => render_thinking_content(content, thinking_meta, prefix, prefix_color, indent, width),
-        ContentType::Markdown if is_likely_diff(content) => render_diff(content, prefix, prefix_color, indent, width),
-        ContentType::Markdown => render_markdown(content, prefix, prefix_color, indent, width),
-        ContentType::Plain => render_plain(content, prefix, prefix_color, indent, width),
+        ContentType::Thinking  => render_thinking(content, thinking_meta, prefix, prefix_style, indent, width),
+        ContentType::Markdown if is_likely_diff(content) => render_diff(content, prefix, prefix_style, indent, width),
+        ContentType::Markdown  => render_markdown(content, prefix, prefix_style, indent, width),
+        ContentType::Plain     => render_plain(content, prefix, prefix_style, indent, width),
     }
 }
 
-fn render_thinking_content(
-    content: &str,
-    meta: &Option<ThinkingMeta>,
-    prefix: &str,
-    prefix_color: Color,
-    indent: &str,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+// ── render_thinking ───────────────────────────────────────────────────────────
 
-    if let Some(m) = meta {
-        let tokens_str = if m.token_count > 0 {
-            format!(" · {} tokens", fmt_tokens(m.token_count))
-        } else {
-            String::new()
-        };
-        lines.push(Line::from(vec![
-            Span::styled(prefix.to_string(), Style::default().fg(prefix_color)),
-            Span::styled(
-                format!("Pensó por {}s{}", m.elapsed_secs, tokens_str),
-                Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
-            ),
-        ]));
+fn render_thinking(
+    content:  &str,
+    meta:     &Option<ThinkingMeta>,
+    prefix:   &str,
+    prefix_style: Style,
+    indent:   &str,
+    width:    usize,
+) -> Vec<StyledLine> {
+    let mut lines: Vec<StyledLine> = Vec::new();
+    let thinking_style = Style::new().fg(DIM);
+
+    let header = if let Some(m) = meta {
+        let tokens = if m.token_count > 0 { format!(" · {} tokens", fmt_tokens(m.token_count)) } else { String::new() };
+        format!("Pensó por {}s{}", m.elapsed_secs, tokens)
     } else {
-        lines.push(Line::from(vec![
-            Span::styled(prefix.to_string(), Style::default().fg(prefix_color)),
-            Span::styled(
-                "Pensando...".to_string(),
-                Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
-            ),
-        ]));
-    }
+        "Pensando...".to_string()
+    };
 
-    if !content.is_empty() {
-        let thinking_style = Style::default().fg(DIM).add_modifier(Modifier::ITALIC);
-        for (i, line) in content.lines().enumerate() {
-            let available = if i == 0 { width.saturating_sub(prefix.len()) } else { width.saturating_sub(indent.len()) };
-            let wrapped = textwrap::wrap(line, available.max(10));
+    lines.push(vec![
+        Segment::new(prefix, prefix_style),
+        Segment::new(header, thinking_style),
+    ]);
 
-            for (j, wrapped_line) in wrapped.into_iter().enumerate() {
-                if i == 0 && j == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled(prefix.to_string(), Style::default().fg(prefix_color)),
-                        Span::styled(wrapped_line.into_owned(), thinking_style),
-                    ]));
-                } else {
-                    lines.push(Line::from(vec![
-                        Span::raw(indent.to_string()),
-                        Span::styled(wrapped_line.into_owned(), thinking_style),
-                    ]));
-                }
-            }
+    for (i, line) in content.lines().enumerate() {
+        let avail = if i == 0 { width.saturating_sub(prefix.len()) } else { width.saturating_sub(indent.len()) }.max(10);
+        for (j, wrapped) in textwrap::wrap(line, avail).into_iter().enumerate() {
+            let pfx = if i == 0 && j == 0 { (prefix, prefix_style) } else { (indent, Style::default()) };
+            lines.push(vec![
+                Segment::new(pfx.0, pfx.1),
+                Segment::new(wrapped.into_owned(), thinking_style),
+            ]);
         }
     }
 
-    lines.push(Line::from(""));
+    lines.push(vec![]);
     lines
 }
 
-fn fmt_tokens(n: u32) -> String {
-    if n >= 1000 {
-        format!("{:.1}k", n as f64 / 1000.0)
-    } else {
-        n.to_string()
-    }
-}
+// ── render_markdown ───────────────────────────────────────────────────────────
+//
+// Implementación propia sin tui-markdown: reconoce los casos más comunes.
+// No es un parser completo — cubre lo que los agentes suelen generar.
 
-pub fn render_markdown(
+fn render_markdown(
     content: &str,
-    prefix: &str,
-    prefix_color: Color,
-    indent: &str,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let prefix_len = prefix.len();
-    let indent_len = indent.len();
-    let first_line_max = width.saturating_sub(prefix_len).max(10);
-    let rest_max = width.saturating_sub(indent_len).max(10);
+    prefix:  &str,
+    prefix_style: Style,
+    indent:  &str,
+    width:   usize,
+) -> Vec<StyledLine> {
+    let mut lines: Vec<StyledLine> = Vec::new();
+    let mut in_code_block = false;
+    let code_style    = Style::new().fg(GREEN);
+    let heading1_style = Style::new().fg(AMBER).bold();
+    let heading2_style = Style::new().fg(AMBER).bold();
+    let heading3_style = Style::new().fg(crate::term::CYAN).bold();
+    let dim_style      = Style::new().fg(DIM);
 
-    let options = tui_markdown::Options::new(HiveStyleSheet);
-    let md_text = tui_markdown::from_str_with_options(content, &options);
+    for (i, line) in content.lines().enumerate() {
+        let is_first = i == 0;
+        let pfx_seg  = |s: Style| Segment::new(if is_first { prefix } else { indent }, s);
 
-    let mut result: Vec<Line<'static>> = Vec::new();
+        if line.starts_with("```") {
+            in_code_block = !in_code_block;
+            lines.push(vec![pfx_seg(dim_style), Segment::new(line, dim_style)]);
+            continue;
+        }
 
-    for (i, md_line) in md_text.lines.into_iter().enumerate() {
-        let line_prefix = if i == 0 {
-            Span::styled(prefix.to_string(), Style::default().fg(prefix_color))
-        } else {
-            Span::raw(indent.to_string())
-        };
-        let max_width = if i == 0 { first_line_max } else { rest_max };
+        if in_code_block {
+            // Dentro de bloque de código: verde, sin wrap (respetamos la indentación)
+            lines.push(vec![pfx_seg(code_style), Segment::new(line, code_style)]);
+            continue;
+        }
 
-        let line_spans: Vec<Span<'static>> = md_line.spans.into_iter().map(|s| {
-            Span::styled(s.content.into_owned(), convert_style(s.style))
-        }).collect();
-
-        let line_total: usize = line_spans.iter().map(|s| s.content.len()).sum();
-
-        if line_total <= max_width {
-            let mut spans = vec![line_prefix];
-            spans.extend(line_spans);
-            result.push(Line::from(spans));
-        } else {
-            // Flatten spans into plain text, wrap, then re-apply a single style
-            let flat_content: String = line_spans.iter().map(|s| s.content.as_ref()).collect();
-            let primary_style = line_spans.first().map(|s| s.style).unwrap_or_default();
-            let wrapped = textwrap::wrap(&flat_content, max_width);
-
-            for (j, wrapped_line) in wrapped.into_iter().enumerate() {
-                if j == 0 {
-                    result.push(Line::from(vec![
-                        line_prefix.clone(),
-                        Span::styled(wrapped_line.into_owned(), primary_style),
-                    ]));
-                } else {
-                    result.push(Line::from(vec![
-                        Span::raw(indent.to_string()),
-                        Span::styled(wrapped_line.into_owned(), primary_style),
-                    ]));
-                }
+        // Headings
+        let (text, style) = if let Some(t) = line.strip_prefix("### ") {
+            (t, heading3_style)
+        } else if let Some(t) = line.strip_prefix("## ") {
+            (t, heading2_style)
+        } else if let Some(t) = line.strip_prefix("# ") {
+            (t, heading1_style)
+        } else if line.starts_with("- ") || line.starts_with("* ") {
+            // Bullet: reemplazar el marcador con ▸
+            let t = line[2..].trim();
+            let avail = width.saturating_sub(indent.len() + 2).max(10);
+            for (j, wrapped) in textwrap::wrap(t, avail).into_iter().enumerate() {
+                let bullet = if j == 0 { "▸ " } else { "  " };
+                lines.push(vec![
+                    pfx_seg(Style::default()),
+                    Segment::new(bullet, Style::new().fg(AMBER)),
+                    Segment::new(wrapped.into_owned(), Style::default()),
+                ]);
             }
+            continue;
+        } else {
+            (line, Style::default())
+        };
+
+        // Wrap con el estilo detectado
+        let avail = width.saturating_sub(if is_first { prefix.len() } else { indent.len() }).max(10);
+        for (j, wrapped) in textwrap::wrap(text, avail).into_iter().enumerate() {
+            let p = if is_first && j == 0 { (prefix, prefix_style) } else { (indent, Style::default()) };
+            lines.push(vec![Segment::new(p.0, p.1), Segment::new(wrapped.into_owned(), style)]);
         }
     }
 
-    if result.is_empty() {
-        result.push(Line::from(vec![
-            Span::styled(prefix.to_string(), Style::default().fg(prefix_color)),
-        ]));
+    if lines.is_empty() {
+        lines.push(vec![Segment::new(prefix, prefix_style)]);
     }
-
-    result.push(Line::from(""));
-    result
+    lines.push(vec![]);
+    lines
 }
 
-pub fn render_diff(
+// ── render_diff ───────────────────────────────────────────────────────────────
+
+fn render_diff(
     content: &str,
-    prefix: &str,
-    prefix_color: Color,
-    indent: &str,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    prefix:  &str,
+    prefix_style: Style,
+    indent:  &str,
+    width:   usize,
+) -> Vec<StyledLine> {
+    let mut lines: Vec<StyledLine> = Vec::new();
 
     for (i, line) in content.lines().enumerate() {
-        let line_style = if line.starts_with('+') && !line.starts_with("+++") {
-            Style::default().fg(GREEN)
+        let style = if line.starts_with('+') && !line.starts_with("+++") {
+            Style::new().fg(GREEN)
         } else if line.starts_with('-') && !line.starts_with("---") {
-            Style::default().fg(Color::Indexed(203))
+            Style::new().fg(RED)
         } else if line.starts_with("@@") {
-            Style::default().fg(DIM).add_modifier(Modifier::ITALIC)
+            Style::new().fg(DIM)
         } else if line.starts_with("diff ") || line.starts_with("--- ") || line.starts_with("+++ ") {
-            Style::default().fg(AMBER)
+            Style::new().fg(AMBER)
         } else {
             Style::default()
         };
 
-        let available = if i == 0 { width.saturating_sub(prefix.len()) } else { width.saturating_sub(indent.len()) };
-        let wrapped = textwrap::wrap(line, available.max(10));
+        let (pfx, pfx_style, avail) = if i == 0 {
+            (prefix, prefix_style, width.saturating_sub(prefix.len()).max(10))
+        } else {
+            (indent, Style::default(), width.saturating_sub(indent.len()).max(10))
+        };
 
-        for (j, wrapped_line) in wrapped.into_iter().enumerate() {
-            if i == 0 && j == 0 {
-                lines.push(Line::from(vec![
-                    Span::styled(prefix.to_string(), Style::default().fg(prefix_color)),
-                    Span::styled(wrapped_line.into_owned(), line_style),
-                ]));
-            } else {
-                lines.push(Line::from(vec![
-                    Span::raw(indent.to_string()),
-                    Span::styled(wrapped_line.into_owned(), line_style),
-                ]));
-            }
+        for (j, wrapped) in textwrap::wrap(line, avail).into_iter().enumerate() {
+            let p = if j == 0 { (pfx, pfx_style) } else { (indent, Style::default()) };
+            lines.push(vec![Segment::new(p.0, p.1), Segment::new(wrapped.into_owned(), style)]);
         }
     }
 
-    lines.push(Line::from(""));
+    lines.push(vec![]);
     lines
 }
 
+// ── render_plain ──────────────────────────────────────────────────────────────
+
 fn render_plain(
     content: &str,
-    prefix: &str,
-    prefix_color: Color,
-    indent: &str,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    prefix:  &str,
+    prefix_style: Style,
+    indent:  &str,
+    width:   usize,
+) -> Vec<StyledLine> {
+    let mut lines: Vec<StyledLine> = Vec::new();
 
-    if content.contains('\n') {
-        for (i, line) in content.lines().enumerate() {
-            let trimmed = line.trim_start();
-            let content_style = if trimmed.starts_with('\u{25b8}') {
-                Style::default().fg(AMBER)
-            } else if trimmed.starts_with('\u{00b7}') {
-                Style::default().fg(ratatui::style::Color::Indexed(248))
-            } else if trimmed.starts_with('\u{2500}') || trimmed.starts_with('\u{2550}') {
-                Style::default().fg(DIM)
-            } else {
-                Style::default()
-            };
+    if content.is_empty() {
+        lines.push(vec![Segment::new(prefix, prefix_style)]);
+        lines.push(vec![]);
+        return lines;
+    }
 
-            let available = if i == 0 { width.saturating_sub(prefix.len()) } else { width.saturating_sub(indent.len()) };
-            let wrapped = textwrap::wrap(line, available.max(10));
+    for (i, line) in content.lines().enumerate() {
+        let avail = if i == 0 {
+            width.saturating_sub(prefix.len()).max(10)
+        } else {
+            width.saturating_sub(indent.len()).max(10)
+        };
 
-            for (j, wrapped_line) in wrapped.into_iter().enumerate() {
-                if i == 0 && j == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled(prefix.to_string(), Style::default().fg(prefix_color)),
-                        Span::styled(wrapped_line.into_owned(), content_style),
-                    ]));
-                } else {
-                    lines.push(Line::from(vec![
-                        Span::raw(indent.to_string()),
-                        Span::styled(wrapped_line.into_owned(), content_style),
-                    ]));
-                }
-            }
-        }
-    } else {
-        let available = width.saturating_sub(prefix.len());
-        let wrapped = textwrap::wrap(content, available.max(10));
-
-        for (j, wrapped_line) in wrapped.into_iter().enumerate() {
-            if j == 0 {
-                lines.push(Line::from(vec![
-                    Span::styled(prefix.to_string(), Style::default().fg(prefix_color)),
-                    Span::styled(wrapped_line.into_owned(), Style::default()),
-                ]));
-            } else {
-                lines.push(Line::from(vec![
-                    Span::raw(indent.to_string()),
-                    Span::styled(wrapped_line.into_owned(), Style::default()),
-                ]));
-            }
+        for (j, wrapped) in textwrap::wrap(line, avail).into_iter().enumerate() {
+            let p = if i == 0 && j == 0 { (prefix, prefix_style) } else { (indent, Style::default()) };
+            lines.push(vec![Segment::new(p.0, p.1), Segment::new(wrapped.into_owned(), Style::default())]);
         }
     }
 
-    lines.push(Line::from(""));
+    lines.push(vec![]);
     lines
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn fmt_tokens(n: u32) -> String {
+    if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1_000_000.0) }
+    else if n >= 1_000 { format!("{:.1}k", n as f64 / 1_000.0) }
+    else { n.to_string() }
 }

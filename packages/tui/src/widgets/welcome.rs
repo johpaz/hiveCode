@@ -1,120 +1,159 @@
-use ratatui::{
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
-    Frame,
+use crate::app::{AppState, ReplMode};
+use crate::term::{
+    Canvas, Color, Rect, Style,
+    AMBER, AMBER_DIM, BLUE, CYAN, DIM, GREEN, PURPLE, RED, SECONDARY, WHITE,
 };
 
-use crate::app::{
-    AppState, ReplMode, AMBER, AMBER_DIM, BLUE, CYAN, DIM, GREEN, PURPLE, RED, SECONDARY,
-};
-
-// ASCII bee — 12 lines × 28 display chars
+// ── Bee ASCII art ─────────────────────────────────────────────────────────────
 //
-// Structure: antennae (0-2) · head (3) · wings+thorax (4-6) · abdomen (7-10) · stinger (11)
-// Wings use ▒ in CYAN to visually separate from amber body (░/█).
+// La abeja tiene 12 líneas × 28 caracteres de ancho.
+// Cada línea es una función que retorna los segmentos a dibujar en esa fila.
+// Dividimos en segmentos porque cada parte tiene un color diferente.
+//
+// Por qué trabajamos con segmentos y no con un solo String con ANSI codes:
+// ─────────────────────────────────────────────────────────────────────────────
+// El Canvas sabe manejar colores por celda. Si pusiéramos ANSI codes dentro
+// del string, el canvas los contaría como caracteres visibles y el alineamiento
+// se rompería. En su lugar, dibujamos cada segmento con su estilo y el canvas
+// se encarga de emitir las secuencias ANSI correctas en flush().
 
-fn bee_line<'a>(i: usize, state: &'a AppState) -> Line<'a> {
-    let amber = Style::default().fg(AMBER).add_modifier(Modifier::BOLD);
-    let dim   = Style::default().fg(DIM);
-    let wing  = Style::default().fg(CYAN);
+struct BeeSegment {
+    text:  &'static str,
+    color: Color,
+    bold:  bool,
+}
 
-    // Each match arm totals exactly 28 display chars.
-    let bee_spans: Vec<Span<'a>> = match i {
-        // ── antennae (diverge upward, converge to head) ────────────────────
-        0 => vec![Span::styled("        \\          /        ", dim)],
-        1 => vec![Span::styled("         \\        /         ", dim)],
-        2 => vec![Span::styled("          \\      /          ", dim)],
-        // ── head ───────────────────────────────────────────────────────────
+impl BeeSegment {
+    const fn c(text: &'static str, color: Color) -> Self { Self { text, color, bold: false } }
+    const fn b(text: &'static str, color: Color) -> Self { Self { text, color, bold: true  } }
+}
+
+/// Retorna los segmentos de la línea i de la abeja (0-11).
+fn bee_row(i: usize) -> Vec<BeeSegment> {
+    use BeeSegment::{c, b};
+    match i {
+        // Antenas
+        0 => vec![c("        \\          /        ", DIM)],
+        1 => vec![c("         \\        /         ", DIM)],
+        2 => vec![c("          \\      /          ", DIM)],
+        // Cabeza
         3 => vec![
-            Span::styled("          ", dim),
-            Span::styled("(", amber),
-            Span::styled(" o  o ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(")", amber),
-            Span::styled("          ", dim),
+            c("          ",  DIM),
+            c("(",           AMBER),
+            b(" o  o ",      WHITE),
+            c(")",           AMBER),
+            c("          ",  DIM),
         ],
-        // ── wings (▒ cyan) flanking thorax ─────────────────────────────────
+        // Alas + tórax
         4 => vec![
-            Span::styled("   ", dim),
-            Span::styled("▒▒▒▒▒", wing),
-            Span::styled(" ░░░░░░░░░░ ", amber),
-            Span::styled("▒▒▒▒▒", wing),
-            Span::styled("   ", dim),
+            c("   ", DIM),
+            c("▒▒▒▒▒",        CYAN),
+            c(" ░░░░░░░░░░ ", AMBER),
+            c("▒▒▒▒▒",        CYAN),
+            c("   ", DIM),
         ],
         5 => vec![
-            Span::styled("   ", dim),
-            Span::styled("▒▒▒▒▒", wing),
-            Span::styled(" ░░██████░░ ", amber),
-            Span::styled("▒▒▒▒▒", wing),
-            Span::styled("   ", dim),
+            c("   ", DIM),
+            c("▒▒▒▒▒",        CYAN),
+            c(" ░░██████░░ ", AMBER),
+            c("▒▒▒▒▒",        CYAN),
+            c("   ", DIM),
         ],
         6 => vec![
-            Span::styled("   ", dim),
-            Span::styled("▒▒▒▒▒", wing),
-            Span::styled(" ░░░░░░░░░░ ", amber),
-            Span::styled("▒▒▒▒▒", wing),
-            Span::styled("   ", dim),
+            c("   ", DIM),
+            c("▒▒▒▒▒",        CYAN),
+            c(" ░░░░░░░░░░ ", AMBER),
+            c("▒▒▒▒▒",        CYAN),
+            c("   ", DIM),
         ],
-        // ── abdomen (alternating amber / dark stripes, tapering) ───────────
-        7  => vec![Span::styled("         ░░██████░░         ", amber)],
-        8  => vec![Span::styled("         ░░░░░░░░░░         ", amber)],
-        9  => vec![Span::styled("          ░░░░░░░░          ", amber)],
-        10 => vec![Span::styled("           ░░░░░░           ", amber)],
-        // ── stinger ────────────────────────────────────────────────────────
-        11 => vec![Span::styled("            ▼▼▼▼            ", amber)],
+        // Abdomen (rayas ámbar/oscuras que se van estrechando)
+        7  => vec![c("         ░░██████░░         ", AMBER)],
+        8  => vec![c("         ░░░░░░░░░░         ", AMBER)],
+        9  => vec![c("          ░░░░░░░░          ", AMBER)],
+        10 => vec![c("           ░░░░░░           ", AMBER)],
+        // Aguijón
+        11 => vec![c("            ▼▼▼▼            ", AMBER)],
         _  => vec![],
-    };
-
-    let side: Vec<Span<'a>> = match i {
-        3 => vec![
-            Span::styled("  hivecode", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  v{}", state.version), Style::default().fg(DIM)),
-        ],
-        4 => vec![Span::styled("  Gateway de agentes de código", Style::default().fg(DIM))],
-        5 => vec![Span::styled("  local-first · Bun runtime", Style::default().fg(DIM))],
-        6 => vec![Span::styled("  @johpaz", Style::default().fg(DIM))],
-        _ => vec![],
-    };
-
-    let mut spans = bee_spans;
-    spans.extend(side);
-    Line::from(spans)
+    }
 }
 
-fn mode_badge(mode: &ReplMode) -> Span<'static> {
-    let (label, fg, bg) = match mode {
-        ReplMode::Plan     => (" PLAN ",     Color::Rgb(196, 181, 253), Color::Rgb(46, 26, 94)),
+/// Texto lateral a la derecha de la abeja (líneas 3-6).
+fn side_text(i: usize, version: &str) -> Option<(&'static str, String, Color)> {
+    match i {
+        3 => Some(("  hivecode", format!("  v{}", version), DIM)),
+        4 => Some(("  Gateway de agentes de código", String::new(), DIM)),
+        5 => Some(("  local-first · Bun runtime",    String::new(), DIM)),
+        6 => Some(("  @johpaz",                       String::new(), DIM)),
+        _ => None,
+    }
+}
+
+/// Dibuja una fila de la abeja en el canvas en la posición (x, row).
+fn draw_bee_row(canvas: &mut Canvas, i: usize, x: u16, row: u16, state: &AppState) {
+    let segs = bee_row(i);
+    let mut cx = x;
+    for seg in &segs {
+        let style = Style::new().fg(seg.color).bold();
+        canvas.print(cx, row, seg.text, if seg.bold { style } else { Style::new().fg(seg.color) });
+        cx += seg.text.chars().count() as u16;
+    }
+
+    // Texto lateral (versión, descripción, etc.)
+    if let Some((main, extra, color)) = side_text(i, &state.version) {
+        canvas.print(cx, row, main, Style::new().fg(WHITE).bold());
+        cx += main.chars().count() as u16;
+        if !extra.is_empty() {
+            canvas.print(cx, row, &extra, Style::new().fg(color));
+        }
+    }
+}
+
+// ── Elementos de información ──────────────────────────────────────────────────
+
+fn draw_sep(canvas: &mut Canvas, x: u16, row: u16) {
+    canvas.print(x, row, "  ─────────────────────────────────────────────",
+        Style::new().fg(DIM));
+}
+
+fn draw_bar_label(canvas: &mut Canvas, x: u16, row: u16, label: &str, value: &str, vc: Color) {
+    canvas.print(x,       row, "  │", Style::new().fg(AMBER));
+    canvas.print(x + 3,   row, label, Style::new().fg(DIM));
+    canvas.print(x + 3 + label.chars().count() as u16, row, value, Style::new().fg(vc));
+}
+
+fn mode_badge_text(mode: &ReplMode) -> (&'static str, Color, Color) {
+    match mode {
+        ReplMode::Plan     => (" PLAN ",       Color::Rgb(196, 181, 253), Color::Rgb(46, 26, 94)),
         ReplMode::Approval => (" APROBACIÓN ", Color::Rgb(252, 211, 77),  Color::Rgb(69, 26, 3)),
-        ReplMode::Auto     => (" AUTO ",     Color::Rgb(110, 231, 183), Color::Rgb(6, 78, 59)),
-    };
-    Span::styled(
-        label,
-        Style::default()
-            .fg(fg)
-            .bg(bg)
-            .add_modifier(Modifier::BOLD),
-    )
+        ReplMode::Auto     => (" AUTO ",       Color::Rgb(110, 231, 183), Color::Rgb(6, 78, 59)),
+    }
 }
 
-fn bar_span() -> Span<'static> {
-    Span::styled("  │", Style::default().fg(AMBER))
+fn draw_mode_row(canvas: &mut Canvas, x: u16, row: u16, mode: &ReplMode) {
+    canvas.print(x,      row, "  │", Style::new().fg(AMBER));
+    canvas.print(x + 3,  row, "  Modo      ", Style::new().fg(DIM));
+    let (label, fg, bg) = mode_badge_text(mode);
+    let badge_x = x + 3 + 12;
+    canvas.print(badge_x, row, label, Style::new().fg(fg).bg(bg).bold());
+    let after = badge_x + label.chars().count() as u16;
+    canvas.print(after, row, "  shift+tab para cambiar", Style::new().fg(DIM));
 }
 
-fn workers_line(agent_count: u32) -> Line<'static> {
-    let count_color = if agent_count >= 7 { GREEN } else { RED };
-    let mut spans = vec![
-        bar_span(),
-        Span::styled("  Workers   ", Style::default().fg(DIM)),
-        Span::styled(
-            format!("{} activos", agent_count),
-            Style::default().fg(count_color),
-        ),
-    ];
+fn draw_workers_row(canvas: &mut Canvas, x: u16, row: u16, workers: &[String]) {
+    let count = workers.len();
+    let count_color = if count >= 7 { GREEN } else { RED };
+    canvas.print(x,     row, "  │", Style::new().fg(AMBER));
+    canvas.print(x + 3, row, "  Workers   ", Style::new().fg(DIM));
+    let after = x + 3 + 12;
+    let count_text = format!("{} activos", count);
+    canvas.print(after, row, &count_text, Style::new().fg(count_color));
 
-    if agent_count > 0 {
-        spans.push(Span::styled("  ·  ", Style::default().fg(DIM)));
-        let roles: &[(&str, Color)] = &[
+    if count > 0 {
+        let mut cx = after + count_text.chars().count() as u16;
+        canvas.print(cx, row, "  ·  ", Style::new().fg(DIM));
+        cx += 5;
+
+        let role_colors: &[(&str, Color)] = &[
             ("bee",    AMBER),
             ("arch",   PURPLE),
             ("back",   BLUE),
@@ -123,133 +162,131 @@ fn workers_line(agent_count: u32) -> Line<'static> {
             ("test",   GREEN),
             ("devops", AMBER_DIM),
         ];
-        let active = (agent_count as usize).min(roles.len());
-        for (idx, (name, color)) in roles[..active].iter().enumerate() {
-            spans.push(Span::styled(*name, Style::default().fg(*color)));
-            if idx + 1 < active {
-                spans.push(Span::styled(" · ", Style::default().fg(DIM)));
+
+        for (idx, worker) in workers.iter().enumerate() {
+            let color = role_colors.iter()
+                .find(|(k, _)| worker.contains(k))
+                .map(|(_, c)| *c)
+                .unwrap_or(DIM);
+            canvas.print(cx, row, worker, Style::new().fg(color));
+            cx += worker.chars().count() as u16;
+            if idx + 1 < count {
+                canvas.print(cx, row, " · ", Style::new().fg(DIM));
+                cx += 3;
             }
         }
     }
-
-    Line::from(spans)
 }
 
-fn sep_line() -> Line<'static> {
-    Line::from(vec![Span::styled(
-        "  ─────────────────────────────────────────────",
-        Style::default().fg(DIM),
-    )])
-}
+// ── Punto de entrada del widget ───────────────────────────────────────────────
 
-pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
-    // Content is ~24 lines; center vertically if terminal is taller
-    let content_height: u16 = 24;
-    let top_pad = area.height.saturating_sub(content_height) / 2;
+pub fn draw(canvas: &mut Canvas, state: &AppState, rect: Rect) {
+    // Centrar verticalmente si el terminal es más alto que el contenido (~24 líneas)
+    let content_h: u16 = 24;
+    let top_pad = rect.h.saturating_sub(content_h) / 2;
+    let x   = rect.x;
+    let mut row = rect.y + top_pad;
 
-    let mut lines: Vec<Line> = Vec::new();
-
-    // Top padding
-    for _ in 0..top_pad {
-        lines.push(Line::from(""));
-    }
-
-    // ── Bee art (12 lines) ────────────────────────────────────────────────────
+    // ── Abeja ASCII (12 líneas) ───────────────────────────────────────────────
     for i in 0..12 {
-        lines.push(bee_line(i, state));
+        if row >= rect.bottom() { break; }
+        draw_bee_row(canvas, i, x, row, state);
+        row += 1;
     }
 
-    lines.push(Line::from(""));
-    lines.push(sep_line());
+    if row < rect.bottom() { row += 1; } // línea vacía
 
+    // ── Separador ─────────────────────────────────────────────────────────────
+    if row < rect.bottom() {
+        draw_sep(canvas, x, row);
+        row += 1;
+    }
+
+    // ── Información ───────────────────────────────────────────────────────────
     if state.provider.is_empty() {
-        // No provider — warning state
-        lines.push(Line::from(vec![
-            bar_span(),
-            Span::styled("  Sin provider configurado", Style::default().fg(RED)),
-        ]));
-        lines.push(Line::from(vec![
-            bar_span(),
-            Span::styled("  ▸ Escribe  ", Style::default().fg(DIM)),
-            Span::styled("/provider", Style::default().fg(AMBER)),
-            Span::styled("  para configurar un LLM", Style::default().fg(DIM)),
-        ]));
-        lines.push(Line::from(vec![
-            bar_span(),
-            Span::styled(
-                "  anthropic · openai · groq · gemini · ollama",
-                Style::default().fg(DIM),
-            ),
-        ]));
+        // Sin provider configurado
+        if row < rect.bottom() {
+            canvas.print(x, row, "  │", Style::new().fg(AMBER));
+            canvas.print(x + 3, row, "  Sin provider configurado", Style::new().fg(RED));
+            row += 1;
+        }
+        if row < rect.bottom() {
+            canvas.print(x, row, "  │", Style::new().fg(AMBER));
+            canvas.print(x + 3, row, "  ▸ Escribe  ", Style::new().fg(DIM));
+            canvas.print(x + 16, row, "/provider", Style::new().fg(AMBER));
+            canvas.print(x + 25, row, "  para configurar un LLM", Style::new().fg(DIM));
+            row += 1;
+        }
+        if row < rect.bottom() {
+            canvas.print(x, row, "  │", Style::new().fg(AMBER));
+            canvas.print(x + 3, row, "  anthropic · openai · groq · gemini · ollama",
+                Style::new().fg(DIM));
+            row += 1;
+        }
     } else {
-        // ── Status rows ──────────────────────────────────────────────────────
         // Modo
-        lines.push(Line::from(vec![
-            bar_span(),
-            Span::styled("  Modo      ", Style::default().fg(DIM)),
-            mode_badge(&state.mode),
-            Span::styled("  shift+tab para cambiar", Style::default().fg(DIM)),
-        ]));
+        if row < rect.bottom() {
+            draw_mode_row(canvas, x, row, &state.mode);
+            row += 1;
+        }
 
-        // Directory
-        let project_display = {
-            let p = state.project_path.as_str();
-            if let Some(home) = std::env::var("HOME").ok() {
-                p.strip_prefix(&home).map(|s| format!("~{s}")).unwrap_or_else(|| p.to_string())
-            } else {
-                p.to_string()
-            }
-        };
-        lines.push(Line::from(vec![
-            bar_span(),
-            Span::styled("  Directory ", Style::default().fg(DIM)),
-            Span::styled(project_display, Style::default().fg(SECONDARY)),
-        ]));
+        // Directorio
+        if row < rect.bottom() {
+            let path = &state.project_path;
+            let display = std::env::var("HOME")
+                .ok()
+                .and_then(|h| path.strip_prefix(&h).map(|s| format!("~{s}")))
+                .unwrap_or_else(|| path.clone());
+            draw_bar_label(canvas, x, row, "  Directory ", &display, SECONDARY);
+            row += 1;
+        }
 
-        // Session
-        let session_display = if state.session_id.is_empty() {
-            "—".to_string()
-        } else {
-            state.session_id.clone()
-        };
-        lines.push(Line::from(vec![
-            bar_span(),
-            Span::styled("  Session   ", Style::default().fg(DIM)),
-            Span::styled(session_display, Style::default().fg(SECONDARY)),
-        ]));
+        // Sesión
+        if row < rect.bottom() {
+            let sid = if state.session_id.is_empty() { "—".to_string() } else { state.session_id.clone() };
+            draw_bar_label(canvas, x, row, "  Session   ", &sid, SECONDARY);
+            row += 1;
+        }
 
         // Provider
-        let provider_info = if state.model.is_empty() {
-            state.provider.clone()
-        } else {
-            format!("{}  ·  {}", state.provider, state.model)
-        };
-        lines.push(Line::from(vec![
-            bar_span(),
-            Span::styled("  Provider  ", Style::default().fg(DIM)),
-            Span::styled(provider_info, Style::default().fg(GREEN)),
-        ]));
+        if row < rect.bottom() {
+            let prov = if state.model.is_empty() {
+                state.provider.clone()
+            } else {
+                format!("{}  ·  {}", state.provider, state.model)
+            };
+            draw_bar_label(canvas, x, row, "  Provider  ", &prov, GREEN);
+            row += 1;
+        }
 
         // Workers
-        lines.push(workers_line(state.agent_count));
+        if row < rect.bottom() {
+            draw_workers_row(canvas, x, row, &state.workers);
+            row += 1;
+        }
 
-        // Tasks / tokens
-        lines.push(Line::from(vec![
-            bar_span(),
-            Span::styled("  Tareas    ", Style::default().fg(DIM)),
-            Span::styled(state.task_count.to_string(), Style::default().fg(SECONDARY)),
-            Span::styled("  ·  tokens ", Style::default().fg(DIM)),
-            Span::styled(state.fmt_tokens(), Style::default().fg(DIM)),
-        ]));
+        // Tareas / tokens
+        if row < rect.bottom() {
+            canvas.print(x,     row, "  │", Style::new().fg(AMBER));
+            canvas.print(x + 3, row, "  Tareas    ", Style::new().fg(DIM));
+            let tasks = state.task_count.to_string();
+            canvas.print(x + 15, row, &tasks, Style::new().fg(SECONDARY));
+            canvas.print(x + 15 + tasks.len() as u16, row, "  ·  tokens ", Style::new().fg(DIM));
+            canvas.print(x + 15 + tasks.len() as u16 + 12, row, &state.fmt_tokens(), Style::new().fg(DIM));
+            row += 1;
+        }
     }
 
-    lines.push(sep_line());
+    // ── Separador inferior ────────────────────────────────────────────────────
+    if row < rect.bottom() {
+        draw_sep(canvas, x, row);
+        row += 1;
+    }
 
-    // ── Commands ──────────────────────────────────────────────────────────────
-    lines.push(Line::from(vec![
-        bar_span(),
-        Span::styled("  Escribe / para ver todos los comandos disponibles", Style::default().fg(DIM)),
-    ]));
-
-    frame.render_widget(Paragraph::new(lines), area);
+    // ── Hint de comandos ─────────────────────────────────────────────────────
+    if row < rect.bottom() {
+        canvas.print(x,     row, "  │", Style::new().fg(AMBER));
+        canvas.print(x + 3, row, "  Escribe / para ver todos los comandos disponibles",
+            Style::new().fg(DIM));
+    }
 }

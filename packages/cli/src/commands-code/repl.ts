@@ -106,40 +106,38 @@ async function ensureGateway(): Promise<void> {
 // ─── TUI binary compile-on-demand ─────────────────────────────────────────────
 
 async function ensureTuiBinary(): Promise<void> {
-  const tuiDir = path.join(import.meta.dir, "../../../tui")
+  const tuiDir = path.join(import.meta.dir, "../../../hivetui")
   if (!existsSync(tuiDir)) return
 
   const isDev = process.env.HIVE_DEV === "true"
 
-  // In dev mode, always run cargo build (debug) so the binary is up-to-date.
-  // Cargo is fast when nothing changed (~1s) and rebuilds automatically when it detects changes.
   if (isDev) {
     const spinner = hiveSpinner("default")
-    spinner.start("Ensuring TUI binary is up to date...")
+    spinner.start("Compilando hivetui...")
     const proc = Bun.spawnSync(["cargo", "build"], {
       cwd: tuiDir,
       stdio: ["ignore", "pipe", "pipe"],
     })
     if (proc.exitCode === 0) {
-      spinner.stop("TUI binary ready")
+      spinner.stop("hivetui listo")
     } else {
-      spinner.stop("TUI build failed — continuing without TUI", "error")
+      spinner.stop("hivetui build falló — continuando sin TUI", "error")
     }
     return
   }
 
-  // Production: compile release only if binary does not exist
+  // Producción: compilar release solo si no existe el binario
   if (tuiAvailable()) return
   const spinner = hiveSpinner("default")
-  spinner.start("Compilando TUI binary (primera vez)...")
+  spinner.start("Compilando hivetui (primera vez)...")
   const proc = Bun.spawnSync(["cargo", "build", "--release"], {
     cwd: tuiDir,
     stdio: ["ignore", "pipe", "pipe"],
   })
   if (proc.exitCode === 0) {
-    spinner.stop("TUI binary compilado")
+    spinner.stop("hivetui compilado")
   } else {
-    spinner.stop("No se pudo compilar el TUI binary — continuando sin TUI", "error")
+    spinner.stop("No se pudo compilar hivetui — continuando sin TUI", "error")
   }
 }
 
@@ -221,7 +219,56 @@ async function executeTask(
   mode: ReplMode,
   options?: { suspend?: () => Promise<void>; resume?: () => void; manager?: CoordinatorManager; quiet?: boolean },
 ): Promise<string> {
-  // Captura todo lo que los coordinadores escriben a stdout
+  const quiet = options?.quiet ?? false
+  const manager = options?.manager
+
+  // In TUI mode (manager provided), collect the final response via the coordinator's
+  // task-complete callback instead of capturing stdout. Stdout capture includes
+  // plan text, hiveSelect prompts, and other noise that garbles the history entry.
+  if (manager && quiet) {
+    let finalResponse = ""
+    manager.setTaskCompleteCallback((response) => { finalResponse = response })
+
+    try {
+      if (mode === "plan") {
+        await runPlan(task, { keyboard: false, exitOnError: false, manager, quiet })
+      } else if (mode === "auto") {
+        await runTask(task, [], { keyboard: false, exitOnError: false, manager, quiet })
+      } else {
+        // approval: plan → ask user → run
+        await runPlan(task, { keyboard: false, exitOnError: false, manager, quiet })
+
+        let approval: "yes" | "no" = "no"
+        if (options?.suspend && options?.resume) {
+          await options.suspend()
+          try {
+            const result = await hiveSelect({
+              message: "¿Deseas implementar este plan?",
+              options: [
+                { value: "yes", label: "Sí, implementar" },
+                { value: "no",  label: "No, volver" },
+              ],
+            })
+            approval = (!isCancel(result) && result === "yes") ? "yes" : "no"
+          } finally {
+            options.resume()
+          }
+        }
+
+        if (approval === "yes") {
+          // Reset collector so we get the run result, not the plan result
+          finalResponse = ""
+          await runTask(task, [], { keyboard: false, exitOnError: false, manager, quiet })
+        }
+      }
+    } finally {
+      manager.setTaskCompleteCallback(undefined)
+    }
+
+    return finalResponse.replace(/\x1b\[[0-9;]*m/g, "").replace(/\r/g, "").trim()
+  }
+
+  // Non-TUI path: capture stdout (original behaviour)
   const lines: string[] = []
   const origWrite = process.stdout.write.bind(process.stdout)
   ;(process.stdout as any).write = (chunk: any, ...args: any[]) => {
@@ -230,42 +277,21 @@ async function executeTask(
   }
 
   try {
-    const quiet = options?.quiet ?? false
-    const manager = options?.manager
-
     if (mode === "plan") {
       await runPlan(task, { keyboard: false, exitOnError: false, manager, quiet })
     } else if (mode === "auto") {
       await runTask(task, [], { keyboard: false, exitOnError: false, manager, quiet })
     } else {
-      // approval: plan → pedir confirmación → run
       await runPlan(task, { keyboard: false, exitOnError: false, manager, quiet })
 
-      let approval: "yes" | "no" = "no"
-      if (options?.suspend && options?.resume) {
-        await options.suspend()
-        try {
-          const result = await hiveSelect({
-            message: "¿Deseas implementar este plan?",
-            options: [
-              { value: "yes", label: "Sí, implementar" },
-              { value: "no",  label: "No, volver" },
-            ],
-          })
-          approval = (!isCancel(result) && result === "yes") ? "yes" : "no"
-        } finally {
-          options.resume()
-        }
-      } else {
-        const result = await hiveSelect({
-          message: "¿Deseas implementar este plan?",
-          options: [
-            { value: "yes", label: "Sí, implementar" },
-            { value: "no",  label: "No, volver" },
-          ],
-        })
-        approval = (!isCancel(result) && result === "yes") ? "yes" : "no"
-      }
+      const result = await hiveSelect({
+        message: "¿Deseas implementar este plan?",
+        options: [
+          { value: "yes", label: "Sí, implementar" },
+          { value: "no",  label: "No, volver" },
+        ],
+      })
+      const approval = (!isCancel(result) && result === "yes") ? "yes" : "no"
 
       if (approval === "yes") {
         await runTask(task, [], { keyboard: false, exitOnError: false, manager, quiet })
@@ -275,10 +301,8 @@ async function executeTask(
     ;(process.stdout as any).write = origWrite
   }
 
-  // Devuelve un resumen limpio (sin ANSI) para el historial Rezi
   const raw = lines.join("")
-  const clean = raw.replace(/\x1b\[[0-9;]*m/g, "").replace(/\r/g, "").trim()
-  return clean
+  return raw.replace(/\x1b\[[0-9;]*m/g, "").replace(/\r/g, "").trim()
 }
 
 // ─── Internal command handler ─────────────────────────────────────────────────
@@ -341,9 +365,9 @@ export async function repl(): Promise<void> {
   const sessionId = manager.openSession()
   logger.info(`[repl] Session started: ${sessionId}`)
 
-  const agentCount = (getDb()
-    .query("SELECT COUNT(*) as c FROM agents WHERE role='coordinator' AND enabled=1")
-    .get() as any)?.c ?? 0
+  const activeWorkers: string[] = (getDb()
+    .query("SELECT name FROM agents WHERE role='coordinator' AND enabled=1")
+    .all() as any[]).map(r => r.name as string)
 
   // ── Ratatui TUI (preferred) ────────────────────────────────────────────────
   if (tuiAvailable()) {
@@ -438,7 +462,7 @@ export async function repl(): Promise<void> {
       version:         VERSION,
       taskCount:       init.taskCount,
       tokenCount:      init.tokenCount,
-      agentCount,
+      workers:         activeWorkers,
 
       getSuggestions: (query) => renderSuggestions(query),
 
@@ -529,8 +553,8 @@ export async function repl(): Promise<void> {
   }
 
   hiveNote("TUI binary no encontrado", [
-    "Compila el binario Ratatui con:",
-    "  cd packages/tui && cargo build",
+    "Compila hivetui con:",
+    "  cd packages/hivetui && cargo build",
   ])
   hiveOutro("Ejecuta el comando anterior y vuelve a intentarlo", "error")
 }

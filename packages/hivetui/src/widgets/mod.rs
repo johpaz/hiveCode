@@ -1,0 +1,11 @@
+pub mod command_popup;
+pub mod config_modal;
+pub mod header;
+pub mod history;
+pub mod info_modal;
+pub mod input;
+pub mod mascot;
+pub mod statusbar;
+pub mod thought_stream;
+pub mod welcome;
+pub mod workers_panel;

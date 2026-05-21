@@ -3,13 +3,14 @@ use base64::Engine;
 use color_eyre::eyre::Result;
 use crossterm::{
     event::{
-        Event, EventStream, KeyCode, KeyEvent,
+        Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
         KeyModifiers,
     },
-    terminal::{disable_raw_mode, enable_raw_mode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
-use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
+use ratatui::{backend::CrosstermBackend, layout::Rect, widgets::ListItem, Terminal};
 use std::io::{stdout, Write};
 use tokio::sync::mpsc::Sender;
 
@@ -27,6 +28,21 @@ pub const BLUE: ratatui::style::Color = ratatui::style::Color::Indexed(75);
 pub const CYAN: ratatui::style::Color = ratatui::style::Color::Indexed(45);
 pub const DIM: ratatui::style::Color = ratatui::style::Color::Indexed(240);
 pub const SECONDARY: ratatui::style::Color = ratatui::style::Color::Indexed(248);
+
+// ── State module re-exports (source of truth lives in state/) ────────────────
+// Widgets import from `crate::app::*`; these re-exports keep that working while
+// the canonical definitions live in their dedicated modules.
+#[allow(unused_imports)]
+pub use crate::state::{
+    AdrRisk, AdrState,
+    CheckpointEntry, CheckpointState,
+    DirtyFlags,
+    FileMapState, FileRiskEntry,
+    LogState,
+    ModalState,
+    NarrativeChunk, ThoughtStreamState,
+    Phase, WorkerState,
+};
 
 // ── Domain types ─────────────────────────────────────────────────────────────
 
@@ -146,14 +162,6 @@ pub struct LogEntry {
     pub message: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct Phase {
-    pub name: String,
-    pub coordinator: String,
-    pub status: String,
-    pub duration_ms: Option<u64>,
-}
-
 // ── Input with cursor ────────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
@@ -211,7 +219,7 @@ pub struct AppState {
     pub version: String,
     pub task_count: u32,
     pub token_count: u64,
-    pub agent_count: u32,
+    pub workers: Vec<String>,
     pub history: Vec<HistoryEntry>,
     pub input: InputState,
     pub running: bool,
@@ -240,8 +248,6 @@ pub struct AppState {
     pub copy_mode: bool,
     pub copy_sel: usize,
     pub paused: bool,
-    // ─── Streaming: track last thinking streamId for appending ───
-    pub last_thinking_stream_id: Option<String>,
     // ─── Config modal ───
     pub show_modal: bool,
     pub modal_title: String,
@@ -256,6 +262,9 @@ pub struct AppState {
     pub info_modal_title: String,
     pub info_modal_content: String,
     pub info_scroll_offset: usize,
+    // ─── History render cache (avoids per-keystroke markdown re-parse) ───
+    pub history_render_cache: Vec<ListItem<'static>>,
+    pub history_render_key: (usize, usize, bool, usize), // (history.len, width, copy_mode, copy_sel)
 }
 
 impl Default for AppState {
@@ -272,7 +281,7 @@ impl Default for AppState {
             version: "1.0.0".to_string(),
             task_count: 0,
             token_count: 0,
-            agent_count: 0,
+            workers: Vec::new(),
             history: Vec::new(),
             input: InputState::default(),
             running: false,
@@ -299,7 +308,6 @@ impl Default for AppState {
             copy_mode: false,
             copy_sel: 0,
             paused: false,
-            last_thinking_stream_id: None,
             show_modal: false,
             modal_title: String::new(),
             modal_command: String::new(),
@@ -312,6 +320,8 @@ impl Default for AppState {
             info_modal_title: String::new(),
             info_modal_content: String::new(),
             info_scroll_offset: 0,
+            history_render_cache: Vec::new(),
+            history_render_key: (0, 0, false, 0),
             phases: vec![
                 Phase { name: "Analyze & Route".into(), coordinator: "bee".into(), status: "idle".into(), duration_ms: None },
                 Phase { name: "Architecture Design".into(), coordinator: "architecture".into(), status: "idle".into(), duration_ms: None },
@@ -371,7 +381,7 @@ impl AppState {
         match msg {
             BunMessage::Init {
                 mode, provider, model, project_name, project_path, session_id,
-                version, task_count, token_count, agent_count,
+                version, task_count, token_count, workers,
             } => {
                 self.mode = ReplMode::from(mode.as_str());
                 self.provider = provider;
@@ -382,22 +392,31 @@ impl AppState {
                 self.version = version;
                 self.task_count = task_count;
                 self.token_count = token_count;
-                self.agent_count = agent_count;
+                self.workers = workers;
             }
             BunMessage::HistoryAppend { role, content, content_type } => {
                 let r = Role::from(role.as_str());
-                let ct = match content_type.as_deref() {
-                    Some("markdown") => crate::markdown::ContentType::Markdown,
-                    Some("thinking") => crate::markdown::ContentType::Thinking,
-                    Some("plain") => crate::markdown::ContentType::Plain,
-                    _ => crate::markdown::ContentType::Plain,
-                };
-                self.history.push(HistoryEntry {
-                    role: r,
-                    content,
-                    content_type: ct,
-                    thinking_meta: None,
-                });
+                let is_agent_response = r == Role::Assistant || r == Role::System;
+                if !content.is_empty() {
+                    let ct = match content_type.as_deref() {
+                        Some("markdown") => crate::markdown::ContentType::Markdown,
+                        Some("thinking") => crate::markdown::ContentType::Thinking,
+                        Some("plain") => crate::markdown::ContentType::Plain,
+                        _ => crate::markdown::ContentType::Plain,
+                    };
+                    self.history.push(HistoryEntry {
+                        role: r,
+                        content,
+                        content_type: ct,
+                        thinking_meta: None,
+                    });
+                }
+                // Safety: unlock input when the agent's response arrives,
+                // in case the Status message is lost or arrives out of order.
+                if is_agent_response {
+                    self.running = false;
+                    self.update_mascot_state();
+                }
             }
             BunMessage::Status { running, msg } => {
                 self.running = running;
@@ -468,71 +487,16 @@ impl AppState {
                     self.log_entries.remove(0);
                 }
             }
-            BunMessage::NarrativeChunk { coordinator, phase, content, content_type, stream_id } => {
+            BunMessage::NarrativeChunk { coordinator, phase, content, content_type: _, stream_id: _ } => {
                 self.narrative_chunks.push((coordinator.clone(), phase.clone(), content.clone()));
                 if self.narrative_chunks.len() > 100 {
                     self.narrative_chunks.remove(0);
                 }
-                // Render narrative chunks in the chat history so user sees agent activity
-                if !content.is_empty() {
-                    let role = if phase == "thinking" {
-                        self.mascot_state = MascotState::Thinking;
-                        Role::Thinking
-                    } else {
-                        Role::Assistant
-                    };
-                    let ct = match content_type.as_deref() {
-                        Some("markdown") => crate::markdown::ContentType::Markdown,
-                        Some("thinking") => crate::markdown::ContentType::Thinking,
-                        _ => {
-                            if phase == "thinking" {
-                                crate::markdown::ContentType::Thinking
-                            } else if crate::markdown::is_likely_markdown(&content) {
-                                crate::markdown::ContentType::Markdown
-                            } else {
-                                crate::markdown::ContentType::Plain
-                            }
-                        }
-                    };
-                    let display_content = if ct == crate::markdown::ContentType::Thinking {
-                        content.clone()
-                    } else {
-                        format!("[{}] {}", coordinator, content)
-                    };
-
-                    // For thinking chunks with a streamId: append to the last Thinking entry
-                    // if the streamId matches. This produces a single streaming text block
-                    // like ChatGPT, instead of separate "Pensando..." bubbles.
-                    // Chunks without streamId (e.g. "🧠 analizando...") start a new block.
-                    if phase == "thinking" {
-                        let should_append = stream_id.is_some()
-                            && stream_id == self.last_thinking_stream_id
-                            && self.history.last().map_or(false, |e| {
-                                e.role == Role::Thinking
-                                    && e.content_type == crate::markdown::ContentType::Thinking
-                            });
-
-                        if should_append {
-                            if let Some(last) = self.history.last_mut() {
-                                last.content.push_str(&display_content);
-                            }
-                        } else {
-                            self.history.push(HistoryEntry {
-                                role,
-                                content: display_content,
-                                content_type: ct,
-                                thinking_meta: None,
-                            });
-                            self.last_thinking_stream_id = stream_id.clone();
-                        }
-                    } else {
-                        self.history.push(HistoryEntry {
-                            role,
-                            content: display_content,
-                            content_type: ct,
-                            thinking_meta: None,
-                        });
-                    }
+                // Update mascot state but do NOT add to conversation history —
+                // activity_update already drives the status bar, and history_append
+                // sends the final clean response. Adding chunks here caused duplicates.
+                if phase == "thinking" {
+                    self.mascot_state = MascotState::Thinking;
                 }
             }
             BunMessage::ShowConfigModal { command, title, fields } => {
@@ -565,6 +529,24 @@ impl AppState {
                 self.info_scroll_offset = 0;
                 self.running = false;
                 self.status_msg = "Esc cerrar · ↑↓ scroll".to_string();
+            }
+            BunMessage::ConflictAlert { agent, file, reason, severity } => {
+                let msg = format!("⚠ CONFLICT [{severity}] {agent} ← {file}: {reason}");
+                self.status_msg = msg.clone();
+                self.history.push(HistoryEntry::plain(Role::System, msg));
+            }
+            BunMessage::FileRiskUpdate { path, risk, reason, .. } => {
+                let msg = format!("🔴 RISK [{risk}] {path}: {reason}");
+                self.status_msg = msg;
+            }
+            BunMessage::CheckpointCreated { description, file_count, .. } => {
+                self.status_msg = format!("💾 checkpoint: {description} ({file_count} files)");
+            }
+            BunMessage::CheckpointRollback { files_restored, .. } => {
+                self.status_msg = format!("⏮ rollback: {files_restored} files restored");
+            }
+            BunMessage::ContextUpdate { agent, key, .. } => {
+                self.status_msg = format!("📋 {agent} updated context: {key}");
             }
             // Handled in the main loop before apply_message is called
             BunMessage::Suspend | BunMessage::Resume => {}
@@ -698,14 +680,15 @@ impl AppState {
                 self.suggestions.clear();
                 self.popup_sel = 0;
             }
-            _ if !self.running => {
+            _ => {
+                // Allow typing even while agent is running — buffered for the next submit.
+                // Only Enter is blocked (guarded above with !self.running).
                 let before = self.input.value();
                 self.input.handle_key(key.code);
                 let after = self.input.value();
 
                 if before != after {
-                    // Request suggestions if input starts with /
-                    if after.starts_with('/') {
+                    if !self.running && after.starts_with('/') {
                         let _ = ipc_tx.try_send(TuiMessage::SuggestionsRequest {
                             query: after.clone(),
                         });
@@ -715,7 +698,6 @@ impl AppState {
                     }
                 }
             }
-            _ => {}
         }
     }
 
@@ -990,17 +972,18 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     }
 }
 
-fn setup_terminal(clear: bool) -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
+fn setup_terminal(_clear: bool) -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     enable_raw_mode()?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-    if clear {
-        terminal.clear()?;
-    }
+    let mut out = stdout();
+    execute!(out, EnterAlternateScreen)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
+    terminal.clear()?;
     Ok(terminal)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) {
     let _ = terminal.clear();
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
     let _ = disable_raw_mode();
     let _ = terminal.show_cursor();
 }
@@ -1015,7 +998,8 @@ pub async fn run(screen: &str) -> Result<()> {
         default_panic(info);
     }));
 
-    let (mut bun_rx, ipc_tx) = ipc::connect().await?;
+    let mut channels = ipc::connect().await?;
+    let ipc_tx = channels.sender.clone();
     let mut state = AppState::default();
     let mut terminal = setup_terminal(true)?;
     // Wrapped in Option so we can drop it on Suspend (stops the crossterm
@@ -1025,7 +1009,61 @@ pub async fn run(screen: &str) -> Result<()> {
     // Send ready signal
     let _ = ipc_tx.try_send(TuiMessage::Ready);
 
+    // Ticker for cursor blink and mascot animation (500ms cadence).
+    // Also guarantees a redraw after Bun messages arrive without a key event.
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
+
     loop {
+        // ── Batch drain: apply all pending Bun messages before drawing ────────
+        // Priority order: critical → normal → low.
+        // During agent execution Bun sends many rapid messages (log entries,
+        // narrative chunks, activity updates). Without draining, the loop would
+        // redraw once per message — dozens of times per second — causing cursor
+        // lag and wasted CPU. Draining batches them so we draw once per group.
+        let mut suspended = false;
+        'drain: loop {
+            // 1. Drain critical first
+            while let Ok(msg) = channels.critical.try_recv() {
+                match msg {
+                    BunMessage::Suspend => { suspended = true; break 'drain; }
+                    BunMessage::Resume  => {
+                        if events.is_none() {
+                            terminal = setup_terminal(true)?;
+                            events = Some(EventStream::new());
+                        }
+                    }
+                    m => state.apply_message(m),
+                }
+            }
+            // 2. Drain normal
+            while let Ok(msg) = channels.normal.try_recv() {
+                match msg {
+                    BunMessage::Suspend => { suspended = true; break 'drain; }
+                    BunMessage::Resume  => {
+                        if events.is_none() {
+                            terminal = setup_terminal(true)?;
+                            events = Some(EventStream::new());
+                        }
+                    }
+                    m => state.apply_message(m),
+                }
+            }
+            // 3. Drain low
+            while let Ok(msg) = channels.low.try_recv() {
+                match msg {
+                    BunMessage::Suspend => { suspended = true; break 'drain; }
+                    BunMessage::Resume  => {}
+                    m => state.apply_message(m),
+                }
+            }
+            break;
+        }
+        if suspended {
+            restore_terminal(&mut terminal);
+            events = None;
+            let _ = ipc_tx.try_send(TuiMessage::Suspended);
+        }
+
         if events.is_some() && !state.paused {
             terminal.draw(|frame| {
                 match screen {
@@ -1040,51 +1078,91 @@ pub async fn run(screen: &str) -> Result<()> {
         }
 
         if events.is_none() {
-            // Suspended — only wait for Resume (or other IPC)
-            match bun_rx.recv().await {
-                Some(BunMessage::Resume) => {
-                    terminal = setup_terminal(true)?;
-                    events = Some(EventStream::new());
-                }
-                Some(BunMessage::Suspend) => {} // already suspended, ignore
-                Some(msg) => state.apply_message(msg),
-                None => break,
+            // Suspended — only wait for Resume (or other IPC); biased: critical first
+            tokio::select! {
+                biased;
+                msg = channels.critical.recv() => match msg {
+                    Some(BunMessage::Resume) => {
+                        terminal = setup_terminal(true)?;
+                        events = Some(EventStream::new());
+                    }
+                    Some(BunMessage::Suspend) => {}
+                    Some(m) => state.apply_message(m),
+                    None => break,
+                },
+                msg = channels.normal.recv() => match msg {
+                    Some(BunMessage::Resume) => {
+                        terminal = setup_terminal(true)?;
+                        events = Some(EventStream::new());
+                    }
+                    Some(m) => state.apply_message(m),
+                    None => break,
+                },
+                msg = channels.low.recv() => {
+                    if let Some(m) = msg { state.apply_message(m); } else { break; }
+                },
             }
             continue;
         }
 
-        // Normal operation — events is Some (no ticker, redraw only on events/messages)
+        // Normal operation — biased select! drains critical before normal before low
         tokio::select! {
             biased;
 
+            // Critical priority — conflict alerts, risk updates, init
+            msg = channels.critical.recv() => {
+                match msg {
+                    Some(BunMessage::Suspend) => {
+                        restore_terminal(&mut terminal);
+                        events = None;
+                        let _ = ipc_tx.try_send(TuiMessage::Suspended);
+                    }
+                    Some(BunMessage::Resume) => {}
+                    Some(m) => state.apply_message(m),
+                    None => {}
+                }
+            }
+
             maybe_event = events.as_mut().unwrap().next() => {
                 match maybe_event {
-                    Some(Ok(Event::Key(key))) => {
+                    // Ignore Release events — some terminals (kitty, WezTerm) send both
+                    // Press and Release, which would double-process every key.
+                    Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
                         state.handle_key(key, &ipc_tx);
                     }
                     Some(Ok(Event::Mouse(_mouse))) => {
-                        // Mouse disabled — Antigravity terminal doesn't support it well
+                        // Mouse disabled — not supported in all terminals
                     }
                     Some(Err(_)) | None => break,
                     _ => {}
                 }
             }
 
-            maybe_msg = bun_rx.recv() => {
-                match maybe_msg {
+            msg = channels.normal.recv() => {
+                match msg {
                     Some(BunMessage::Suspend) => {
                         restore_terminal(&mut terminal);
-                        events = None; // drop EventStream → kills background stdin thread
+                        events = None;
                         let _ = ipc_tx.try_send(TuiMessage::Suspended);
                     }
-                    Some(BunMessage::Resume) => {} // not suspended, ignore
-                    Some(msg) => state.apply_message(msg),
+                    Some(BunMessage::Resume) => {}
+                    Some(m) => state.apply_message(m),
                     None => {}
                 }
             }
+
+            msg = channels.low.recv() => {
+                if let Some(m) = msg { state.apply_message(m); }
+            }
+
+            _ = ticker.tick() => {
+                state.cursor_visible = !state.cursor_visible;
+                state.animation_frame = state.animation_frame.wrapping_add(1);
+            }
         }
 
-        // Handle pause mode (Ctrl+M) — release terminal so user can select/copy text
+        // Handle pause mode (Ctrl+M) — disable raw mode so the terminal handles mouse
+        // selection natively; we stay in alternate screen (content remains visible).
         if state.paused {
             let _ = events.take(); // drop EventStream so stdin is free
             let _ = disable_raw_mode();
@@ -1094,7 +1172,9 @@ pub async fn run(screen: &str) -> Result<()> {
                 let mut buf = String::new();
                 let _ = std::io::stdin().read_line(&mut buf);
             }).await;
-            terminal = setup_terminal(false)?;
+            // Re-enable raw mode — stay in alternate screen (no need to re-enter it)
+            let _ = enable_raw_mode();
+            let _ = terminal.clear();
             events = Some(EventStream::new());
             state.paused = false;
             state.status_msg = "Listo · [shift+tab] cambiar modo".to_string();

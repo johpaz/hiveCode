@@ -1,72 +1,34 @@
-use ratatui::{
-    layout::Rect,
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
-    Frame,
-};
+use crate::app::AppState;
+use crate::term::{Canvas, Color, Rect, Style, AMBER, DIM, GREEN, RED, SECONDARY};
 
-use crate::app::{AppState, LogEntry, AMBER, DIM, GREEN, RED, SECONDARY};
+pub fn draw(canvas: &mut Canvas, state: &AppState, rect: Rect) {
+    if rect.h == 0 { return; }
+    canvas.draw_border(rect, Style::new().fg(DIM));
 
-pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
-    let block = Block::default()
-        .title(" Logs ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(DIM));
+    let inner = Rect::new(rect.x + 1, rect.y + 1, rect.w.saturating_sub(2), rect.h.saturating_sub(2));
+    let title = " Logs ";
+    canvas.print(rect.x + 1, rect.y, title, Style::new().fg(AMBER));
 
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let max_rows = inner.h as usize;
+    let entries  = &state.log_entries;
+    let start    = entries.len().saturating_sub(max_rows);
 
-    if state.log_entries.is_empty() {
-        let empty = Paragraph::new("Esperando logs...")
-            .style(Style::default().fg(DIM))
-            .wrap(Wrap { trim: true });
-        frame.render_widget(empty, inner);
-        return;
+    for (i, entry) in entries[start..].iter().enumerate() {
+        let y = inner.y + i as u16;
+        if y >= inner.bottom() { break; }
+
+        let level_color = match entry.level.as_str() {
+            "error" | "ERROR" => RED,
+            "warn"  | "WARN"  => Color::Rgb(252, 211, 77),
+            "info"  | "INFO"  => GREEN,
+            _                 => DIM,
+        };
+
+        let prefix = format!("[{}] ", &entry.level[..entry.level.len().min(4)]);
+        canvas.print(inner.x, y, &prefix, Style::new().fg(level_color));
+        let msg_x = inner.x + prefix.chars().count() as u16;
+        let max_msg = inner.w.saturating_sub(prefix.chars().count() as u16) as usize;
+        let msg = if entry.message.len() > max_msg { &entry.message[..max_msg] } else { &entry.message };
+        canvas.print(msg_x, y, msg, Style::new().fg(SECONDARY));
     }
-
-    let lines: Vec<Line> = state
-        .log_entries
-        .iter()
-        .rev()
-        .take(inner.height as usize)
-        .rev()
-        .map(|entry| format_log_line(entry))
-        .collect();
-
-    let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: true })
-        .scroll((state.log_entries.len().saturating_sub(inner.height as usize) as u16, 0));
-
-    frame.render_widget(paragraph, inner);
-}
-
-fn format_log_line(entry: &LogEntry) -> Line<'_> {
-    let color = match entry.level.as_str() {
-        "error" => RED,
-        "warn" => AMBER,
-        "debug" => SECONDARY,
-        _ => GREEN,
-    };
-
-    let ts = if entry.timestamp.len() >= 19 {
-        &entry.timestamp[11..19]
-    } else {
-        &entry.timestamp
-    };
-
-    Line::from(vec![
-        Span::styled(
-            format!("{} ", ts),
-            Style::default().fg(DIM),
-        ),
-        Span::styled(
-            format!("{} ", entry.level.to_uppercase()),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("[{}] {}", entry.source, entry.message),
-            Style::default().fg(SECONDARY),
-        ),
-    ])
 }

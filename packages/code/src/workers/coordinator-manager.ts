@@ -1,4 +1,5 @@
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { getSessionDb, closeSessionDb } from "@johpaz/hivecode-core/db/client"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { createAllTools } from "@johpaz/hivecode-core/tools"
 import type { Config } from "@johpaz/hivecode-core/config"
@@ -25,379 +26,15 @@ import type {
   PhaseName, SessionMode, CoordinatorStatus,
   WorkerToManagerMessage, ManagerToWorkerMessage,
 } from "./types"
+import { CoordinatorBase } from "../coordinator/base.ts"
+import { makeGatewayEmitter } from "../context/ipc-emitter.ts"
+import {
+  parseBeeDecision, formatBeeNarrative, formatToolCallForHuman,
+  formatToolResult, parseGitDiffStat, repairJson,
+  smartTruncate, smartTruncateLines,
+} from "../coordinator/utils.ts"
 
 const log = logger.child("coordinator-manager")
-
-/** Parse `git diff --stat` text into per-file line counts */
-function parseGitDiffStat(stat: string): Record<string, { added: number; removed: number }> {
-  const result: Record<string, { added: number; removed: number }> = {}
-  for (const line of stat.split("\n")) {
-    // Format: " src/foo.ts | 12 +++---"
-    const m = line.match(/^\s+(.+?)\s+\|\s+\d+\s+([+\-]+)/)
-    if (!m) continue
-    const file = m[1].trim()
-    const symbols = m[2]
-    result[file] = {
-      added:   (symbols.match(/\+/g) ?? []).length,
-      removed: (symbols.match(/-/g)  ?? []).length,
-    }
-  }
-  return result
-}
-
-/** Extract and parse BEE's JSON routing decision from its narrative output */
-function parseBeeDecision(raw: string): import("./types").BeeDecision {
-  if (!raw || !raw.trim()) {
-    return { action: "respond", content: "", reason: "Empty response from LLM" }
-  }
-
-  // Strategy 1: Extract JSON from markdown code blocks (```json ... ```)
-  const codeBlockMatch = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
-  if (codeBlockMatch) {
-    try {
-      const data = JSON.parse(codeBlockMatch[1])
-      return {
-        action: data.action || "architecture",
-        content: data.content,
-        reason: data.reason || "",
-        phases: data.phases,
-        filesModified: data.filesModified,
-        harness: data.harness,
-      }
-    } catch {
-      // JSON in code block failed — try to repair common issues
-      const repaired = repairJson(codeBlockMatch[1])
-      if (repaired) {
-        try {
-          const data = JSON.parse(repaired)
-          return {
-            action: data.action || "architecture",
-            content: data.content,
-            reason: data.reason || "",
-            phases: data.phases,
-            filesModified: data.filesModified,
-            harness: data.harness,
-          }
-        } catch {
-          // Repaired JSON still failed — fall through
-        }
-      }
-    }
-  }
-
-  // Strategy 2: Find the last top-level JSON object (greedy match for closing brace)
-  const jsonObjMatch = raw.match(/\{[\s\S]*"action"[\s\S]*\}/)
-  if (jsonObjMatch) {
-    try {
-      const data = JSON.parse(jsonObjMatch[0])
-      return {
-        action: data.action || "architecture",
-        content: data.content,
-        reason: data.reason || "",
-        phases: data.phases,
-        filesModified: data.filesModified,
-        harness: data.harness,
-      }
-    } catch {
-      const repaired = repairJson(jsonObjMatch[0])
-      if (repaired) {
-        try {
-          const data = JSON.parse(repaired)
-          return {
-            action: data.action || "architecture",
-            content: data.content,
-            reason: data.reason || "",
-            phases: data.phases,
-            filesModified: data.filesModified,
-            harness: data.harness,
-          }
-        } catch {
-          // Repaired JSON still failed — fall through
-        }
-      }
-    }
-  }
-
-  // Strategy 3: Try to parse the entire response as JSON
-  try {
-    const data = JSON.parse(raw)
-    return {
-      action: data.action || "architecture",
-      content: data.content,
-      reason: data.reason || "",
-      phases: data.phases,
-      filesModified: data.filesModified,
-      harness: data.harness,
-    }
-  } catch {
-    // Not JSON at all
-  }
-
-  // Strategy 4: BEE returned plain text — treat as a direct response to the user
-  return { action: "respond", content: raw.trim(), reason: "BEE returned non-JSON response" }
-}
-
-/** Attempt to repair common JSON issues from LLM output */
-function repairJson(input: string): string | null {
-  let s = input.trim()
-  // Remove trailing commas before } or ]
-  s = s.replace(/,\s*([}\]])/g, "$1")
-  // Add missing closing braces/brackets
-  const opens = (s.match(/{/g) || []).length
-  const closes = (s.match(/}/g) || []).length
-  if (opens > closes) s += "}".repeat(opens - closes)
-  const openBrackets = (s.match(/\[/g) || []).length
-  const closeBrackets = (s.match(/]/g) || []).length
-  if (openBrackets > closeBrackets) s += "]".repeat(openBrackets - closeBrackets)
-  return s
-}
-
-/** Format BEE's raw JSON output into a human-readable narrative entry */
-/** Convert a tool call into a human-readable description */
-function formatToolCallForHuman(toolName: string, args: Record<string, unknown>): string {
-  const path = (args.path as string) || (args.file as string) || ""
-  const cmd = (args.cmd as string) || (args.command as string) || ""
-  const query = (args.query as string) || (args.pattern as string) || ""
-  switch (toolName) {
-    case "fs_read":
-      return `📄 Leyendo archivo${path ? ": " + path : ""}`
-    case "fs_list":
-      return `📁 Explorando directorio${path ? ": " + path : ""}`
-    case "fs_exists":
-      return `🔍 Verificando existencia${path ? ": " + path : ""}`
-    case "fs_glob":
-      return `🌐 Buscando archivos${(args.pattern as string) ? ": " + args.pattern : ""}`
-    case "fs_write":
-      return `✏️  Escribiendo archivo${path ? ": " + path : ""}`
-    case "fs_edit":
-      return `✏️  Editando archivo${path ? ": " + path : ""}`
-    case "fs_delete":
-      return `🗑️  Eliminando archivo${path ? ": " + path : ""}`
-    case "shell_executor":
-      return `⚡ Ejecutando${cmd ? ": " + cmd.slice(0, 60) : ""}`
-    case "code_search":
-      return `🔍 Buscando código${query ? ": " + query.slice(0, 60) : ""}`
-    case "parse_ast":
-      return `🌳 Analizando AST${path ? ": " + path : ""}`
-    case "git_status":
-      return `📊 Estado del repositorio`
-    case "git_diff":
-      return `📋 Diff del repositorio`
-    case "git_log":
-      return `📜 Historial de commits`
-    case "git_branch":
-      return `🌿 Gestionando ramas`
-    case "git_commit":
-      return `💾 Commit de cambios`
-    case "check_types":
-      return `🔎 Verificando tipos`
-    case "code_build":
-      return `🏗️  Compilando proyecto`
-    case "code_test":
-      return `🧪 Ejecutando tests`
-    case "code_lint":
-      return `🧹 Linting`
-    case "read_narrative":
-      return `📖 Leyendo narrativa`
-    case "write_decision":
-      return `📝 Registrando decisión`
-    case "append_narrative":
-      return `📝 Actualizando narrativa`
-    case "run_script":
-      return `▶️  Ejecutando script`
-    case "browser_screenshot":
-      return `🖼️  Capturando pantalla${(args.url as string) ? ": " + args.url : ""}`
-    case "web_search":
-      return `🌐 Buscando web${query ? ": " + query.slice(0, 60) : ""}`
-    case "web_fetch":
-      return `🌐 Fetching${(args.url as string) ? ": " + args.url : ""}`
-    default:
-      return `🔧 ${toolName}`
-  }
-}
-
-/** Format a tool result into a human-readable <system> message for the LLM.
- *  Inspired by Kimi CLI's tool_result_to_message().
- */
-// Smart truncation: show head + tail for large outputs (like OpenHands/Cline)
-// Keeps the beginning (context) and the end (most relevant recent output)
-const MAX_DISPLAY_CHARS = 10_000
-const MAX_DISPLAY_LINES = 500
-function smartTruncate(text: string, maxChars = MAX_DISPLAY_CHARS): string {
-  if (text.length <= maxChars) return text
-  const headLen = Math.floor(maxChars * 0.3)
-  const tailLen = Math.floor(maxChars * 0.7)
-  return text.slice(0, headLen) + `\n... [${text.length - headLen - tailLen} chars omitted] ...\n` + text.slice(-tailLen)
-}
-
-function smartTruncateLines(text: string, maxLines = MAX_DISPLAY_LINES): string {
-  const lines = text.split("\n")
-  if (lines.length <= maxLines) return text
-  const headLines = Math.floor(maxLines * 0.3)
-  const tailLines = Math.floor(maxLines * 0.7)
-  const head = lines.slice(0, headLines).join("\n")
-  const tail = lines.slice(-tailLines).join("\n")
-  return head + `\n... [${lines.length - headLines - tailLines} lines omitted] ...\n` + tail
-}
-
-function formatToolResult(toolName: string, result: unknown): string {
-  const isError = result && typeof result === "object" && "ok" in (result as any) && (result as any).ok === false
-  const errorMsg = isError ? (result as any).error || "Unknown error" : ""
-
-  if (isError) {
-    return `<system>\n❌ [${toolName}]: ${errorMsg}\n</system>`
-  }
-
-  // Build human-readable summary based on tool type
-  let summary = ""
-  const r = result as any
-
-  switch (toolName) {
-    case "fs_list": {
-      const count = r?.count ?? r?.entries?.length ?? 0
-      summary = `✅ [${toolName}]: ${count} entries in ${r?.path || "."}`
-      if (r?.entries && Array.isArray(r.entries)) {
-        const lines = r.entries.map((e: any) => {
-          const size = e.size ? ` (${Math.round(e.size / 1024)}KB)` : ""
-          return `  ${e.type === "directory" ? "📁" : "📄"} ${e.name}${size}`
-        })
-        summary += "\n" + smartTruncateLines(lines.join("\n"))
-      }
-      break
-    }
-    case "fs_read": {
-      const linesRead = r?.linesRead ?? 0
-      const totalLines = r?.totalLines ?? 0
-      summary = `✅ [${toolName}]: ${r?.path || "file"} (${linesRead}/${totalLines} lines)`
-      if (r?.content) {
-        summary += "\n```\n" + smartTruncate(String(r.content)) + "\n```"
-      }
-      break
-    }
-    case "fs_exists": {
-      summary = `✅ [${toolName}]: ${r?.path || ""} ${r?.exists ? "exists" : "does not exist"}`
-      break
-    }
-    case "fs_glob": {
-      const matches = r?.matches || r?.files || []
-      summary = `✅ [${toolName}]: ${matches.length} matches${r?.pattern ? ` for "${r.pattern}"` : ""}`
-      if (matches.length > 0) {
-        summary += "\n" + smartTruncateLines(matches.map((f: string) => `  ${f}`).join("\n"))
-      }
-      break
-    }
-    case "shell_executor": {
-      const exitCode = r?.exitCode ?? 0
-      const elapsed = r?.executionTimeMs ?? 0
-      summary = `${exitCode === 0 ? "✅" : "⚠️"} [${toolName}]: ${r?.command || ""} (exit=${exitCode}, ${elapsed}ms)`
-      if (r?.stdout) {
-        summary += "\nstdout:\n```\n" + smartTruncate(smartTruncateLines(String(r.stdout))) + "\n```"
-      }
-      if (r?.stderr) {
-        summary += "\nstderr:\n```\n" + smartTruncate(smartTruncateLines(String(r.stderr))) + "\n```"
-      }
-      break
-    }
-    case "code_search": {
-      const matches = r?.matches || []
-      summary = `✅ [${toolName}]: ${matches.length} matches${r?.query ? ` for "${r.query}"` : ""}`
-      if (matches.length > 0) {
-        summary += "\n" + smartTruncateLines(matches.map((m: any) => `  ${m.file}:${m.line}: ${m.text || ""}`).join("\n"))
-      }
-      break
-    }
-    case "git_status": {
-      const staged = r?.staged || []
-      const unstaged = r?.unstaged || []
-      summary = `✅ [${toolName}]: ${staged.length} staged, ${unstaged.length} unstaged`
-      if (staged.length) summary += "\nstaged:\n" + staged.map((f: string) => `  ${f}`).join("\n")
-      if (unstaged.length) summary += "\nunstaged:\n" + unstaged.map((f: string) => `  ${f}`).join("\n")
-      break
-    }
-    case "git_diff": {
-      summary = `✅ [${toolName}]: diff retrieved${r?.path ? ` for ${r.path}` : ""}`
-      if (r?.diff) {
-        summary += "\n```diff\n" + smartTruncate(smartTruncateLines(String(r.diff))) + "\n```"
-      }
-      break
-    }
-    case "git_log": {
-      const commits = r?.commits || []
-      summary = `✅ [${toolName}]: ${commits.length} commits`
-      if (commits.length > 0) {
-        summary += "\n" + commits.map((c: any) => `  ${c.hash?.slice(0, 7) || ""} — ${c.message || ""}`).join("\n")
-      }
-      break
-    }
-    case "parse_ast": {
-      summary = `✅ [${toolName}]: AST parsed for ${r?.file || r?.path || "file"}`
-      if (r?.summary) summary += `\n${r.summary}`
-      break
-    }
-    case "check_types": {
-      summary = `${r?.ok ? "✅" : "⚠️"} [${toolName}]: type check ${r?.ok ? "passed" : "failed"}`
-      if (r?.errors?.length) summary += "\n" + r.errors.map((e: string) => `  ${e}`).join("\n")
-      break
-    }
-    case "code_build":
-    case "code_test":
-    case "code_lint": {
-      summary = `${r?.ok ? "✅" : "⚠️"} [${toolName}]: ${r?.ok ? "success" : "failed"}`
-      if (r?.output) {
-        summary += "\n```\n" + smartTruncate(smartTruncateLines(String(r.output))) + "\n```"
-      }
-      break
-    }
-    case "browser_screenshot": {
-      summary = `${r?.ok ? "✅" : "❌"} [${toolName}]: ${r?.url || ""}`
-      if (r?.path) summary += `\nScreenshot saved to: ${r.path}`
-      if (r?.error) summary += `\nError: ${r.error}`
-      break
-    }
-    case "web_search": {
-      const results = r?.results || []
-      summary = `✅ [${toolName}]: ${results.length} results${r?.query ? ` for "${r.query}"` : ""}`
-      if (results.length > 0) {
-        summary += "\n" + results.map((res: any, i: number) =>
-          `  ${i + 1}. ${res.title || ""}\n     ${res.url || ""}\n     ${res.snippet || ""}`
-        ).join("\n")
-      }
-      break
-    }
-    case "web_fetch": {
-      summary = `✅ [${toolName}]: fetched ${r?.url || ""}`
-      if (r?.title) summary += `\nTitle: ${r.title}`
-      if (r?.content) {
-        summary += "\n```\n" + smartTruncate(String(r.content)) + "\n```"
-      }
-      break
-    }
-    default:
-      // Generic fallback
-      const generic = typeof result === "string" ? result : JSON.stringify(result, null, 2)
-      summary = `✅ [${toolName}]: result\n\`\`\`\n${smartTruncate(generic)}\n\`\`\``
-  }
-
-  return `<system>\n${summary}\n</system>`
-}
-
-function formatBeeNarrative(raw: string): string {
-  const decision = parseBeeDecision(raw)
-  switch (decision.action) {
-    case "respond":
-      return decision.content || "BEE respondió directamente."
-    case "fix":
-      return decision.content || "BEE aplicó un fix directo."
-    case "dispatch": {
-      const coords = decision.phases?.map(p => p.coordinator).join(", ") || ""
-      return `BEE delegó a: ${coords}\n${decision.reason}`
-    }
-    case "architecture":
-      return `BEE decidió diseño arquitectónico\n${decision.reason}`
-    default:
-      return raw
-  }
-}
 
 // BEE is index 0 in the bitmask; coordinators follow at indices 1-6
 const COORDINATOR_NAMES: PhaseName[] = [
@@ -416,7 +53,7 @@ const COORDINATOR_FILES: Record<PhaseName, string> = {
   devops: new URL(`./devops${WORKER_EXT}`, import.meta.url).pathname,
 }
 
-export class CoordinatorManager {
+export class CoordinatorManager extends CoordinatorBase {
   private workers: Map<PhaseName, Bun.Worker> = new Map()
   private scribe = new Scribe()
   private activeTaskId: string | null = null
@@ -431,6 +68,7 @@ export class CoordinatorManager {
   private toolResolvers = new Map<string, (res: any) => void>()
   private onNarrativeChunk?: (chunk: { coordinator: string; phase: string; content: string; streamId?: string }) => void
   private onWorkerUpdate?: (update: { type: "tool_worker"; id: number; status: "idle" | "busy"; tool?: string }) => void
+  private onTaskComplete?: (response: string) => void
 
   /** Reload secrets from Bun.secrets and providers table */
   reloadSecrets(): void {
@@ -537,6 +175,11 @@ export class CoordinatorManager {
   /** Create a session at TUI startup — one session per TUI lifecycle */
   openSession(): string {
     this.activeSessionId = this.scribe.createSession(process.cwd())
+    // Open per-session DB and wire all subsystems (Blackboard, Checkpoint, ADR, Risk)
+    const sessionDb = getSessionDb(this.activeSessionId)
+    const ipc = makeGatewayEmitter(this.activeSessionId)
+    this.initSubsystems(sessionDb, this.activeSessionId, ipc)
+    this.loadProjectAdrs(process.cwd())
     return this.activeSessionId
   }
 
@@ -544,6 +187,7 @@ export class CoordinatorManager {
   closeSession(): void {
     if (this.activeSessionId) {
       this.scribe.closeSession(this.activeSessionId)
+      closeSessionDb(this.activeSessionId)
       this.activeSessionId = null
     }
   }
@@ -610,6 +254,10 @@ export class CoordinatorManager {
     // Ensure we have a session (created at TUI startup via openSession(), fallback here)
     if (!this.activeSessionId) {
       this.activeSessionId = this.scribe.createSession(process.cwd())
+      const sessionDb = getSessionDb(this.activeSessionId)
+      const ipc = makeGatewayEmitter(this.activeSessionId)
+      this.initSubsystems(sessionDb, this.activeSessionId, ipc)
+      this.loadProjectAdrs(process.cwd())
     }
 
     // Create a turn for this user message — closed after we have the agent response
@@ -722,6 +370,7 @@ export class CoordinatorManager {
         durationMs: Math.round(performance.now() - taskStartTime),
       })
       this.scribe.completeTurn(turnId, response, null)
+      if (this.onTaskComplete) this.onTaskComplete(response)
       if (response) process.stdout.write(response + "\n")
       return
     }
@@ -740,6 +389,7 @@ export class CoordinatorManager {
         durationMs: Math.round(performance.now() - taskStartTime),
       })
       this.scribe.completeTurn(turnId, response, this.activeTaskId)
+      if (this.onTaskComplete) this.onTaskComplete(response)
       if (response) process.stdout.write(response + "\n")
       if (beeDecision.filesModified?.length) {
         log.info(`[coordinator-manager] 🐝 BEE modified: ${beeDecision.filesModified.join(", ")}`)
@@ -942,6 +592,10 @@ export class CoordinatorManager {
     })
     this.scribe.updateTaskStatus(this.activeTaskId, "completed")
     this.scribe.completeTurn(turnId, agentResponse, this.activeTaskId)
+
+    if (this.onTaskComplete) {
+      this.onTaskComplete(agentResponse)
+    }
 
     broadcastTaskEnd(this.activeTaskId, "completed", durationMs)
 
@@ -1318,10 +972,32 @@ export class CoordinatorManager {
       }
     }
 
-    // Create snapshot before write operations
+    // Conflict detection + checkpoint before write operations
     const writeTools = new Set(["fs_write", "fs_edit", "fs_delete"])
-    if (writeTools.has(msg.toolName) && this.activeTaskId && msg.toolArgs) {
-      await this.createSnapshot(msg.toolArgs.path as string || msg.toolArgs.file as string)
+    if (writeTools.has(msg.toolName) && msg.toolArgs) {
+      const filePath = (msg.toolArgs.path as string) || (msg.toolArgs.file as string) || ""
+      if (filePath) {
+        // 1. Check blackboard for write conflicts
+        const canWrite = await this.checkWriteConflicts(name, filePath)
+        if (!canWrite) {
+          const errorMsg = `[CONFLICT] Another agent is writing to ${filePath}. Retry in a moment.`
+          log.warn(`[coordinator-manager] ⚠️ Conflict blocked ${name} from writing ${filePath}`)
+          this.writeToolTrace(name, msg.toolName, JSON.stringify(msg.toolArgs), errorMsg, false, 0n)
+          worker.postMessage(JSON.stringify({
+            type: "TOOL_RESULT",
+            toolCallId: msg.toolCallId,
+            error: errorMsg,
+          } as ManagerToWorkerMessage))
+          return
+        }
+        // 2. Create checkpoint before mutating
+        const op = msg.toolName === "fs_delete" ? "deleted" : "modified"
+        if (this.activeTaskId) {
+          const existingPaths = op !== "deleted" ? [filePath] : []
+          const newPaths     = op === "deleted"   ? []         : []
+          await this.checkpoint(`before ${msg.toolName} ${filePath}`, existingPaths, newPaths, name)
+        }
+      }
     }
 
     // Enforce confirmation for destructive operations
@@ -1388,6 +1064,17 @@ export class CoordinatorManager {
     // Write tool execution trace (SPEC §5.4)
     this.writeToolTrace(name, msg.toolName, inputSummary, outputSummary, success, toolDurationNs)
 
+    // Evaluate file risk after a successful write so TUI can show risk badges
+    if (success && writeTools.has(msg.toolName!) && msg.toolArgs) {
+      const riskFilePath = (msg.toolArgs.path as string) || (msg.toolArgs.file as string) || ""
+      if (riskFilePath) {
+        const riskOp = msg.toolName === "fs_delete"
+          ? "deleted"
+          : msg.toolName === "fs_write" ? "created" : "modified"
+        this.evaluateFileRisk(riskFilePath, riskOp as "created" | "modified" | "deleted", name)
+      }
+    }
+
     // Stream tool result to TUI so user sees success/failure — use human-readable format
     if (this.onNarrativeChunk) {
       const formattedForHuman = formatToolResult(msg.toolName, result)
@@ -1438,23 +1125,6 @@ export class CoordinatorManager {
     }
   }
 
-  private async createSnapshot(filePath: string | undefined): Promise<void> {
-    if (!filePath || !this.activeTaskId) return
-    try {
-      const file = Bun.file(filePath)
-      if (await file.exists()) {
-        const content = await file.text()
-        const hasher = new Bun.CryptoHasher("sha256")
-        hasher.update(content)
-        const hash = hasher.digest("hex")
-        this.scribe.saveSnapshot(this.activeTaskId, filePath, content, hash)
-        log.debug(`[coordinator-manager] 💾 Snapshot created: ${filePath}`)
-      }
-    } catch (err) {
-      log.warn(`[coordinator-manager] ⚠️  Failed to create snapshot for ${filePath}: ${(err as Error).message}`)
-    }
-  }
-
   private handleControlMessage(msg: ControlMessage): void {
     log.info(`[coordinator-manager] Control message: ${msg.type} (mode: ${msg.payload.mode})`)
 
@@ -1491,6 +1161,10 @@ export class CoordinatorManager {
 
   setNarrativeCallback(cb: (chunk: { coordinator: string; phase: string; content: string }) => void): void {
     this.onNarrativeChunk = cb
+  }
+
+  setTaskCompleteCallback(cb: ((response: string) => void) | undefined): void {
+    this.onTaskComplete = cb
   }
 
   setWorkerUpdateCallback(cb: (update: { type: "tool_worker"; id: number; status: "idle" | "busy"; tool?: string }) => void): void {

@@ -1,9 +1,12 @@
 use color_eyre::eyre::Result;
 
 mod app;
+mod commands;
 mod ipc;
 mod markdown;
+mod renderer;
 mod screens;
+mod state;
 mod widgets;
 
 #[tokio::main]

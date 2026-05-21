@@ -29,10 +29,25 @@
     "./narrative/scribe": "./src/narrative/scribe.ts",
     "./modes": "./src/modes/index.ts",
     "./coordinator/command-parser": "./src/coordinator/command-parser.ts",
+    "./coordinator/utils": "./src/coordinator/utils.ts",
+    "./coordinator/base": "./src/coordinator/base.ts",
     "./modes/keyboard": "./src/modes/keyboard.ts",
     "./workers/tool-bridge": "./src/workers/tool-bridge.ts",
     "./workers/secrets": "./src/workers/secrets.ts",
     "./seed": "./src/seed.ts",
-    "./agent/code-indexer": "./src/agent/code-indexer.ts"
+    "./agent/code-indexer": "./src/agent/code-indexer.ts",
+    "./context": "./src/context/index.ts",
+    "./context/blackboard": "./src/context/blackboard.ts",
+    "./context/conflict-detector": "./src/context/conflict-detector.ts",
+    "./context/ipc-emitter": "./src/context/ipc-emitter.ts",
+    "./workers/base": "./src/workers/base.ts",
+    "./checkpoint": "./src/checkpoint/index.ts",
+    "./checkpoint/manager": "./src/checkpoint/manager.ts",
+    "./checkpoint/snapshot": "./src/checkpoint/snapshot.ts",
+    "./checkpoint/rollback": "./src/checkpoint/rollback.ts",
+    "./adr": "./src/adr/index.ts",
+    "./adr/loader": "./src/adr/loader.ts",
+    "./adr/analyzer": "./src/adr/analyzer.ts",
+    "./adr/risk": "./src/adr/risk.ts"
   }
 }

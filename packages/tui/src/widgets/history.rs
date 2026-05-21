@@ -1,106 +1,60 @@
-use ratatui::{
-    layout::Rect,
-    widgets::{List, ListItem, ListState},
-    Frame,
-};
+use crate::app::{AppState, HistoryEntry, Role};
+use crate::term::{Canvas, Color, Rect, Style, AMBER, BLUE, CYAN, DIM, GREEN, RED};
+use crate::markdown::{render_content, Segment};
 
-use crate::app::{AppState, HistoryEntry, Role, AMBER, CYAN, DIM, GREEN, RED, BLUE};
-use crate::markdown;
+pub fn draw(canvas: &mut Canvas, state: &mut AppState, rect: Rect) {
+    if rect.h == 0 || rect.w == 0 { return; }
+    let width = rect.w as usize;
 
+    // Renderizar cada entrada del historial como líneas de segmentos
+    let mut all_lines: Vec<Vec<Segment>> = Vec::new();
+    for entry in &state.history {
+        let (prefix, prefix_color, indent): (&str, Color, &str) = match entry.role {
+            Role::User      => ("▸ ", AMBER,  "  "),
+            Role::Assistant => ("  ", GREEN,  "  "),
+            Role::System    => ("⚙ ", CYAN,   "  "),
+            Role::Shell     => ("$ ", BLUE,   "  "),
+            Role::Thinking  => ("… ", DIM,    "  "),
+        };
+        let lines = render_content(
+            &entry.content,
+            &entry.content_type,
+            &entry.thinking_meta,
+            width.saturating_sub(2),
+            prefix,
+            Style::new().fg(prefix_color),
+            indent,
+        );
+        all_lines.extend(lines);
+    }
+
+    // Scroll: mostrar las últimas N líneas que caben en el rect
+    let visible_rows = rect.h as usize;
+    let total        = all_lines.len();
+    let start        = total.saturating_sub(visible_rows);
+
+    for (i, line) in all_lines[start..].iter().enumerate() {
+        let y  = rect.y + i as u16;
+        let mut x = rect.x;
+        for seg in line {
+            if x >= rect.right() { break; }
+            canvas.print(x, y, &seg.text, seg.style);
+            x += seg.text.chars().count() as u16;
+        }
+    }
+}
+
+/// Retorna todo el historial como texto plano (para copiar al portapapeles).
 pub fn get_text(history: &[HistoryEntry]) -> String {
-    history
-        .iter()
-        .map(|e| {
-            let label = match e.role {
-                Role::User      => "tú",
-                Role::Assistant => "bee",
-                Role::System    => "sys",
-                Role::Shell     => "$",
-                Role::Thinking  => "bee (thinking)",
-            };
-            format!("[{}] {}", label, e.content)
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    history.iter().map(|e| format!("[{}] {}\n", role_label(&e.role), e.content)).collect()
 }
 
-pub fn draw(frame: &mut Frame, state: &AppState, area: Rect) {
-    let width = area.width.saturating_sub(2) as usize;
-
-    let items: Vec<ListItem> = state
-        .history
-        .iter()
-        .enumerate()
-        .flat_map(|(idx, entry)| entry_to_items(entry, width, state.copy_mode && idx == state.copy_sel))
-        .collect();
-
-    let list = List::new(items);
-    let mut list_state = ListState::default();
-    if !state.history.is_empty() {
-        list_state.select(Some(
-            state
-                .history
-                .iter()
-                .flat_map(|e| entry_to_items(e, width, false))
-                .count()
-                .saturating_sub(1),
-        ));
-    }
-
-    frame.render_stateful_widget(list, area, &mut list_state);
-}
-
-fn role_prefix(role: &Role) -> (&'static str, ratatui::style::Color) {
+fn role_label(role: &Role) -> &'static str {
     match role {
-        Role::User      => ("▸ tú ", AMBER),
-        Role::Assistant => ("⬢ bee ", GREEN),
-        Role::System    => ("⬡ sys ", DIM),
-        Role::Shell     => ("$ ", AMBER),
-        Role::Thinking  => ("🐝 ", CYAN),
+        Role::User      => "user",
+        Role::Assistant => "assistant",
+        Role::System    => "system",
+        Role::Shell     => "shell",
+        Role::Thinking  => "thinking",
     }
-}
-
-fn entry_to_items(entry: &HistoryEntry, width: usize, is_selected: bool) -> Vec<ListItem<'static>> {
-    let (prefix_str, prefix_color) = role_prefix(&entry.role);
-    let prefix_color = if is_selected { BLUE } else { prefix_color };
-
-    // For System role with error prefix, override content color
-    if entry.role == Role::System && entry.content.starts_with("(×ᴗ×)") {
-        let lines = markdown::render_content(
-            &entry.content,
-            &entry.content_type,
-            &entry.thinking_meta,
-            width,
-            prefix_str,
-            if is_selected { BLUE } else { RED },
-            "      ",
-        );
-        return lines.into_iter().map(ListItem::new).collect();
-    }
-
-    // For Thinking role, use the compact thinking indicator
-    if entry.role == Role::Thinking {
-        let lines = markdown::render_content(
-            &entry.content,
-            &entry.content_type,
-            &entry.thinking_meta,
-            width,
-            prefix_str,
-            prefix_color,
-            "      ",
-        );
-        return lines.into_iter().map(ListItem::new).collect();
-    }
-
-    // For Markdown content, use the markdown renderer
-    let lines = markdown::render_content(
-        &entry.content,
-        &entry.content_type,
-        &entry.thinking_meta,
-        width,
-        prefix_str,
-        prefix_color,
-        "      ",
-    );
-    lines.into_iter().map(ListItem::new).collect()
 }

@@ -9,6 +9,8 @@
 import * as path from "node:path"
 import * as fs from "node:fs"
 import { logger, onLogEntry, removeLogListener, type LogEntry } from "@johpaz/hivecode-core/utils/logger"
+import { createIpcServer } from "@johpaz/hivecode-core/ipc/server"
+import type { BunMessage as CoreBunMessage, TuiMessage as CoreTuiMessage } from "@johpaz/hivecode-core/ipc/protocol"
 
 function isLikelyMarkdown(content: string): boolean {
   if (content.includes("```")) return true
@@ -35,8 +37,12 @@ function isLikelyMarkdown(content: string): boolean {
 function tuiBinPath(): string {
   const candidates = [
     // Running from dist/ bundle — binary sits next to hivecode.js
+    path.join(path.dirname(process.argv[1] || ""), "hivetui"),
     path.join(path.dirname(process.argv[1] || ""), "hivecode-tui"),
-    // Dev mode: source tree (packages/cli/src/commands-code/ → packages/tui/)
+    // Dev mode: hivetui (ratatui-free, preferred)
+    path.join(import.meta.dir, "../../../hivetui/target/release/hivetui"),
+    path.join(import.meta.dir, "../../../hivetui/target/debug/hivetui"),
+    // Dev mode: legacy packages/tui
     path.join(import.meta.dir, "../../../tui/target/release/hivecode-tui"),
     path.join(import.meta.dir, "../../../tui/target/debug/hivecode-tui"),
   ]
@@ -66,33 +72,9 @@ export interface ModalField {
   default_value?: string
 }
 
-export type BunMessage =
-  | { type: "init";           mode: string; provider: string; model: string; project_name: string; project_path: string; session_id: string; version: string; task_count: number; token_count: number; agent_count: number }
-  | { type: "history_append"; role: string; content: string; content_type?: string }
-  | { type: "status";         running: boolean; msg: string }
-  | { type: "state_update";   new_mode?: string; new_provider?: string; new_model?: string }
-  | { type: "suggestions";    items: string[] }
-  | { type: "quick_menu";     items: { label: string; cmd: string; desc: string }[] }
-  | { type: "shell_output";   stdout: string; stderr: string; exit_code: number }
-  | { type: "activity_update"; coordinator: string; phase: string; status: string }
-  | { type: "log_entry"; timestamp: string; level: string; source: string; message: string }
-  | { type: "narrative_chunk"; coordinator: string; phase: string; content: string; content_type?: string; stream_id?: string }
-  | { type: "show_config_modal"; command: string; title: string; fields: ModalField[] }
-  | { type: "show_info_modal"; title: string; content: string }
-  | { type: "suspend" }
-  | { type: "resume" }
+export type BunMessage = CoreBunMessage
 
-type TuiMessage =
-  | { type: "ready" }
-  | { type: "submit";               input: string }
-  | { type: "suggestions_request";  query: string }
-  | { type: "mode_change";          mode: string }
-  | { type: "shell_execute";        command: string }
-  | { type: "modal_submit";         command: string; values: Record<string, string> }
-  | { type: "modal_cancel";         command: string }
-  | { type: "info_modal_close" }
-  | { type: "suspended" }
-  | { type: "exit" }
+type TuiMessage = CoreTuiMessage
 
 // ── Callbacks interface ───────────────────────────────────────────────────────
 
@@ -106,7 +88,7 @@ export interface TuiCallbacks {
   version:          string
   taskCount:        number
   tokenCount:       number
-  agentCount:       number
+  workers:          string[]
   onSubmit:   (input: string) => Promise<{ output: string; newMode?: string; newProvider?: string; newModel?: string }>
   getSuggestions: (query: string) => string[]
   onModeChange?:  (mode: string) => void
@@ -127,8 +109,8 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
   const binPath = tuiBinPath()
   if (!binPath) {
     throw new Error(
-      "hivecode-tui binary not found.\n" +
-      "Build it with:  cd packages/tui && cargo build",
+      "hivetui binary not found.\n" +
+      "Build it with:  cd packages/hivetui && cargo build",
     )
   }
 
@@ -145,9 +127,8 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
     let tuiSocket: import("bun").Socket<undefined> | null = null
     let buf = ""
 
-    const send = (msg: BunMessage) => {
-      if (tuiSocket) tuiSocket.write(JSON.stringify(msg) + "\n")
-    }
+    let ipcServer: ReturnType<typeof createIpcServer> | null = null
+    const send = (msg: BunMessage) => ipcServer?.send(msg)
 
     // Subscribe to real-time logs and forward to TUI
     const logCb = (entry: LogEntry) => {
@@ -186,66 +167,39 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
       callbacks.tuiControl.showInfoModal = showInfoModal
     }
 
-    // ── IPC server (Bun native unix socket) ────────────────────────────────
-    let server: ReturnType<typeof Bun.listen> | null = null
+    // ── IPC server (priority-envelope Unix socket) ─────────────────────────
     try {
-      server = Bun.listen<undefined>({
-        unix: socketPath,
-        socket: {
-          open(s) {
-            tuiSocket = s
-          },
-          data(_s, chunk) {
-            buf += Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk)
-            const lines = buf.split("\n")
-            buf = lines.pop() ?? ""
-
-            for (const line of lines) {
-              const trimmed = line.trim()
-              if (!trimmed) continue
-              try {
-                const msg = JSON.parse(trimmed) as TuiMessage
-
-                if (msg.type === "suspended") {
-                  suspendedResolve?.()
-                  suspendedResolve = null
-                  continue
-                }
-
-                if (msg.type === "modal_submit") {
-                  modalResolve?.(msg.values)
-                  modalResolve = null
-                  continue
-                }
-
-                if (msg.type === "modal_cancel") {
-                  modalResolve?.(null)
-                  modalResolve = null
-                  continue
-                }
-
-                if (msg.type === "info_modal_close") {
-                  infoModalResolve?.()
-                  infoModalResolve = null
-                  continue
-                }
-
-                handleTuiMessage(msg, send, suspendTui, resumeTui, callbacks).catch((err) => {
-                  logger.error("[tui-ipc] handler error", err)
-                  send({ type: "history_append", role: "system", content: `(×ᴗ×) ${(err as Error).message}` })
-                  send({ type: "status", running: false, msg: "Error" })
-                })
-              } catch {
-                logger.warn("[tui-ipc] invalid JSON:", trimmed)
-              }
-            }
-          },
-          close(_s) {
-            tuiSocket = null
-          },
-          error(_s, err) {
-            logger.warn("[tui-ipc] socket error:", (err as Error).message)
-          },
+      ipcServer = createIpcServer({
+        socketPath,
+        onMessage(msg) {
+          if (msg.type === "suspended") {
+            suspendedResolve?.()
+            suspendedResolve = null
+            return
+          }
+          if (msg.type === "modal_submit") {
+            modalResolve?.(msg.values)
+            modalResolve = null
+            return
+          }
+          if (msg.type === "modal_cancel") {
+            modalResolve?.(null)
+            modalResolve = null
+            return
+          }
+          if (msg.type === "info_modal_close") {
+            infoModalResolve?.()
+            infoModalResolve = null
+            return
+          }
+          handleTuiMessage(msg, send, suspendTui, resumeTui, callbacks).catch((err) => {
+            logger.error("[tui-ipc] handler error", err)
+            send({ type: "history_append", role: "system", content: `(×ᴗ×) ${(err as Error).message}` })
+            send({ type: "status", running: false, msg: "Error" })
+          })
+        },
+        onError(err) {
+          logger.warn("[tui-ipc] socket error:", err.message)
         },
       })
     } catch (err) {
@@ -273,7 +227,8 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
     proc.exited.then(() => {
       removeLogListener(logCb)
       callbacks.onExit?.()
-      server?.stop(true)
+      ipcServer?.stop()
+      ipcServer = null
       try { fs.unlinkSync(socketPath) } catch { /* ignore */ }
       resolve()
     }).catch(reject)
@@ -302,7 +257,7 @@ async function handleTuiMessage(
         version:       callbacks.version,
         task_count:    callbacks.taskCount,
         token_count:   callbacks.tokenCount,
-        agent_count:   callbacks.agentCount,
+        workers:       callbacks.workers,
       })
       break
 
@@ -369,6 +324,13 @@ async function handleTuiMessage(
       break
 
     case "exit":
+    case "quit":
       break
+
+    case "rollback": {
+      // hivetui sends rollback requests — forward as system message for now
+      send({ type: "history_append", role: "system", content: `↩ Rollback solicitado: ${(msg as { type: string; checkpoint_id?: string }).checkpoint_id ?? "—"}` })
+      break
+    }
   }
 }

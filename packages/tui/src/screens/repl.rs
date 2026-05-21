@@ -1,94 +1,53 @@
-use ratatui::{
-    layout::{Constraint, Direction, Layout},
-    Frame,
-};
-
 use crate::app::AppState;
-use crate::widgets::{command_popup, config_modal, header, history, info_modal, input, log_panel, mascot, phase_timeline, statusbar, welcome};
+use crate::term::{Canvas, Rect};
+use crate::widgets::{command_popup, config_modal, header, history, info_modal, input,
+                     log_panel, mascot, phase_timeline, statusbar, welcome};
 
-pub fn draw(frame: &mut Frame, state: &mut AppState) {
-    let area = frame.area();
+pub fn draw(canvas: &mut Canvas, state: &mut AppState) {
+    let area = canvas.area();
 
     if state.history.is_empty() {
-        // ── Welcome state: content + input box + statusbar ────────────────
-        let root = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Fill(1),      // welcome content
-                Constraint::Length(5),    // input box (more spacious)
-                Constraint::Length(1),    // statusbar
-            ])
-            .split(area);
+        // ── Welcome: contenido + input + statusbar ────────────────────────────
+        // vsplit con 0 = Fill (ocupa el espacio restante)
+        let parts = area.vsplit(&[0, 5, 1]);
 
-        welcome::draw(frame, state, root[0]);
-        input::draw(frame, state, root[1]);
-        statusbar::draw(frame, state, root[2]);
+        welcome::draw(canvas, state, parts[0]);
+        input::draw(canvas, state, parts[1]);
+        statusbar::draw(canvas, state, parts[2]);
 
-        // Mascot (drawn before popup so popup appears on top)
-        mascot::draw(frame, state, area);
-        // Suggestion popup as overlay (drawn after mascot)
-        command_popup::draw(frame, state, area);
-        // Config modal (on top of everything)
-        config_modal::draw(frame, state);
-        // Info modal (read-only display, on top of everything)
-        info_modal::draw(frame, state);
+        // Mascota superpuesta (esquina inferior derecha de toda el área)
+        mascot::draw(canvas, state, area);
+        // Popup de sugerencias
+        command_popup::draw(canvas, state, area);
     } else {
-        // ── Active session: header + history + input + statusbar ──────────
-        let root = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3), // header
-                Constraint::Fill(1),   // history
-                Constraint::Length(5), // input (more spacious)
-                Constraint::Length(1), // statusbar
-            ])
-            .split(area);
+        // ── Sesión activa: header + body + input + statusbar ──────────────────
+        let parts = area.vsplit(&[3, 0, 5, 1]);
+        let (header_rect, body_rect, input_rect, status_rect) =
+            (parts[0], parts[1], parts[2], parts[3]);
 
-        let header_area  = root[0];
-        let body_area    = root[1];
-        let input_area   = root[2];
-        let status_area  = root[3];
+        header::draw(canvas, state, header_rect);
 
-        header::draw(frame, state, header_area);
-
-        let body_constraints = if state.show_timeline {
-            vec![Constraint::Length(16), Constraint::Fill(1)]
-        } else {
-            vec![Constraint::Fill(1)]
-        };
-        let body_parts = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(body_constraints)
-            .split(body_area);
-
-        let history_area = if state.show_timeline { body_parts[1] } else { body_parts[0] };
-
-        if state.show_timeline {
-            phase_timeline::draw(frame, state, body_parts[0]);
-        }
-
+        // Body: opcionalmente split horizontal con log panel
         if state.show_logs {
-            let h = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .split(history_area);
-            history::draw(frame, state, h[0]);
-            log_panel::draw(frame, state, h[1]);
+            let body_parts = body_rect.hsplit(&[0, body_rect.w / 3]);
+            history::draw(canvas, state, body_parts[0]);
+            log_panel::draw(canvas, state, body_parts[1]);
+        } else if state.show_timeline {
+            let body_parts = body_rect.vsplit(&[16, 0]);
+            phase_timeline::draw(canvas, state, body_parts[0]);
+            history::draw(canvas, state, body_parts[1]);
         } else {
-            history::draw(frame, state, history_area);
+            history::draw(canvas, state, body_rect);
         }
 
-        input::draw(frame, state, input_area);
-        statusbar::draw(frame, state, status_area);
+        input::draw(canvas, state, input_rect);
+        statusbar::draw(canvas, state, status_rect);
 
-        // Mascot (drawn before popup so popup appears on top)
-        mascot::draw(frame, state, area);
-        // Suggestion popup as overlay (drawn after mascot)
-        command_popup::draw(frame, state, area);
-
-        // Config modal (on top of everything)
-        config_modal::draw(frame, state);
-        // Info modal (read-only display, on top of everything)
-        info_modal::draw(frame, state);
+        mascot::draw(canvas, state, area);
+        command_popup::draw(canvas, state, area);
     }
+
+    // Modales (siempre encima de todo)
+    config_modal::draw(canvas, state);
+    info_modal::draw(canvas, state);
 }
