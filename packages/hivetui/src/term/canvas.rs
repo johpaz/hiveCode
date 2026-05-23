@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use unicode_width::UnicodeWidthChar;
 use crossterm::{
     cursor::MoveTo,
     queue,
@@ -59,9 +60,16 @@ impl Canvas {
     }
 
     pub fn print(&mut self, x: u16, y: u16, text: &str, style: Style) {
-        for (i, ch) in text.chars().enumerate() {
-            let cx = x.saturating_add(i as u16);
+        let mut col = 0u16;
+        for ch in text.chars() {
+            let w = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+            let cx = x.saturating_add(col);
             self.put(cx, y, Cell::new(ch, style));
+            // Mark right-half of wide chars as placeholder so flush never overwrites them
+            if w == 2 && cx + 1 < self.w {
+                self.put(cx + 1, y, Cell::new('\0', style));
+            }
+            col += w;
         }
     }
 
@@ -83,6 +91,30 @@ impl Canvas {
         let len = text.chars().count() as u16;
         let offset = w.saturating_sub(len) / 2;
         self.print(x + offset, y, text, style);
+    }
+
+    /// Serializes every row to a plain-text string (wide-char placeholders stripped).
+    /// Used by the headless runner to emit frame snapshots for E2E tests.
+    pub fn to_text_rows(&self) -> Vec<String> {
+        (0..self.h)
+            .map(|y| {
+                (0..self.w)
+                    .filter_map(|x| self.cell_at(x, y))
+                    .filter(|c| c.ch != '\0')
+                    .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Returns the character at (x, y) in the back (pending) buffer.
+    /// Used by tests to inspect rendered output without flushing to a real terminal.
+    pub fn cell_at(&self, x: u16, y: u16) -> Option<&Cell> {
+        if x < self.w && y < self.h {
+            Some(&self.back[y as usize * self.w as usize + x as usize])
+        } else {
+            None
+        }
     }
 
     pub fn draw_border(&mut self, r: Rect, style: Style) {
@@ -126,6 +158,12 @@ impl Canvas {
                     continue;
                 }
 
+                // Right-half placeholder for wide chars: update front but never render
+                if new.ch == '\0' {
+                    self.front[idx] = new.clone();
+                    continue;
+                }
+
                 if cur_y != y || cur_x != x {
                     queue!(out, MoveTo(x, y))?;
                 }
@@ -164,7 +202,8 @@ impl Canvas {
 
                 queue!(out, Print(new.ch))?;
                 self.front[idx] = new.clone();
-                cur_x = x.wrapping_add(1);
+                let ch_w = UnicodeWidthChar::width(new.ch).unwrap_or(1) as u16;
+                cur_x = x.wrapping_add(ch_w);
                 cur_y = y;
             }
         }

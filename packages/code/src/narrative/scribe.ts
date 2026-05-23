@@ -212,7 +212,7 @@ export class Scribe {
     this.db.query("DELETE FROM code_file_snapshots WHERE task_id = ?").run(taskId)
   }
 
-  saveRecoveryPoint(taskId: string, phaseId: number | null, completedPhases: number[], pendingPhases: number[]): void {
+  saveRecoveryPoint(taskId: string, phaseId: number | null, completedPhases: number[], pendingPhases: number[], level = 0): void {
     let gitRef: string | null = null
     try {
       const proc = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: process.cwd() })
@@ -225,11 +225,12 @@ export class Scribe {
 
     this.db.query(
       `INSERT INTO code_recovery_points
-         (task_id, phase_id, git_ref, completed_phases, pending_phases, last_narrative_id)
-       VALUES (?, ?, ?, ?, ?, ?)`
+         (task_id, phase_id, level, git_ref, completed_phases, pending_phases, last_narrative_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run(
       taskId,
       phaseId,
+      level,
       gitRef,
       JSON.stringify(completedPhases),
       JSON.stringify(pendingPhases),

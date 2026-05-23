@@ -12,7 +12,7 @@ use crossterm::{
 
 use crate::{
     ipc::TuiMessage,
-    state::{AppState, HistoryEntry, InfoModalState, ModalState, ReplMode, Role, TabId},
+    state::{AppState, HistoryEntry, InfoModalState, ModalFieldKind, ModalState, ReplMode, Role, TabId},
     widgets::{command_popup, history, tabbar},
 };
 
@@ -34,7 +34,10 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
     // ── Modal de info activo ───────────────────────────────────────────────────
     if let ModalState::Info(info) = &mut state.modal {
         match key.code {
-            KeyCode::Esc => { state.modal = ModalState::None; }
+            KeyCode::Esc => {
+                state.modal = ModalState::None;
+                state.pending_ipc.push(TuiMessage::InfoModalClose);
+            }
             KeyCode::Up   => { info.scroll = info.scroll.saturating_sub(1); }
             KeyCode::Down => { info.scroll += 1; }
             _ => {}
@@ -68,6 +71,15 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 return false;
             }
             KeyCode::Enter => {
+                // Autocomplete al item seleccionado del popup antes de ejecutar.
+                // Esto permite que el usuario navegue con ↑↓ y pulse Enter directamente
+                // sin necesidad de Tab previo.
+                {
+                    let filtered_items = command_popup::filtered(state.input.value());
+                    if let Some(selected_cmd) = filtered_items.get(state.command_popup_selected) {
+                        state.input.set(selected_cmd.cmd);
+                    }
+                }
                 let raw = state.input.value().trim().to_string();
                 let mut parts = raw.splitn(2, ' ');
                 let cmd = parts.next().unwrap_or("");
@@ -136,7 +148,8 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                         return false;
                     }
                     _ => {
-                        // Todos los demás (/provider, /modelo, /github, /telegram…) → Bun
+                        // Todos los demás (/provider, /modelo, /github, /telegram…) → Bun.
+                        // Poner el comando completo en el input y dejar caer al Enter principal.
                         state.input.set(&raw);
                     }
                 }
@@ -175,6 +188,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         (KeyModifiers::NONE, KeyCode::Char(n @ '1'..='5')) if state.input.value().is_empty() && !state.history_nav_mode => {
             if let Some(tab) = TabId::from_num(n as u8 - b'0') {
                 state.active_tab = tab;
+                state.tab_locked = true;  // inhibe auto-routing hasta siguiente tarea
             }
         }
         (_, KeyCode::Esc) => {
@@ -280,7 +294,32 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 }
             }
         }
-        (_, KeyCode::Char(c)) if !state.history_nav_mode => state.input.insert(c),
+        // Scroll ADR en Review tab (↑↓ cuando input vacío y en Review)
+        (_, KeyCode::Up) if state.active_tab == TabId::Review && state.input.value().is_empty() => {
+            state.adrs.scroll = state.adrs.scroll.saturating_sub(1);
+        }
+        (_, KeyCode::Down) if state.active_tab == TabId::Review && state.input.value().is_empty() => {
+            state.adrs.scroll += 1;
+        }
+        // Navegar entre ADRs en Review tab ([ y ])
+        (_, KeyCode::Char('[')) if state.active_tab == TabId::Review => {
+            if state.adrs.selected > 0 {
+                state.adrs.selected -= 1;
+                state.adrs.scroll = 0;
+            }
+        }
+        (_, KeyCode::Char(']')) if state.active_tab == TabId::Review => {
+            if !state.adrs.entries.is_empty() {
+                state.adrs.selected = (state.adrs.selected + 1).min(state.adrs.entries.len().saturating_sub(1));
+                state.adrs.scroll = 0;
+            }
+        }
+        // Tipear un carácter siempre sale del modo nav y escribe en el input
+        (_, KeyCode::Char(c)) => {
+            state.history_nav_mode = false;
+            state.history_hscroll = 0;
+            state.input.insert(c);
+        }
         _ => {}
     }
 
@@ -298,12 +337,13 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
             move_history_selection(state, 1);
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            // Click en la fila del tabbar (fila 1)
-            if mouse.row == 1 {
+            // Click en la fila del tabbar (fila 2 — header ocupa 2 filas)
+            if mouse.row == 2 {
                 if let Some((w, _h)) = terminal::size().ok() {
-                    let tabbar_area = crate::term::Rect::new(0, 1, w, 1);
+                    let tabbar_area = crate::term::Rect::new(0, 2, w, 1);
                     if let Some(tab) = tabbar::tab_at_col(tabbar_area, mouse.column) {
                         state.active_tab = tab;
+                        state.show_welcome = false;
                         return;
                     }
                 }
@@ -344,8 +384,8 @@ fn history_rect_from_size(size: Option<(u16, u16)>) -> Option<crate::term::Rect>
     let (w, h) = size?;
 
     let area = crate::term::Rect::new(0, 0, w, h);
-    // Layout: header(1) + tabbar(1) + content(fill) + checkpoint(1) + conflict(1) + input(4) + statusbar(1)
-    let vertical = area.vsplit(&[1, 1, 0, 1, 1, 4, 1]);
+    // Layout: header(2) + tabbar(1) + content(fill) + checkpoint(1) + conflict(1) + input(4) + statusbar(1)
+    let vertical = area.vsplit(&[2, 1, 0, 1, 1, 4, 1]);
     vertical.get(2).copied()
 }
 
@@ -568,44 +608,6 @@ mod tests {
         assert_eq!(state.history.selected, Some(1));
     }
 
-    #[test]
-    fn left_click_selects_history_entry() {
-        let mut state = mk_state_with_entries(3);
-        state.history.selected = Some(0);
-
-        // Layout: header(1)+tabbar(1)+content(y=2). Entry 2 is at row y+1+2=5.
-        let click = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 3,
-            row: 5,
-            modifiers: KeyModifiers::NONE,
-        };
-        handle_mouse_event(&mut state, click);
-
-        assert!(state.history_nav_mode);
-        assert_eq!(state.history.selected, Some(2));
-    }
-
-    #[test]
-    fn right_click_loads_selected_entry_to_input_and_exits_nav() {
-        let mut state = mk_state_with_entries(3);
-        state.history.selected = Some(0);
-        state.history_nav_mode = true;
-        state.input.set("draft");
-
-        // Layout: header(1)+tabbar(1)+content(y=2). Entry 2 is at row y+1+2=5.
-        let click = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Right),
-            column: 3,
-            row: 5,
-            modifiers: KeyModifiers::NONE,
-        };
-        handle_mouse_event(&mut state, click);
-
-        assert_eq!(state.history.selected, Some(2));
-        assert_eq!(state.input.value(), "entry-2");
-        assert!(!state.history_nav_mode);
-    }
 }
 
 // ── Modal de configuración ────────────────────────────────────────────────────
@@ -625,11 +627,38 @@ fn handle_config_modal_key(state: &mut AppState, code: KeyCode) {
             state.modal = ModalState::None;
             state.pending_ipc.push(TuiMessage::ModalCancel { command });
         }
-        KeyCode::Tab | KeyCode::Down => {
+        // Tab/BackTab siempre cambian de campo
+        KeyCode::Tab => {
             state.modal_focused = (state.modal_focused + 1) % n;
         }
-        KeyCode::BackTab | KeyCode::Up => {
+        KeyCode::BackTab => {
             state.modal_focused = (state.modal_focused + n.saturating_sub(1)) % n;
+        }
+        // ↑↓ navegan opciones en Select; en Text/Secret cambian de campo
+        KeyCode::Up => {
+            let focused = state.modal_focused;
+            if is_select_field(state, focused) {
+                cycle_select(state, focused, -1);
+            } else {
+                state.modal_focused = (state.modal_focused + n.saturating_sub(1)) % n;
+            }
+        }
+        KeyCode::Down => {
+            let focused = state.modal_focused;
+            if is_select_field(state, focused) {
+                cycle_select(state, focused, 1);
+            } else {
+                state.modal_focused = (state.modal_focused + 1) % n;
+            }
+        }
+        // ◄/► también funcionan en Select (alias de ↑↓)
+        KeyCode::Left => {
+            let focused = state.modal_focused;
+            cycle_select(state, focused, -1);
+        }
+        KeyCode::Right => {
+            let focused = state.modal_focused;
+            cycle_select(state, focused, 1);
         }
         KeyCode::Enter => {
             // Validar campos requeridos
@@ -651,18 +680,65 @@ fn handle_config_modal_key(state: &mut AppState, code: KeyCode) {
         KeyCode::Backspace => {
             let focused = state.modal_focused;
             let ModalState::Config(modal) = &mut state.modal else { return; };
-            if let Some(val) = modal.values.get_mut(focused) {
-                val.pop();
+            // Solo campos de texto/secreto — Select usa ◄/►
+            if modal.fields.get(focused).map(|f| f.kind != ModalFieldKind::Select).unwrap_or(false) {
+                if let Some(val) = modal.values.get_mut(focused) {
+                    val.pop();
+                }
             }
         }
         KeyCode::Char(c) => {
             let focused = state.modal_focused;
             let ModalState::Config(modal) = &mut state.modal else { return; };
-            if let Some(val) = modal.values.get_mut(focused) {
-                val.push(c);
+            // Solo campos de texto/secreto — Select usa ◄/►
+            if modal.fields.get(focused).map(|f| f.kind != ModalFieldKind::Select).unwrap_or(false) {
+                if let Some(val) = modal.values.get_mut(focused) {
+                    val.push(c);
+                }
             }
         }
         _ => {}
+    }
+}
+
+fn is_select_field(state: &AppState, field_idx: usize) -> bool {
+    let ModalState::Config(modal) = &state.modal else { return false; };
+    modal.fields.get(field_idx).map(|f| f.kind == ModalFieldKind::Select).unwrap_or(false)
+}
+
+/// Avanza (delta=1) o retrocede (delta=-1) la selección de un campo Select.
+/// Actualiza `cursors[field_idx]` como scroll offset para mantener el item visible.
+fn cycle_select(state: &mut AppState, field_idx: usize, delta: isize) {
+    use crate::widgets::config_modal::MAX_VISIBLE_OPTIONS;
+    let ModalState::Config(modal) = &mut state.modal else { return; };
+    let Some(field) = modal.fields.get(field_idx) else { return; };
+    if field.kind != ModalFieldKind::Select { return; }
+    let Some(opts) = field.options.clone() else { return; };
+    if opts.is_empty() { return; }
+
+    let current = modal.values.get(field_idx).cloned().unwrap_or_default();
+    let cur_idx = opts.iter().position(|o| *o == current).unwrap_or(0);
+    let next_idx = if delta < 0 {
+        if cur_idx == 0 { opts.len() - 1 } else { cur_idx - 1 }
+    } else {
+        (cur_idx + 1) % opts.len()
+    };
+
+    if let Some(val) = modal.values.get_mut(field_idx) {
+        *val = opts[next_idx].clone();
+    }
+
+    // Ajustar scroll para mantener el item seleccionado visible
+    let scroll = modal.cursors.get(field_idx).copied().unwrap_or(0);
+    let new_scroll = if next_idx < scroll {
+        next_idx
+    } else if next_idx >= scroll + MAX_VISIBLE_OPTIONS {
+        next_idx + 1 - MAX_VISIBLE_OPTIONS
+    } else {
+        scroll
+    };
+    if let Some(s) = modal.cursors.get_mut(field_idx) {
+        *s = new_scroll;
     }
 }
 

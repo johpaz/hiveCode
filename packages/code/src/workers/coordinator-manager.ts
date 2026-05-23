@@ -1,5 +1,7 @@
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { getSessionDb, closeSessionDb } from "@johpaz/hivecode-core/db/client"
+import { getMemoryDb } from "@johpaz/hivecode-core/storage/memory-db"
+import { MemoryRepo } from "@johpaz/hivecode-core/storage/memory-repo"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { createAllTools } from "@johpaz/hivecode-core/tools"
 import type { Config } from "@johpaz/hivecode-core/config"
@@ -36,9 +38,11 @@ import {
 
 const log = logger.child("coordinator-manager")
 
-// BEE is index 0 in the bitmask; coordinators follow at indices 1-6
+// BEE is index 0 in the bitmask; coordinators follow at indices 1-9
+// librarian and forensic are on-demand workers — not in the persistent pool
 const COORDINATOR_NAMES: PhaseName[] = [
   "bee", "architecture", "backend", "frontend", "security", "test", "devops",
+  "dba", "integration", "reviewer",
 ]
 
 const WORKER_EXT = import.meta.url.endsWith(".ts") ? ".worker.ts" : ".worker.js"
@@ -51,6 +55,11 @@ const COORDINATOR_FILES: Record<PhaseName, string> = {
   security: new URL(`./security${WORKER_EXT}`, import.meta.url).pathname,
   test: new URL(`./test${WORKER_EXT}`, import.meta.url).pathname,
   devops: new URL(`./devops${WORKER_EXT}`, import.meta.url).pathname,
+  dba: new URL(`./dba${WORKER_EXT}`, import.meta.url).pathname,
+  integration: new URL(`./integration${WORKER_EXT}`, import.meta.url).pathname,
+  reviewer: new URL(`./reviewer${WORKER_EXT}`, import.meta.url).pathname,
+  librarian: new URL(`./librarian${WORKER_EXT}`, import.meta.url).pathname,
+  forensic: new URL(`./forensic${WORKER_EXT}`, import.meta.url).pathname,
 }
 
 export class CoordinatorManager extends CoordinatorBase {
@@ -64,11 +73,13 @@ export class CoordinatorManager extends CoordinatorBase {
   private secrets: Record<string, string> = {}
   private allTools: Tool[] = []
   private toolWorkerPool: Bun.Worker[] = []
+  private currentLevel = 0
   private idleToolWorkers: Bun.Worker[] = []
   private toolResolvers = new Map<string, (res: any) => void>()
   private onNarrativeChunk?: (chunk: { coordinator: string; phase: string; content: string; streamId?: string }) => void
   private onWorkerUpdate?: (update: { type: "tool_worker"; id: number; status: "idle" | "busy"; tool?: string }) => void
   private onTaskComplete?: (response: string) => void
+  private onIpcEvent?: (event: string, payload: unknown) => void
 
   /** Reload secrets from Bun.secrets and providers table */
   reloadSecrets(): void {
@@ -177,7 +188,12 @@ export class CoordinatorManager extends CoordinatorBase {
     this.activeSessionId = this.scribe.createSession(process.cwd())
     // Open per-session DB and wire all subsystems (Blackboard, Checkpoint, ADR, Risk)
     const sessionDb = getSessionDb(this.activeSessionId)
-    const ipc = makeGatewayEmitter(this.activeSessionId)
+    // Use a combined emitter: gateway broadcast + optional TUI socket callback
+    const gatewayIpc = makeGatewayEmitter(this.activeSessionId)
+    const onIpcEvent = this.onIpcEvent
+    const ipc = onIpcEvent
+      ? { emit(event: string, payload: unknown) { gatewayIpc.emit(event, payload); onIpcEvent(event, payload) } }
+      : gatewayIpc
     this.initSubsystems(sessionDb, this.activeSessionId, ipc)
     this.loadProjectAdrs(process.cwd())
     return this.activeSessionId
@@ -642,6 +658,9 @@ export class CoordinatorManager extends CoordinatorBase {
     for (let levelIdx = 0; levelIdx < levels.length; levelIdx++) {
       if (isCancelled()) break
 
+      // Track current level for worker_activity writes
+      this.currentLevel = levelIdx
+
       const phaseMode = getMode()
       const levelPhases = levels[levelIdx]
 
@@ -661,11 +680,13 @@ export class CoordinatorManager extends CoordinatorBase {
           .slice(levelIdx)
           .flat()
           .map((_, i) => levelIdx + i)
-        this.scribe.saveRecoveryPoint(this.activeTaskId, null, completedPhaseIds, pendingPhaseIds)
+        this.scribe.saveRecoveryPoint(this.activeTaskId, null, completedPhaseIds, pendingPhaseIds, levelIdx)
       }
 
-      const levelTasks: Array<{ phase: PhaseName; task: CoordinatorTask }> = levelPhases.map(phaseDef => {
+      const levelTasks: Array<{ phase: PhaseName; task: CoordinatorTask; startedAt: number }> = levelPhases.map(phaseDef => {
         const phase = phaseDef.coordinator
+        // Override model to most capable for reviewer
+        const effectiveModel = phase === "reviewer" ? this.getHighestCapabilityModel() || model : model
         const task: CoordinatorTask = {
           taskId: this.activeTaskId || "current",
           phaseId: this.scribe.createPhase(this.activeTaskId || "current", phase, phase),
@@ -678,13 +699,14 @@ export class CoordinatorManager extends CoordinatorBase {
           projectPath: process.cwd(),
           secrets: this.secrets,
           provider: provider || undefined,
-          model: model || undefined,
+          model: effectiveModel || undefined,
         }
-        return { phase, task }
+        this.writeWorkerActivity(phase, levelIdx, "running", 0, 0, Date.now(), null)
+        return { phase, task, startedAt: Date.now() }
       })
 
       // Announce phase start to live feed
-      for (const { phase, task: t } of levelTasks) {
+      for (const { phase } of levelTasks) {
         if (this.activeTaskId) broadcastPhaseStart(this.activeTaskId, phase, phase)
       }
 
@@ -694,7 +716,15 @@ export class CoordinatorManager extends CoordinatorBase {
 
       for (let r = 0; r < results.length; r++) {
         const result = results[r]
-        const { phase, task } = levelTasks[r]
+        const { phase, task, startedAt } = levelTasks[r]
+
+        // Record completion in worker_activity
+        this.writeWorkerActivity(
+          phase, levelIdx,
+          result.status === "failed" ? "failed" : "done",
+          result.tokensIn ?? 0, result.tokensOut ?? 0,
+          startedAt, Date.now()
+        )
 
         this.scribe.appendNarrative({
           taskId: this.activeTaskId!,
@@ -705,6 +735,51 @@ export class CoordinatorManager extends CoordinatorBase {
           isDraft: false,
           isOverride: false,
         })
+
+        if (result.status === "failed" && result.iterationLimitReached) {
+          log.warn(`[coordinator-manager] ⚠️ ${phase} hit iteration limit — invoking ForensicAgent`)
+          const forensicResult = await this.runForensicAgent(phase, task, result)
+          const recommendation = this.parseForensicRecommendation(forensicResult.narrativeEntry)
+
+          if (recommendation.action === "escalate") {
+            this.scribe.updateTaskStatus(this.activeTaskId!, "paused")
+            log.warn(`[coordinator-manager] 🚨 ForensicAgent escalation: ${recommendation.detail}`)
+            if (this.onIpcEvent) {
+              this.onIpcEvent("forensic_alert", { worker: phase, analysis: forensicResult.narrativeEntry, recommendation: recommendation.detail })
+            }
+            return
+          }
+
+          if (recommendation.action === "retry_with_constraint") {
+            log.info(`[coordinator-manager] 🔄 Retrying ${phase} with constraint: ${recommendation.detail}`)
+            const constraintTask: CoordinatorTask = {
+              ...task,
+              phaseId: this.scribe.createPhase(this.activeTaskId || "current", phase, phase),
+              narrative: (archNarrative || "") + `\n\nCONSTRAINT (ForensicAgent): ${recommendation.detail}`,
+            }
+            this.writeWorkerActivity(phase, levelIdx, "running", 0, 0, Date.now(), null)
+            const retryResult = await this.dispatchPhase(phase, constraintTask)
+            this.writeWorkerActivity(
+              phase, levelIdx,
+              retryResult.status === "failed" ? "failed" : "done",
+              retryResult.tokensIn ?? 0, retryResult.tokensOut ?? 0,
+              Date.now(), Date.now()
+            )
+            if (retryResult.status === "failed") {
+              this.scribe.updateTaskStatus(this.activeTaskId!, "failed")
+              log.error(`[coordinator-manager] ❌ ${phase} failed after ForensicAgent retry`)
+              return
+            }
+            this.scribe.updatePhaseStatus(constraintTask.phaseId, "completed", retryResult.narrativeEntry)
+            this.scribe.updatePhaseMetadata(constraintTask.phaseId, retryResult.tokensIn ?? 0, retryResult.tokensOut ?? 0, retryResult.durationMs)
+            continue
+          }
+
+          // Reasign: handle as regular failure
+          this.scribe.updateTaskStatus(this.activeTaskId!, "failed")
+          log.error(`[coordinator-manager] ❌ ${phase} phase failed (ForensicAgent recommends reasign)`)
+          return
+        }
 
         if (result.status === "failed") {
           this.scribe.updateTaskStatus(this.activeTaskId!, "failed")
@@ -730,6 +805,21 @@ export class CoordinatorManager extends CoordinatorBase {
             durationMs: result.durationMs,
           })
           broadcastPhaseEnd(this.activeTaskId, phase, phase, result.durationMs)
+        }
+
+        // Post-reviewer: activate Librarian if approved
+        if (phase === "reviewer") {
+          const verdict = this.parseReviewerVerdict(result.narrativeEntry)
+          if (verdict === "aprobado" || verdict === "aprobado_con_observaciones") {
+            log.info(`[coordinator-manager] 📚 Reviewer approved — activating Librarian`)
+            this.runLibrarianAgent(task, provider, model).catch(err => {
+              log.warn(`[coordinator-manager] Librarian error: ${(err as Error).message}`)
+            })
+          } else {
+            log.info(`[coordinator-manager] 🔄 Reviewer rejected — marking task for retry`)
+            this.scribe.updateTaskStatus(this.activeTaskId!, "failed")
+            return
+          }
         }
       }
 
@@ -765,6 +855,204 @@ export class CoordinatorManager extends CoordinatorBase {
 
       globalPhaseIndex += levelPhases.length
     }
+  }
+
+  /** Write a row to the session DB worker_activity table for level-based tracking */
+  private writeWorkerActivity(
+    phase: PhaseName,
+    level: number,
+    status: "running" | "done" | "failed",
+    tokensIn: number,
+    tokensOut: number,
+    startedAt: number | null,
+    completedAt: number | null
+  ): void {
+    if (!this.activeSessionId) return
+    try {
+      const sessionDb = getSessionDb(this.activeSessionId)
+      sessionDb.query(
+        `INSERT INTO worker_activity (session_id, worker, phase, level, status, input_tokens, output_tokens, started_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(this.activeSessionId, phase, phase, level, status, tokensIn, tokensOut, startedAt, completedAt)
+    } catch {
+      // worker_activity is non-critical — never block on write failure
+    }
+  }
+
+  /** Returns the highest-capability model ID available for the configured provider */
+  private getHighestCapabilityModel(): string | null {
+    try {
+      const db = getDb()
+      // Try to find a model tagged as top-tier; fall back to configured model
+      const row = db.query<{ id: string }, []>(
+        `SELECT id FROM models WHERE tier = 'top' ORDER BY id DESC LIMIT 1`
+      ).get()
+      return row?.id ?? null
+    } catch {
+      return null
+    }
+  }
+
+  /** Run ForensicAgent as an on-demand temporary worker */
+  private async runForensicAgent(
+    failedPhase: PhaseName,
+    originalTask: CoordinatorTask,
+    failedResult: CoordinatorResult
+  ): Promise<CoordinatorResult> {
+    const taskId = this.activeTaskId || "forensic"
+    const phaseId = this.scribe.createPhase(taskId, "forensic", "forensic")
+    const forensicTask: CoordinatorTask = {
+      taskId,
+      phaseId,
+      phase: "forensic",
+      description: `Analyze why ${failedPhase} failed after exhausting iterations. Failed narrative: ${failedResult.narrativeEntry?.slice(0, 500)}`,
+      narrative: originalTask.narrative || "",
+      mode: originalTask.mode,
+      projectPath: process.cwd(),
+      secrets: this.secrets,
+      provider: originalTask.provider,
+      model: originalTask.model,
+    }
+
+    const workerPath = COORDINATOR_FILES["forensic"]
+    const forensicWorker = new (Worker as any)(workerPath, { smol: true }) as Bun.Worker
+
+    return new Promise((resolve) => {
+      const resolverKey = `${taskId}:${phaseId}`
+      const tools = getToolsForCoordinator("forensic" as PhaseName, this.allTools)
+      const compiledContext = this.compileWorkerContext("forensic" as PhaseName, forensicTask.description, forensicTask.narrative)
+      const msg: ManagerToWorkerMessage = {
+        type: "TASK",
+        task: { ...forensicTask, tools: tools as any, compiledContext },
+      }
+
+      const timeout = setTimeout(() => {
+        forensicWorker.terminate()
+        resolve({
+          taskId,
+          phaseId,
+          coordinator: "forensic",
+          status: "failed",
+          narrativeEntry: "ForensicAgent timed out.",
+          filesModified: [],
+          durationMs: 120_000,
+        })
+      }, 120_000)
+
+      forensicWorker.onmessage = (msg: MessageEvent) => {
+        const data = typeof msg.data === "string" ? JSON.parse(msg.data) : msg.data
+        if (data.type === "RESULT" && data.result) {
+          clearTimeout(timeout)
+          forensicWorker.terminate()
+          resolve(data.result as CoordinatorResult)
+        } else if (data.type === "TOOL_CALL") {
+          // Handle tool calls from forensic worker
+          this.handleToolCall("forensic" as PhaseName, data).catch(() => {})
+        }
+      }
+
+      // Wire tool results back to forensic worker
+      const origWorker = this.workers.get("forensic" as PhaseName)
+      this.workers.set("forensic" as PhaseName, forensicWorker)
+      forensicWorker.postMessage(JSON.stringify(msg))
+      // Restore after done
+      forensicWorker.addEventListener("close", () => {
+        if (origWorker) this.workers.set("forensic" as PhaseName, origWorker)
+        else this.workers.delete("forensic" as PhaseName)
+      })
+    })
+  }
+
+  /** Parse ForensicAgent recommendation from its narrative */
+  private parseForensicRecommendation(narrative: string): { action: "retry_with_constraint" | "reasign" | "escalate"; detail: string } {
+    const retryMatch = narrative.match(/relanzar_con_constraint:\s*(.+)/i)
+    if (retryMatch) return { action: "retry_with_constraint", detail: retryMatch[1].trim() }
+
+    const reasignMatch = narrative.match(/reasignar_a:\s*(.+)/i)
+    if (reasignMatch) return { action: "reasign", detail: reasignMatch[1].trim() }
+
+    const escalateMatch = narrative.match(/escalar_al_humano:\s*([\s\S]+)/i)
+    if (escalateMatch) return { action: "escalate", detail: escalateMatch[1].trim() }
+
+    return { action: "escalate", detail: "ForensicAgent did not produce a parseable recommendation." }
+  }
+
+  /** Parse reviewer verdict from its narrative */
+  private parseReviewerVerdict(narrative: string): "aprobado" | "aprobado_con_observaciones" | "rechazado" {
+    const normalized = narrative.toLowerCase()
+    if (normalized.includes("aprobado_con_observaciones") || normalized.includes("aprobado con observaciones")) {
+      return "aprobado_con_observaciones"
+    }
+    if (normalized.includes("aprobado")) return "aprobado"
+    return "rechazado"
+  }
+
+  /** Run Librarian as on-demand worker after reviewer approves */
+  private async runLibrarianAgent(
+    reviewerTask: CoordinatorTask,
+    provider: string,
+    model: string
+  ): Promise<void> {
+    if (!this.activeSessionId || !this.activeTaskId) return
+
+    if (this.onIpcEvent) {
+      this.onIpcEvent("librarian_progress", { status: "running", records_written: 0 })
+    }
+
+    const taskId = this.activeTaskId
+    const phaseId = this.scribe.createPhase(taskId, "librarian", "librarian")
+    const libTask: CoordinatorTask = {
+      taskId,
+      phaseId,
+      phase: "librarian",
+      description: `Distill session knowledge into agent_memory for project: ${process.cwd()}`,
+      narrative: reviewerTask.narrative || "",
+      mode: reviewerTask.mode,
+      projectPath: process.cwd(),
+      secrets: this.secrets,
+      provider: provider || undefined,
+      model: model || undefined,
+    }
+
+    const workerPath = COORDINATOR_FILES["librarian"]
+    const libWorker = new (Worker as any)(workerPath, { smol: true }) as Bun.Worker
+
+    return new Promise((resolve) => {
+      const tools = getToolsForCoordinator("librarian" as PhaseName, this.allTools)
+      const compiledContext = this.compileWorkerContext("librarian" as PhaseName, libTask.description, libTask.narrative)
+      const msg: ManagerToWorkerMessage = {
+        type: "TASK",
+        task: { ...libTask, tools: tools as any, compiledContext },
+      }
+
+      const timeout = setTimeout(() => {
+        libWorker.terminate()
+        log.warn("[coordinator-manager] Librarian timed out")
+        resolve()
+      }, 180_000)
+
+      libWorker.onmessage = (msgEvent: MessageEvent) => {
+        const data = typeof msgEvent.data === "string" ? JSON.parse(msgEvent.data) : msgEvent.data
+        if (data.type === "RESULT") {
+          clearTimeout(timeout)
+          libWorker.terminate()
+          if (this.onIpcEvent) {
+            this.onIpcEvent("librarian_progress", { status: "done", records_written: 0 })
+          }
+          log.info("[coordinator-manager] Librarian completed memory distillation")
+          resolve()
+        } else if (data.type === "TOOL_CALL") {
+          this.handleToolCall("librarian" as PhaseName, data).catch(() => {})
+        }
+      }
+
+      this.workers.set("librarian" as PhaseName, libWorker)
+      libWorker.postMessage(JSON.stringify(msg))
+      libWorker.addEventListener("close", () => {
+        this.workers.delete("librarian" as PhaseName)
+        resolve()
+      })
+    })
   }
 
   private dispatchPhase(phase: PhaseName, task: CoordinatorTask): Promise<CoordinatorResult> {
@@ -850,7 +1138,24 @@ export class CoordinatorManager extends CoordinatorBase {
       // code_playbook may not have rows yet — skip silently
     }
 
-    // 3. Recent scratchpad / narrative context
+    // 3. Agent memory from previous sessions (FTS5-filtered by relevance)
+    try {
+      const memRepo = new MemoryRepo()
+      const projectId = process.cwd()
+      const memories = memRepo.searchByRelevance(projectId, `${taskDescription} ${phase}`, 8)
+      if (memories.length > 0) {
+        let memSection = "# PROJECT MEMORY (from previous sessions)\nKnowledge accumulated by the swarm:\n\n"
+        for (const m of memories) {
+          memSection += `[${m.type}|${m.severity}] ${m.content}\n`
+          memRepo.updateLastUsed(m.id)
+        }
+        sections.push(memSection)
+      }
+    } catch {
+      // memory.db may not be initialized in test/worker context — skip silently
+    }
+
+    // 4. Recent scratchpad / narrative context
     if (narrative) {
       sections.push(`# PROJECT NARRATIVE\n${narrative}`)
     }
@@ -1169,6 +1474,11 @@ export class CoordinatorManager extends CoordinatorBase {
 
   setWorkerUpdateCallback(cb: (update: { type: "tool_worker"; id: number; status: "idle" | "busy"; tool?: string }) => void): void {
     this.onWorkerUpdate = cb
+  }
+
+  /** Forward raw IPC events (file_risk_update, conflict_alert, etc.) to TUI socket. */
+  setIpcCallback(cb: (event: string, payload: unknown) => void): void {
+    this.onIpcEvent = cb
   }
 
   /** Record a user override instruction into the narrative with is_override=1. */

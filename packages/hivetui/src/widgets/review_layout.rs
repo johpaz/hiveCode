@@ -1,5 +1,5 @@
 use crate::{
-    state::{AppState, RiskLevel},
+    state::{AppState, ReplMode, RiskLevel},
     term::{Canvas, Rect, Style, AMBER, AMBER_BRIGHT, AMBER_DIM, BG_ELEVATED, BG_PANEL, DIM, GREEN, RED, SECONDARY, WHITE, YELLOW},
 };
 
@@ -10,8 +10,12 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
         return;
     }
 
-    // Split: ADR view (fill) + approval strip (bottom ~6 rows)
-    let strip_h = 6u16.min(area.h / 3);
+    // En modo APPROVAL el strip es más alto (8 filas) para señalizar la decisión
+    let strip_h = if state.session.mode == ReplMode::Approval {
+        8u16.min(area.h / 2)
+    } else {
+        6u16.min(area.h / 3)
+    };
     let panels = area.vsplit(&[0, strip_h]);
     render_adr_pane(canvas, panels[0], state);
     render_approval_strip(canvas, panels[1], state);
@@ -20,92 +24,132 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
 fn render_adr_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
     canvas.fill_rect(area, ' ', Style::new().bg(BG_PANEL));
 
-    let title = "⬡ REVISIÓN · contexto de tarea";
-    canvas.print(area.x + 1, area.y, title, Style::new().fg(AMBER).bold());
+    if state.adrs.entries.is_empty() {
+        let title = "⬡ ADR · Architecture Decision Records";
+        canvas.print(area.x + 1, area.y, title, Style::new().fg(AMBER).bold());
+        canvas.print(area.x + 2, area.y + 2, "Sin ADRs activos", Style::new().fg(DIM));
+        canvas.print(area.x + 2, area.y + 3, "Se mostrarán aquí cuando el worker de arquitectura genere decisiones.", Style::new().fg(DIM));
+        return;
+    }
 
-    let mut y = area.y + 1;
+    let idx = state.adrs.selected.min(state.adrs.entries.len().saturating_sub(1));
+    let adr = &state.adrs.entries[idx];
+
+    // Header: título + status + navegación si hay más de uno
+    let status_color = match adr.status.as_str() {
+        "accepted" => GREEN,
+        "proposed" => YELLOW,
+        "rejected" => RED,
+        _          => DIM,
+    };
+    let header = format!("⬡ ADR · {} [{}/{}]", adr.title, idx + 1, state.adrs.entries.len());
+    canvas.print(area.x + 1, area.y, &header, Style::new().fg(AMBER).bold());
+    canvas.print(area.right().saturating_sub(adr.status.len() as u16 + 2), area.y,
+                 &adr.status, Style::new().fg(status_color).bold());
+
     let avail_w = area.w.saturating_sub(3) as usize;
+    let mut y = area.y + 1;
 
-    // Show thought stream chunks as "reasoning" display
-    let chunks = &state.thought.chunks;
+    // Renderizar contenido con markdown básico
+    let lines: Vec<&str> = adr.content.lines().collect();
     let avail_h = area.h.saturating_sub(2) as usize;
-    let start = chunks.len().saturating_sub(avail_h);
+    let start = state.adrs.scroll.min(lines.len().saturating_sub(avail_h));
 
-    for chunk in chunks.iter().skip(start) {
-        if y >= area.bottom() {
+    for raw in lines.iter().skip(start) {
+        if y >= area.bottom().saturating_sub(1) {
             break;
         }
-        let (prefix, ps, cs) = if chunk.phase.contains("think") || chunk.phase.contains("reason") {
-            ("  ↳ ", Style::new().fg(DIM), Style::new().fg(DIM))
+        let line = raw.trim_end();
+        let (style, offset) = if line.starts_with("### ") {
+            (Style::new().fg(AMBER_DIM), 4)
+        } else if line.starts_with("## ") {
+            (Style::new().fg(AMBER).bold(), 3)
+        } else if line.starts_with("# ") {
+            (Style::new().fg(AMBER_BRIGHT).bold(), 2)
+        } else if line.starts_with("```") || line.starts_with("    ") {
+            (Style::new().fg(WHITE).bg(BG_ELEVATED), 0)
+        } else if line.starts_with("> ") {
+            (Style::new().fg(DIM), 2)
+        } else if line.starts_with("- ") || line.starts_with("* ") {
+            (Style::new().fg(SECONDARY), 0)
         } else {
-            let col = worker_color(&chunk.coordinator);
-            ("⬡  ", Style::new().fg(col).bold(), Style::new().fg(WHITE))
+            (Style::new().fg(SECONDARY), 0)
         };
 
-        canvas.print(area.x + 1, y, prefix, ps);
-        // prefix is 4 chars max
-        let shown: String = chunk.content.chars().take(avail_w.saturating_sub(5)).collect();
-        canvas.print(area.x + 5, y, &shown, cs);
+        let content: String = line.chars().skip(offset).take(avail_w).collect();
+        if !content.is_empty() || line.is_empty() {
+            canvas.print(area.x + 2, y, &content, style);
+        }
         y += 1;
     }
 
-    if chunks.is_empty() {
-        canvas.print(area.x + 2, area.y + 2, "sin actividad de revisión aún", Style::new().fg(DIM));
-        canvas.print(area.x + 2, area.y + 4, "Los ADRs y contexto de los agentes", Style::new().fg(DIM));
-        canvas.print(area.x + 2, area.y + 5, "aparecerán aquí durante la ejecución.", Style::new().fg(DIM));
+    // Hint scroll al fondo
+    if lines.len() > avail_h {
+        let pct = (start * 100) / lines.len().max(1);
+        let hint = format!("{}% · ↑↓ scroll", pct);
+        canvas.print(area.right().saturating_sub(hint.len() as u16 + 1),
+                     area.bottom().saturating_sub(1), &hint, Style::new().fg(DIM));
     }
 }
 
 fn render_approval_strip(canvas: &mut Canvas, area: Rect, state: &AppState) {
     canvas.fill_rect(area, ' ', Style::new().bg(BG_ELEVATED));
 
+    // En modo APPROVAL: borde superior destacado para señalizar el momento de decisión
+    let is_approval = state.session.mode == ReplMode::Approval;
+    let border_color = if is_approval { AMBER_BRIGHT } else { AMBER_DIM };
+    let sep: String = std::iter::repeat('─').take(area.w as usize).collect();
+    canvas.print(area.x, area.y, &sep, Style::new().fg(border_color));
+
     let file_count = state.filemap.entries.len();
-    let header = format!("⬡ ARCHIVOS PARA APROBAR · {file_count}");
-    canvas.print(area.x + 1, area.y, &header, Style::new().fg(AMBER_BRIGHT).bold());
+    let header = if is_approval {
+        format!("⬡ APROBAR O RECHAZAR · {} archivo(s)", file_count)
+    } else {
+        format!("⬡ ARCHIVOS PARA APROBAR · {file_count}")
+    };
+    let header_color = if is_approval { AMBER_BRIGHT } else { AMBER_BRIGHT };
+    canvas.print(area.x + 1, area.y, &header, Style::new().fg(header_color).bold());
 
     if state.filemap.entries.is_empty() {
         canvas.print(area.x + 2, area.y + 1, "sin archivos pendientes de aprobación", Style::new().fg(DIM));
         return;
     }
 
+    let list_rows = area.h.saturating_sub(3) as usize;
     let mut y = area.y + 1;
-    for entry in state.filemap.entries.iter().take(area.h.saturating_sub(3) as usize) {
-        if y >= area.bottom().saturating_sub(2) {
-            break;
-        }
-        let dot_color = match entry.risk {
-            RiskLevel::Low      => GREEN,
-            RiskLevel::Medium   => YELLOW,
-            RiskLevel::High     => AMBER,
-            RiskLevel::Critical => RED,
+    for entry in state.filemap.entries.iter().take(list_rows) {
+        if y >= area.bottom().saturating_sub(2) { break; }
+
+        let (dot_color, risk_tag) = match entry.risk {
+            RiskLevel::Low      => (GREEN,  "[low]   "),
+            RiskLevel::Medium   => (YELLOW, "[medium]"),
+            RiskLevel::High     => (AMBER,  "[high]  "),
+            RiskLevel::Critical => (RED,    "[crit]  "),
         };
         canvas.print(area.x + 1, y, "●", Style::new().fg(dot_color).bold());
 
-        let avail = area.w.saturating_sub(4) as usize;
-        let path: String = entry.path.chars().take(avail).collect();
+        let path_avail = area.w.saturating_sub(14) as usize;
+        let path: String = entry.path.chars().take(path_avail).collect();
         canvas.print(area.x + 3, y, &path, Style::new().fg(WHITE));
+
+        let tag_x = area.right().saturating_sub(10);
+        canvas.print(tag_x, y, risk_tag, Style::new().fg(dot_color));
         y += 1;
     }
 
-    // Hint
+    // Hints de acción — más prominentes en modo APPROVAL
     let hint_y = area.bottom().saturating_sub(1);
-    canvas.print(area.x + 1, hint_y, "→ ", Style::new().fg(AMBER_DIM));
-    canvas.print(area.x + 3, hint_y, "/approve", Style::new().fg(AMBER).bold());
-    canvas.print(area.x + 11, hint_y, " para aceptar  ·  ", Style::new().fg(DIM));
-    canvas.print(area.x + 29, hint_y, "/reject <razón>", Style::new().fg(AMBER).bold());
-    canvas.print(area.x + 44, hint_y, " para devolver", Style::new().fg(DIM));
+    if is_approval {
+        canvas.print(area.x + 1, hint_y, "[↩ /approve]", Style::new().fg(GREEN).bold());
+        canvas.print(area.x + 14, hint_y, " proceder  ·  ", Style::new().fg(DIM));
+        canvas.print(area.x + 28, hint_y, "[↩ /reject <razón>]", Style::new().fg(RED).bold());
+        canvas.print(area.x + 48, hint_y, " devolver a Bee", Style::new().fg(DIM));
+    } else {
+        canvas.print(area.x + 1, hint_y, "→ ", Style::new().fg(AMBER_DIM));
+        canvas.print(area.x + 3, hint_y, "/approve", Style::new().fg(AMBER).bold());
+        canvas.print(area.x + 11, hint_y, " para aceptar  ·  ", Style::new().fg(DIM));
+        canvas.print(area.x + 29, hint_y, "/reject <razón>", Style::new().fg(AMBER).bold());
+        canvas.print(area.x + 44, hint_y, " para devolver", Style::new().fg(DIM));
+    }
 }
 
-fn worker_color(name: &str) -> crate::term::Color {
-    use crate::term::{AMBER_BRIGHT, BLUE, CYAN, LAVENDER, PINK, PURPLE, YELLOW};
-    const ROLES: &[(&str, crate::term::Color)] = &[
-        ("bee",    AMBER_BRIGHT),
-        ("arch",   PURPLE),
-        ("back",   BLUE),
-        ("front",  CYAN),
-        ("sec",    PINK),
-        ("test",   YELLOW),
-        ("devops", LAVENDER),
-    ];
-    ROLES.iter().find(|(k, _)| name.contains(k)).map(|(_, c)| *c).unwrap_or(SECONDARY)
-}

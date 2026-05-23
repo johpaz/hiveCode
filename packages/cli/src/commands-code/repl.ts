@@ -222,31 +222,13 @@ async function executeTask(
       } else if (mode === "auto") {
         await runTask(task, [], { keyboard: false, exitOnError: false, manager, quiet })
       } else {
-        // approval: plan → ask user → run
+        // approval: plan → mostrar al usuario → implementar si aprueba
         await runPlan(task, { keyboard: false, exitOnError: false, manager, quiet })
 
-        let approval: "yes" | "no" = "no"
-        if (options?.suspend && options?.resume) {
-          await options.suspend()
-          try {
-            const result = await hiveSelect({
-              message: "¿Deseas implementar este plan?",
-              options: [
-                { value: "yes", label: "Sí, implementar" },
-                { value: "no",  label: "No, volver" },
-              ],
-            })
-            approval = (!isCancel(result) && result === "yes") ? "yes" : "no"
-          } finally {
-            options.resume()
-          }
-        }
-
-        if (approval === "yes") {
-          // Reset collector so we get the run result, not the plan result
-          finalResponse = ""
-          await runTask(task, [], { keyboard: false, exitOnError: false, manager, quiet })
-        }
+        // En modo TUI (quiet=true), la TUI muestra el plan y el usuario usa
+        // /approve o /reject desde el input. No suspender el proceso porque
+        // hivetui no implementa el protocolo suspend/resume → deadlock.
+        // finalResponse ya tiene la respuesta del plan (seteada por onTaskComplete).
       }
     } finally {
       manager.setTaskCompleteCallback(undefined)
@@ -348,6 +330,15 @@ export async function repl(): Promise<void> {
 
   // Start coordinator workers and open a session (one per TUI lifecycle)
   const manager = new CoordinatorManager()
+
+  // Lazy IPC forwarder — populated once TUI socket is ready, null before that.
+  // Events fired before TUI connects (should not happen in practice) are silently dropped.
+  let _tuiIpcSend: ((msg: any) => void) | null = null
+  manager.setIpcCallback((event, payload) => {
+    if (!_tuiIpcSend) return
+    _tuiIpcSend({ type: event, ...(payload as object) })
+  })
+
   await manager.startAll()
   const sessionId = manager.openSession()
   logger.info(`[repl] Session started: ${sessionId}`)
@@ -376,6 +367,9 @@ export async function repl(): Promise<void> {
       showConfigModal: null,
       showInfoModal: null,
     }
+
+    // Wire live IPC events (file_risk_update, conflict_alert, etc.) to TUI socket
+    _tuiIpcSend = (msg: any) => tuiControl.send?.(msg)
 
     // Forward narrative chunks from coordinators to TUI
     manager.setNarrativeCallback((chunk) => {
@@ -459,6 +453,7 @@ export async function repl(): Promise<void> {
       },
 
       onExit() {
+        _tuiIpcSend = null
         // Close session and stop workers
         manager.closeSession()
         manager.stopAll().catch(() => {})

@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
+mod adr;
 mod checkpoint;
 mod conflicts;
+mod diff;
 mod dirty;
 mod filemap;
 mod history;
@@ -12,8 +14,11 @@ mod session;
 mod thought;
 mod workers;
 
+pub use adr::{AdrEntry, AdrState};
 pub use checkpoint::{Checkpoint, CheckpointState};
 pub use conflicts::{AgentConflict, ConflictState};
+pub use diff::DiffState;
+pub use crate::ipc::DiffLine;
 pub use dirty::DirtyFlags;
 pub use filemap::{FileEntry, FileMapState, RiskLevel};
 pub use history::{HistoryEntry, HistoryState, Role};
@@ -34,6 +39,8 @@ pub struct AppState {
     pub filemap: FileMapState,
     pub thought: ThoughtStreamState,
     pub conflicts: ConflictState,
+    pub adrs: AdrState,
+    pub diff: DiffState,
     pub modal: ModalState,
     pub logs: LogState,
     pub dirty: DirtyFlags,
@@ -65,6 +72,8 @@ pub struct AppState {
     pub anim_tick: u8,
     /// Contador lento para el bob de la bee del welcome (avanza cada tick, ciclo 30 = 3.6s).
     pub slow_tick: u16,
+    /// true cuando el usuario navegó manualmente (1-5), inhibe auto-routing hasta AssistantDone.
+    pub tab_locked: bool,
 }
 
 impl AppState {
@@ -76,7 +85,14 @@ impl AppState {
                                project_name, project_path, version,
                                task_count, token_count } => {
                 self.session.session_id = session_id;
-                if let Some(m) = mode        { self.session.mode         = ReplMode::from(m.as_str()); }
+                if let Some(m) = mode {
+                    self.session.mode = ReplMode::from(m.as_str());
+                    // Siempre iniciar en Focus — el modo sólo cambia el tab durante
+                    // una tarea activa (ActivityUpdate/StateUpdate), no al arrancar.
+                    if !self.tab_locked {
+                        self.active_tab = TabId::Focus;
+                    }
+                }
                 if let Some(p) = provider    { self.session.provider     = p; }
                 if let Some(m) = model       { self.session.model        = m; }
                 if let Some(n) = project_name{ self.session.project_name = n; }
@@ -96,6 +112,7 @@ impl AppState {
                 }
                 self.dirty.session = true;
                 self.dirty.workers = true;
+                self.dirty.full = true;
             }
 
             // ── Respuesta del agente ───────────────────────────────────────────
@@ -112,6 +129,9 @@ impl AppState {
             }
             BunMessage::AssistantDone => {
                 self.running = false;
+                self.tab_locked = false;
+                self.active_tab = TabId::Focus;
+                self.dirty.full = true;
                 self.dirty.history = true;
             }
             // Protocolo legado: respuesta completa en un mensaje
@@ -119,17 +139,46 @@ impl AppState {
                 let r = Role::from(role.as_str());
                 self.history.entries.push(HistoryEntry { role: r, content });
                 self.history.selected = Some(self.history.entries.len().saturating_sub(1));
+                if r == Role::Assistant {
+                    // La respuesta llegó → detener live-activity y mostrarla ya.
+                    // No esperar a Status{running:false}; tui-launcher los envía en orden
+                    // pero queremos el cambio de estado en el mismo frame.
+                    self.running = false;
+                    if !self.tab_locked {
+                        self.active_tab = TabId::Focus;
+                    }
+                    self.dirty.full = true;
+                }
                 self.dirty.history = true;
             }
 
             // ── Estado de sesión ───────────────────────────────────────────────
             BunMessage::Status { running, msg } => {
+                let was_running = self.running;
                 self.running = running;
                 self.status_msg = msg;
+                // Cuando la tarea termina (running: true → false) ir a Focus igual que AssistantDone.
+                // Esto maneja el protocolo del tui-launcher que usa Status en vez de AssistantDone.
+                if was_running && !running && !self.tab_locked {
+                    self.active_tab = TabId::Focus;
+                    self.tab_locked = false;
+                    self.dirty.full = true;
+                }
                 self.dirty.session = true;
             }
             BunMessage::StateUpdate { new_mode, new_provider, new_model } => {
-                if let Some(m) = new_mode { self.session.mode = ReplMode::from(m.as_str()); }
+                if let Some(m) = new_mode {
+                    self.session.mode = ReplMode::from(m.as_str());
+                    // Al cambiar de modo, navegar al layout correspondiente
+                    if !self.tab_locked {
+                        self.active_tab = match self.session.mode {
+                            ReplMode::Plan     => TabId::Plan,
+                            ReplMode::Approval => TabId::Review,
+                            ReplMode::Auto     => TabId::Focus,
+                        };
+                    }
+                    self.dirty.full = true;
+                }
                 if let Some(p) = new_provider { self.session.provider = p; }
                 if let Some(m) = new_model { self.session.model = m; }
                 self.dirty.session = true;
@@ -153,6 +202,15 @@ impl AppState {
             }
             // Legado: activity_update → actualiza coordinator activo
             BunMessage::ActivityUpdate { coordinator, phase, status } => {
+                // Auto-routing basado en modo, no en nombre del coordinador
+                if !self.tab_locked && status == "running" {
+                    self.active_tab = match self.session.mode {
+                        ReplMode::Plan     => TabId::Plan,
+                        ReplMode::Approval => TabId::Review,
+                        ReplMode::Auto     => TabId::Code,
+                    };
+                    self.dirty.full = true;
+                }
                 self.workers.active_coordinator = coordinator;
                 self.workers.active_phase = phase;
                 self.workers.activity_status = status;
@@ -215,7 +273,16 @@ impl AppState {
                     }
                 }).collect();
                 let values: Vec<String> = modal_fields.iter()
-                    .map(|f| f.default_value.clone().unwrap_or_default())
+                    .map(|f| {
+                        if let Some(v) = &f.default_value {
+                            v.clone()
+                        } else if f.kind == ModalFieldKind::Select {
+                            // Select sin default → primera opción disponible
+                            f.options.as_ref().and_then(|o| o.first()).cloned().unwrap_or_default()
+                        } else {
+                            String::new()
+                        }
+                    })
                     .collect();
                 let n = modal_fields.len();
                 self.modal = ModalState::Config(ConfigModalState {
@@ -235,12 +302,21 @@ impl AppState {
                 self.dirty.modal = true;
             }
 
+            // ── Logs ───────────────────────────────────────────────────────────
+            BunMessage::LogEntry { timestamp, level, source, message } => {
+                self.logs.entries.push(LogEntry { timestamp, level, source, message });
+                if self.logs.entries.len() > self.logs.capacity {
+                    self.logs.entries.remove(0);
+                }
+                self.dirty.logs = true;
+            }
+
             // ── Alertas ────────────────────────────────────────────────────────
-            BunMessage::ConflictAlert { worker_a, worker_b, file } => {
+            BunMessage::ConflictAlert { agent, file, reason, severity } => {
                 self.conflicts.entries.push(AgentConflict {
-                    agent: format!("{worker_a}↔{worker_b}"),
+                    agent,
                     path: file,
-                    reason: "file collision".to_string(),
+                    reason: format!("[{severity}] {reason}"),
                 });
                 self.dirty.conflicts = true;
             }
@@ -256,6 +332,87 @@ impl AppState {
                 }
                 self.dirty.logs = true;
             }
+
+            // ── Rollback completado ────────────────────────────────────────────
+            BunMessage::CheckpointRollback { checkpoint_id, files_restored } => {
+                self.logs.entries.push(LogEntry {
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    level: "info".to_string(),
+                    source: "rollback".to_string(),
+                    message: format!("↩ {checkpoint_id} — {files_restored} archivo(s) restaurado(s)"),
+                });
+                if self.logs.entries.len() > self.logs.capacity {
+                    self.logs.entries.remove(0);
+                }
+                self.dirty.logs = true;
+                self.dirty.checkpoints = true;
+            }
+
+            // ── ADRs ───────────────────────────────────────────────────────────
+            BunMessage::AdrUpdate { path, title, content, status } => {
+                if let Some(e) = self.adrs.entries.iter_mut().find(|e| e.path == path) {
+                    e.title = title; e.content = content; e.status = status;
+                } else {
+                    self.adrs.entries.push(AdrEntry { path, title, content, status });
+                }
+                self.dirty.adrs = true;
+                self.dirty.full = true;
+            }
+
+            // ── Diff activo ─────────────────────────────────────────────────────
+            BunMessage::FileDiff { path, chunks } => {
+                self.diff.path = path;
+                self.diff.lines = chunks;
+                self.diff.scroll = 0;
+                if !self.tab_locked {
+                    self.active_tab = TabId::Code;
+                }
+                self.dirty.diff = true;
+                self.dirty.full = true;
+            }
+
+            // ── Snapshots de inicio (SQLite → IPC) ─────────────────────────────
+            BunMessage::WorkersSnapshot { workers } => {
+                for w in workers {
+                    let status = match w.status.as_str() {
+                        "running" => WorkerStatus::Running,
+                        "done"    => WorkerStatus::Done,
+                        "failed"  => WorkerStatus::Failed,
+                        _         => WorkerStatus::Waiting,
+                    };
+                    if let Some(existing) = self.workers.workers.iter_mut().find(|x| x.name == w.name) {
+                        existing.status = status;
+                        existing.detail = w.detail;
+                    } else {
+                        self.workers.workers.push(Worker { name: w.name, status, detail: w.detail });
+                    }
+                }
+                self.dirty.workers = true;
+            }
+            BunMessage::FilesSnapshot { files } => {
+                for f in files {
+                    let risk = match f.risk.as_str() {
+                        "medium"   => RiskLevel::Medium,
+                        "high"     => RiskLevel::High,
+                        "critical" => RiskLevel::Critical,
+                        _          => RiskLevel::Low,
+                    };
+                    if let Some(e) = self.filemap.entries.iter_mut().find(|e| e.path == f.path) {
+                        e.risk = risk; e.operation = f.operation; e.agent = f.agent;
+                    } else {
+                        self.filemap.entries.push(FileEntry { path: f.path, risk, operation: f.operation, agent: f.agent });
+                    }
+                }
+                self.dirty.filemap = true;
+            }
+
+            // ── No-ops ─────────────────────────────────────────────────────────
+            BunMessage::Suggestions { .. }
+            | BunMessage::QuickMenu { .. }
+            | BunMessage::ShellOutput { .. }
+            | BunMessage::Suspend
+            | BunMessage::Resume
+            | BunMessage::ContextUpdate { .. } => {}
         }
     }
 }

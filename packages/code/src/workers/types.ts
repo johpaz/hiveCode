@@ -6,6 +6,11 @@ export type PhaseName =
   | "security"
   | "test"
   | "devops"
+  | "dba"
+  | "integration"
+  | "reviewer"
+  | "librarian"
+  | "forensic"
 
 export type CoordinatorStatus =
   | "idle"
@@ -76,6 +81,8 @@ export interface CoordinatorResult {
   durationMs: number
   tokensIn?: number
   tokensOut?: number
+  /** True when the worker exhausted its MAX_ITERATIONS without completing the task */
+  iterationLimitReached?: boolean
 }
 
 /** Messages sent FROM workers TO the manager */

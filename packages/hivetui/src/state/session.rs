@@ -52,9 +52,9 @@ impl TabId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReplMode {
-    #[default]
     Plan,
     Approval,
+    #[default]
     Auto,
 }
 
@@ -111,7 +111,7 @@ pub struct SessionState {
 impl Default for SessionState {
     fn default() -> Self {
         Self {
-            mode: ReplMode::Plan,
+            mode: ReplMode::Auto,
             provider: String::new(),
             model: String::new(),
             project_name: "hivetui".to_string(),

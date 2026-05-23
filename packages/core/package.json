@@ -59,6 +59,8 @@
     "./storage/crypto": "./src/storage/crypto.ts",
     "./storage/schema": "./src/storage/schema.ts",
     "./storage/seed": "./src/storage/seed.ts",
+    "./storage/memory-db": "./src/storage/memory-db.ts",
+    "./storage/memory-repo": "./src/storage/memory-repo.ts",
     "./tools": "./src/tools/index.ts",
     "./tools/agents": "./src/tools/agents/index.ts",
     "./tools/canvas": "./src/tools/canvas/index.ts",

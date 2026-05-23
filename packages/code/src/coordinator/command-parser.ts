@@ -458,9 +458,11 @@ async function handleProviderCommand(
     }
     case "set": {
       if (ui?.showConfigModal) {
-        const providers = db.query("SELECT id, name FROM providers WHERE enabled = 1 ORDER BY name").all() as { id: string; name: string }[]
+        const providers = db.query(
+          "SELECT id, name FROM providers WHERE enabled = 1 AND api_key_encrypted IS NOT NULL AND api_key_encrypted != '' ORDER BY name"
+        ).all() as { id: string; name: string }[]
         if (providers.length === 0) {
-          return { handled: true, output: "  No hay providers configurados.\n  Agrega uno con: /provider add" }
+          return { handled: true, output: "  No hay providers con API key configurada.\n  Agrega uno con: /provider add" }
         }
         const options = providers.map(p => p.id)
         const current = options.includes(ctx.activeProvider) ? ctx.activeProvider : options[0]
@@ -603,14 +605,23 @@ async function handleModelCommand(
 
     case "set": {
       if (ui?.showConfigModal) {
-        const providers = db.query("SELECT id FROM providers WHERE enabled = 1 ORDER BY id").all() as { id: string }[]
+        const providers = db.query(
+          "SELECT id FROM providers WHERE enabled = 1 AND api_key_encrypted IS NOT NULL AND api_key_encrypted != '' ORDER BY id"
+        ).all() as { id: string }[]
         if (providers.length === 0) {
-          return { handled: true, output: "  No hay providers configurados. Agrega uno con: /provider add" }
+          return { handled: true, output: "  No hay providers con API key configurada. Agrega uno con: /provider add" }
         }
-        // Build combined options: "provider :: modelId" from models table
-        const dbModels = db.query(
-          "SELECT m.id, m.provider_id FROM models m WHERE m.enabled = 1 ORDER BY m.provider_id, m.id"
-        ).all() as { id: string; provider_id: string }[]
+        // Build combined options: "provider :: modelId" — solo providers con API key
+        const dbModels = db.query(`
+          SELECT m.id, m.provider_id
+          FROM models m
+          JOIN providers p ON m.provider_id = p.id
+          WHERE m.enabled = 1
+            AND p.enabled = 1
+            AND p.api_key_encrypted IS NOT NULL
+            AND p.api_key_encrypted != ''
+          ORDER BY m.provider_id, m.id
+        `).all() as { id: string; provider_id: string }[]
 
         const combinedOptions = dbModels.map(m => `${m.provider_id} :: ${m.id}`)
 

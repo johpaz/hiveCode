@@ -148,15 +148,80 @@ pub enum BunMessage {
         content: String,
     },
 
+    // ── Logs (low priority, forwarded by tui-launcher) ────────────────────────
+    LogEntry {
+        timestamp: String,
+        level: String,
+        source: String,
+        message: String,
+    },
+
     // ── Alertas ────────────────────────────────────────────────────────────────
+    /// Wire: { agent, file, reason, severity } — matches protocol.ts
     ConflictAlert {
-        worker_a: String,
-        worker_b: String,
+        agent: String,
         file: String,
+        reason: String,
+        severity: String,
     },
     Error {
         message: String,
     },
+
+    // ── Rollback completado ────────────────────────────────────────────────────
+    CheckpointRollback {
+        checkpoint_id: String,
+        files_restored: u32,
+    },
+
+    // ── ADRs (SQLite → Bun → TUI) ─────────────────────────────────────────────
+    AdrUpdate {
+        path:    String,
+        title:   String,
+        content: String,
+        status:  String,
+    },
+
+    // ── Diff activo (git diff → Bun → TUI) ────────────────────────────────────
+    FileDiff {
+        path:   String,
+        chunks: Vec<DiffLine>,
+    },
+
+    // ── Snapshots de inicio (dump de SQLite al conectar) ───────────────────────
+    WorkersSnapshot { workers: Vec<WorkerSnapshotEntry> },
+    FilesSnapshot   { files:   Vec<FileSnapshotEntry>   },
+
+    // ── No-ops: Bun puede enviar estos; los ignoramos sin romper el parser ─────
+    Suggestions { items: Vec<String> },
+    QuickMenu { items: Vec<sonic_rs::Value> },
+    ShellOutput { stdout: String, stderr: String, exit_code: i32 },
+    Suspend,
+    Resume,
+    ContextUpdate { agent: String, key: String, scope: String },
+}
+
+// ── Tipos de datos para nuevos mensajes ───────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiffLine {
+    pub kind: String,
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkerSnapshotEntry {
+    pub name:   String,
+    pub status: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FileSnapshotEntry {
+    pub path:      String,
+    pub risk:      String,
+    pub operation: String,
+    pub agent:     String,
 }
 
 /// Definición de campo de modal que llega del servidor Bun.
@@ -185,6 +250,7 @@ pub enum TuiMessage {
     ModeChange { mode: String },
     ModalSubmit { command: String, values: std::collections::HashMap<String, String> },
     ModalCancel { command: String },
+    InfoModalClose,
     Exit,
 }
 

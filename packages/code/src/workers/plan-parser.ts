@@ -30,7 +30,7 @@ export interface ParsedPlan {
   interfaces?: string
 }
 
-const VALID_PHASES: PhaseName[] = ["backend", "frontend", "security", "test", "devops"]
+const VALID_PHASES: PhaseName[] = ["backend", "frontend", "security", "test", "devops", "dba", "integration", "reviewer"]
 
 /** Extract JSON from text (handles markdown code blocks) */
 function extractJson(text: string): string | null {

@@ -132,30 +132,53 @@ fn draw_right_base(canvas: &mut Canvas, x: u16, y: u16, _w: u16, version: &str) 
     row
 }
 
-/// Boot lines con las tags y textos exactos del diseño JSX
-fn draw_boot_lines(canvas: &mut Canvas, x: u16, y: u16, w: u16) -> u16 {
+/// Boot lines dinámicas — reflejan el estado real recibido vía IPC (que a su vez viene de SQLite).
+fn draw_boot_lines(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &AppState) -> u16 {
     let mut row = y;
 
-    // Exactamente los 4 lines del JSX
-    // tag = l.k.padEnd(5) → entre corchetes
-    let lines: &[(&str, &str, bool)] = &[
-        ("load ", "cargando workers · bee · architecture · backend · frontend · security · test · devops", false),
-        ("sqlite", "sqlite + FTS5 · .hivecode/state.db · WAL mode (~0.6ms)", false),
-        ("adr  ", "cargando 14 ADRs · ADR-003 activo", false),
-        ("ready", "listo · ⬡ press [enter] to enter", true),
+    let worker_count = state.workers.workers.len();
+    let has_session  = !state.session.session_id.is_empty();
+    let adr_count    = state.adrs.entries.len();
+    let provider     = &state.session.provider;
+
+    // Cada línea: (tag_pad, texto, es_last, ok_si_true)
+    let load_txt = if worker_count > 0 {
+        format!("{worker_count} workers · bee · arch · back · front · sec · test · devops")
+    } else {
+        "iniciando workers...".to_string()
+    };
+    let sqlite_txt = if has_session {
+        format!("sqlite WAL · sesión {}", &state.session.session_id.get(..8).unwrap_or("?"))
+    } else {
+        "sqlite + FTS5 · WAL mode".to_string()
+    };
+    let adr_txt = if adr_count > 0 {
+        format!("{adr_count} ADR(s) cargados")
+    } else {
+        "sin ADRs — cargando...".to_string()
+    };
+    let ready_txt = format!("listo · provider: {provider} · ⬡ escribe tu tarea");
+
+    let lines: &[(&str, String, bool, bool)] = &[
+        ("load ", load_txt,    false, worker_count > 0),
+        ("db   ", sqlite_txt,  false, has_session),
+        ("adr  ", adr_txt,     false, adr_count > 0),
+        ("ready", ready_txt,   true,  true),
     ];
 
-    for (tag, text, is_last) in lines {
+    for (tag, text, is_last, ok) in lines {
         let bracket_tag = format!("[{tag}]");
-        canvas.print(x, row, &bracket_tag, Style::new().fg(AMBER));
+        let tag_style = if *ok { Style::new().fg(AMBER) } else { Style::new().fg(DIM) };
+        canvas.print(x, row, &bracket_tag, tag_style);
         let tag_w = bracket_tag.chars().count() as u16;
         let msg_x = x + tag_w + 1;
         let max_msg = w.saturating_sub(tag_w + 1 + 4) as usize;
         let shown: String = text.chars().take(max_msg).collect();
-        canvas.print(msg_x, row, &shown, Style::new().fg(SECONDARY));
+        let msg_style = if *ok { Style::new().fg(SECONDARY) } else { Style::new().fg(DIM) };
+        canvas.print(msg_x, row, &shown, msg_style);
         if *is_last {
             canvas.print(msg_x + shown.chars().count() as u16 + 1, row, "▌", Style::new().fg(AMBER_BRIGHT));
-        } else {
+        } else if *ok {
             let ok_x = (x + w).saturating_sub(3);
             canvas.print(ok_x, row, "OK", Style::new().fg(GREEN).bold());
         }
@@ -189,7 +212,7 @@ fn draw_hints(canvas: &mut Canvas, x: u16, y: u16, w: u16) -> u16 {
 
 fn draw_right_with_provider(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &AppState) -> u16 {
     let row = draw_right_base(canvas, x, y, w, &state.session.version);
-    let row = draw_boot_lines(canvas, x, row, w);
+    let row = draw_boot_lines(canvas, x, row, w, state);
     draw_hints(canvas, x, row, w)
 }
 

@@ -5,7 +5,7 @@ export type ReplMode = "plan" | "approval" | "auto"
 export function loadInitialState() {
   const db = getDb()
   const m = (db.query("SELECT value FROM code_config WHERE key = 'default_mode'").get() as any)?.value
-  const mode: ReplMode = m === "auto" ? "auto" : m === "approval" ? "approval" : "plan"
+  const mode: ReplMode = m === "plan" ? "plan" : m === "approval" ? "approval" : "auto"
   const provider = (db.query("SELECT value FROM code_config WHERE key = 'default_provider'").get() as any)?.value ?? ""
   const model = provider
     ? (db.query("SELECT value FROM code_config WHERE key = ?").get(`provider_model_${provider}`) as any)?.value ?? ""

@@ -11,4 +11,7 @@ pub struct DirtyFlags {
     pub modal: bool,
     pub logs: bool,
     pub mascot: bool,
+    pub adrs: bool,
+    pub diff: bool,
+    pub full: bool,
 }

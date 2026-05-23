@@ -165,6 +165,7 @@ export const SESSION_SCHEMA: string[] = [
     session_id    TEXT    NOT NULL REFERENCES sessions(id),
     worker        TEXT    NOT NULL,
     phase         TEXT    NOT NULL,
+    level         INTEGER NOT NULL DEFAULT 0,
     status        TEXT    NOT NULL,
     current_action TEXT,
     input_tokens  INTEGER DEFAULT 0,

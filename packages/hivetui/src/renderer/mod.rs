@@ -14,12 +14,10 @@ pub fn render(canvas: &mut Canvas, state: &AppState) -> (u16, u16) {
 
     let input_area = render_main(canvas, area, state);
 
-    // Welcome fullscreen overlay — cubre header, tabbar y contenido
-    // El input se redibuja encima para que el usuario pueda escribir
+    // Welcome fullscreen overlay — cubre todo (header, tabbar, contenido, input)
     if state.show_welcome && state.history.entries.is_empty() {
         welcome::render(canvas, area, state);
-        input::render(canvas, input_area, state);
-        return cursor_position(state, input_area);
+        return (0, 0);
     }
 
     // Popup de comandos: flota justo encima del input
@@ -39,8 +37,8 @@ pub fn render(canvas: &mut Canvas, state: &AppState) -> (u16, u16) {
 }
 
 fn render_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {
-    // Layout: [header 1] + [tabbar 1] + [content fill] + [checkpoint 1] + [conflict 1] + [input 4] + [statusbar 1]
-    let rows = area.vsplit(&[1, 1, 0, 1, 1, 4, 1]);
+    // Layout: [header 2] + [tabbar 1] + [content fill] + [checkpoint 1] + [conflict 1] + [input 4] + [statusbar 1]
+    let rows = area.vsplit(&[2, 1, 0, 1, 1, 4, 1]);
     let header_area     = rows[0];
     let tabbar_area     = rows[1];
     let content_area    = rows[2];
@@ -74,7 +72,7 @@ fn render_focus(canvas: &mut Canvas, area: Rect, state: &AppState) {
 }
 
 fn content_area_for_popup(area: Rect, _state: &AppState) -> Rect {
-    let rows = area.vsplit(&[1, 1, 0, 1, 1, 4, 1]);
+    let rows = area.vsplit(&[2, 1, 0, 1, 1, 4, 1]);
     rows[2]
 }
 

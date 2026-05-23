@@ -21,6 +21,7 @@ export type BunMessage =
   | { type: "init";            mode: string; provider: string; model: string; project_name: string; project_path: string; session_id: string; version: string; task_count: number; token_count: number; workers: string[] }
   | { type: "conflict_alert";  agent: string; file: string; reason: string; severity: string }
   | { type: "file_risk_update"; path: string; risk: string; operation: string; adr_ref: string | null; reason: string; agent: string }
+  | { type: "forensic_alert";  worker: string; analysis: string; recommendation: string }
   // normal priority — live streaming output
   | { type: "history_append";  role: string; content: string; content_type?: string }
   | { type: "status";          running: boolean; msg: string }
@@ -39,6 +40,12 @@ export type BunMessage =
   | { type: "checkpoint_created"; checkpoint_id: string; description: string; file_count: number; agent: string }
   | { type: "checkpoint_rollback"; checkpoint_id: string; files_restored: number }
   | { type: "context_update";     agent: string; key: string; scope: string }
+  | { type: "adr_update";         path: string; title: string; content: string; status: string }
+  | { type: "file_diff";          path: string; chunks: { kind: string; text: string }[] }
+  | { type: "workers_snapshot";   workers: { name: string; status: string; detail?: string }[] }
+  | { type: "files_snapshot";     files: { path: string; risk: string; operation: string; agent: string }[] }
+  | { type: "memory_update";      records_added: number; records_updated: number; records_deprecated: number }
+  | { type: "librarian_progress"; status: "running" | "done"; records_written: number }
 
 // ── TUI → Bun ────────────────────────────────────────────────────────────────
 
@@ -59,10 +66,12 @@ export type TuiMessage =
 // ── Priority helpers ──────────────────────────────────────────────────────────
 
 const CRITICAL_TYPES = new Set<BunMessage["type"]>([
-  "init", "conflict_alert", "file_risk_update",
+  "init", "conflict_alert", "file_risk_update", "forensic_alert",
 ])
 const LOW_TYPES = new Set<BunMessage["type"]>([
   "log_entry", "checkpoint_created", "checkpoint_rollback", "context_update",
+  "adr_update", "file_diff", "workers_snapshot", "files_snapshot",
+  "memory_update", "librarian_progress",
 ])
 
 export function messagePriority(msg: BunMessage): IpcPriority {

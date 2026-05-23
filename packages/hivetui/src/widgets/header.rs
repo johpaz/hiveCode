@@ -3,6 +3,8 @@ use crate::{
     term::{Canvas, Color, Rect, Style, AMBER_BRIGHT, AMBER_DIM, BG_PANEL, DIM, GREEN, SECONDARY, WHITE},
 };
 
+const BORDER_SUBTLE: Color = Color::Rgb { r: 35, g: 30, b: 20 };
+
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     // fondo de la línea de header
     canvas.fill_rect(area, ' ', Style::new().bg(BG_PANEL));
@@ -79,6 +81,12 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     };
     let live_x = area.right().saturating_sub(live_label.chars().count() as u16 + 1);
     canvas.print(live_x, y, &live_label, Style::new().fg(GREEN).bold());
+
+    // Separador sutil bajo el header (fila 2 del área de 2 filas)
+    if area.h >= 2 {
+        let sep: String = std::iter::repeat('─').take(area.w as usize).collect();
+        canvas.print(area.x, area.y + 1, &sep, Style::new().fg(BORDER_SUBTLE).bg(BG_PANEL));
+    }
 }
 
 fn mode_badge(mode: &ReplMode) -> (&'static str, Color, Color) {

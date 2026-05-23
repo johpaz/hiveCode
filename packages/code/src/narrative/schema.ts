@@ -232,6 +232,7 @@ CREATE TABLE IF NOT EXISTS code_recovery_points (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id           TEXT NOT NULL REFERENCES code_tasks(id),
   phase_id          INTEGER REFERENCES code_task_phases(id),
+  level             INTEGER DEFAULT 0, -- execution level this checkpoint covers
   git_ref           TEXT,              -- commit hash at checkpoint time
   completed_phases  TEXT DEFAULT '[]', -- JSON array of completed phase IDs
   pending_phases    TEXT DEFAULT '[]', -- JSON array of remaining phase IDs

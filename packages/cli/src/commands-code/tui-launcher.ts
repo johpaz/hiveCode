@@ -11,6 +11,10 @@ import * as fs from "node:fs"
 import { logger, onLogEntry, removeLogListener, type LogEntry } from "@johpaz/hivecode-core/utils/logger"
 import { createIpcServer } from "@johpaz/hivecode-core/ipc/server"
 import type { BunMessage as CoreBunMessage, TuiMessage as CoreTuiMessage } from "@johpaz/hivecode-core/ipc/protocol"
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { MessagesRepo } from "@johpaz/hivecode-core/db/repos/messages"
+import { CheckpointsRepo } from "@johpaz/hivecode-core/db/repos/checkpoints"
+import { FileRisksRepo } from "@johpaz/hivecode-core/db/repos/file-risks"
 
 function isLikelyMarkdown(content: string): boolean {
   if (content.includes("```")) return true
@@ -259,6 +263,48 @@ async function handleTuiMessage(
         token_count:   callbacks.tokenCount,
         workers:       callbacks.workers,
       })
+      // Dump SQLite state so TUI can rebuild session on startup
+      try {
+        const db = getDb()
+        const msgsRepo  = new MessagesRepo(db)
+        const cpsRepo   = new CheckpointsRepo(db)
+        const risksRepo = new FileRisksRepo(db)
+
+        // Recent conversation history (last 50, sent oldest-first)
+        const msgs = msgsRepo.list(callbacks.sessionId, 50)
+        for (const m of msgs.reverse()) {
+          send({ type: "history_append", role: m.role, content: m.content,
+                 content_type: m.content_type === "diff" ? "plain" : m.content_type })
+        }
+
+        // Checkpoint timeline (last 20, sent oldest-first)
+        const cps = cpsRepo.list(callbacks.sessionId, 20)
+        for (const cp of cps.reverse()) {
+          send({ type: "checkpoint_created", checkpoint_id: cp.id,
+                 description: cp.description, file_count: cp.file_count,
+                 agent: cp.created_by ?? "system" })
+        }
+
+        // Active file risks for this session
+        const risks = risksRepo.listBySession(callbacks.sessionId)
+        for (const r of risks) {
+          send({ type: "file_risk_update", path: r.file_path, risk: r.risk_level,
+                 operation: r.operation ?? "modified", adr_ref: r.adr_ref,
+                 reason: r.reason ?? "", agent: r.agent ?? "system" })
+        }
+
+        // ADRs for this project
+        const adrs = db.query(
+          "SELECT file_path, title, content, status FROM adrs ORDER BY updated_at DESC LIMIT 10"
+        ).all() as { file_path: string; title: string; content: string; status: string }[]
+        for (const adr of adrs) {
+          send({ type: "adr_update", path: adr.file_path, title: adr.title,
+                 content: adr.content, status: adr.status ?? "accepted" })
+        }
+      } catch (e) {
+        logger.warn("[tui-ipc] init snapshot failed:", (e as Error).message)
+      }
+      send({ type: "status", running: false, msg: "Listo · escribe tu tarea" })
       break
 
     case "suggestions_request": {

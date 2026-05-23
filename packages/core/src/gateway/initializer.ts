@@ -1,6 +1,7 @@
 import type { Config } from "../config/loader";
 import { logger } from "../utils/logger";
 import { getDb, initializeDatabase, getDbPathLazy } from "../storage/sqlite";
+import { initializeMemoryDb } from "../storage/memory-db";
 import { buildAgentLoop } from "../agent/agent-loop";
 import { AgentRunner } from "../agent/providers/index";
 import { ChannelManager } from "../channels/manager";
@@ -242,6 +243,14 @@ export async function initializeGateway(
 
     // 2. Escribir archivo PID (no crítico)
     await writePidFile(pidFile);
+
+    // 2a. Initialize global memory DB (agent_memory between sessions)
+    try {
+      initializeMemoryDb();
+      log.info("[initialize] Memory DB initialized (agent_memory)");
+    } catch (err) {
+      log.warn(`[initialize] Memory DB initialization failed: ${(err as Error).message}`);
+    }
 
     // 3a. Startup migrations (idempotent, version-keyed)
     runStartupMigrations();

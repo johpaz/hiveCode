@@ -2,9 +2,10 @@ use std::io::{stdin, stdout, IsTerminal, Stdout, Write};
 use chrono::Local;
 use color_eyre::eyre::{bail, Result};
 use crossterm::{
+    cursor::Hide,
     cursor::MoveTo,
     cursor::Show,
-    event::{Event, EventStream},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream},
     execute,
     terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -18,6 +19,77 @@ use crate::{
     state::{AppState, Role},
     term::Canvas,
 };
+
+/// Headless runner: no TTY required.
+/// Connects to IPC, processes messages, emits canvas snapshots as NDJSON to stdout.
+/// Activated by env var HIVETUI_HEADLESS=1.
+pub async fn run_headless() -> Result<()> {
+    use std::env;
+
+    let w: u16 = env::var("HIVETUI_COLS").ok().and_then(|v| v.parse().ok()).unwrap_or(120);
+    let h: u16 = env::var("HIVETUI_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+
+    let mut ipc_ch = ipc::connect().await.map_err(|e| {
+        color_eyre::eyre::eyre!("headless: IPC connect failed: {e}")
+    })?;
+
+    let _ = ipc_ch.tx.try_send(TuiMessage::Ready);
+
+    let mut state = AppState::default();
+    state.show_welcome = false;
+    state.cursor_visible = true;
+    state.show_workers = true;
+
+    let mut canvas = Canvas::new(w, h);
+    let mut frame: u64 = 0;
+    let mut stdout = stdout();
+
+    let emit = |canvas: &mut Canvas, state: &AppState, frame: u64, out: &mut dyn Write| {
+        renderer::render(canvas, state);
+        let rows = canvas.to_text_rows();
+        let tab = format!("{:?}", state.active_tab).to_lowercase();
+        let mode = format!("{:?}", state.session.mode).to_lowercase();
+        let running = state.running;
+        let row_json: Vec<String> = rows.iter().map(|r| {
+            // JSON-encode each row string manually (escape backslash and double-quote)
+            let escaped = r.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{escaped}\"")
+        }).collect();
+        let _ = writeln!(
+            out,
+            r#"{{"frame":{frame},"tab":"{tab}","mode":"{mode}","running":{running},"rows":[{}]}}"#,
+            row_json.join(",")
+        );
+        let _ = out.flush();
+    };
+
+    // Initial frame (empty state)
+    emit(&mut canvas, &state, frame, &mut stdout);
+
+    loop {
+        tokio::select! {
+            biased;
+            Some(msg) = ipc_ch.critical.recv() => {
+                state.apply_message(msg);
+                frame += 1;
+                emit(&mut canvas, &state, frame, &mut stdout);
+            }
+            Some(msg) = ipc_ch.normal.recv() => {
+                state.apply_message(msg);
+                frame += 1;
+                emit(&mut canvas, &state, frame, &mut stdout);
+            }
+            Some(msg) = ipc_ch.low.recv() => {
+                state.apply_message(msg);
+                frame += 1;
+                emit(&mut canvas, &state, frame, &mut stdout);
+            }
+            else => break,
+        }
+    }
+
+    Ok(())
+}
 
 pub async fn run() -> Result<()> {
     ensure_tty()?;
@@ -92,6 +164,10 @@ pub async fn run() -> Result<()> {
                                     let _ = ipc_ch.tx.try_send(TuiMessage::Submit {
                                         input: last.content.clone(),
                                     });
+                                    // tui-launcher nunca envía status{running:true} antes del
+                                    // resultado, así que lo marcamos aquí para activar la
+                                    // live-activity de Focus y el routing post-tarea.
+                                    state.running = true;
                                 }
                             }
                         }
@@ -138,7 +214,7 @@ fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
         let mut stdout = stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen, Show);
+        let _ = execute!(stdout, LeaveAlternateScreen, Show, DisableMouseCapture);
         previous(panic_info);
     }));
 }
@@ -153,7 +229,7 @@ impl TerminalSession {
         enable_raw_mode()?;
 
         let mut stdout = stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide)?;
         let (w, h) = terminal::size()?;
 
         Ok(Self {
@@ -178,6 +254,6 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.stdout, LeaveAlternateScreen, Show);
+        let _ = execute!(self.stdout, LeaveAlternateScreen, Show, DisableMouseCapture);
     }
 }
