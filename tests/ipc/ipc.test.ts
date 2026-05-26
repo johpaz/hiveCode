@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test"
 import { messagePriority } from "@johpaz/hivecode-core/ipc/protocol"
 import { wrap, serialize, unwrap } from "@johpaz/hivecode-core/ipc/envelope"
+import { createIpcServer } from "@johpaz/hivecode-core/ipc/server"
 import type { BunMessage } from "@johpaz/hivecode-core/ipc/protocol"
 
 // ─── messagePriority ─────────────────────────────────────────────────────────
@@ -111,5 +112,36 @@ describe("envelope wrap/serialize/unwrap", () => {
     const flat = unwrap(env)
     expect(flat.type).toBe("activity_update")
     expect((flat as any).coordinator).toBe("bee")
+  })
+})
+
+describe("TCP IPC transport", () => {
+  it("accepts messages on the Windows-compatible loopback endpoint", async () => {
+    let resolveMessage!: (value: string) => void
+    const received = new Promise<string>((resolve) => { resolveMessage = resolve })
+    const server = createIpcServer({
+      tcp: { hostname: "127.0.0.1" },
+      onMessage: (msg) => resolveMessage(msg.type),
+    })
+    const endpoint = new URL(server.endpoint)
+
+    const client = await Bun.connect({
+      hostname: endpoint.hostname,
+      port: Number(endpoint.port),
+      socket: {
+        open(socket) {
+          socket.write('{"type":"ready"}\n')
+        },
+        data() {},
+      },
+    })
+
+    try {
+      expect(server.endpoint.startsWith("tcp://127.0.0.1:")).toBe(true)
+      expect(await received).toBe("ready")
+    } finally {
+      client.end()
+      server.stop()
+    }
   })
 })

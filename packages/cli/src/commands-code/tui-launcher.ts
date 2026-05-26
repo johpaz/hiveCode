@@ -2,7 +2,7 @@
  * Launch the Ratatui TUI binary and handle IPC with the Bun process.
  *
  * Architecture:
- *   Bun (this file) ←→ Unix socket (JSON-ND) ←→ hivecode-tui (Rust)
+ *   Bun (this file) ←→ local IPC (Unix socket or Windows loopback TCP) ←→ hivecode-tui (Rust)
  *   Rust owns stdin/stdout (TTY), Bun owns business logic.
  */
 
@@ -40,16 +40,17 @@ function isLikelyMarkdown(content: string): boolean {
 // ── Locate the binary ─────────────────────────────────────────────────────────
 
 function tuiBinPath(): string {
+  const executableSuffix = process.platform === "win32" ? ".exe" : ""
   const candidates = [
     // Running from dist/ bundle — binary sits next to hivecode.js
-    path.join(path.dirname(process.argv[1] || ""), "hivetui"),
-    path.join(path.dirname(process.argv[1] || ""), "hivecode-tui"),
+    path.join(path.dirname(process.argv[1] || ""), `hivetui${executableSuffix}`),
+    path.join(path.dirname(process.argv[1] || ""), `hivecode-tui${executableSuffix}`),
     // Dev mode: hivetui (ratatui-free, preferred)
-    path.join(import.meta.dir, "../../../hivetui/target/release/hivetui"),
-    path.join(import.meta.dir, "../../../hivetui/target/debug/hivetui"),
+    path.join(import.meta.dir, `../../../hivetui/target/release/hivetui${executableSuffix}`),
+    path.join(import.meta.dir, `../../../hivetui/target/debug/hivetui${executableSuffix}`),
     // Dev mode: legacy packages/tui
-    path.join(import.meta.dir, "../../../tui/target/release/hivecode-tui"),
-    path.join(import.meta.dir, "../../../tui/target/debug/hivecode-tui"),
+    path.join(import.meta.dir, `../../../tui/target/release/hivecode-tui${executableSuffix}`),
+    path.join(import.meta.dir, `../../../tui/target/debug/hivecode-tui${executableSuffix}`),
   ]
 
   const existing = candidates.filter(p => fs.existsSync(p))
@@ -119,10 +120,12 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
     )
   }
 
-  const socketPath = `/tmp/hivecode-${process.pid}.sock`
+  const socketPath = process.platform === "win32" ? undefined : `/tmp/hivecode-${process.pid}.sock`
 
   // Clean up any leftover socket
-  try { fs.unlinkSync(socketPath) } catch { /* ignore */ }
+  if (socketPath) {
+    try { fs.unlinkSync(socketPath) } catch { /* ignore */ }
+  }
 
   return new Promise((resolve, reject) => {
     // Resolves when Rust confirms it has released the TTY
@@ -184,10 +187,11 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
       })
     })
 
-    // ── IPC server (priority-envelope Unix socket) ─────────────────────────
+    // ── IPC server (Unix socket on Unix, loopback TCP on Windows) ───────────
     try {
       ipcServer = createIpcServer({
         socketPath,
+        tcp: process.platform === "win32" ? { hostname: "127.0.0.1" } : undefined,
         onMessage(msg) {
           if (msg.type === "suspended") {
             suspendedResolve?.()
@@ -229,7 +233,7 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
       stdin:  "inherit",
       stdout: "inherit",
       stderr: "pipe",
-      env:    { ...process.env, HIVECODE_IPC: socketPath },
+      env:    { ...process.env, HIVECODE_IPC: ipcServer.endpoint },
     })
 
     if (proc.stderr) {
@@ -246,7 +250,9 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
       callbacks.onExit?.()
       ipcServer?.stop()
       ipcServer = null
-      try { fs.unlinkSync(socketPath) } catch { /* ignore */ }
+      if (socketPath) {
+        try { fs.unlinkSync(socketPath) } catch { /* ignore */ }
+      }
       resolve()
     }).catch(reject)
   })

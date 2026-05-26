@@ -3,10 +3,13 @@ use std::env;
 use color_eyre::eyre::Result;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixStream,
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    net::TcpStream,
     sync::mpsc,
 };
+
+#[cfg(unix)]
+use tokio::net::UnixStream;
 
 // ── Wire format ───────────────────────────────────────────────────────────────
 
@@ -333,20 +336,46 @@ impl IpcChannels {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-/// Conecta al Unix socket de `HIVECODE_IPC`.
+trait IpcStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> IpcStream for T {}
+
+async fn connect_transport(endpoint: &str) -> std::io::Result<Box<dyn IpcStream>> {
+    if let Some(address) = endpoint.strip_prefix("tcp://") {
+        return TcpStream::connect(address)
+            .await
+            .map(|stream| Box::new(stream) as Box<dyn IpcStream>);
+    }
+
+    #[cfg(unix)]
+    {
+        return UnixStream::connect(endpoint)
+            .await
+            .map(|stream| Box::new(stream) as Box<dyn IpcStream>);
+    }
+
+    #[cfg(not(unix))]
+    {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Windows requiere un endpoint IPC tcp://",
+        ))
+    }
+}
+
+/// Conecta al endpoint local de `HIVECODE_IPC`.
 ///
 /// Demo mode si la variable no existe o el socket falla — la TUI
 /// funciona independientemente del proceso Bun.
 pub async fn connect() -> Result<IpcChannels> {
-    let socket_path = match env::var("HIVECODE_IPC") {
+    let endpoint = match env::var("HIVECODE_IPC") {
         Ok(p) if !p.is_empty() => p,
         _ => return Ok(IpcChannels::demo()),
     };
 
-    let stream = match UnixStream::connect(&socket_path).await {
+    let stream = match connect_transport(&endpoint).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("hivetui: socket {socket_path}: {e} — arrancando en demo mode");
+            eprintln!("hivetui: IPC {endpoint}: {e} — arrancando en demo mode");
             return Ok(IpcChannels::demo());
         }
     };
@@ -356,7 +385,7 @@ pub async fn connect() -> Result<IpcChannels> {
     let (low_tx, low_rx) = mpsc::channel::<BunMessage>(512);
     let (out_tx, mut out_rx) = mpsc::channel::<TuiMessage>(64);
 
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(stream);
 
     // Tarea lectora: NDJSON envelope → canal por prioridad
     tokio::spawn(async move {

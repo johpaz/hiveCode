@@ -11,7 +11,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test"
-import { createServer, type Server } from "node:net"
+import { createServer, type AddressInfo, type Server } from "node:net"
 import { unlinkSync, existsSync } from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
@@ -76,8 +76,45 @@ async function createIpcServer(socketPath: string): Promise<{
   return { server, waitForConnection }
 }
 
+/** Crea un servidor TCP local para validar el transporte usado en Windows. */
+async function createTcpIpcServer(): Promise<{
+  endpoint: string
+  server: Server
+  waitForConnection: () => Promise<{ send: (msg: BunMessage) => void; close: () => void }>
+}> {
+  const server = createServer()
+  await new Promise<void>((resolve, reject) => {
+    server.once("listening", resolve)
+    server.once("error", reject)
+    server.listen(0, "127.0.0.1")
+  })
+  const address = server.address() as AddressInfo
+
+  const waitForConnection = () =>
+    new Promise<{ send: (msg: BunMessage) => void; close: () => void }>((resolve) => {
+      server.once("connection", (socket) => {
+        const send = (msg: BunMessage) => {
+          const { type, ...payload } = msg
+          socket.write(JSON.stringify({
+            priority: "normal",
+            seq: Date.now(),
+            type,
+            payload,
+          }) + "\n")
+        }
+        resolve({ send, close: () => socket.destroy() })
+      })
+    })
+
+  return {
+    endpoint: `tcp://127.0.0.1:${address.port}`,
+    server,
+    waitForConnection,
+  }
+}
+
 /** Spawna hivetui en modo headless y devuelve un iterador de frames. */
-async function spawnTui(socketPath: string): Promise<{
+async function spawnTui(endpoint: string): Promise<{
   frames: () => AsyncGenerator<FrameSnapshot>
   kill: () => void
 }> {
@@ -88,7 +125,7 @@ async function spawnTui(socketPath: string): Promise<{
     env: {
       ...process.env,
       HIVETUI_HEADLESS: "1",
-      HIVECODE_IPC: socketPath,
+      HIVECODE_IPC: endpoint,
       HIVETUI_COLS: "120",
       HIVETUI_ROWS: "30",
     },
@@ -217,9 +254,8 @@ const STRUCTURED_PLAN = (): BunMessage => ({
 
 describe("E2E: modo PLAN", () => {
   test("permanece en Focus hasta recibir un plan estructurado y entonces muestra scroll", async () => {
-    const socketPath = path.join(os.tmpdir(), `hivetui-e2e-plan-${Date.now()}.sock`)
-    const { server, waitForConnection } = await createIpcServer(socketPath)
-    const { frames, kill } = await spawnTui(socketPath)
+    const { endpoint, server, waitForConnection } = await createTcpIpcServer()
+    const { frames, kill } = await spawnTui(endpoint)
     const iter = frames()
 
     try {
@@ -272,7 +308,6 @@ describe("E2E: modo PLAN", () => {
     } finally {
       kill()
       server.close()
-      if (existsSync(socketPath)) unlinkSync(socketPath)
     }
   })
 })
