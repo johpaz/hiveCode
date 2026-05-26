@@ -17,8 +17,8 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
         6u16.min(area.h / 3)
     };
     let panels = area.vsplit(&[0, strip_h]);
-    render_adr_pane(canvas, panels[0], state);
-    render_approval_strip(canvas, panels[1], state);
+    canvas.with_clip(panels[0], |canvas| render_adr_pane(canvas, panels[0], state));
+    canvas.with_clip(panels[1], |canvas| render_approval_strip(canvas, panels[1], state));
 }
 
 fn render_adr_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -152,4 +152,3 @@ fn render_approval_strip(canvas: &mut Canvas, area: Rect, state: &AppState) {
         canvas.print(area.x + 44, hint_y, " para devolver", Style::new().fg(DIM));
     }
 }
-

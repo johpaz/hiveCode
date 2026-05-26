@@ -1,6 +1,6 @@
 use crate::{
     state::AppState,
-    term::{Canvas, Color, Rect, Style, BG_CONFLICT, RED},
+    term::{Canvas, Rect, Style, BG_CONFLICT, RED},
 };
 
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -17,25 +17,20 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
         Style::new().fg(RED).bg(BG_CONFLICT),
     );
 
-    let msg = format!("⚠  {} · {}", conflict.agent, conflict.path);
+    // Construir partes del mensaje
+    let agents = format!("{} ↔ {}", conflict.agent_a, conflict.agent_b);
+    let mut parts = vec![agents, conflict.path.clone(), conflict.reason.clone()];
+    if let Some(ref detail) = conflict.detail {
+        parts.push(detail.clone());
+    }
+    let msg = parts.join(" | ");
+
     canvas.print(area.x + 1, row, &msg, Style::new().fg(RED).bold());
 
-    // razón (más tenue) si hay espacio
-    if !conflict.reason.is_empty() {
-        let reason_x = area.x + 1 + msg.chars().count() as u16 + 2;
-        let avail = area.right().saturating_sub(reason_x + 12) as usize;
-        if avail > 4 {
-            let shown: String = conflict.reason.chars().take(avail).collect();
-            canvas.print(
-                reason_x,
-                row,
-                &shown,
-                Style::new().fg(Color::Rgb { r: 180, g: 80, b: 80 }),
-            );
-        }
-    }
-
-    let tag = "[CRITICAL]";
+    // Tag de severidad a la derecha
+    let tag = format!("[{}]", conflict.severity.to_uppercase());
     let tag_x = area.right().saturating_sub(tag.chars().count() as u16 + 1);
-    canvas.print(tag_x, row, tag, Style::new().fg(RED).bold());
+    if tag_x > area.x + 1 + msg.chars().count() as u16 {
+        canvas.print(tag_x, row, &tag, Style::new().fg(RED).bold());
+    }
 }

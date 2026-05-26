@@ -5,6 +5,8 @@ pub struct Checkpoint {
     pub file_count: u32,
     pub agent: String,
     pub time: String,
+    pub tests_passed: u32,
+    pub tests_total: u32,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -41,6 +43,8 @@ mod tests {
                 file_count: index,
                 agent: "bee".to_string(),
                 time: String::new(),
+                tests_passed: 0,
+                tests_total: 0,
             });
         }
 

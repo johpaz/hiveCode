@@ -61,6 +61,43 @@ export class MemoryRepo {
     return Number(result.lastInsertRowid)
   }
 
+  /** FTS5 search filtered by project AND specific memory types (domain-specific injection) */
+  searchByTypeAndRelevance(projectId: string, query: string, types: MemoryType[], limit = 8): MemoryRecord[] {
+    if (types.length === 0) return this.searchByRelevance(projectId, query, limit)
+    const placeholders = types.map(() => "?").join(", ")
+    const baseQuery = query.trim()
+    try {
+      const params: (string | number)[] = [projectId, ...types]
+      if (baseQuery) {
+        params.push(baseQuery, limit)
+        return this.db.query<MemoryRecord, (string | number)[]>(`
+          SELECT m.*
+          FROM agent_memory m
+          JOIN agent_memory_fts f ON m.id = f.rowid
+          WHERE m.project_id = ?
+            AND m.deprecated = 0
+            AND m.type IN (${placeholders})
+            AND agent_memory_fts MATCH ?
+          ORDER BY
+            CASE m.severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END,
+            m.confirmed_count DESC
+          LIMIT ?
+        `).all(...params)
+      }
+      params.push(limit)
+      return this.db.query<MemoryRecord, (string | number)[]>(`
+        SELECT * FROM agent_memory
+        WHERE project_id = ? AND deprecated = 0 AND type IN (${placeholders})
+        ORDER BY
+          CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END,
+          confirmed_count DESC
+        LIMIT ?
+      `).all(...params)
+    } catch {
+      return this.getByProject(projectId, limit)
+    }
+  }
+
   /** FTS5 semantic search filtered by project, ordered by severity then confirmed count */
   searchByRelevance(projectId: string, query: string, limit = 8): MemoryRecord[] {
     if (!query.trim()) return this.getByProject(projectId, limit)

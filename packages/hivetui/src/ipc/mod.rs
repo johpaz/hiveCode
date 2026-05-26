@@ -69,6 +69,8 @@ pub enum BunMessage {
     /// Nuevo protocolo: streaming chunk a chunk.
     AssistantChunk {
         text: String,
+        agent: Option<String>,
+        timestamp: Option<String>,
     },
     AssistantDone,
     /// Protocolo legado del tui-launcher: respuesta completa en un solo mensaje.
@@ -76,6 +78,8 @@ pub enum BunMessage {
         role: String,
         content: String,
         content_type: Option<String>,
+        agent: Option<String>,
+        timestamp: Option<String>,
     },
 
     // ── Estado de la sesión ────────────────────────────────────────────────────
@@ -96,12 +100,16 @@ pub enum BunMessage {
         worker: String,
         phase: String,
         status: String,
+        display_name: Option<String>,
+        activity: Option<String>,
     },
     /// Legado: mismos campos que WorkerUpdate pero nombre diferente.
     ActivityUpdate {
         coordinator: String,
         phase: String,
         status: String,
+        display_name: Option<String>,
+        activity: Option<String>,
     },
 
     // ── Checkpoints ────────────────────────────────────────────────────────────
@@ -112,6 +120,8 @@ pub enum BunMessage {
         description: String,
         file_count: u32,
         agent: String,
+        tests_passed: Option<u32>,
+        tests_total: Option<u32>,
     },
 
     // ── Mapa de riesgo ─────────────────────────────────────────────────────────
@@ -120,6 +130,10 @@ pub enum BunMessage {
         risk: String,
         operation: String,
         agent: String,
+        adr_ref: Option<String>,
+        reason: Option<String>,
+        lines_added: Option<u32>,
+        lines_removed: Option<u32>,
     },
 
     // ── Stream de pensamiento ──────────────────────────────────────────────────
@@ -159,10 +173,12 @@ pub enum BunMessage {
     // ── Alertas ────────────────────────────────────────────────────────────────
     /// Wire: { agent, file, reason, severity } — matches protocol.ts
     ConflictAlert {
-        agent: String,
+        agent_a: String,
+        agent_b: String,
         file: String,
         reason: String,
         severity: String,
+        detail: Option<String>,
     },
     Error {
         message: String,
@@ -185,7 +201,20 @@ pub enum BunMessage {
     // ── Diff activo (git diff → Bun → TUI) ────────────────────────────────────
     FileDiff {
         path:   String,
+        branch: Option<String>,
+        stats_added: Option<u32>,
+        stats_removed: Option<u32>,
         chunks: Vec<DiffLine>,
+    },
+
+    // ── Plan estructurado ─────────────────────────────────────────────────────
+    PlanUpdate {
+        task_id: String,
+        adr_title: String,
+        adr_content: String,
+        status: String,
+        phases: Vec<PlanPhaseIpc>,
+        risks: Vec<PlanRiskIpc>,
     },
 
     // ── Snapshots de inicio (dump de SQLite al conectar) ───────────────────────
@@ -207,6 +236,8 @@ pub enum BunMessage {
 pub struct DiffLine {
     pub kind: String,
     pub text: String,
+    pub old_line_no: Option<u32>,
+    pub new_line_no: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,6 +245,8 @@ pub struct WorkerSnapshotEntry {
     pub name:   String,
     pub status: String,
     pub detail: Option<String>,
+    pub display_name: Option<String>,
+    pub activity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,6 +255,25 @@ pub struct FileSnapshotEntry {
     pub risk:      String,
     pub operation: String,
     pub agent:     String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlanPhaseIpc {
+    pub name: String,
+    pub coordinator: String,
+    pub description: String,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub level: u32,
+    #[serde(default)]
+    pub status: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlanRiskIpc {
+    pub severity: String,
+    pub description: String,
 }
 
 /// Definición de campo de modal que llega del servidor Bun.

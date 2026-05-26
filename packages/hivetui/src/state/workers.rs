@@ -5,6 +5,7 @@ pub enum WorkerStatus {
     Running,
     Done,
     Failed,
+    Warn,
 }
 
 impl WorkerStatus {
@@ -14,6 +15,7 @@ impl WorkerStatus {
             WorkerStatus::Running => "▶",
             WorkerStatus::Done => "✓",
             WorkerStatus::Failed => "✗",
+            WorkerStatus::Warn => "⚠",
         }
     }
 }
@@ -21,8 +23,10 @@ impl WorkerStatus {
 #[derive(Debug, Clone)]
 pub struct Worker {
     pub name: String,
+    pub display_name: String,
     pub status: WorkerStatus,
     pub detail: Option<String>,
+    pub activity: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]

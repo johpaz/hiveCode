@@ -11,6 +11,7 @@ import * as fs from "node:fs"
 import { logger, onLogEntry, removeLogListener, type LogEntry } from "@johpaz/hivecode-core/utils/logger"
 import { createIpcServer } from "@johpaz/hivecode-core/ipc/server"
 import type { BunMessage as CoreBunMessage, TuiMessage as CoreTuiMessage } from "@johpaz/hivecode-core/ipc/protocol"
+import { broadcastUiMessage, registerUiMessageHandler } from "@johpaz/hivecode-core/ipc/ui-broadcast"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { MessagesRepo } from "@johpaz/hivecode-core/db/repos/messages"
 import { CheckpointsRepo } from "@johpaz/hivecode-core/db/repos/checkpoints"
@@ -132,7 +133,10 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
     let buf = ""
 
     let ipcServer: ReturnType<typeof createIpcServer> | null = null
-    const send = (msg: BunMessage) => ipcServer?.send(msg)
+    const send = (msg: BunMessage) => {
+      ipcServer?.send(msg)
+      broadcastUiMessage(msg)
+    }
 
     // Subscribe to real-time logs and forward to TUI
     const logCb = (entry: LogEntry) => {
@@ -170,6 +174,15 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
       callbacks.tuiControl.showConfigModal = showConfigModal
       callbacks.tuiControl.showInfoModal = showInfoModal
     }
+
+    // ── Bridge: React UI WebSocket → same handler as Rust TUI ────────────────
+    registerUiMessageHandler((msg) => {
+      handleTuiMessage(msg, send, suspendTui, resumeTui, callbacks).catch((err) => {
+        logger.error("[ui-ws] handler error", err)
+        send({ type: "history_append", role: "system", content: `(×ᴗ×) ${(err as Error).message}` })
+        send({ type: "status", running: false, msg: "Error" })
+      })
+    })
 
     // ── IPC server (priority-envelope Unix socket) ─────────────────────────
     try {
@@ -274,7 +287,9 @@ async function handleTuiMessage(
         const msgs = msgsRepo.list(callbacks.sessionId, 50)
         for (const m of msgs.reverse()) {
           send({ type: "history_append", role: m.role, content: m.content,
-                 content_type: m.content_type === "diff" ? "plain" : m.content_type })
+                 content_type: m.content_type === "diff" ? "plain" : m.content_type,
+                 agent: (m as any).agent,
+                 timestamp: (m as any).timestamp })
         }
 
         // Checkpoint timeline (last 20, sent oldest-first)
@@ -319,7 +334,9 @@ async function handleTuiMessage(
       try {
         send({ type: "activity_update", coordinator: "agent", phase: input, status: "thinking" })
         const result = await callbacks.onSubmit(input)
-        send({ type: "history_append", role: "assistant", content: result.output, content_type: isLikelyMarkdown(result.output) ? "markdown" : "plain" })
+        if (result.output) {
+          send({ type: "history_append", role: "assistant", content: result.output, content_type: isLikelyMarkdown(result.output) ? "markdown" : "plain", agent: "bee", timestamp: new Date().toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" }) })
+        }
         send({ type: "status",         running: false,    msg: "Listo · [shift+tab] cambiar modo" })
         send({ type: "activity_update", coordinator: "", phase: "", status: "idle" })
         if (result.newMode || result.newProvider || result.newModel) {

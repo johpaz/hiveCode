@@ -1,355 +1,208 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { PanelLeft, PanelRight, MessageSquare, GitBranch, Send, LayoutDashboard, Brain } from 'lucide-react';
-import Header from './components/Header';
-import Chat, { type ChatMessage } from './components/Chat';
-import LogPanel, { type LogEntry } from './components/LogPanel';
-import PhaseTimeline, { type Phase } from './components/PhaseTimeline';
-import Mascot from './components/Mascot';
-import FlowCanvas, { type FlowPhase } from './components/FlowCanvas';
-import HexGridBackground from './components/HexGridBackground';
-import FloatingParticles from './components/FloatingParticles';
-import Dashboard from './components/Dashboard';
-import ThinkingPanel from './components/ThinkingPanel';
-import DiffViewer from './components/DiffViewer';
-import { hiveWs, type WsMessage } from './lib/ws';
+import { useState, useEffect, useRef, useMemo } from 'react'
+import type { TabId } from './data/types'
+import { WelcomeScreen } from './components/tui/WelcomeScreen'
+import { Header } from './components/tui/Header'
+import { TabBar, TABS } from './components/tui/TabBar'
+import { CheckpointBar } from './components/tui/CheckpointBar'
+import { ConflictBar } from './components/tui/ConflictBar'
+import { BottomBar } from './components/tui/BottomBar'
+import { FocusLayout } from './components/tui/layouts/FocusLayout'
+import { PlanLayout } from './components/tui/layouts/PlanLayout'
+import { CodeLayout } from './components/tui/layouts/CodeLayout'
+import { ReviewLayout } from './components/tui/layouts/ReviewLayout'
+import { DashboardLayout } from './components/tui/layouts/DashboardLayout'
+import { useUiSocket } from './hooks/useUiSocket'
 
-type ViewMode = 'chat' | 'flow' | 'dashboard';
-
-const DEFAULT_PHASES: Phase[] = [
-  { name: 'Analyze & Route', coordinator: 'bee', status: 'idle' },
-  { name: 'Architecture Design', coordinator: 'architecture', status: 'idle' },
-  { name: 'Backend Implementation', coordinator: 'backend', status: 'idle' },
-  { name: 'Frontend Implementation', coordinator: 'frontend', status: 'idle' },
-  { name: 'Security Audit', coordinator: 'security', status: 'idle' },
-  { name: 'Testing', coordinator: 'test', status: 'idle' },
-  { name: 'DevOps Deploy', coordinator: 'devops', status: 'idle' },
-];
+function nowHHMM() {
+  const d = new Date()
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
 
 export default function App() {
-  const [viewMode, setViewMode] = useState<ViewMode>('dashboard');
-  const [showLogs, setShowLogs] = useState(true);
-  const [showTimeline, setShowTimeline] = useState(true);
-  const [showThinking, setShowThinking] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [phases, setPhases] = useState<Phase[]>(DEFAULT_PHASES);
-  const [flowPhases, setFlowPhases] = useState<FlowPhase[]>([]);
-  const [pendingDiff, setPendingDiff] = useState<{
-    taskId: string; phaseId: string; phase: string; diff: string
-  } | null>(null);
-  const [headerState, setHeaderState] = useState({
-    mode: 'plan',
-    provider: 'gemini',
-    model: 'gemini-3-flash-preview',
-    taskCount: 0,
-    tokenCount: '0',
-    agentCount: 7,
-    activeCoordinator: '',
-  });
-  const [inputValue, setInputValue] = useState('');
-  const msgIdRef = useRef(0);
-  const logsRef = useRef<LogEntry[]>([]);
+  const [tab, setTab] = useState<TabId>('focus')
+  const [showWelcome, setShowWelcome] = useState(true)
+  const [input, setInput] = useState('')
+  const [selectedCp, setSelectedCp] = useState(-1)
+  const [clock, setClock] = useState(nowHHMM)
 
-  const addMessage = useCallback((role: ChatMessage['role'], content: string) => {
-    msgIdRef.current += 1;
-    setMessages((prev) => [...prev, {
-      id: `${Date.now()}-${msgIdRef.current}`,
-      role,
-      content,
-      timestamp: new Date().toISOString(),
-    }]);
-  }, []);
+  const {
+    connected,
+    messages, setMessages,
+    workersState,
+    checkpoints, setCheckpoints,
+    currentCp, setCurrentCp,
+    conflict, setConflict,
+    mode, setMode,
+    tokens,
+    cost,
+    fileRisks,
+    adrs,
+    narrativeLines,
+    submit: wsSubmit,
+    changeMode,
+  } = useUiSocket()
 
-  const addLog = useCallback((entry: LogEntry) => {
-    logsRef.current = [...logsRef.current.slice(-499), entry];
-    setLogs(logsRef.current);
-  }, []);
+  const runningCount = useMemo(
+    () => workersState.filter((w) => w.state === 'running').length,
+    [workersState]
+  )
 
-  const sendMessage = useCallback(() => {
-    const text = inputValue.trim();
-    if (!text) return;
-    addMessage('user', text);
-    hiveWs.send({ type: 'message', content: text });
-    setInputValue('');
-  }, [inputValue, addMessage]);
-
+  // ticking clock
   useEffect(() => {
-    hiveWs.connect();
-    hiveWs.subscribeLogs();
+    const id = setInterval(() => setClock(nowHHMM()), 30000)
+    return () => clearInterval(id)
+  }, [])
 
-    const unsubscribe = hiveWs.onMessage((msg: WsMessage) => {
-      if (msg.type === 'log' && msg.logEntry) {
-        addLog(msg.logEntry);
-        return;
+  // keyboard shortcuts 1-5 to switch tabs
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement) return
+      const num = parseInt(e.key)
+      if (num >= 1 && num <= 5) {
+        const t = TABS[num - 1]
+        if (t) setTab(t.id)
       }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
-      if (msg.type === 'narrative' && msg.data) {
-        const data = msg.data as { coordinator?: string; phase?: string; content?: string };
-        if (data.content) {
-          addMessage('assistant', `[${data.coordinator || 'agent'}] ${data.content}`);
-        }
-        return;
+  const demoStep = useRef(0)
+  const runDemo = () => {
+    const step = demoStep.current % 4
+    const t = nowHHMM()
+
+    if (step === 0) {
+      setMessages((m) => [...m, {
+        id: Date.now(),
+        who: 'frontend', name: 'FrontendEngineer', time: t,
+        body: 'preparando hook `useAuthSession` · pregunta a backend en blackboard: shape exacto del response /auth/refresh',
+        tool: '↳ scaffold  hooks/useAuthSession.ts',
+      }])
+    } else if (step === 1) {
+      setCheckpoints((cps) => {
+        const next = [...cps, { time: t, label: 'frontend integrado' }]
+        setCurrentCp(next.length - 1)
+        return next
+      })
+      setMessages((m) => [...m, {
+        id: Date.now(),
+        who: 'bee', name: 'Bee', time: t,
+        body: '⬡ checkpoint creado · auto-save aplicado',
+      }])
+    } else if (step === 2) {
+      setConflict({
+        a: 'security', b: 'backend',
+        file: 'auth/refresh.ts',
+        level: 'CRITICAL',
+        detail: 'cookie SameSite=strict rompe SSO flow',
+      })
+      setMessages((m) => [...m, {
+        id: Date.now(),
+        who: 'security', name: 'SecurityAuditor', time: t,
+        body: 'CONFLICTO con backend · SameSite=strict rompe el SSO actual. Constraint sugerido: `SameSite=lax` + CSRF token.',
+      }])
+    } else {
+      setConflict(null)
+      setMessages((m) => [...m, {
+        id: Date.now(),
+        who: 'bee', name: 'Bee', time: t,
+        body: 'conflicto resuelto · acepto sugerencia de security · re-dispatch backend',
+      }])
+    }
+    demoStep.current += 1
+  }
+
+  const submit = () => {
+    const v = input.trim()
+    if (!v) return
+
+    if (v.startsWith('/')) {
+      const [cmd, ...rest] = v.slice(1).split(/\s+/)
+      if (cmd === 'layout' && rest[0]) {
+        const target = rest[0].toLowerCase() as TabId
+        if (TABS.find((t) => t.id === target)) setTab(target)
+      } else if (cmd === 'demo') {
+        runDemo()
+      } else if (cmd === 'approve') {
+        changeMode('AUTO')
+        setMessages((m) => [...m, {
+          id: Date.now(), who: 'bee', name: 'Bee', time: nowHHMM(),
+          body: '✓ aprobado · workers desbloqueados · continuando ciclo',
+        }])
+      } else if (cmd === 'reject') {
+        setMessages((m) => [...m, {
+          id: Date.now(), who: 'bee', name: 'Bee', time: nowHHMM(),
+          body: `✗ rechazado · "${rest.join(' ') || 'sin razón'}" · enviado de vuelta a workers`,
+        }])
+      } else if (cmd === 'mode' && rest[0]) {
+        changeMode(rest[0].toUpperCase() as import('./data/types').Mode)
+      } else if (cmd === 'clear') {
+        setMessages([])
+      } else if (cmd === 'welcome') {
+        setShowWelcome(true)
       }
+      setInput('')
+      return
+    }
 
-      if (msg.type === 'phase' && msg.data) {
-        const data = msg.data as { name?: string; coordinator?: string; status?: string; durationMs?: number };
-        setPhases((prev) =>
-          prev.map((p) =>
-            p.coordinator === data.coordinator
-              ? { ...p, status: (data.status as Phase['status']) || p.status, durationMs: data.durationMs }
-              : p
-          )
-        );
-        setFlowPhases((prev) => {
-          const existing = prev.find((p) => p.coordinator === data.coordinator);
-          if (existing) {
-            return prev.map((p) =>
-              p.coordinator === data.coordinator
-                ? { ...p, status: (data.status as FlowPhase['status']) || p.status }
-                : p
-            );
-          }
-          return [...prev, {
-            id: data.coordinator || `phase-${Date.now()}`,
-            coordinator: data.coordinator || 'unknown',
-            status: (data.status as FlowPhase['status']) || 'idle',
-            label: data.name || data.coordinator || 'unknown',
-          }];
-        });
-        if (data.status === 'thinking') {
-          setHeaderState((prev) => ({ ...prev, activeCoordinator: data.coordinator || '' }));
-        }
-        return;
-      }
+    const t = nowHHMM()
+    setMessages((m) => [...m, { id: Date.now(), who: 'user', name: 'Tú', time: t, body: v }])
+    setTab('focus')
+    setInput('')
 
-      if (msg.type === 'mode' && msg.data) {
-        const data = msg.data as { mode?: string };
-        if (data.mode) {
-          setHeaderState((prev) => ({ ...prev, mode: data.mode || prev.mode }));
-        }
-        return;
-      }
+    if (connected) {
+      // Send to real agents via WebSocket
+      wsSubmit(v)
+    } else {
+      // Fallback: mock bee response when not connected to gateway
+      setTimeout(() => {
+        setMessages((m) => [...m, {
+          id: Date.now(), who: 'bee', name: 'Bee', time: nowHHMM(),
+          body: 'recibido · [sin conexión al gateway — modo demo] · dispatching workers …',
+        }])
+      }, 700)
+    }
+  }
 
-      if (msg.type === 'status' && msg.status) {
-        if (msg.status.model) {
-          const parts = msg.status.model.split('/');
-          setHeaderState((prev) => ({
-            ...prev,
-            provider: parts[0] || prev.provider,
-            model: parts.slice(1).join('/') || prev.model,
-          }));
-        }
-        return;
-      }
-
-      if (msg.type === 'thinking') {
-        setShowThinking(true);
-        return;
-      }
-
-      if (msg.type === 'phase_end' && msg.data) {
-        const data = msg.data as { diff?: string; taskId?: string; phaseId?: string; phase?: string };
-        if (data.diff && data.taskId) {
-          setPendingDiff({
-            taskId: data.taskId,
-            phaseId: String(data.phaseId ?? ''),
-            phase: data.phase ?? 'unknown',
-            diff: data.diff,
-          });
-        }
-        return;
-      }
-
-      if (msg.type === 'task_end') {
-        setPendingDiff(null);
-        return;
-      }
-    });
-
-    return () => {
-      unsubscribe();
-      hiveWs.disconnect();
-    };
-  }, [addMessage, addLog]);
+  const layout = useMemo(() => {
+    switch (tab) {
+      case 'focus':     return <FocusLayout messages={messages} />
+      case 'plan':      return <PlanLayout fileRisks={fileRisks} narrativeLines={narrativeLines} />
+      case 'code':      return <CodeLayout workersState={workersState} />
+      case 'review':    return <ReviewLayout adrs={adrs} />
+      case 'dashboard': return <DashboardLayout workersState={workersState} />
+      default:          return <FocusLayout messages={messages} />
+    }
+  }, [tab, messages, workersState, fileRisks, adrs, narrativeLines])
 
   return (
-    <div className="flex flex-col h-screen text-neutral-100 overflow-hidden relative">
-      {/* Atmospheric layers */}
-      <HexGridBackground />
-      <FloatingParticles />
-
-      {/* Background base */}
-      <div className="fixed inset-0 bg-[var(--color-surface)] -z-10" />
-
-      {/* Main UI */}
-      <div className="relative z-10 flex flex-col h-full">
-        <Header {...headerState} />
-
-        <div className="flex flex-1 overflow-hidden">
-          {/* Left: Timeline */}
-          {showTimeline && (
-            <div className="w-60 shrink-0">
-              <PhaseTimeline phases={phases} />
-            </div>
-          )}
-
-          {/* Center: Chat or Flow */}
-          <div className="flex flex-col flex-1 min-w-0 relative">
-            {/* Toolbar */}
-            <div className="flex items-center gap-1 px-4 py-2 border-b border-white/[0.06] relative">
-              <div className="absolute inset-0 glass-panel opacity-50" />
-              <div className="relative flex items-center gap-1">
-                <button
-                  onClick={() => setViewMode('dashboard')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium
-                    transition-all duration-200 border
-                    ${viewMode === 'dashboard'
-                      ? 'bg-white/[0.06] border-white/10 text-neutral-200 shadow-[0_0_12px_rgba(240,160,48,0.08)]'
-                      : 'border-transparent text-neutral-500 hover:text-neutral-300 hover:bg-white/[0.03]'
-                    }`}
-                >
-                  <LayoutDashboard size={12} />
-                  Dashboard
-                </button>
-                <button
-                  onClick={() => setViewMode('chat')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium
-                    transition-all duration-200 border
-                    ${viewMode === 'chat'
-                      ? 'bg-white/[0.06] border-white/10 text-neutral-200 shadow-[0_0_12px_rgba(240,160,48,0.08)]'
-                      : 'border-transparent text-neutral-500 hover:text-neutral-300 hover:bg-white/[0.03]'
-                    }`}
-                >
-                  <MessageSquare size={12} />
-                  Chat
-                </button>
-                <button
-                  onClick={() => setViewMode('flow')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium
-                    transition-all duration-200 border
-                    ${viewMode === 'flow'
-                      ? 'bg-white/[0.06] border-white/10 text-neutral-200 shadow-[0_0_12px_rgba(240,160,48,0.08)]'
-                      : 'border-transparent text-neutral-500 hover:text-neutral-300 hover:bg-white/[0.03]'
-                    }`}
-                >
-                  <GitBranch size={12} />
-                  Flow
-                </button>
-              </div>
-
-              <div className="flex-1" />
-
-              <div className="relative flex items-center gap-1">
-                <button
-                  onClick={() => setShowThinking(!showThinking)}
-                  className={`transition-colors p-1.5 rounded-lg hover:bg-white/[0.03]
-                    ${showThinking ? 'text-[#56ccf2]' : 'text-neutral-500 hover:text-neutral-300'}`}
-                  title="Toggle thinking panel"
-                >
-                  <Brain size={14} />
-                </button>
-                <button
-                  onClick={() => setShowTimeline(!showTimeline)}
-                  className="text-neutral-500 hover:text-neutral-300 transition-colors p-1.5
-                    rounded-lg hover:bg-white/[0.03]"
-                  title="Toggle timeline"
-                >
-                  <PanelLeft size={14} />
-                </button>
-                <button
-                  onClick={() => setShowLogs(!showLogs)}
-                  className="text-neutral-500 hover:text-neutral-300 transition-colors p-1.5
-                    rounded-lg hover:bg-white/[0.03]"
-                  title="Toggle logs"
-                >
-                  <PanelRight size={14} />
-                </button>
-              </div>
-            </div>
-
-            {/* Content */}
-            <div className="flex-1 overflow-hidden">
-              {viewMode === 'dashboard' ? (
-                <div className="h-full overflow-y-auto">
-                  <Dashboard />
-                </div>
-              ) : viewMode === 'chat' ? (
-                <Chat messages={messages} />
-              ) : (
-                <FlowCanvas phases={flowPhases.length > 0 ? flowPhases : phases.map((p) => ({
-                  id: p.coordinator,
-                  coordinator: p.coordinator,
-                  status: p.status,
-                  label: p.name,
-                }))} />
-              )}
-            </div>
-
-            {/* Chat Input */}
-            {viewMode === 'chat' && (
-              <div className="shrink-0 px-4 py-3 border-t border-white/[0.06] relative">
-                <div className="absolute inset-0 glass-panel opacity-50" />
-                <div className="relative flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={inputValue}
-                    onChange={(e) => setInputValue(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        sendMessage();
-                      }
-                    }}
-                    placeholder="Describe what you want to build..."
-                    className="flex-1 bg-white/[0.03] border border-white/[0.06] rounded-xl
-                      px-4 py-2.5 text-[13px] text-neutral-200 placeholder-neutral-600
-                      focus:outline-none focus:border-amber-500/30 focus:bg-white/[0.05]
-                      transition-all"
-                  />
-                  <button
-                    onClick={sendMessage}
-                    disabled={!inputValue.trim()}
-                    className="flex items-center justify-center w-9 h-9 rounded-xl
-                      bg-amber-500/10 border border-amber-500/20
-                      text-amber-400 hover:bg-amber-500/20 hover:text-amber-300
-                      disabled:opacity-30 disabled:cursor-not-allowed
-                      transition-all"
-                  >
-                    <Send size={14} />
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Right: Logs + Mascot */}
-          {showLogs && (
-            <div className="w-80 shrink-0 flex flex-col">
-              <Mascot
-                coordinator={headerState.activeCoordinator || 'bee'}
-                status={headerState.activeCoordinator ? 'thinking' : 'idle'}
-              />
-              <div className="flex-1 min-h-0">
-                <LogPanel logs={logs} />
-              </div>
-            </div>
-          )}
-
-          {/* Thinking panel */}
-          <ThinkingPanel open={showThinking} onClose={() => setShowThinking(!showThinking)} />
-        </div>
-      </div>
-
-      {/* DiffViewer modal */}
-      {pendingDiff && (
-        <DiffViewer
-          taskId={pendingDiff.taskId}
-          phaseId={pendingDiff.phaseId}
-          phase={pendingDiff.phase}
-          diff={pendingDiff.diff}
-          onDismiss={() => setPendingDiff(null)}
-        />
-      )}
+    <div className="app">
+      {showWelcome && <WelcomeScreen onDismiss={() => setShowWelcome(false)} />}
+      <Header
+        mode={mode}
+        runningCount={runningCount}
+        tokens={tokens}
+        cost={cost}
+        clock={clock}
+        onDemo={runDemo}
+      />
+      <TabBar active={tab} onChange={setTab} />
+      <div className="content">{layout}</div>
+      <CheckpointBar
+        checkpoints={checkpoints}
+        currentIdx={currentCp}
+        selectedIdx={selectedCp}
+        onSelect={setSelectedCp}
+      />
+      <ConflictBar conflict={conflict} />
+      <BottomBar
+        value={input}
+        onChange={setInput}
+        onSubmit={submit}
+        mode={mode}
+        hasConflict={!!conflict}
+      />
     </div>
-  );
+  )
 }

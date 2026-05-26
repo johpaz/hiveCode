@@ -28,9 +28,13 @@ export interface ParsedPlan {
   phases: ParsedPhase[]
   risks: Array<{ severity: "HIGH" | "MEDIUM" | "LOW"; description: string }>
   interfaces?: string
+  parseError?: string
 }
 
-const VALID_PHASES: PhaseName[] = ["backend", "frontend", "security", "test", "devops", "dba", "integration", "reviewer"]
+const VALID_PHASES: PhaseName[] = [
+  "product_manager", "backend", "frontend", "mobile", "data_scientist",
+  "security", "test", "devops", "dba", "integration", "reviewer",
+]
 
 /** Extract JSON from text (handles markdown code blocks) */
 function extractJson(text: string): string | null {
@@ -129,14 +133,9 @@ export function parsePlan(text: string): ParsedPlan {
       decision: "Proceed with implementation",
       consequences: "See narrative for details",
     },
-    phases: sortPhases([
-      { name: "backend", coordinator: "backend", description: "Implement backend", dependsOn: [] },
-      { name: "frontend", coordinator: "frontend", description: "Implement frontend", dependsOn: ["backend"] },
-      { name: "security", coordinator: "security", description: "Security audit", dependsOn: ["backend", "frontend"] },
-      { name: "test", coordinator: "test", description: "Generate and run tests", dependsOn: ["backend", "frontend"] },
-      { name: "devops", coordinator: "devops", description: "Prepare deployment", dependsOn: ["security", "test"] },
-    ]),
+    phases: sortPhases(getDefaultPhases()),
     risks: [{ severity: "MEDIUM", description: "Plan could not be parsed from JSON" }],
+    parseError: "Architecture no devolvio JSON estructurado valido para el plan.",
   }
 }
 
@@ -195,10 +194,11 @@ export function groupPhasesByLevel(phases: ParsedPhase[]): ParsedPhase[][] {
  */
 export function getDefaultPhases(): ParsedPhase[] {
   return [
-    { name: "backend", coordinator: "backend", description: "Implement backend", dependsOn: [] },
-    { name: "frontend", coordinator: "frontend", description: "Implement frontend", dependsOn: ["backend"] },
-    { name: "security", coordinator: "security", description: "Security audit", dependsOn: ["backend", "frontend"] },
-    { name: "test", coordinator: "test", description: "Generate and run tests", dependsOn: ["backend", "frontend"] },
-    { name: "devops", coordinator: "devops", description: "Prepare deployment", dependsOn: ["security", "test"] },
+    { name: "backend",  coordinator: "backend",  description: "Implement backend logic and APIs", dependsOn: [] },
+    { name: "frontend", coordinator: "frontend",  description: "Implement frontend UI",            dependsOn: [] },
+    { name: "security", coordinator: "security",  description: "Security audit",                   dependsOn: ["backend", "frontend"] },
+    { name: "test",     coordinator: "test",      description: "Generate and run tests",            dependsOn: ["backend", "frontend"] },
+    { name: "devops",   coordinator: "devops",    description: "Prepare deployment pipeline",       dependsOn: ["security", "test"] },
+    { name: "reviewer", coordinator: "reviewer",  description: "Final quality gate",                dependsOn: ["devops"] },
   ]
 }

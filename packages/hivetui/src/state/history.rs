@@ -23,10 +23,13 @@ impl From<&str> for Role {
 pub struct HistoryEntry {
     pub role: Role,
     pub content: String,
+    pub agent: Option<String>,
+    pub timestamp: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct HistoryState {
     pub entries: Vec<HistoryEntry>,
     pub selected: Option<usize>,
+    pub scroll: usize,
 }

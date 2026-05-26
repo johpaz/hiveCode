@@ -10,6 +10,7 @@ mod history;
 mod input;
 mod logs;
 mod modal;
+mod plan;
 mod session;
 mod thought;
 mod workers;
@@ -25,6 +26,7 @@ pub use history::{HistoryEntry, HistoryState, Role};
 pub use input::InputState;
 pub use logs::{LogEntry, LogState};
 pub use modal::{ConfigModalState, InfoModalState, ModalField, ModalFieldKind, ModalState};
+pub use plan::{PlanEntry, PlanPhase, PlanRisk, PlanState};
 pub use session::{ReplMode, SessionState, TabId};
 pub use thought::{ThoughtChunk, ThoughtStreamState};
 pub use workers::{Worker, WorkerState, WorkerStatus};
@@ -41,6 +43,7 @@ pub struct AppState {
     pub conflicts: ConflictState,
     pub adrs: AdrState,
     pub diff: DiffState,
+    pub plan: PlanState,
     pub modal: ModalState,
     pub logs: LogState,
     pub dirty: DirtyFlags,
@@ -104,9 +107,11 @@ impl AppState {
                 for name in workers {
                     if !self.workers.workers.iter().any(|w| w.name == name) {
                         self.workers.workers.push(Worker {
-                            name,
+                            name: name.clone(),
+                            display_name: name.clone(),
                             status: WorkerStatus::Waiting,
                             detail: None,
+                            activity: None,
                         });
                     }
                 }
@@ -116,28 +121,37 @@ impl AppState {
             }
 
             // ── Respuesta del agente ───────────────────────────────────────────
-            BunMessage::AssistantChunk { text } => {
+            BunMessage::AssistantChunk { text, agent, timestamp } => {
                 match self.history.entries.last_mut() {
                     Some(e) if e.role == Role::Assistant => e.content.push_str(&text),
                     _ => self.history.entries.push(HistoryEntry {
                         role: Role::Assistant,
                         content: text,
+                        agent,
+                        timestamp,
                     }),
                 }
+                self.history.scroll = 0;
                 self.history.selected = Some(self.history.entries.len().saturating_sub(1));
                 self.dirty.history = true;
             }
             BunMessage::AssistantDone => {
                 self.running = false;
+                self.history.scroll = 0;
                 self.tab_locked = false;
-                self.active_tab = TabId::Focus;
+                self.active_tab = if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
+                    TabId::Plan
+                } else {
+                    TabId::Focus
+                };
                 self.dirty.full = true;
                 self.dirty.history = true;
             }
             // Protocolo legado: respuesta completa en un mensaje
-            BunMessage::HistoryAppend { role, content, .. } => {
+            BunMessage::HistoryAppend { role, content, agent, timestamp, .. } => {
                 let r = Role::from(role.as_str());
-                self.history.entries.push(HistoryEntry { role: r, content });
+                self.history.entries.push(HistoryEntry { role: r, content, agent, timestamp });
+                self.history.scroll = 0;
                 self.history.selected = Some(self.history.entries.len().saturating_sub(1));
                 if r == Role::Assistant {
                     // La respuesta llegó → detener live-activity y mostrarla ya.
@@ -145,7 +159,11 @@ impl AppState {
                     // pero queremos el cambio de estado en el mismo frame.
                     self.running = false;
                     if !self.tab_locked {
-                        self.active_tab = TabId::Focus;
+                        self.active_tab = if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
+                            TabId::Plan
+                        } else {
+                            TabId::Focus
+                        };
                     }
                     self.dirty.full = true;
                 }
@@ -160,7 +178,11 @@ impl AppState {
                 // Cuando la tarea termina (running: true → false) ir a Focus igual que AssistantDone.
                 // Esto maneja el protocolo del tui-launcher que usa Status en vez de AssistantDone.
                 if was_running && !running && !self.tab_locked {
-                    self.active_tab = TabId::Focus;
+                    self.active_tab = if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
+                        TabId::Plan
+                    } else {
+                        TabId::Focus
+                    };
                     self.tab_locked = false;
                     self.dirty.full = true;
                 }
@@ -172,7 +194,11 @@ impl AppState {
                     // Al cambiar de modo, navegar al layout correspondiente
                     if !self.tab_locked {
                         self.active_tab = match self.session.mode {
-                            ReplMode::Plan     => TabId::Plan,
+                            ReplMode::Plan     => {
+                                self.plan.current = None;
+                                self.plan.scroll = 0;
+                                TabId::Focus
+                            }
                             ReplMode::Approval => TabId::Review,
                             ReplMode::Auto     => TabId::Focus,
                         };
@@ -185,47 +211,77 @@ impl AppState {
             }
 
             // ── Workers ────────────────────────────────────────────────────────
-            BunMessage::WorkerUpdate { worker, phase, status } => {
+            BunMessage::WorkerUpdate { worker, phase, status, display_name, activity } => {
                 let wstatus = match status.as_str() {
                     "running" => WorkerStatus::Running,
                     "done"    => WorkerStatus::Done,
                     "failed"  => WorkerStatus::Failed,
+                    "warn"    => WorkerStatus::Warn,
                     _         => WorkerStatus::Waiting,
                 };
                 if let Some(w) = self.workers.workers.iter_mut().find(|w| w.name == worker) {
                     w.status = wstatus;
-                    w.detail = Some(phase);
+                    w.detail = Some(phase.clone());
+                    if let Some(dn) = display_name { w.display_name = dn; }
+                    if let Some(act) = activity { w.activity = Some(act); }
                 } else {
-                    self.workers.workers.push(Worker { name: worker, status: wstatus, detail: Some(phase) });
+                    self.workers.workers.push(Worker {
+                        name: worker.clone(),
+                        display_name: display_name.unwrap_or(worker.clone()),
+                        status: wstatus,
+                        detail: Some(phase),
+                        activity,
+                    });
                 }
-                self.dirty.workers = true;
-            }
-            // Legado: activity_update → actualiza coordinator activo
-            BunMessage::ActivityUpdate { coordinator, phase, status } => {
-                // Auto-routing basado en modo, no en nombre del coordinador
+                // Auto-routing: when a worker starts, switch to the execution tab
                 if !self.tab_locked && status == "running" {
                     self.active_tab = match self.session.mode {
-                        ReplMode::Plan     => TabId::Plan,
+                        ReplMode::Plan     => TabId::Focus,
                         ReplMode::Approval => TabId::Review,
                         ReplMode::Auto     => TabId::Code,
                     };
                     self.dirty.full = true;
                 }
-                self.workers.active_coordinator = coordinator;
-                self.workers.active_phase = phase;
-                self.workers.activity_status = status;
+                self.dirty.workers = true;
+            }
+            // Legado: activity_update → actualiza coordinator activo
+            BunMessage::ActivityUpdate { coordinator, phase, status, display_name, activity } => {
+                // Auto-routing basado en modo, no en nombre del coordinador
+                if !self.tab_locked && status == "running" {
+                    self.active_tab = match self.session.mode {
+                        ReplMode::Plan     => TabId::Focus,
+                        ReplMode::Approval => TabId::Review,
+                        ReplMode::Auto     => TabId::Code,
+                    };
+                    self.dirty.full = true;
+                }
+                self.workers.active_coordinator = coordinator.clone();
+                self.workers.active_phase = phase.clone();
+                self.workers.activity_status = status.clone();
+                if let Some(w) = self.workers.workers.iter_mut().find(|w| w.name == coordinator) {
+                    if let Some(dn) = display_name { w.display_name = dn; }
+                    if let Some(act) = activity { w.activity = Some(act); }
+                }
                 self.dirty.workers = true;
             }
 
             // ── Checkpoints ────────────────────────────────────────────────────
-            BunMessage::CheckpointCreated { id, description, file_count, agent } => {
+            BunMessage::CheckpointCreated { id, description, file_count, agent, tests_passed, tests_total } => {
                 let time = chrono::Local::now().format("%H:%M").to_string();
-                self.checkpoints.push(Checkpoint { id, description, file_count, agent, time });
+                self.checkpoints.push(Checkpoint {
+                    id,
+                    description,
+                    file_count,
+                    agent,
+                    time,
+                    tests_passed: tests_passed.unwrap_or(0),
+                    tests_total: tests_total.unwrap_or(0),
+                });
                 self.dirty.checkpoints = true;
             }
 
             // ── Mapa de riesgo ─────────────────────────────────────────────────
-            BunMessage::FileRiskUpdate { path, risk, operation, agent } => {
+            BunMessage::FileRiskUpdate { path, risk, operation, agent, adr_ref, lines_added, lines_removed, .. } => {
                 let risk_level = match risk.as_str() {
                     "medium"   => RiskLevel::Medium,
                     "high"     => RiskLevel::High,
@@ -236,8 +292,19 @@ impl AppState {
                     entry.risk = risk_level;
                     entry.operation = operation;
                     entry.agent = agent;
+                    entry.adr_ref = adr_ref;
+                    entry.lines_added = lines_added.unwrap_or(0);
+                    entry.lines_removed = lines_removed.unwrap_or(0);
                 } else {
-                    self.filemap.entries.push(FileEntry { path, risk: risk_level, operation, agent });
+                    self.filemap.entries.push(FileEntry {
+                        path,
+                        risk: risk_level,
+                        operation,
+                        agent,
+                        adr_ref,
+                        lines_added: lines_added.unwrap_or(0),
+                        lines_removed: lines_removed.unwrap_or(0),
+                    });
                 }
                 self.dirty.filemap = true;
             }
@@ -312,15 +379,31 @@ impl AppState {
             }
 
             // ── Alertas ────────────────────────────────────────────────────────
-            BunMessage::ConflictAlert { agent, file, reason, severity } => {
+            BunMessage::ConflictAlert { agent_a, agent_b, file, reason, severity, detail } => {
                 self.conflicts.entries.push(AgentConflict {
-                    agent,
+                    agent_a,
+                    agent_b,
                     path: file,
-                    reason: format!("[{severity}] {reason}"),
+                    reason,
+                    severity,
+                    detail,
                 });
                 self.dirty.conflicts = true;
             }
             BunMessage::Error { message } => {
+                self.history.entries.push(HistoryEntry {
+                    role: Role::System,
+                    content: format!("Error: {message}"),
+                    agent: None,
+                    timestamp: None,
+                });
+                self.history.selected = Some(self.history.entries.len().saturating_sub(1));
+                self.history.scroll = 0;
+                self.running = false;
+                self.status_msg = "Error".to_string();
+                if !self.tab_locked {
+                    self.active_tab = TabId::Focus;
+                }
                 self.logs.entries.push(LogEntry {
                     timestamp: "ERR".to_string(),
                     level: "error".to_string(),
@@ -331,6 +414,8 @@ impl AppState {
                     self.logs.entries.remove(0);
                 }
                 self.dirty.logs = true;
+                self.dirty.history = true;
+                self.dirty.full = true;
             }
 
             // ── Rollback completado ────────────────────────────────────────────
@@ -359,9 +444,59 @@ impl AppState {
                 self.dirty.full = true;
             }
 
+            // ── Plan estructurado ───────────────────────────────────────────────
+            BunMessage::PlanUpdate { task_id, adr_title, adr_content, status, phases, risks } => {
+                if adr_title.trim().is_empty() || adr_content.trim().is_empty() || phases.is_empty() {
+                    self.history.entries.push(HistoryEntry {
+                        role: Role::System,
+                        content: "Error: el plan recibido esta incompleto; falta ADR o fases para revisarlo.".to_string(),
+                        agent: None,
+                        timestamp: None,
+                    });
+                    self.history.selected = Some(self.history.entries.len().saturating_sub(1));
+                    self.history.scroll = 0;
+                    self.status_msg = "Error de plan".to_string();
+                    if !self.tab_locked {
+                        self.active_tab = TabId::Focus;
+                    }
+                    self.dirty.history = true;
+                    self.dirty.full = true;
+                    return;
+                }
+                self.plan.current = Some(crate::state::PlanEntry {
+                    task_id,
+                    adr_title,
+                    adr_content,
+                    status,
+                    phases: phases.into_iter().map(|p| crate::state::PlanPhase {
+                        name: p.name,
+                        coordinator: p.coordinator,
+                        description: p.description,
+                        depends_on: p.depends_on,
+                        level: p.level,
+                        status: p.status,
+                    }).collect(),
+                    risks: risks.into_iter().map(|r| crate::state::PlanRisk {
+                        severity: r.severity,
+                        description: r.description,
+                    }).collect(),
+                });
+                self.plan.selected_phase = 0;
+                self.plan.scroll = 0;
+                if !self.tab_locked {
+                    self.active_tab = TabId::Plan;
+                    self.history_nav_mode = false;
+                    self.history_hscroll = 0;
+                }
+                self.dirty.full = true;
+            }
+
             // ── Diff activo ─────────────────────────────────────────────────────
-            BunMessage::FileDiff { path, chunks } => {
+            BunMessage::FileDiff { path, branch, stats_added, stats_removed, chunks } => {
                 self.diff.path = path;
+                self.diff.branch = branch.unwrap_or_default();
+                self.diff.stats_added = stats_added.unwrap_or(0);
+                self.diff.stats_removed = stats_removed.unwrap_or(0);
                 self.diff.lines = chunks;
                 self.diff.scroll = 0;
                 if !self.tab_locked {
@@ -383,8 +518,16 @@ impl AppState {
                     if let Some(existing) = self.workers.workers.iter_mut().find(|x| x.name == w.name) {
                         existing.status = status;
                         existing.detail = w.detail;
+                        if let Some(ref dn) = w.display_name { existing.display_name = dn.clone(); }
+                        if let Some(ref act) = w.activity { existing.activity = Some(act.clone()); }
                     } else {
-                        self.workers.workers.push(Worker { name: w.name, status, detail: w.detail });
+                        self.workers.workers.push(Worker {
+                            name: w.name.clone(),
+                            display_name: w.display_name.unwrap_or(w.name.clone()),
+                            status,
+                            detail: w.detail,
+                            activity: w.activity,
+                        });
                     }
                 }
                 self.dirty.workers = true;
@@ -399,20 +542,117 @@ impl AppState {
                     };
                     if let Some(e) = self.filemap.entries.iter_mut().find(|e| e.path == f.path) {
                         e.risk = risk; e.operation = f.operation; e.agent = f.agent;
+                        e.adr_ref = None; e.lines_added = 0; e.lines_removed = 0;
                     } else {
-                        self.filemap.entries.push(FileEntry { path: f.path, risk, operation: f.operation, agent: f.agent });
+                        self.filemap.entries.push(FileEntry { path: f.path, risk, operation: f.operation, agent: f.agent, adr_ref: None, lines_added: 0, lines_removed: 0 });
                     }
                 }
                 self.dirty.filemap = true;
             }
 
+            // ── Shell output de workers ────────────────────────────────────────
+            BunMessage::ShellOutput { stdout, stderr, exit_code } => {
+                let combined = match (stdout.is_empty(), stderr.is_empty()) {
+                    (false, false) => format!("{stdout}\n[stderr] {stderr}"),
+                    (false, true)  => stdout,
+                    (true,  false) => format!("[stderr] {stderr}"),
+                    (true,  true)  => return,
+                };
+                let phase = if exit_code == 0 { "shell".to_string() } else { format!("exit:{exit_code}") };
+                for line in combined.lines().take(10) {
+                    if line.trim().is_empty() { continue; }
+                    self.thought.chunks.push(ThoughtChunk {
+                        coordinator: "shell".to_string(),
+                        phase: phase.clone(),
+                        content: line.to_string(),
+                    });
+                }
+                if self.thought.chunks.len() > 100 {
+                    let excess = self.thought.chunks.len() - 100;
+                    self.thought.chunks.drain(0..excess);
+                }
+                self.dirty.thought = true;
+            }
+
             // ── No-ops ─────────────────────────────────────────────────────────
             BunMessage::Suggestions { .. }
             | BunMessage::QuickMenu { .. }
-            | BunMessage::ShellOutput { .. }
             | BunMessage::Suspend
             | BunMessage::Resume
             | BunMessage::ContextUpdate { .. } => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::{BunMessage, PlanPhaseIpc, PlanRiskIpc};
+
+    #[test]
+    fn plan_mode_stays_in_focus_until_structured_plan_arrives() {
+        let mut state = AppState::default();
+
+        state.apply_message(BunMessage::StateUpdate {
+            new_mode: Some("plan".to_string()),
+            new_provider: None,
+            new_model: None,
+        });
+        state.apply_message(BunMessage::ActivityUpdate {
+            coordinator: "architecture".to_string(),
+            phase: "reading".to_string(),
+            status: "running".to_string(),
+            display_name: None,
+            activity: None,
+        });
+
+        assert_eq!(state.active_tab, TabId::Focus);
+        state.history_nav_mode = true;
+
+        state.apply_message(BunMessage::PlanUpdate {
+            task_id: "task-1".to_string(),
+            adr_title: "ADR de layout".to_string(),
+            adr_content: "Contexto y decision completos.".to_string(),
+            status: "pending".to_string(),
+            phases: vec![PlanPhaseIpc {
+                name: "Revisar".to_string(),
+                coordinator: "architecture".to_string(),
+                description: "Preparar revision".to_string(),
+                depends_on: Vec::new(),
+                level: 0,
+                status: "pending".to_string(),
+            }],
+            risks: vec![PlanRiskIpc {
+                severity: "LOW".to_string(),
+                description: "Sin cambios destructivos".to_string(),
+            }],
+        });
+
+        assert_eq!(state.active_tab, TabId::Plan);
+        assert!(!state.history_nav_mode);
+        assert!(state.plan.current.is_some());
+    }
+
+    #[test]
+    fn incomplete_plan_is_reported_in_focus_instead_of_opening_plan() {
+        let mut state = AppState::default();
+        state.session.mode = ReplMode::Plan;
+
+        state.apply_message(BunMessage::PlanUpdate {
+            task_id: "task-1".to_string(),
+            adr_title: String::new(),
+            adr_content: String::new(),
+            status: "pending".to_string(),
+            phases: Vec::new(),
+            risks: Vec::new(),
+        });
+
+        assert_eq!(state.active_tab, TabId::Focus);
+        assert!(state.plan.current.is_none());
+        assert!(state
+            .history
+            .entries
+            .last()
+            .is_some_and(|entry| entry.content.contains("incompleto")));
     }
 }

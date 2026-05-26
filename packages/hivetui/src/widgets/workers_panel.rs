@@ -1,6 +1,6 @@
 use crate::{
     state::{AppState, WorkerStatus},
-    term::{Canvas, Rect, Style, CYAN, DIM, GREEN, RED, SECONDARY},
+    term::{Canvas, Rect, Style, CYAN, DIM, GREEN, RED, SECONDARY, YELLOW},
     widgets::welcome::worker_color as name_color,
 };
 
@@ -24,6 +24,7 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
             WorkerStatus::Done    => ("✓", Style::new().fg(GREEN)),
             WorkerStatus::Failed  => ("✗", Style::new().fg(RED)),
             WorkerStatus::Waiting => ("○", Style::new().fg(DIM)),
+            WorkerStatus::Warn => ("●", Style::new().fg(YELLOW).bold()),
         };
 
         canvas.print(area.x + 1, y, dot, dot_style);

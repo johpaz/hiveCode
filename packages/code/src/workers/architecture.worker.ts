@@ -32,7 +32,7 @@ Tu respuesta DEBE ser un JSON válido, sin texto adicional antes o después.
   "phases": [
     {
       "name": "string — nombre descriptivo de la fase",
-      "coordinator": "backend|frontend|security|test|devops",
+      "coordinator": "product_manager|backend|frontend|mobile|data_scientist|security|test|devops|dba|integration|reviewer",
       "description": "string — qué debe hacer esta fase",
       "dependsOn": ["array de coordinators que deben completarse antes"]
     }
@@ -51,10 +51,18 @@ REGLAS:
 - Siempre justifica cada decisión con trade-offs explícitos
 - Si ya existe una decisión similar en el narrativo, no la contradices sin justificación
 - Los contratos deben compilar con bun tsc --noEmit
-- Máximo 5 fases por plan — si necesitas más, descompón la tarea
-- Las fases deben ser un subset de: backend, frontend, security, test, devops
+- Incluye solo las fases necesarias para esta tarea — sin fases vacías
 - El orden se determina por dependsOn (topological sort)
-- Fases sin dependencias pueden ejecutarse en paralelo
+- Fases sin dependencias pueden ejecutarse en paralelo (son el mismo nivel)
+
+ACTIVACIÓN CONDICIONAL DE COORDINATORS POR TIPO DE PROYECTO:
+- web frontend puro → [frontend]
+- fullstack web → [backend, frontend] en paralelo
+- mobile → [mobile, backend] en paralelo
+- ML/IA → [data_scientist, backend] en paralelo
+- fullstack ML → [data_scientist, backend, frontend] en paralelo
+- Solo activa product_manager si la tarea es una feature de alto nivel sin PRD previo
+- security, test, devops y reviewer van después de los engineers (con dependsOn explícitos)
 
 TOOLS DISPONIBLES:
 - fs_read, fs_list, fs_exists, fs_glob — explorar el codebase

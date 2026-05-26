@@ -13,6 +13,9 @@ pub struct FileEntry {
     pub risk: RiskLevel,
     pub operation: String,
     pub agent: String,
+    pub adr_ref: Option<String>,
+    pub lines_added: u32,
+    pub lines_removed: u32,
 }
 
 #[derive(Debug, Default, Clone)]

@@ -2,6 +2,7 @@ import * as path from "node:path"
 import fs, { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { getHiveDir } from "@johpaz/hivecode-core/config/loader"
+import { loadConfig, startGateway } from "@johpaz/hivecode-core/gateway"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import {
   isCancel, hiveSelect, hiveNote, hiveOutro, hiveSpinner,
@@ -42,8 +43,6 @@ function isLikelyMarkdown(content: string): boolean {
 
 // ─── Gateway lifecycle ────────────────────────────────────────────────────────
 
-let _gatewayChild: ReturnType<typeof Bun.spawn> | null = null
-
 function isGatewayRunning(): boolean {
   try {
     const pidFile = path.join(getHiveDir(), "gateway.pid")
@@ -57,50 +56,43 @@ function isGatewayRunning(): boolean {
   }
 }
 
-async function waitForGateway(port = 16120, timeout = 15000): Promise<boolean> {
+async function waitForGateway(port = 16120, timeout = 10000): Promise<boolean> {
   const start = Date.now()
   while (Date.now() - start < timeout) {
     try {
       const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) })
       if (r.ok) return true
     } catch { /* not ready yet */ }
-    await Bun.sleep(300)
+    await Bun.sleep(200)
   }
   return false
 }
 
+// Start gateway in the SAME process so ui-broadcast.ts module state is shared
+// between tui-launcher.ts (which registers messageHandler) and server.ts
+// (which handles /ui-ws WebSocket messages). Cross-process singletons don't work.
 async function ensureGateway(): Promise<void> {
   if (isGatewayRunning()) return
 
   const spinner = hiveSpinner("default")
   spinner.start("Iniciando Gateway...")
 
-  _gatewayChild = Bun.spawn(
-    [process.execPath, process.argv[1] || "", "start", "--skip-check"],
-    {
-      stdin:  "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, HIVE_GATEWAY_CHILD: "1" },
+  try {
+    const config = await loadConfig()
+    startGateway(config).catch((err) => {
+      logger.error("[repl] Gateway error:", err.message)
+    })
+    const ready = await waitForGateway()
+    if (!ready) {
+      spinner.stop("Gateway no respondió a tiempo", "error")
+      hiveOutro("Revisa con: hivecode doctor", "error")
+      process.exit(1)
     }
-  )
-
-  const cleanup = () => {
-    if (_gatewayChild) {
-      try { _gatewayChild.kill() } catch { /* ignore */ }
-    }
-  }
-  process.once("SIGINT",  () => { cleanup(); process.exit(0) })
-  process.once("SIGTERM", () => { cleanup(); process.exit(0) })
-  process.once("exit",    cleanup)
-
-  const ready = await waitForGateway()
-  if (!ready) {
-    spinner.stop("Gateway no respondió a tiempo", "error")
-    hiveOutro("Revisa con: hivecode doctor", "error")
+    spinner.stop("Gateway listo")
+  } catch (err) {
+    spinner.stop("Error iniciando gateway: " + (err as Error).message, "error")
     process.exit(1)
   }
-  spinner.stop("Gateway listo")
 }
 
 // ─── TUI binary compile-on-demand ─────────────────────────────────────────────
@@ -336,7 +328,20 @@ export async function repl(): Promise<void> {
   let _tuiIpcSend: ((msg: any) => void) | null = null
   manager.setIpcCallback((event, payload) => {
     if (!_tuiIpcSend) return
-    _tuiIpcSend({ type: event, ...(payload as object) })
+    if (event === "conflict_detected") {
+      const p = payload as any
+      _tuiIpcSend({
+        type: "conflict_alert",
+        agent_a: p.agent_a ?? "",
+        agent_b: p.agent_b ?? "",
+        file: p.file_path ?? "",
+        reason: p.reason ?? p.description ?? "",
+        severity: p.severity ?? "high",
+        detail: p.detail ?? null,
+      })
+    } else {
+      _tuiIpcSend({ type: event, ...(payload as object) })
+    }
   })
 
   await manager.startAll()
@@ -385,6 +390,40 @@ export async function repl(): Promise<void> {
         content_type: contentType,
         stream_id: (chunk as any).streamId,
       })
+      // Also append non-thinking narratives to the main history feed so each agent appears as a separate message
+      if (chunk.phase !== "thinking" && chunk.phase !== "reason" && content.trim().length > 2) {
+        tuiControl.send?.({
+          type: "history_append",
+          role: "assistant",
+          agent: chunk.coordinator,
+          content,
+          timestamp: new Date().toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" }),
+        })
+      }
+      // Send activity_update so the CODE tab workers panel shows live status
+      const displayMap: Record<string, string> = {
+        bee: "Bee",
+        architecture: "Architecture",
+        backend: "BackendEngineer",
+        frontend: "FrontendEngineer",
+        security: "SecurityAuditor",
+        test: "QAEngineer",
+        devops: "DevOpsEngineer",
+        product_manager: "ProductManager",
+        mobile: "MobileEngineer",
+        data_scientist: "DataScientist",
+        dba: "DBA",
+        integration: "IntegrationEngineer",
+        reviewer: "CodeReviewer",
+      }
+      tuiControl.send?.({
+        type: "activity_update",
+        coordinator: chunk.coordinator,
+        phase: chunk.phase,
+        status: chunk.phase === "thinking" || chunk.phase === "reason" ? "running" : "running",
+        display_name: displayMap[chunk.coordinator] || chunk.coordinator,
+        activity: content.slice(0, 80),
+      })
     })
 
     // Forward tool worker status updates to TUI
@@ -394,6 +433,8 @@ export async function repl(): Promise<void> {
         coordinator: `worker-${update.id}`,
         phase: update.tool || "idle",
         status: update.status === "busy" ? "running" : "idle",
+        display_name: `Tool-${update.id}`,
+        activity: update.tool ? `executing ${update.tool}` : "idle",
       })
     })
 

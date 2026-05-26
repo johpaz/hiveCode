@@ -34,7 +34,7 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
         }
 
         let card = Rect::new(cx, cy, card_w.min(area.right().saturating_sub(cx)), card_h);
-        render_worker_card(canvas, card, w);
+        canvas.with_clip(card, |canvas| render_worker_card(canvas, card, w));
         idx += 1;
     }
 
@@ -71,6 +71,7 @@ fn render_worker_card(canvas: &mut Canvas, area: Rect, w: &crate::state::Worker)
         WorkerStatus::Done    => ("✓ done",    GREEN),
         WorkerStatus::Failed  => ("✗ failed",  RED),
         WorkerStatus::Waiting => ("○ waiting", DIM),
+        WorkerStatus::Warn => ("⚠ warn", YELLOW),
     };
     canvas.print(area.x + 2, area.y + 1, status_str, Style::new().fg(status_color).bold());
 

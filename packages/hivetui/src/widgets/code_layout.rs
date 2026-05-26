@@ -1,10 +1,6 @@
 use crate::{
     state::{AppState, WorkerStatus},
-    term::{
-        Canvas, Rect, Style,
-        AMBER, AMBER_BRIGHT, AMBER_DIM, BG_ELEVATED, BG_PANEL, BLUE, CYAN,
-        DIM, GREEN, LAVENDER, PINK, PURPLE, RED, SECONDARY, WHITE, YELLOW,
-    },
+    term::{Canvas, Rect, Style, AMBER, AMBER_BRIGHT, BG_ELEVATED, BG_PANEL, BLUE, CYAN, DIM, GREEN, LAVENDER, PINK, PURPLE, RED, SECONDARY, WHITE, YELLOW},
 };
 
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -14,64 +10,89 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
         return;
     }
 
-    let active_workers = state.workers.workers.iter()
-        .filter(|w| matches!(w.status, WorkerStatus::Running))
-        .count();
-
-    // Split dinámico: con 3+ workers activos, dar más espacio al panel de workers
-    let left_w = if active_workers >= 3 {
-        area.w * 40 / 100   // 40% diff, 60% workers
-    } else {
-        area.w * 60 / 100   // 60% diff, 40% workers
-    };
-
+    // 55/45 split: more space for diff
+    let left_w = area.w * 55 / 100;
     let cols = area.hsplit(&[left_w, 0]);
-    render_diff_pane(canvas, cols[0], state);
-    render_workers_pane(canvas, cols[1], state);
+    canvas.with_clip(cols[0], |canvas| render_diff_pane(canvas, cols[0], state));
+    canvas.with_clip(cols[1], |canvas| render_workers_pane(canvas, cols[1], state));
 }
 
-// ── Panel izquierdo: diff activo o filemap ────────────────────────────────────
+// ── Left panel: diff viewer ───────────────────────────────────────────────────
 
 fn render_diff_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
     canvas.fill_rect(area, ' ', Style::new().bg(BG_PANEL));
 
-    if !state.diff.lines.is_empty() {
-        render_diff_active(canvas, area, state);
-    } else {
+    if state.diff.lines.is_empty() {
         render_filemap_fallback(canvas, area, state);
+        return;
     }
-}
 
-fn render_diff_active(canvas: &mut Canvas, area: Rect, state: &AppState) {
-    canvas.print(area.x + 1, area.y, "⬡ DIFF ·", Style::new().fg(AMBER_DIM));
-    let path: String = state.diff.path
-        .rsplit('/')
-        .next()
-        .unwrap_or(&state.diff.path)
-        .chars()
-        .take(area.w.saturating_sub(12) as usize)
-        .collect();
-    canvas.print(area.x + 10, area.y, &path, Style::new().fg(AMBER).bold());
+    // Header: path + stats + branch
+    let path = &state.diff.path;
+    let stats = format!("+{} -{}", state.diff.stats_added, state.diff.stats_removed);
+    let branch = if state.diff.branch.is_empty() {
+        String::new()
+    } else {
+        format!(" · branch {}", state.diff.branch)
+    };
 
-    let avail_h = area.h.saturating_sub(2) as usize;
+    let header_left = format!("⬡ {}", path);
+    let header_right = format!("{} {}", stats, branch);
+
+    let hl_shown: String = header_left.chars().take(area.w.saturating_sub(3) as usize).collect();
+    canvas.print(area.x + 1, area.y, &hl_shown, Style::new().fg(AMBER).bold());
+
+    if !header_right.is_empty() {
+        let hr_x = area.right().saturating_sub(header_right.chars().count() as u16 + 1);
+        if hr_x > area.x + 1 + hl_shown.len() as u16 {
+            canvas.print(hr_x, area.y, &header_right, Style::new().fg(DIM));
+        }
+    }
+
+    // Backend indicator top-right
+    let backend_tag = "○ backend";
+    let backend_x = area.right().saturating_sub(backend_tag.chars().count() as u16 + 1);
+    canvas.print(backend_x, area.y, backend_tag, Style::new().fg(BLUE));
+
+    let avail_h = area.h.saturating_sub(3) as usize;
     let start = state.diff.scroll.min(state.diff.lines.len().saturating_sub(avail_h));
-    let mut y = area.y + 1;
+    let mut y = area.y + 2;
+
+    // Column widths
+    let line_no_w = 6usize;
+    let content_x = area.x + line_no_w as u16 + 3;
+    let content_w = area.w.saturating_sub(line_no_w as u16 + 4) as usize;
 
     for dl in state.diff.lines.iter().skip(start).take(avail_h) {
         if y >= area.bottom().saturating_sub(1) { break; }
 
-        let (prefix, style) = match dl.kind.as_str() {
-            "add"    => ("+", Style::new().fg(GREEN)),
-            "remove" => ("-", Style::new().fg(RED)),
-            _        => (" ", Style::new().fg(DIM)),
+        let (prefix, prefix_fg, bg) = match dl.kind.as_str() {
+            "add"    => ("+", GREEN, Some(Style::new().bg(crate::term::Color::Rgb { r: 10, g: 30, b: 15 }))),
+            "remove" => ("-", RED, Some(Style::new().bg(crate::term::Color::Rgb { r: 30, g: 10, b: 10 }))),
+            _        => (" ", DIM, None),
         };
 
-        canvas.print(area.x + 1, y, prefix, style);
-        let shown: String = dl.text.chars().take(area.w.saturating_sub(4) as usize).collect();
-        canvas.print(area.x + 3, y, &shown, style);
+        // Line numbers
+        let old_no = dl.old_line_no.map(|n| format!("{:>3}", n)).unwrap_or_else(|| "   ".to_string());
+        let new_no = dl.new_line_no.map(|n| format!("{:>3}", n)).unwrap_or_else(|| "   ".to_string());
+        let line_no_text = format!("{} {}", old_no, new_no);
+        canvas.print(area.x + 1, y, &line_no_text, Style::new().fg(DIM));
+
+        // Prefix
+        canvas.print(area.x + line_no_w as u16 + 1, y, prefix, Style::new().fg(prefix_fg));
+
+        // Content with syntax highlight
+        let text = if dl.text.len() > content_w {
+            dl.text.chars().take(content_w).collect::<String>()
+        } else {
+            dl.text.clone()
+        };
+        render_code_line(canvas, content_x, y, &text, content_w, bg);
+
         y += 1;
     }
 
+    // Scroll indicator
     if state.diff.lines.len() > avail_h {
         let total = state.diff.lines.len();
         let pct = (start * 100) / total.max(1);
@@ -120,72 +141,111 @@ fn render_filemap_fallback(canvas: &mut Canvas, area: Rect, state: &AppState) {
     }
 }
 
-// ── Panel derecho: todos los workers + checkpoint ─────────────────────────────
+// ── Right panel: workers + checkpoint ─────────────────────────────────────────
 
 fn render_workers_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
     canvas.fill_rect(area, ' ', Style::new().bg(BG_ELEVATED));
 
-    // Si hay suficiente espacio, dar la mitad a workers y la otra al checkpoint
-    let workers_h = if area.h > 8 { area.h * 65 / 100 } else { area.h };
+    let workers_h = if area.h > 10 { area.h * 68 / 100 } else { area.h };
     let panels = area.vsplit(&[workers_h, 0]);
-    render_all_workers(canvas, panels[0], state);
-    if area.h > 8 {
-        render_checkpoint_card(canvas, panels[1], state);
+    canvas.with_clip(panels[0], |canvas| render_all_workers(canvas, panels[0], state));
+    if area.h > 10 {
+        canvas.with_clip(panels[1], |canvas| render_checkpoint_card(canvas, panels[1], state));
     }
 }
 
 fn render_all_workers(canvas: &mut Canvas, area: Rect, state: &AppState) {
-    let running_count = state.workers.workers.iter()
-        .filter(|w| matches!(w.status, WorkerStatus::Running))
-        .count();
-
-    let title = if running_count > 0 {
-        format!("⬡ WORKERS · {} activos", running_count)
-    } else {
-        "⬡ WORKERS · en espera".to_string()
-    };
-    canvas.print(area.x + 1, area.y, &title, Style::new().fg(CYAN).bold());
+    canvas.print(area.x + 1, area.y, "⬡ WORKERS · ESTADO LIVE", Style::new().fg(CYAN).bold());
 
     if state.workers.workers.is_empty() {
         canvas.print(area.x + 2, area.y + 1, "sin workers activos", Style::new().fg(DIM));
         return;
     }
 
-    let mut y = area.y + 1;
-    for w in state.workers.workers.iter() {
-        if y >= area.bottom().saturating_sub(1) { break; }
+    let mut y = area.y + 2;
+    let mut idle_count = 0;
 
-        let (dot, dot_style) = match w.status {
-            WorkerStatus::Running => ("●", Style::new().fg(GREEN).bold()),
-            WorkerStatus::Done    => ("✓", Style::new().fg(GREEN)),
-            WorkerStatus::Failed  => ("✗", Style::new().fg(RED)),
-            WorkerStatus::Waiting => ("○", Style::new().fg(DIM)),
+    for w in state.workers.workers.iter() {
+        if y >= area.bottom().saturating_sub(2) { break; }
+
+        let (dot, dot_color) = match w.status {
+            WorkerStatus::Running => ("●", GREEN),
+            WorkerStatus::Done    => ("○", DIM),
+            WorkerStatus::Failed  => ("✗", RED),
+            WorkerStatus::Warn    => ("●", YELLOW),
+            WorkerStatus::Waiting => ("○", DIM),
         };
 
-        canvas.print(area.x + 1, y, dot, dot_style);
+        let status_label = match w.status {
+            WorkerStatus::Running => "RUNNING",
+            WorkerStatus::Done    => "DONE",
+            WorkerStatus::Failed  => "FAILED",
+            WorkerStatus::Warn    => "WARN",
+            WorkerStatus::Waiting => "WAITING",
+        };
+
+        let status_color = match w.status {
+            WorkerStatus::Running => GREEN,
+            WorkerStatus::Done    => DIM,
+            WorkerStatus::Failed  => RED,
+            WorkerStatus::Warn    => YELLOW,
+            WorkerStatus::Waiting => DIM,
+        };
+
+        let display = if w.display_name.is_empty() {
+            agent_display_name(&w.name)
+        } else {
+            w.display_name.clone()
+        };
+
         let wcolor = worker_color(&w.name);
-        canvas.print(area.x + 3, y, "⬡", Style::new().fg(wcolor));
 
-        let max_name = (area.w.saturating_sub(10) as usize).min(10);
-        let name: String = w.name.chars().take(max_name).collect();
-        canvas.print(area.x + 5, y, &name, Style::new().fg(wcolor).bold());
+        // Dot
+        canvas.print(area.x + 1, y, dot, Style::new().fg(dot_color).bold());
 
-        // Fase actual a la derecha (lo que está haciendo ahora)
-        if let Some(ref detail) = w.detail {
-            let name_end = area.x + 5 + name.len() as u16 + 1;
-            let avail = area.right().saturating_sub(name_end + 1) as usize;
+        // Name
+        let name_x = area.x + 3;
+        canvas.print(name_x, y, "⬡", Style::new().fg(wcolor));
+        canvas.print(name_x + 2, y, &display, Style::new().fg(wcolor).bold());
+
+        // Status label
+        let status_x = name_x + 2 + display.len() as u16 + 2;
+        canvas.print(status_x, y, status_label, Style::new().fg(status_color));
+
+        // Activity description
+        let activity_text = w.activity.as_deref().or(w.detail.as_deref()).unwrap_or("");
+        if !activity_text.is_empty() {
+            let act_x = status_x + status_label.len() as u16 + 2;
+            let avail = area.right().saturating_sub(act_x + 1) as usize;
             if avail > 3 {
-                let shown: String = detail.chars().take(avail).collect();
-                canvas.print(name_end, y, &shown, Style::new().fg(SECONDARY));
+                let shown: String = activity_text.chars().take(avail).collect();
+                canvas.print(act_x, y, &shown, Style::new().fg(SECONDARY));
             }
+        }
+
+        if w.status == WorkerStatus::Waiting {
+            idle_count += 1;
         }
 
         y += 1;
     }
+
+    // Idle agents footer
+    if idle_count > 0 && y < area.bottom().saturating_sub(1) {
+        let idle_names: Vec<_> = state.workers.workers.iter()
+            .filter(|w| w.status == WorkerStatus::Waiting)
+            .map(|w| if w.display_name.is_empty() { agent_display_name(&w.name) } else { w.display_name.clone() })
+            .collect();
+        if !idle_names.is_empty() {
+            let footer = format!("○ ---- {} agents idle ({}) ---- ○", idle_count, idle_names.join(" · "));
+            let shown: String = footer.chars().take(area.w.saturating_sub(2) as usize).collect();
+            canvas.print(area.x + 1, y, &shown, Style::new().fg(DIM));
+        }
+    }
 }
 
 fn render_checkpoint_card(canvas: &mut Canvas, area: Rect, state: &AppState) {
-    if area.h < 3 { return; }
+    if area.h < 4 { return; }
 
     let Some(cp) = state.checkpoints.entries.last() else {
         canvas.print(area.x + 1, area.y + 1, "sin checkpoints", Style::new().fg(DIM));
@@ -193,7 +253,7 @@ fn render_checkpoint_card(canvas: &mut Canvas, area: Rect, state: &AppState) {
     };
 
     canvas.fill_rect(
-        crate::term::Rect::new(area.x, area.y, area.w, area.h.min(5)),
+        crate::term::Rect::new(area.x, area.y, area.w, area.h.min(6)),
         ' ',
         Style::new().bg(crate::term::BG_ELEVATED),
     );
@@ -202,14 +262,168 @@ fn render_checkpoint_card(canvas: &mut Canvas, area: Rect, state: &AppState) {
     let header = format!("⬡ CHECKPOINT{time_part} ●");
     canvas.print(area.x + 1, area.y, &header, Style::new().fg(AMBER_BRIGHT).bold());
 
+    // Test stats
+    let mut y = area.y + 1;
+    if cp.tests_total > 0 {
+        let test_color = if cp.tests_passed == cp.tests_total { GREEN } else { YELLOW };
+        let test_text = format!("tests verdes {}/{}", cp.tests_passed, cp.tests_total);
+        canvas.print(area.x + 1, y, &test_text, Style::new().fg(test_color));
+        y += 1;
+    }
+
     let desc: String = cp.description.chars().take(area.w.saturating_sub(3) as usize).collect();
-    canvas.print(area.x + 1, area.y + 1, &desc, Style::new().fg(SECONDARY));
+    canvas.print(area.x + 1, y, &desc, Style::new().fg(SECONDARY));
+    y += 1;
 
     let files = format!("{} archivos  ⬡ {}", cp.file_count, cp.agent);
-    canvas.print(area.x + 1, area.y + 2, &files, Style::new().fg(DIM));
+    canvas.print(area.x + 1, y, &files, Style::new().fg(DIM));
+    y += 1;
 
-    if area.h > 3 {
-        canvas.print(area.x + 1, area.y + 3, "[↩ r] rollback", Style::new().fg(RED));
+    if area.h > 4 {
+        canvas.print(area.x + 1, y, "[↩ r] rollback · o presiona r", Style::new().fg(RED));
+    }
+}
+
+// ── Syntax highlighting helpers ───────────────────────────────────────────────
+
+fn render_code_line(
+    canvas: &mut Canvas,
+    x: u16,
+    y: u16,
+    line: &str,
+    max_width: usize,
+    bg: Option<Style>,
+) {
+    // Draw background if needed
+    if let Some(bg_style) = bg {
+        for dx in 0..max_width.min(200) {
+            canvas.print(x + dx as u16, y, " ", bg_style);
+        }
+    }
+
+    let mut cx = x;
+    let mut in_string = false;
+    let mut string_delim = '\0';
+    let mut buf = String::new();
+    let mut drawn = 0usize;
+    let chars: Vec<char> = line.chars().collect();
+
+    for i in 0..chars.len() {
+        if drawn >= max_width { break; }
+        let ch = chars[i];
+
+        if in_string {
+            buf.push(ch);
+            if ch == string_delim && (i == 0 || chars[i.saturating_sub(1)] != '\\') {
+                flush_ts_token(canvas, cx, y, &buf, true, bg, &mut drawn);
+                cx += buf.chars().count() as u16;
+                buf.clear();
+                in_string = false;
+            }
+            continue;
+        }
+
+        if ch == '\'' || ch == '"' || ch == '`' {
+            if !buf.is_empty() {
+                flush_ts_token(canvas, cx, y, &buf, false, bg, &mut drawn);
+                cx += buf.chars().count() as u16;
+                buf.clear();
+            }
+            in_string = true;
+            string_delim = ch;
+            buf.push(ch);
+            continue;
+        }
+
+        if ch.is_alphanumeric() || ch == '_' || ch == '.' || ch == '/' {
+            buf.push(ch);
+        } else {
+            if !buf.is_empty() {
+                flush_ts_token(canvas, cx, y, &buf, false, bg, &mut drawn);
+                cx += buf.chars().count() as u16;
+                buf.clear();
+            }
+            if drawn < max_width {
+                canvas.print(cx, y, &ch.to_string(), Style::new().fg(WHITE).bg(bg.map(|s| s.bg).unwrap_or(crate::term::BG_PANEL)));
+                cx += 1;
+                drawn += 1;
+            }
+        }
+    }
+
+    if !buf.is_empty() && drawn < max_width {
+        flush_ts_token(canvas, cx, y, &buf, in_string, bg, &mut drawn);
+    }
+}
+
+fn flush_ts_token(
+    canvas: &mut Canvas,
+    x: u16,
+    y: u16,
+    token: &str,
+    is_string: bool,
+    bg: Option<Style>,
+    drawn: &mut usize,
+) {
+    let base_bg = bg.map(|s| s.bg).unwrap_or(crate::term::BG_PANEL);
+    let style = if is_string {
+        Style::new().fg(GREEN).bg(base_bg)
+    } else if is_ts_keyword(token) {
+        Style::new().fg(CYAN).bg(base_bg)
+    } else if is_ts_type(token) {
+        Style::new().fg(PURPLE).bg(base_bg)
+    } else {
+        Style::new().fg(WHITE).bg(base_bg)
+    };
+    canvas.print(x, y, token, style);
+    *drawn += token.chars().count();
+}
+
+fn is_ts_keyword(word: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "import", "export", "from", "const", "let", "var", "function", "async", "await",
+        "if", "else", "return", "try", "catch", "throw", "new", "typeof", "instanceof",
+        "class", "interface", "type", "default", "extends", "implements", "public", "private",
+        "protected", "static", "readonly", "as", "in", "of", "for", "while", "do", "switch",
+        "case", "break", "continue", "yield", "void", "delete", "debugger", "with",
+    ];
+    KEYWORDS.contains(&word)
+}
+
+fn is_ts_type(word: &str) -> bool {
+    const TYPES: &[&str] = &[
+        "string", "number", "boolean", "void", "any", "unknown", "never", "null", "undefined",
+        "object", "symbol", "bigint", "Promise", "Array", "Map", "Set", "Record", "Partial",
+        "Required", "Readonly", "Pick", "Omit", "Exclude", "Extract", "ReturnType",
+        "Request", "Response", "NextFunction", "Error", "Date", "RegExp", "Buffer",
+    ];
+    TYPES.contains(&word)
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn agent_display_name(name: &str) -> String {
+    match name {
+        "bee" => "Bee".to_string(),
+        "architecture" => "Architecture".to_string(),
+        "backend" => "BackendEngineer".to_string(),
+        "frontend" => "FrontendEngineer".to_string(),
+        "security" => "SecurityAuditor".to_string(),
+        "test" => "QAEngineer".to_string(),
+        "devops" => "DevOpsEngineer".to_string(),
+        "product_manager" => "ProductManager".to_string(),
+        "mobile" => "MobileEngineer".to_string(),
+        "data_scientist" => "DataScientist".to_string(),
+        "dba" => "DBA".to_string(),
+        "integration" => "IntegrationEngineer".to_string(),
+        "reviewer" => "Reviewer".to_string(),
+        _ => {
+            let mut s = name.to_string();
+            if let Some(first) = s.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            s
+        }
     }
 }
 

@@ -38,10 +38,14 @@ import {
 
 const log = logger.child("coordinator-manager")
 
-// BEE is index 0 in the bitmask; coordinators follow at indices 1-9
+// BEE is index 0 in the bitmask; coordinators follow in the pool
 // librarian and forensic are on-demand workers — not in the persistent pool
 const COORDINATOR_NAMES: PhaseName[] = [
-  "bee", "architecture", "backend", "frontend", "security", "test", "devops",
+  "bee", "architecture",
+  "product_manager",
+  "backend", "frontend",
+  "mobile", "data_scientist",
+  "security", "test", "devops",
   "dba", "integration", "reviewer",
 ]
 
@@ -50,8 +54,11 @@ const WORKER_EXT = import.meta.url.endsWith(".ts") ? ".worker.ts" : ".worker.js"
 const COORDINATOR_FILES: Record<PhaseName, string> = {
   bee: new URL(`./bee${WORKER_EXT}`, import.meta.url).pathname,
   architecture: new URL(`./architecture${WORKER_EXT}`, import.meta.url).pathname,
+  product_manager: new URL(`./product-manager${WORKER_EXT}`, import.meta.url).pathname,
   backend: new URL(`./backend${WORKER_EXT}`, import.meta.url).pathname,
   frontend: new URL(`./frontend${WORKER_EXT}`, import.meta.url).pathname,
+  mobile: new URL(`./mobile${WORKER_EXT}`, import.meta.url).pathname,
+  data_scientist: new URL(`./data-scientist${WORKER_EXT}`, import.meta.url).pathname,
   security: new URL(`./security${WORKER_EXT}`, import.meta.url).pathname,
   test: new URL(`./test${WORKER_EXT}`, import.meta.url).pathname,
   devops: new URL(`./devops${WORKER_EXT}`, import.meta.url).pathname,
@@ -377,7 +384,7 @@ export class CoordinatorManager extends CoordinatorBase {
     // ── Route based on BEE's decision ─────────────────────────────────────────
 
     // RESPOND: BEE handled it directly — return the answer to the user
-    if (beeDecision.action === "respond") {
+    if (beeDecision.action === "respond" && mode !== "plan") {
       const response = beeDecision.content ?? ""
       this.scribe.updateTaskStatus(this.activeTaskId, "completed")
       this.scribe.updateTaskMetadata(this.activeTaskId, {
@@ -387,12 +394,12 @@ export class CoordinatorManager extends CoordinatorBase {
       })
       this.scribe.completeTurn(turnId, response, null)
       if (this.onTaskComplete) this.onTaskComplete(response)
-      if (response) process.stdout.write(response + "\n")
+      if (response && !this.onTaskComplete) process.stdout.write(response + "\n")
       return
     }
 
     // FIX: BEE applied a direct fix — report the summary and finish
-    if (beeDecision.action === "fix") {
+    if (beeDecision.action === "fix" && mode !== "plan") {
       const response = beeDecision.content ?? ""
       const fileChanges: FileChange[] = (beeDecision.filesModified ?? []).map(f => ({
         filePath: f, changeType: "modified" as const, linesAdded: 0, linesRemoved: 0,
@@ -406,7 +413,7 @@ export class CoordinatorManager extends CoordinatorBase {
       })
       this.scribe.completeTurn(turnId, response, this.activeTaskId)
       if (this.onTaskComplete) this.onTaskComplete(response)
-      if (response) process.stdout.write(response + "\n")
+      if (response && !this.onTaskComplete) process.stdout.write(response + "\n")
       if (beeDecision.filesModified?.length) {
         log.info(`[coordinator-manager] 🐝 BEE modified: ${beeDecision.filesModified.join(", ")}`)
       }
@@ -414,7 +421,7 @@ export class CoordinatorManager extends CoordinatorBase {
     }
 
     // DISPATCH: BEE decided which coordinators to use directly (no architecture phase)
-    if (beeDecision.action === "dispatch" && beeDecision.phases?.length) {
+    if (beeDecision.action === "dispatch" && beeDecision.phases?.length && mode !== "plan") {
       log.info(`[coordinator-manager] 🐝 BEE dispatching directly to: ${beeDecision.phases.map(p => p.coordinator).join(", ")}`)
       const dispatchPhases: ParsedPhase[] = beeDecision.phases.map(p => ({
         name: p.description,
@@ -501,6 +508,48 @@ export class CoordinatorManager extends CoordinatorBase {
 
     // Parse the architecture output into a structured plan
     const plan = parsePlan(archResult.narrativeEntry)
+    if (mode === "plan") {
+      const incompleteReason = plan.parseError
+        ?? (!plan.adr.title.trim() || plan.adr.title === "Untitled ADR"
+          ? "Architecture no produjo el titulo del ADR."
+          : !plan.adr.context.trim() || !plan.adr.decision.trim()
+            ? "Architecture no produjo contexto y decision completos para el ADR."
+            : plan.phases.length === 0
+              ? "Architecture no produjo fases de implementacion."
+              : undefined)
+      if (incompleteReason) {
+        this.scribe.updateTaskStatus(this.activeTaskId, "failed")
+        const failMsg = `No se pudo generar un plan aprobable: ${incompleteReason}`
+        log.error(`[coordinator-manager] ${failMsg}`)
+        throw new Error(failMsg)
+      }
+    }
+
+    // Send structured plan to TUI
+    if (this.onIpcEvent) {
+      const groupedPhases = groupPhasesByLevel(plan.phases)
+      const phasesWithLevel = plan.phases.map((p, idx) => ({
+        name: p.name,
+        coordinator: p.coordinator,
+        description: p.description,
+        depends_on: p.dependsOn,
+        level: groupedPhases.findIndex(g => g.some(gp => gp.name === p.name && gp.coordinator === p.coordinator)),
+        status: "pending" as string,
+      }))
+      this.onIpcEvent("plan_update", {
+        task_id: this.activeTaskId,
+        adr_title: plan.adr.title,
+        adr_content: [
+          plan.adr.context,
+          plan.adr.options,
+          plan.adr.decision,
+          plan.adr.consequences,
+        ].filter(Boolean).join("\n\n"),
+        status: "pending",
+        phases: phasesWithLevel,
+        risks: plan.risks,
+      })
+    }
 
     // Save ADR to database
     if (plan.adr.title) {
@@ -532,7 +581,9 @@ export class CoordinatorManager extends CoordinatorBase {
       if (plan.phases.length)    lines.push(`\n**Fases:** ${plan.phases.map(p => p.coordinator).join(" → ")}\n`)
       if (plan.risks.length)     lines.push(`\n**Riesgos:**\n${plan.risks.map(r => `- [${r.severity}] ${r.description}`).join("\n")}\n`)
       const adrText = lines.join("")
-      if (adrText) process.stdout.write(adrText)
+      // In callback-driven TUI sessions the plan is delivered via IPC/state;
+      // writing it to inherited stdout paints raw text over the alternate screen.
+      if (adrText && !this.onTaskComplete) process.stdout.write(adrText)
 
       await this.finalizeTask(taskStartTime, turnId, adrText || archResult.narrativeEntry)
       return
@@ -704,6 +755,29 @@ export class CoordinatorManager extends CoordinatorBase {
         this.writeWorkerActivity(phase, levelIdx, "running", 0, 0, Date.now(), null)
         return { phase, task, startedAt: Date.now() }
       })
+
+      // Transversal SecurityAuditor: run alongside engineer levels if security is not already planned
+      const engineerPhases: PhaseName[] = ["backend", "frontend", "mobile", "data_scientist"]
+      const levelHasEngineers = levelPhases.some(p => engineerPhases.includes(p.coordinator))
+      const securityAlreadyInLevel = levelPhases.some(p => p.coordinator === "security")
+      if (levelHasEngineers && !securityAlreadyInLevel) {
+        const secTask: CoordinatorTask = {
+          taskId: this.activeTaskId || "current",
+          phaseId: this.scribe.createPhase(this.activeTaskId || "current", "security", "security"),
+          phase: "security",
+          description: `[TRANSVERSAL WATCH] Review code being written by engineers in level ${levelIdx} for critical security issues. Report CRITICAL findings immediately.`,
+          adr: archNarrative,
+          interfaces,
+          narrative: archNarrative || "",
+          mode: phaseMode,
+          projectPath: process.cwd(),
+          secrets: this.secrets,
+          provider: provider || undefined,
+          model: model || undefined,
+        }
+        this.writeWorkerActivity("security", levelIdx, "running", 0, 0, Date.now(), null)
+        levelTasks.push({ phase: "security", task: secTask, startedAt: Date.now() })
+      }
 
       // Announce phase start to live feed
       for (const { phase } of levelTasks) {
@@ -1138,11 +1212,20 @@ export class CoordinatorManager extends CoordinatorBase {
       // code_playbook may not have rows yet — skip silently
     }
 
-    // 3. Agent memory from previous sessions (FTS5-filtered by relevance)
+    // 3. Agent memory from previous sessions (FTS5-filtered by relevance + domain type)
     try {
       const memRepo = new MemoryRepo()
       const projectId = process.cwd()
-      const memories = memRepo.searchByRelevance(projectId, `${taskDescription} ${phase}`, 8)
+      const memoryTypeFilter: Partial<Record<PhaseName, import("@johpaz/hivecode-core/storage/memory-repo").MemoryType[]>> = {
+        architecture:    ["pattern", "contract"],
+        security:        ["antipattern"],
+        test:            ["forensic_lesson"],
+        reviewer:        ["pattern", "antipattern", "contract", "convention", "forensic_lesson"],
+      }
+      const typeFilter = memoryTypeFilter[phase]
+      const memories = typeFilter
+        ? memRepo.searchByTypeAndRelevance(projectId, `${taskDescription} ${phase}`, typeFilter, 8)
+        : memRepo.searchByRelevance(projectId, `${taskDescription} ${phase}`, 8)
       if (memories.length > 0) {
         let memSection = "# PROJECT MEMORY (from previous sessions)\nKnowledge accumulated by the swarm:\n\n"
         for (const m of memories) {

@@ -27,11 +27,11 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
         let is_selected = selected == Some(i);
 
         let label = if is_current {
-            format!(" [{}●]", cp.id)
+            format!(" [{}●]", cp.time)
         } else if is_selected {
-            format!(" [{}◀]", cp.id)
+            format!(" [{}◀]", cp.time)
         } else {
-            format!(" [{}]", cp.id)
+            format!(" [{}]", cp.time)
         };
 
         let style = if is_current {

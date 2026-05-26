@@ -199,6 +199,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
             if !state.history.entries.is_empty() {
                 persist_hscroll_for_selected(state);
                 state.history.selected = Some(0);
+                state.history.scroll = 0;
                 restore_hscroll_for_selected(state);
             }
         }
@@ -206,6 +207,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
             if !state.history.entries.is_empty() {
                 persist_hscroll_for_selected(state);
                 state.history.selected = Some(state.history.entries.len().saturating_sub(1));
+                state.history.scroll = 0;
                 restore_hscroll_for_selected(state);
             }
         }
@@ -232,6 +234,18 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         (m, KeyCode::Right) if state.history_nav_mode && m.contains(KeyModifiers::SHIFT) => {
             state.history_hscroll = state.history_hscroll.saturating_add(2).min(5000);
             persist_hscroll_for_selected(state);
+        }
+        (_, KeyCode::PageUp) if state.active_tab == TabId::Focus && !state.history_nav_mode => {
+            state.history.scroll = state.history.scroll.saturating_sub(5);
+        }
+        (_, KeyCode::PageDown) if state.active_tab == TabId::Focus && !state.history_nav_mode => {
+            state.history.scroll = state.history.scroll.saturating_add(5);
+        }
+        (_, KeyCode::PageUp) if state.active_tab == TabId::Plan => {
+            state.plan.scroll = state.plan.scroll.saturating_sub(5);
+        }
+        (_, KeyCode::PageDown) if state.active_tab == TabId::Plan => {
+            state.plan.scroll = state.plan.scroll.saturating_add(5);
         }
         (_, KeyCode::PageUp) => {
             move_history_selection(state, -5);
@@ -285,10 +299,17 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 let submitted = state.input.submit();
                 if !submitted.trim().is_empty() {
                     state.show_welcome = false; // entrar al chat al enviar el primer mensaje
+                    if state.session.mode == ReplMode::Plan {
+                        state.plan.current = None;
+                        state.plan.scroll = 0;
+                    }
                     state.history.entries.push(HistoryEntry {
                         role: Role::User,
                         content: submitted,
+                        agent: None,
+                        timestamp: None,
                     });
+                    state.history.scroll = 0;
                     state.history.selected = Some(state.history.entries.len().saturating_sub(1));
                     restore_hscroll_for_selected(state);
                 }
@@ -328,6 +349,18 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
 
 pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
     match mouse.kind {
+        MouseEventKind::ScrollUp if state.active_tab == TabId::Focus && !state.history_nav_mode => {
+            state.history.scroll = state.history.scroll.saturating_sub(3);
+        }
+        MouseEventKind::ScrollDown if state.active_tab == TabId::Focus && !state.history_nav_mode => {
+            state.history.scroll = state.history.scroll.saturating_add(3);
+        }
+        MouseEventKind::ScrollUp if state.active_tab == TabId::Plan => {
+            state.plan.scroll = state.plan.scroll.saturating_sub(3);
+        }
+        MouseEventKind::ScrollDown if state.active_tab == TabId::Plan => {
+            state.plan.scroll = state.plan.scroll.saturating_add(3);
+        }
         MouseEventKind::ScrollUp => {
             state.history_nav_mode = true;
             move_history_selection(state, -1);
@@ -343,31 +376,41 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                     let tabbar_area = crate::term::Rect::new(0, 2, w, 1);
                     if let Some(tab) = tabbar::tab_at_col(tabbar_area, mouse.column) {
                         state.active_tab = tab;
+                        if tab != TabId::Focus {
+                            state.history_nav_mode = false;
+                            state.history_hscroll = 0;
+                        }
                         state.show_welcome = false;
                         return;
                     }
                 }
             }
             let history_area = history_rect_from_size(terminal::size().ok());
-            if let Some(area) = history_area {
-                if let Some(entry_idx) = history::entry_at_y(state, area, mouse.row) {
-                    persist_hscroll_for_selected(state);
-                    state.history_nav_mode = true;
-                    state.history.selected = Some(entry_idx);
-                    restore_hscroll_for_selected(state);
+            if state.active_tab == TabId::Focus {
+                if let Some(area) = history_area {
+                    if let Some(entry_idx) = history::entry_at_y(state, area, mouse.row) {
+                        persist_hscroll_for_selected(state);
+                        state.history_nav_mode = true;
+                        state.history.selected = Some(entry_idx);
+                        state.history.scroll = 0;
+                        restore_hscroll_for_selected(state);
+                    }
                 }
             }
         }
         MouseEventKind::Down(MouseButton::Right) => {
             let history_area = history_rect_from_size(terminal::size().ok());
-            if let Some(area) = history_area {
-                if let Some(entry_idx) = history::entry_at_y(state, area, mouse.row) {
-                    persist_hscroll_for_selected(state);
-                    state.history.selected = Some(entry_idx);
-                    restore_hscroll_for_selected(state);
-                    if let Some(entry) = state.history.entries.get(entry_idx) {
-                        state.input.set(&entry.content);
-                        state.history_nav_mode = false;
+            if state.active_tab == TabId::Focus {
+                if let Some(area) = history_area {
+                    if let Some(entry_idx) = history::entry_at_y(state, area, mouse.row) {
+                        persist_hscroll_for_selected(state);
+                        state.history.selected = Some(entry_idx);
+                        state.history.scroll = 0;
+                        restore_hscroll_for_selected(state);
+                        if let Some(entry) = state.history.entries.get(entry_idx) {
+                            state.input.set(&entry.content);
+                            state.history_nav_mode = false;
+                        }
                     }
                 }
             }
@@ -408,6 +451,7 @@ fn move_history_selection(state: &mut AppState, delta: isize) {
     };
 
     state.history.selected = Some(next);
+    state.history.scroll = 0;
     restore_hscroll_for_selected(state);
 }
 
@@ -471,6 +515,8 @@ mod tests {
             .map(|i| HistoryEntry {
                 role: Role::User,
                 content: format!("entry-{i}"),
+                agent: None,
+                timestamp: None,
             })
             .collect();
         state
@@ -583,20 +629,10 @@ mod tests {
     }
 
     #[test]
-    fn mouse_scroll_enables_nav_and_moves_selection() {
+    fn mouse_scroll_moves_focus_response_by_default() {
         let mut state = mk_state_with_entries(3);
         state.history.selected = Some(1);
         state.history_nav_mode = false;
-
-        let up = MouseEvent {
-            kind: MouseEventKind::ScrollUp,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        };
-        handle_mouse_event(&mut state, up);
-        assert!(state.history_nav_mode);
-        assert_eq!(state.history.selected, Some(0));
 
         let down = MouseEvent {
             kind: MouseEventKind::ScrollDown,
@@ -605,7 +641,70 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         handle_mouse_event(&mut state, down);
+        assert!(!state.history_nav_mode);
+        assert_eq!(state.history.scroll, 3);
+
+        let up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse_event(&mut state, up);
+        assert_eq!(state.history.scroll, 0);
+    }
+
+    #[test]
+    fn mouse_scroll_moves_selected_entry_in_history_nav_mode() {
+        let mut state = mk_state_with_entries(3);
+        state.history.selected = Some(1);
+        state.history_nav_mode = true;
+
+        let up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse_event(&mut state, up);
+        assert_eq!(state.history.selected, Some(0));
+    }
+
+    #[test]
+    fn plan_scroll_uses_wheel_without_entering_history_navigation() {
+        let mut state = mk_state_with_entries(3);
+        state.active_tab = TabId::Plan;
+
+        handle_mouse_event(&mut state, MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(state.plan.scroll, 3);
+        assert!(!state.history_nav_mode);
+    }
+
+    #[test]
+    fn plan_scroll_remains_available_after_history_navigation() {
+        let mut state = mk_state_with_entries(3);
+        state.active_tab = TabId::Plan;
+        state.history_nav_mode = true;
+        state.history.selected = Some(1);
+
+        handle_mouse_event(&mut state, MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(state.plan.scroll, 3);
         assert_eq!(state.history.selected, Some(1));
+
+        let key = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
+        let _ = handle_key_event(&mut state, key);
+        assert_eq!(state.plan.scroll, 8);
     }
 
 }

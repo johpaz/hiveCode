@@ -80,6 +80,12 @@ const logSubscribers = new Set<string>();
 const wsInactivityTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const WS_INACTIVITY_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours
 
+// React UI WebSocket clients (/ui-ws route)
+import { registerUiBroadcast, handleUiMessage, hasUiMessageHandler, getLastUiInit, broadcastUiMessage } from '../ipc/ui-broadcast';
+import type { TuiMessage } from '../ipc/protocol';
+type UiWsType = import('bun').ServerWebSocket<WebSocketData>;
+const uiWsClients = new Set<UiWsType>();
+
 // Helpers imported from ./helpers/index.ts
 // - getNarration, TOOL_NARRATIONS
 // - expandPath
@@ -92,6 +98,7 @@ interface WebSocketData {
   providerId?: string;
   modelId?: string;
   meetingSessionId?: string;
+  route?: string;
 }
 
 /**
@@ -576,6 +583,16 @@ export async function startGateway(config: Config): Promise<void> {
             return undefined as any; // Bun handles the response after upgrade
           }
           return applySecurityHeaders(new Response("WebSocket upgrade failed", { status: 500 }));
+        }
+
+        // ── /ui-ws — React web UI (localhost-only, no token required) ────────
+        if (url.pathname === "/ui-ws" || url.pathname === "/ui-ws/") {
+          const sessionId = `ui-${crypto.randomUUID()}`;
+          const upgraded = server.upgrade(req, {
+            data: { sessionId, authenticatedAt: Date.now(), route: '/ui-ws' },
+          });
+          if (upgraded) return undefined as any;
+          return new Response("WebSocket upgrade failed", { status: 500 });
         }
 
         // ── WebSocket upgrades for terminal-only mode ────────────────────────
@@ -1401,6 +1418,18 @@ export async function startGateway(config: Config): Promise<void> {
       open(ws) {
         const data = ws.data;
 
+        // ── /ui-ws client (React web UI) ─────────────────────────────────────
+        if (data.route === '/ui-ws') {
+          uiWsClients.add(ws as UiWsType);
+          // Replay last init so late-joining clients get current mode/state
+          const lastInit = getLastUiInit();
+          if (lastInit) {
+            try { (ws as UiWsType).send(JSON.stringify(lastInit)); } catch { /* ignore */ }
+          }
+          log.debug(`[ui-ws] React UI connected: ${data.sessionId}`);
+          return;
+        }
+
         log.debug(`WebSocket connected: ${data.sessionId} `);
 
         // Start inactivity timeout (2h)
@@ -1455,6 +1484,60 @@ export async function startGateway(config: Config): Promise<void> {
 
       async message(ws, message) {
         const data = ws.data;
+
+        // ── /ui-ws client (React web UI) ─────────────────────────────────────
+        if (data.route === '/ui-ws') {
+          try {
+            const uiMsg = JSON.parse(message.toString()) as TuiMessage;
+            if ((uiMsg as any).type === 'ping') return;
+
+            // If tui-launcher is running, delegate to it (full CoordinatorManager pipeline)
+            if (hasUiMessageHandler()) {
+              handleUiMessage(uiMsg);
+              return;
+            }
+
+            // Fallback: no TUI running — handle submit directly via gateway agent
+            if (uiMsg.type === 'submit' && runner && agent) {
+              const input = uiMsg.input;
+              const sessionId = data.sessionId;
+              laneQueue.enqueue(sessionId, async (_task, signal) => {
+                try {
+                  broadcastUiMessage({ type: 'activity_update', coordinator: 'bee', phase: input, status: 'thinking' });
+                  const { userId } = resolveContext({ channel: 'webchat', channelUserId: sessionId });
+                  let accumulated = '';
+                  const t = new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+                  const response = await runner.generate({
+                    provider: dbProvider as any,
+                    messages: [{ role: 'user' as const, content: input }],
+                    maxTokens: 4096,
+                    tools: prepareTools(agent, sessionId),
+                    maxSteps: 15,
+                    threadId: sessionId,
+                    userId,
+                    signal,
+                    onToken: async (token: string) => {
+                      if (signal.aborted) return;
+                      accumulated += token;
+                      broadcastUiMessage({ type: 'narrative_chunk', coordinator: 'bee', phase: 'streaming', content: token });
+                    },
+                  });
+                  const content = accumulated || response.content?.trim() || '';
+                  if (content) {
+                    broadcastUiMessage({ type: 'history_append', role: 'assistant', agent: 'bee', content, content_type: content.includes('```') ? 'markdown' : 'plain', timestamp: t });
+                  }
+                  broadcastUiMessage({ type: 'activity_update', coordinator: '', phase: '', status: 'idle' });
+                } catch (err) {
+                  broadcastUiMessage({ type: 'history_append', role: 'system', content: `(×ᴗ×) ${(err as Error).message}` });
+                  broadcastUiMessage({ type: 'activity_update', coordinator: '', phase: '', status: 'idle' });
+                }
+              });
+            } else if (uiMsg.type === 'mode_change') {
+              // mode_change with no tui-launcher: nothing to do
+            }
+          } catch { /* ignore malformed JSON */ }
+          return;
+        }
 
         // Reset inactivity timer on any message
         setInactivityTimer(ws);
@@ -2035,6 +2118,11 @@ export async function startGateway(config: Config): Promise<void> {
 
       close(ws) {
         const data = ws.data;
+        if (data.route === '/ui-ws') {
+          uiWsClients.delete(ws as UiWsType);
+          log.debug(`[ui-ws] React UI disconnected: ${data.sessionId}`);
+          return;
+        }
         log.debug(`WebSocket disconnected: ${data.sessionId}`);
         clearInactivityTimer(data.sessionId);
         const pingInterval = (ws as any)._pingInterval;
@@ -2058,6 +2146,14 @@ export async function startGateway(config: Config): Promise<void> {
         requestId: crypto.randomUUID(),
       }, { status: 500 });
     },
+  });
+
+  // Register the /ui-ws broadcast function once (closes over uiWsClients Set)
+  registerUiBroadcast((msg) => {
+    const json = JSON.stringify(msg);
+    for (const client of uiWsClients) {
+      try { client.send(json); } catch { /* client disconnected */ }
+    }
   });
 
   onLogEntry((entry) => {

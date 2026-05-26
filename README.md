@@ -19,7 +19,7 @@ git clone https://github.com/johpaz/hive-code.git hivecode
 cd hivecode
 bun install
 
-# Arrancar (gateway + TUI Ratatui)
+# Arrancar (gateway + TUI)
 bun run dev
 # o bien: hivecode repl
 
@@ -32,28 +32,69 @@ bun run dev
 
 ## Interfaz: TUI
 
-La interfaz es un **terminal Rust compilado** (`packages/hivetui/`) con renderer custom sobre `crossterm`. Comunica con el proceso Bun vía Unix socket IPC con colas de prioridad (critical / normal / low).
+La interfaz es un **terminal Rust compilado** (`packages/hivetui/`) con renderer custom propio sobre `crossterm` — sin dependencias de Ratatui ni Tui-rs. Se comunica con el proceso Bun vía Unix socket IPC con colas de prioridad (`critical / normal / low`).
+
+### Navegación por tabs (teclas 1–5)
+
+| # | Tab | Contenido |
+|---|-----|-----------|
+| 1 | **FOCUS** | ThoughtStream (razonamiento BEE en tiempo real, solo modo PLAN) + FilMap de riesgo o ADRs |
+| 2 | **PLAN** | ADRs activos + strip de aprobación interactiva (APPROVAL mode) |
+| 3 | **CODE** | Diff activo o filemap ÷ panel lateral de workers (se adapta: 60/40 ↔ 40/60 con 3+ workers activos) |
+| 4 | **REVIEW** | Hallazgos del CodeReviewer + filemap de riesgo + veredicto (APROBADO / RECHAZADO) |
+| 5 | **DASHBOARD** | Grid de tarjetas de workers con estado, progreso, iteraciones y tokens |
+
+La tab activa se enruta automáticamente según el estado de Bun (PLAN → Focus, CODE → Code, REVIEW → Review). El usuario puede fijarla pulsando 1–5.
+
+### Layout general
 
 ```
-╭──────────────────────────────────────────────────────────────╮
-│  hivecode  ·  plan  │  approval  │  auto                     │
-├──────────────────────────────────────────────────────────────┤
-│                                                              │
-│  Tarea: implementa autenticación JWT con refresh token       │
-│                                                              │
-│  ⬢ Architecture     ████████████ ✓ 8s      [nivel 0]        │
-│  ⬢ Backend          ███████░░░░░ 65%        [nivel 1] ─┐     │
-│  ⬢ Frontend         ████░░░░░░░░ 38%        [nivel 1]  │ ⬡   │
-│  ⬢ DBA              ██████████░░ 85%        [nivel 1] ─┘     │
-│  ⬢ IntegrationAgent pending                [nivel 3]        │
-│  ⬢ CodeReviewer     pending                [nivel 4]        │
-│                                                              │
-╰──────────────────────────────────────────────────────────────╯
-│ > _                                                          │
-╰──────────────────────────────────────────────────────────────╯
+╭─ ⬡ FOCUS[1]  ⬡ PLAN[2]  ⬡ CODE[3]  ⬡ REVIEW[4]  ⬡ DASHBOARD[5] ──── HH:MM:SS  $0.04 ─╮
+│                                                                                            │
+│  [contenido del tab activo — ver tabla arriba]                                             │
+│                                                                                            │
+│  ── checkpoint_bar ─────────────────────────────────────────────── [nivel 1 ✓ · nivel 2…] │
+│  ── conflict_bar ──────────────────────────────────────── [⚠ conflict: api_shape_mismatch] │
+├────────────────────────────────────────────────────────────────────────────────────────────┤
+│  > escribe tu tarea aquí_                                    (•ᴗ•) hive  [AUTO]  [tokens]  │
+╰────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-Para compilar el TUI:
+### Paneles y widgets
+
+| Widget | Descripción |
+|--------|-------------|
+| `header` | Tabbar ⬡ + reloj + costo acumulado de sesión |
+| `statusbar` | Modo activo (plan/approval/auto), tokens totales, mensaje de estado de Bun |
+| `thought_stream` | Stream de razonamiento en tiempo real del BEE (solo PLAN mode) |
+| `workers_panel` | Lista vertical de workers con barra de progreso, iteraciones y nivel |
+| `dashboard_layout` | Grid de tarjetas de worker: estado, %, tokens por worker |
+| `history` | Historial scroll + navegación horizontal por entrada larga |
+| `checkpoint_bar` | Barra de checkpoints de recuperación por nivel; indica cuáles completaron |
+| `conflict_bar` | Alerta cuando `agent_conflicts` tiene entradas sin resolver |
+| `mascot` | BEE animada en el input: `(•ᴗ•)` auto · `\(^•^)/` plan · `(?•?)` approval |
+| `input` | Línea de entrada con autocompletado de slash commands |
+
+### Overlays y modales
+
+| Widget | Activación |
+|--------|-----------|
+| `command_popup` | Tecla `/` — lista de comandos disponibles con navegación |
+| `config_modal` | `/config` — editar providers, modelo, modo, API key |
+| `info_modal` | `?` — ayuda contextual del tab activo |
+
+### IPC con Bun
+
+El TUI se conecta a un Unix socket (`~/.hivecode/tui.sock`) al arrancar. Los mensajes entrantes se procesan por prioridad:
+
+- **CRITICAL** — `forensic_alert`, `approval_required`: se procesan antes que cualquier otra cosa
+- **NORMAL** — `worker_update`, `history_append`, `diff_update`, `task_status`, `status`
+- **LOW** — `memory_update`, `librarian_progress`, `thinking_chunk`
+
+El TUI también funciona en modo headless (`HIVETUI_HEADLESS=1`) para testing: emite frames como NDJSON a stdout en lugar de pintar la terminal.
+
+### Compilar el TUI
+
 ```bash
 cd packages/hivetui && cargo build --release
 ```
@@ -99,32 +140,39 @@ Usuario escribe cualquier mensaje
   ▼                                                       ▼
 "respond" / "fix"                               "dispatch" / "architecture"
   │                                                       │
-  ▼                                                       ▼
-BEE responde o aplica                          Nivel 0: Architecture
-el fix directamente                              ADR + contratos TypeScript
+  ▼                                              Nivel -1 (opcional):
+BEE responde o aplica                            ProductManager
+el fix directamente                              PRD + criterios de aceptación
                                                          │
-                                             Nivel 1 (paralelo):
-                                             Backend + Frontend + DBA
-                                             Security (transversal)
+                                                Nivel 0: Architecture
+                                                ADR + contratos TypeScript
+                                                Plan de fases por tipo de proyecto
                                                          │
-                                             Nivel 2: Test
+                                         Nivel 1 (paralelo — según tipo):
+                                         Backend + Frontend        (web fullstack)
+                                         Backend + Mobile          (app móvil)
+                                         Backend + DataScientist   (ML/IA)
+                                         los tres juntos           (fullstack ML)
+                                         Security (transversal — siempre)
                                                          │
-                                             Nivel 3: IntegrationAgent
-                                               (cruza contratos entre módulos)
+                                         Nivel 2 (paralelo):
+                                         QAEngineer + Security dedicado
                                                          │
-                                             Nivel 4: CodeReviewer
-                                               (modelo máximo, veredicto final)
+                                         Nivel 3: DevOps
                                                          │
-                                      ┌──────────────────┴──────────────────┐
-                                      │ APROBADO                            │ RECHAZADO
-                                      ▼                                     ▼
-                               Librarian (post-sesión)            Workers relanzados
-                               Destila sesión → agent_memory      con constraints del reviewer
+                                         Nivel 4: CodeReviewer
+                                           (modelo máximo, veredicto final)
+                                                         │
+                                  ┌──────────────────────┴──────────────────┐
+                                  │ APROBADO                                │ RECHAZADO
+                                  ▼                                         ▼
+                           Librarian (post-sesión)                Workers relanzados
+                           Destila sesión → agent_memory          con constraints del reviewer
 ```
 
 Si un worker agota sus iteraciones sin completar, **ForensicAgent** se activa automáticamente antes de cualquier relanzamiento — analiza la causa raíz y recomienda `relanzar_con_constraint`, `reasignar` o `escalar_al_humano`.
 
-### Workers del enjambre — definición completa
+### Los 12 workers del enjambre
 
 Cada worker es un **Bun Worker independiente** (proceso JS separado con su propio heap). Se comunican exclusivamente por paso de mensajes — nunca entre sí directamente. El blackboard en SQLite es el único medio de coordinación.
 
@@ -139,140 +187,158 @@ Cada worker es un **Bun Worker independiente** (proceso JS separado con su propi
 
 ---
 
-#### Architecture — Diseñador de Sistemas
-Solo se activa cuando BEE clasifica la tarea como `architecture`. Lee el proyecto, cruza con ADRs activos y con los registros de `agent_memory` tipo `pattern`, `antipattern` y `contract` del proyecto. Produce:
-- Un **ADR** (Architecture Decision Record) con contexto, opciones y decisión
-- Un **plan de fases con niveles de dependencia** — los workers del mismo nivel pueden ejecutarse en paralelo
-- **Contratos TypeScript** entre módulos (interfaces que backend, frontend y DBA deben respetar)
+#### 1. ProductManager
+Solo se activa cuando BEE clasifica como `architecture` y la tarea es una feature de alto nivel sin especificación previa. Traduce requisitos ambiguos de negocio en un PRD estructurado: objetivo, historias de usuario, criterios de aceptación verificables, y constraints técnicos conocidos. Lo escribe en el blackboard como `type=decision` — Architecture lo usa como punto de partida, QAEngineer usa los criterios de aceptación para los tests.
+
+**No inventa detalles de implementación. Herramientas:** solo lectura + `write_decision`
+
+---
+
+#### 2. Architecture — Diseñador de Sistemas
+Se activa después de ProductManager (si hubo) o directamente cuando BEE clasifica como `architecture`. Lee el PRD del blackboard, los ADRs activos y los registros de `agent_memory` tipo `pattern` y `contract`. Produce:
+- Un **ADR** con contexto, opciones evaluadas y decisión justificada
+- Un **plan de fases con niveles de dependencia** — determina qué engineers del nivel 1 se despachan según el tipo de proyecto (web, mobile, ML, fullstack)
+- **Contratos TypeScript** entre módulos
 
 **Herramientas:** solo lectura + `write_decision`
 
 ---
 
-#### Backend — Ingeniero de Servidor
-Implementa APIs, lógica de negocio y acceso a datos. Antes de escribir cualquier archivo consulta el blackboard para leer las decisiones de Architecture y constraints activos. Al terminar escribe en el blackboard los endpoints que definió con sus contratos exactos (tipo, rutas, respuestas) para que IntegrationAgent los valide.
+#### 3. BackendEngineer — Ingeniero de Servidor
+Implementa APIs, lógica de negocio y acceso a datos. Lee el plan de Architecture y los contratos del blackboard. Al terminar escribe los endpoints implementados con sus contratos exactos para que Frontend, Mobile y DataScientist los consuman. Si va a modificar archivos de schema, verifica si existe un ADR que requiera migration script previo.
 
 **Herramientas:** read + write completo + git + build/test/lint + shell
 
 ---
 
-#### Frontend — Ingeniero de Interfaz
-Implementa componentes UI y consume las APIs definidas por Backend. Antes de escribir componentes que llamen a APIs, consulta el blackboard para leer los endpoints disponibles. Si un endpoint que necesita aún no está en el blackboard, escribe una pregunta dirigida a Backend y continúa con las partes independientes.
+#### 4. FrontendEngineer — Ingeniero de Interfaz Web
+Implementa componentes UI y consume las APIs de Backend. Si un endpoint que necesita aún no está definido en el blackboard, escribe una pregunta dirigida a Backend y continúa con las partes independientes. Al terminar documenta qué componentes creó y qué endpoints consume para que CodeReviewer valide la consistencia.
 
 **Herramientas:** read + write completo + git + build/test/lint
 
 ---
 
-#### DBA — Administrador de Base de Datos
-Diseña el schema de datos del proyecto: tablas, columnas, tipos, índices, constraints y migrations. Lee las entidades de dominio definidas por Architecture del blackboard. Escribe el schema resultante como decisión en el blackboard (scope=`schema`) — esa es la fuente de verdad que Backend y IntegrationAgent consultan.
+#### 5. MobileEngineer — Ingeniero de Apps Móviles
+Implementa aplicaciones React Native, iOS (Swift/SwiftUI) o Android (Kotlin/Jetpack Compose) según el stack definido por Architecture. Es fundamentalmente distinto a FrontendEngineer — maneja APIs de plataforma nativa, compiladores nativos y ciclos build-test-debug autónomos. Lee los contratos de API de Backend del blackboard. Si un endpoint que necesita no está definido, escribe la solicitud en el blackboard y continúa con las partes independientes.
 
-**Herramientas:** read + write de migrations + shell SQLite de diagnóstico (solo lectura de BD)
-
----
-
-#### Security — Auditor Transversal
-Corre **en paralelo con los niveles 1 y 2**, no como una fase secuencial. Lee el blackboard y los archivos del workspace de forma continua. Categorías que siempre audita: inyecciones SQL/command, secrets hardcodeados, autenticación débil, dependencias vulnerables (bun.lock), XSS, exposición de datos en respuestas. Delega a sub-agentes especializados (`sast-agent`, `dependency-audit-agent`, `secrets-scan-agent`) en paralelo.
-
-Cuando detecta un hallazgo:
-- **CRITICAL** → escribe un constraint en el blackboard que bloquea al worker afectado
-- **HIGH/MEDIUM/LOW** → escribe una observación que el CodeReviewer considerará
-
-**No modifica código. Herramientas:** solo lectura
+**Herramientas:** read + write + build + test + shell (expo, pod install, gradle, etc.)
 
 ---
 
-#### Test — Ingeniero de Calidad
-Escribe y ejecuta tests después de que los workers de implementación completaron su nivel. Al conocer exactamente qué implementó cada worker (vía el blackboard), puede escribir casos de prueba que cubran los casos de borde reales. Si un test falla, escribe el fallo en el blackboard como observación dirigida al worker responsable.
+#### 6. DataScientist — Científico de Datos / IA
+Implementa modelos ML, pipelines de datos y agentes de IA. Es fundamentalmente distinto a BackendEngineer — maneja PyTorch, scikit-learn, transformers y MLOps. Coordina con BackendEngineer vía blackboard para definir el contrato del endpoint de predicciones antes de que el backend lo implemente. Reporta métricas concretas (F1, AUC, accuracy) en el blackboard, no narrativas vagas.
+
+**Herramientas:** read + write + run_script + shell
+
+---
+
+#### 7. SecurityAuditor — Auditor de Seguridad
+Opera en **dos modos simultáneos**:
+- **Transversal** durante el nivel de engineers: corre en paralelo con Backend/Frontend/Mobile/DataScientist, detecta hallazgos CRITICAL y escribe constraints en el blackboard antes de que los workers afectados continúen
+- **Dedicado** en el nivel de QA: análisis completo del código producido
+
+Categorías que siempre audita: inyecciones SQL/command, secrets hardcodeados, autenticación débil, dependencias vulnerables, XSS, exposición de datos. **No modifica código.**
+
+**Herramientas:** solo lectura + `check_dependencies`
+
+---
+
+#### 8. QAEngineer — Ingeniero de Calidad
+Escribe y ejecuta tests después de que todos los engineers del nivel anterior completaron. Lee los criterios de aceptación del PRD de ProductManager (si existe) para escribir casos verificables. El Context Compiler le inyecta `forensic_lessons` de sesiones anteriores para evitar repetir casos que ya causaron problemas. Si un test falla, escribe el fallo en el blackboard dirigido al worker responsable.
 
 **Herramientas:** read + write + test runner
 
 ---
 
-#### DevOps — Infraestructura y CI/CD
-Configura pipelines de CI/CD, Dockerfiles, scripts de deploy y herramientas de build. Se activa cuando la tarea involucra infraestructura o automatización de despliegue.
+#### 9. DevOpsEngineer — Infraestructura y CI/CD
+Configura pipelines de CI/CD, Dockerfiles, Terraform y configuraciones de monitoreo. Se activa después de QA y Security porque necesita conocer el estado final del código. Lee el blackboard para entender qué cambios hicieron los otros workers y actualiza la infraestructura para soportarlos.
 
-**Herramientas:** read + write + git + shell completo
-
----
-
-#### IntegrationAgent — Validador de Costuras
-Su responsabilidad exclusiva es encontrar incompatibilidades entre módulos **antes** del CodeReviewer. Lee el blackboard completo y cruza:
-- Endpoints definidos por Backend vs endpoints consumidos por Frontend (tipos, rutas, métodos)
-- Schema definido por DBA vs queries usadas por Backend (nombres de tablas y columnas)
-- Tipos TypeScript exportados por Backend vs importados por Frontend
-- Cobertura de tests vs endpoints y funciones implementadas
-
-Escribe cada incompatibilidad en el blackboard. Las bloqueantes las registra en `agent_conflicts`. **No modifica código.**
-
-**Herramientas:** solo lectura + `write_decision`
+**Herramientas:** read + write + git completo (incluyendo `git_create_pr`, `git_rollback`) + shell
 
 ---
 
-#### CodeReviewer — Gate de Calidad Final
-Siempre usa el **modelo de mayor capacidad disponible**, independientemente del modelo configurado para los otros workers. Lee todo el blackboard, los diffs contra checkpoints, hallazgos de Security, resultados de Test, y hallazgos de IntegrationAgent. Emite uno de tres veredictos:
+#### 10. CodeReviewer — Gate de Calidad Final
+Siempre usa el **modelo de mayor capacidad disponible**, independientemente del modelo configurado para los otros workers. Lee todo el blackboard, los diffs contra checkpoints, hallazgos de Security, resultados de QA, e incompatibilidades de Integration. El Context Compiler le inyecta toda la `agent_memory` del proyecto — llega con el historial completo de lo que funcionó y lo que no.
 
+Emite uno de tres veredictos:
 - `APROBADO` — el trabajo cumple todos los criterios
-- `APROBADO_CON_OBSERVACIONES` — aprobado, pero con puntos de mejora para próximas sesiones
+- `APROBADO_CON_OBSERVACIONES` — aprobado, con puntos de mejora para próximas sesiones
 - `RECHAZADO: {razones específicas}` — no puede pasar a producción sin correcciones
 
-Si rechaza, BEE relanza los workers afectados con los constraints del rechazo en el blackboard. **No modifica código.**
+Si rechaza, BEE relanza los workers afectados con los constraints del rechazo. **No modifica código.**
 
 **Herramientas:** solo lectura + `check_types` + `code_test`
 
 ---
 
-#### ForensicAgent — Reflexión Forzada *(on-demand)*
+#### 11. ForensicAgent — Reflexión Forzada *(on-demand)*
 Se activa **exclusivamente** cuando un worker alcanza su límite de iteraciones sin completar. El `CoordinatorManager` nunca relanza un worker que falló por límite sin esperar el análisis del ForensicAgent.
 
-Analiza el historial completo del worker fallido en el blackboard y produce un análisis en tres partes:
+Analiza el historial completo del worker fallido en el blackboard y produce:
 1. **Qué intentó** — cada enfoque en orden cronológico
 2. **Por qué falló** — causa raíz: `error_de_implementacion`, `conflicto_con_constraint`, `limitacion_del_entorno` o `problema_de_especificacion`
 3. **Recomendación** — exactamente una de tres:
-   - `relanzar_con_constraint: {constraint específico}` → el manager escribe el constraint en el blackboard y relanza
-   - `reasignar_a: {worker alternativo}` → la tarea no corresponde a este worker
-   - `escalar_al_humano: {opciones disponibles}` → requiere decisión humana
+   - `relanzar_con_constraint: {constraint}` → el manager escribe el constraint y relanza
+   - `reasignar_a: {worker}` → la tarea no corresponde a este worker
+   - `escalar_al_humano: {opciones}` → requiere decisión humana
 
 **No modifica código. Herramientas:** solo lectura del blackboard y workspace
 
 ---
 
-#### Librarian — Memoria Compuesta *(on-demand, post-sesión)*
-Se activa solo cuando el CodeReviewer emitió `APROBADO` o `APROBADO_CON_OBSERVACIONES`. Lee el blackboard completo de la sesión y **destila** — no transcribe — el conocimiento accionable en registros de `agent_memory` (`~/.hivecode/memory.db`).
+#### 12. Librarian — Memoria Compuesta *(on-demand, post-sesión)*
+Se activa solo cuando CodeReviewer emitió `APROBADO` o `APROBADO_CON_OBSERVACIONES`. Lee el blackboard completo y **destila** — no transcribe — el conocimiento accionable en `agent_memory` (`~/.hivecode/memory.db`). Escribe patrones, antipatrones, contratos, convenciones y lecciones forenses. Incrementa `confirmed_count` de registros que la sesión validó y depreca los que ya no aplican (`refuted_count > confirmed_count + 2`). El conocimiento no se borra — se depreca con trazabilidad.
 
-También incrementa `confirmed_count` de registros existentes que la sesión validó, y depreca registros cuyo `refuted_count` superó al `confirmed_count + 2`. El conocimiento no se borra — se depreca con trazabilidad.
-
-**No modifica código de producción ni el blackboard de sesión.**
+**No modifica código de producción. Herramientas:** solo lectura + `write_memory`
 
 ---
 
 ### Paralelismo real por niveles
 
-El `CoordinatorManager` agrupa las fases definidas por Architecture en niveles de dependencia. Todos los workers de un nivel se inician **en el mismo tick** con `Promise.all()` — sin esperar a que el anterior termine. El siguiente nivel solo comienza cuando todos los del nivel anterior reportaron `done`.
+El `CoordinatorManager` agrupa las fases definidas por Architecture en niveles de dependencia. Todos los workers de un nivel se inician **en el mismo tick** con `Promise.all()`. El siguiente nivel solo comienza cuando todos los del nivel anterior reportaron `done`.
 
 ```
-Nivel 0 ──► architecture                        (secuencial, diseño)
+Nivel -1 ─► product_manager              (opcional — features de alto nivel)
               │
-Nivel 1 ──►  backend ──┐
-             frontend  ├─ Promise.all() — inician simultáneamente
-             dba    ───┘
-             security  ← corre transversalmente durante niveles 1 y 2
+Nivel 0  ─► architecture                 (diseño, plan de fases)
               │
-Nivel 2 ──► test                                (conoce la implementación real)
+              ├─ Tipo web fullstack:
+              │   backend ──┐
+Nivel 1  ─►  │   frontend  ├─ Promise.all()  +  security (transversal)
               │
-Nivel 3 ──► integration                         (cruza los contratos)
+              ├─ Tipo mobile:
+              │   backend ──┐
+Nivel 1  ─►  │   mobile    ├─ Promise.all()  +  security (transversal)
               │
-Nivel 4 ──► reviewer                            (modelo máximo, veredicto final)
+              └─ Tipo ML:
+                  backend ──────┐
+Nivel 1  ─►      data_scientist ├─ Promise.all()  +  security (transversal)
+                  frontend ─────┘ (si hay UI)
               │
-Post-sesión ► librarian                         (solo si APROBADO)
+Nivel 2  ─► test + security_dedicado    (paralelo — QA conoce la implementación real)
+              │
+Nivel 3  ─► devops
+              │
+Nivel 4  ─► reviewer                    (modelo máximo, veredicto final)
+              │
+Post-sesión ► librarian                 (solo si APROBADO)
 ```
 
-La tabla `worker_activity` en SQLite registra `started_at` y `completed_at` con `level` para cada worker. La métrica de aceptación del paralelismo: los `started_at` de workers dentro del mismo nivel no deben diferir en más de 500ms.
+La tabla `worker_activity` registra `started_at` y `completed_at` con `level`. Métrica de aceptación: `started_at` de workers en el mismo nivel no deben diferir en más de 500ms.
 
 ---
 
 ## Memoria compuesta entre sesiones
 
-El **Librarian** destila el conocimiento de cada sesión aprobada en la tabla `agent_memory` (`~/.hivecode/memory.db`). El **Context Compiler** consulta esta tabla por FTS5 antes de despachar cada worker.
+El **Librarian** destila el conocimiento de cada sesión aprobada en la tabla `agent_memory` (`~/.hivecode/memory.db`). El **Context Compiler** consulta esta tabla por FTS5 antes de despachar cada worker, con filtrado por dominio: cada worker recibe solo el tipo de conocimiento relevante para su rol.
+
+| Worker | Tipos de memoria que recibe |
+|--------|----------------------------|
+| Architecture | `pattern`, `contract` |
+| SecurityAuditor | `antipattern` |
+| QAEngineer | `forensic_lesson` |
+| CodeReviewer | todos los tipos |
+| demás workers | filtrado por relevancia semántica (FTS5) |
 
 Tipos de conocimiento persistido:
 
@@ -284,7 +350,7 @@ Tipos de conocimiento persistido:
 | `convention` | Convención del proyecto descubierta durante la sesión |
 | `forensic_lesson` | Lección de fallos analizados por el ForensicAgent |
 
-Los registros tienen `confirmed_count` / `refuted_count` — el sistema depreca automáticamente conocimiento que ya no aplica.
+Los registros tienen `confirmed_count` / `refuted_count`. El sistema depreca automáticamente conocimiento que ya no aplica (`refuted_count > confirmed_count + 2`). El conocimiento no se borra — se depreca con trazabilidad completa.
 
 ---
 
@@ -348,7 +414,7 @@ packages/
 ├── cli/        CLI: comandos externos, REPL, launchers
 ├── code/       Motor: CoordinatorManager, workers, plan-parser
 ├── core/       Gateway HTTP/WS, SQLite, agent loop, tools, context compiler
-├── hivetui/    TUI Ratatui (Rust) — interfaz de terminal
+├── hivetui/    TUI Rust/crossterm — renderer custom, sin dependencias de Ratatui
 ├── ui/         Componentes CLI (@clack)
 ├── mcp/        Cliente Model Context Protocol
 └── skills/     Skills empaquetadas
@@ -412,8 +478,11 @@ dist/
 ├── hivecode.js               # Entry point
 ├── bee.worker.js
 ├── architecture.worker.js
+├── product-manager.worker.js
 ├── backend.worker.js
 ├── frontend.worker.js
+├── mobile.worker.js
+├── data-scientist.worker.js
 ├── dba.worker.js
 ├── security.worker.js
 ├── test.worker.js

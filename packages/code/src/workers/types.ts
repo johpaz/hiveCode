@@ -1,8 +1,11 @@
 export type PhaseName =
   | "bee"
   | "architecture"
+  | "product_manager"
   | "backend"
   | "frontend"
+  | "mobile"
+  | "data_scientist"
   | "security"
   | "test"
   | "devops"

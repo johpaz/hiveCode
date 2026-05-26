@@ -47,21 +47,21 @@ fn render_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {
     let input_row       = rows[5];
     let status_area     = rows[6];
 
-    header::render(canvas, header_area, state);
-    tabbar::render(canvas, tabbar_area, state);
+    canvas.with_clip(header_area, |canvas| header::render(canvas, header_area, state));
+    canvas.with_clip(tabbar_area, |canvas| tabbar::render(canvas, tabbar_area, state));
 
-    match state.active_tab {
+    canvas.with_clip(content_area, |canvas| match state.active_tab {
         TabId::Focus     => render_focus(canvas, content_area, state),
         TabId::Plan      => plan_layout::render(canvas, content_area, state),
         TabId::Code      => code_layout::render(canvas, content_area, state),
         TabId::Review    => review_layout::render(canvas, content_area, state),
         TabId::Dashboard => dashboard_layout::render(canvas, content_area, state),
-    }
+    });
 
-    checkpoint_bar::render(canvas, checkpoint_area, state);
-    conflict_bar::render(canvas, conflict_area, state);
-    input::render(canvas, input_row, state);
-    statusbar::render(canvas, status_area, state);
+    canvas.with_clip(checkpoint_area, |canvas| checkpoint_bar::render(canvas, checkpoint_area, state));
+    canvas.with_clip(conflict_area, |canvas| conflict_bar::render(canvas, conflict_area, state));
+    canvas.with_clip(input_row, |canvas| input::render(canvas, input_row, state));
+    canvas.with_clip(status_area, |canvas| statusbar::render(canvas, status_area, state));
 
     input_row
 }

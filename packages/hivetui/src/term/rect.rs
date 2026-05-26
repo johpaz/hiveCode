@@ -12,11 +12,28 @@ impl Rect {
     }
 
     pub fn right(&self) -> u16 {
-        self.x + self.w
+        self.x.saturating_add(self.w)
     }
 
     pub fn bottom(&self) -> u16 {
-        self.y + self.h
+        self.y.saturating_add(self.h)
+    }
+
+    pub fn contains(&self, x: u16, y: u16) -> bool {
+        x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
+    }
+
+    pub fn intersection(self, other: Rect) -> Rect {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = self.right().min(other.right());
+        let bottom = self.bottom().min(other.bottom());
+        Rect::new(
+            x,
+            y,
+            right.saturating_sub(x),
+            bottom.saturating_sub(y),
+        )
     }
 
     pub fn vsplit(self, heights: &[u16]) -> Vec<Rect> {

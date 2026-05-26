@@ -105,13 +105,15 @@ describe("parsePlan", () => {
 	test("falls back to default plan on invalid JSON", () => {
 		const result = parsePlan("This is not JSON at all")
 		expect(result.adr.title).toBe("Auto-generated ADR")
-		expect(result.phases.length).toBe(5)
+		expect(result.phases.length).toBe(getDefaultPhases().length)
 		expect(result.risks[0].severity).toBe("MEDIUM")
+		expect(result.parseError).toContain("JSON estructurado valido")
 	})
 
 	test("falls back on malformed JSON", () => {
 		const result = parsePlan("{ invalid json }}}")
 		expect(result.adr.title).toBe("Auto-generated ADR")
+		expect(result.parseError).toBeDefined()
 	})
 
 	test("handles missing adr gracefully", () => {
@@ -211,16 +213,23 @@ describe("groupPhasesByLevel", () => {
 })
 
 describe("getDefaultPhases", () => {
-	test("returns 5 phases in standard order", () => {
+	test("returns 6 phases in standard v4 order", () => {
 		const phases = getDefaultPhases()
-		expect(phases.length).toBe(5)
-		expect(phases.map(p => p.coordinator)).toEqual(["backend", "frontend", "security", "test", "devops"])
+		expect(phases.length).toBe(6)
+		expect(phases.map(p => p.coordinator)).toEqual(["backend", "frontend", "security", "test", "devops", "reviewer"])
 	})
 
-	test("default phases have proper dependencies", () => {
+	test("default phases have proper dependencies (v4 parallel engineers)", () => {
 		const phases = getDefaultPhases()
-		expect(phases[0].dependsOn).toEqual([])
-		expect(phases[1].dependsOn).toEqual(["backend"])
+		// backend and frontend run in parallel (level 0)
+		expect(phases[0].dependsOn).toEqual([])  // backend
+		expect(phases[1].dependsOn).toEqual([])  // frontend — parallel with backend
+		// security and test wait for both engineers (level 1)
+		expect(phases[2].dependsOn).toEqual(["backend", "frontend"])  // security
+		expect(phases[3].dependsOn).toEqual(["backend", "frontend"])  // test
+		// devops waits for security + test (level 2)
 		expect(phases[4].dependsOn).toEqual(["security", "test"])
+		// reviewer is the final gate (level 3)
+		expect(phases[5].dependsOn).toEqual(["devops"])
 	})
 })

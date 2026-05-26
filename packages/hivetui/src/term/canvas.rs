@@ -16,6 +16,7 @@ pub struct Canvas {
     pub h: u16,
     front: Vec<Cell>,
     back: Vec<Cell>,
+    clip: Option<Rect>,
 }
 
 impl Canvas {
@@ -26,6 +27,7 @@ impl Canvas {
             h,
             front: vec![Cell::default(); n],
             back: vec![Cell::default(); n],
+            clip: None,
         }
     }
 
@@ -53,7 +55,24 @@ impl Canvas {
         self.back = vec![Cell::default(); n];
     }
 
+    /// Restricts all drawing in `render` to `area`, intersecting any parent clip.
+    pub fn with_clip<T>(&mut self, area: Rect, render: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = self.clip;
+        self.clip = Some(match previous {
+            Some(parent) => parent.intersection(area),
+            None => area,
+        });
+        let output = render(self);
+        self.clip = previous;
+        output
+    }
+
     pub fn put(&mut self, x: u16, y: u16, cell: Cell) {
+        if let Some(clip) = self.clip {
+            if !clip.contains(x, y) {
+                return;
+            }
+        }
         if x < self.w && y < self.h {
             self.back[y as usize * self.w as usize + x as usize] = cell;
         }
@@ -62,15 +81,27 @@ impl Canvas {
     pub fn print(&mut self, x: u16, y: u16, text: &str, style: Style) {
         let mut col = 0u16;
         for ch in text.chars() {
-            let w = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+            let w = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
             let cx = x.saturating_add(col);
-            self.put(cx, y, Cell::new(ch, style));
-            // Mark right-half of wide chars as placeholder so flush never overwrites them
-            if w == 2 && cx + 1 < self.w {
-                self.put(cx + 1, y, Cell::new('\0', style));
+            if self.glyph_fits(cx, y, w) {
+                self.put(cx, y, Cell::new(ch, style));
+                // Mark right-half of wide chars as placeholder so flush never overwrites them
+                if w == 2 {
+                    self.put(cx + 1, y, Cell::new('\0', style));
+                }
             }
             col += w;
         }
+    }
+
+    fn glyph_fits(&self, x: u16, y: u16, width: u16) -> bool {
+        if x >= self.w || y >= self.h || x.saturating_add(width) > self.w {
+            return false;
+        }
+        let rightmost = x.saturating_add(width.saturating_sub(1));
+        self.clip
+            .map(|clip| clip.contains(x, y) && clip.contains(rightmost, y))
+            .unwrap_or(true)
     }
 
     pub fn hline(&mut self, x: u16, y: u16, len: u16, ch: char, style: Style) {
@@ -211,5 +242,54 @@ impl Canvas {
         queue!(out, ResetColor)?;
         queue!(out, SetAttribute(Attribute::Reset))?;
         out.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clip_prevents_text_from_escaping_its_rect() {
+        let mut canvas = Canvas::new(12, 4);
+
+        canvas.with_clip(Rect::new(2, 1, 4, 1), |canvas| {
+            canvas.print(0, 1, "overflow", Style::new());
+            canvas.print(2, 2, "outside", Style::new());
+        });
+
+        assert_eq!(canvas.cell_at(1, 1).unwrap().ch, ' ');
+        assert_eq!(canvas.cell_at(2, 1).unwrap().ch, 'e');
+        assert_eq!(canvas.cell_at(5, 1).unwrap().ch, 'l');
+        assert_eq!(canvas.cell_at(6, 1).unwrap().ch, ' ');
+        assert_eq!(canvas.cell_at(2, 2).unwrap().ch, ' ');
+    }
+
+    #[test]
+    fn nested_clips_are_intersected() {
+        let mut canvas = Canvas::new(12, 4);
+
+        canvas.with_clip(Rect::new(1, 1, 8, 2), |canvas| {
+            canvas.with_clip(Rect::new(4, 0, 5, 4), |canvas| {
+                canvas.print(1, 1, "abcdefgh", Style::new());
+            });
+        });
+
+        assert_eq!(canvas.cell_at(3, 1).unwrap().ch, ' ');
+        assert_eq!(canvas.cell_at(4, 1).unwrap().ch, 'd');
+        assert_eq!(canvas.cell_at(8, 1).unwrap().ch, 'h');
+        assert_eq!(canvas.cell_at(9, 1).unwrap().ch, ' ');
+    }
+
+    #[test]
+    fn clipped_wide_character_does_not_cross_the_right_edge() {
+        let mut canvas = Canvas::new(8, 2);
+
+        canvas.with_clip(Rect::new(0, 0, 4, 1), |canvas| {
+            canvas.print(3, 0, "🐝", Style::new());
+        });
+
+        assert_eq!(canvas.cell_at(3, 0).unwrap().ch, ' ');
+        assert_eq!(canvas.cell_at(4, 0).unwrap().ch, ' ');
     }
 }
