@@ -429,7 +429,7 @@ export class CoordinatorManager extends CoordinatorBase {
         description: p.description,
         dependsOn: p.dependsOn as Array<Exclude<PhaseName, "bee">>,
       }))
-      await this.executePhaseLoop(
+      const completed = await this.executePhaseLoop(
         dispatchPhases,
         description,
         beeResult.narrativeEntry,
@@ -439,6 +439,7 @@ export class CoordinatorManager extends CoordinatorBase {
         configuredModel,
         onApprovalCheckpoint,
       )
+      if (!completed) return
       await this.finalizeTask(taskStartTime, turnId, "BEE dispatch completed")
       log.info(`[coordinator-manager] ✅ Task ${this.activeTaskId} completed (BEE dispatch)`)
       return
@@ -591,7 +592,7 @@ export class CoordinatorManager extends CoordinatorBase {
 
     // Execute dynamic phases from the architecture plan
     const phases = plan.phases.length > 0 ? plan.phases : getDefaultPhases()
-    await this.executePhaseLoop(
+    const completed = await this.executePhaseLoop(
       phases,
       description,
       archResult.narrativeEntry,
@@ -601,6 +602,7 @@ export class CoordinatorManager extends CoordinatorBase {
       configuredModel,
       onApprovalCheckpoint,
     )
+    if (!completed) return
 
     await this.finalizeTask(taskStartTime, turnId, archResult.narrativeEntry)
     log.info(`[coordinator-manager] ✅ Task ${this.activeTaskId} completed`)
@@ -696,7 +698,7 @@ export class CoordinatorManager extends CoordinatorBase {
       narrativeEntry: string
       nextPhase?: string
     }) => Promise<"approve" | "skip" | "cancel">
-  ): Promise<void> {
+  ): Promise<boolean> {
     const levels = groupPhasesByLevel(phases)
 
     log.info(`[coordinator-manager] 📋 Executing ${phases.length} phases in ${levels.length} level(s):`)
@@ -707,7 +709,7 @@ export class CoordinatorManager extends CoordinatorBase {
     let globalPhaseIndex = 0
 
     for (let levelIdx = 0; levelIdx < levels.length; levelIdx++) {
-      if (isCancelled()) break
+      if (isCancelled()) return false
 
       // Track current level for worker_activity writes
       this.currentLevel = levelIdx
@@ -821,7 +823,7 @@ export class CoordinatorManager extends CoordinatorBase {
             if (this.onIpcEvent) {
               this.onIpcEvent("forensic_alert", { worker: phase, analysis: forensicResult.narrativeEntry, recommendation: recommendation.detail })
             }
-            return
+            return false
           }
 
           if (recommendation.action === "retry_with_constraint") {
@@ -842,7 +844,7 @@ export class CoordinatorManager extends CoordinatorBase {
             if (retryResult.status === "failed") {
               this.scribe.updateTaskStatus(this.activeTaskId!, "failed")
               log.error(`[coordinator-manager] ❌ ${phase} failed after ForensicAgent retry`)
-              return
+              return false
             }
             this.scribe.updatePhaseStatus(constraintTask.phaseId, "completed", retryResult.narrativeEntry)
             this.scribe.updatePhaseMetadata(constraintTask.phaseId, retryResult.tokensIn ?? 0, retryResult.tokensOut ?? 0, retryResult.durationMs)
@@ -852,20 +854,20 @@ export class CoordinatorManager extends CoordinatorBase {
           // Reasign: handle as regular failure
           this.scribe.updateTaskStatus(this.activeTaskId!, "failed")
           log.error(`[coordinator-manager] ❌ ${phase} phase failed (ForensicAgent recommends reasign)`)
-          return
+          return false
         }
 
         if (result.status === "failed") {
           this.scribe.updateTaskStatus(this.activeTaskId!, "failed")
           log.error(`[coordinator-manager] ❌ ${phase} phase failed: ${result.blockerDescription}`)
-          return
+          return false
         }
 
         if (result.status === "blocked") {
           this.scribe.updatePhaseStatus(task.phaseId, "blocked", result.blockerDescription)
           this.scribe.updateTaskStatus(this.activeTaskId!, "paused")
           log.warn(`[coordinator-manager] ⚠️ ${phase} phase blocked: ${result.blockerDescription}`)
-          return
+          return false
         }
 
         this.scribe.updatePhaseStatus(task.phaseId, "completed", result.narrativeEntry)
@@ -892,7 +894,7 @@ export class CoordinatorManager extends CoordinatorBase {
           } else {
             log.info(`[coordinator-manager] 🔄 Reviewer rejected — marking task for retry`)
             this.scribe.updateTaskStatus(this.activeTaskId!, "failed")
-            return
+            return false
           }
         }
       }
@@ -912,7 +914,7 @@ export class CoordinatorManager extends CoordinatorBase {
         if (decision === "cancel") {
           this.scribe.updateTaskStatus(this.activeTaskId!, "cancelled")
           log.info(`[coordinator-manager] ❌ Task cancelled by user at level ${levelIdx}`)
-          return
+          return false
         }
 
         if (decision === "skip") {
@@ -929,6 +931,7 @@ export class CoordinatorManager extends CoordinatorBase {
 
       globalPhaseIndex += levelPhases.length
     }
+    return true
   }
 
   /** Write a row to the session DB worker_activity table for level-based tracking */

@@ -46,6 +46,18 @@ function makeArchResult(taskId: string): CoordinatorResult {
   }
 }
 
+function makeBeeArchitectureResult(task: CoordinatorTask): CoordinatorResult {
+  return {
+    taskId: task.taskId,
+    phaseId: task.phaseId,
+    coordinator: "bee",
+    status: "completed",
+    narrativeEntry: JSON.stringify({ action: "architecture", reason: "Architecture required" }),
+    filesModified: [],
+    durationMs: 100,
+  }
+}
+
 function makePhaseResult(taskId: string, coordinator: string, phaseId: number): CoordinatorResult {
   return {
     taskId,
@@ -84,20 +96,20 @@ describe("e2e: modo PLAN", () => {
     setMode("plan")
 
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
-      (_phase: PhaseName, task: CoordinatorTask) =>
-        Promise.resolve(makeArchResult(task.taskId))
+      (phase: PhaseName, task: CoordinatorTask) =>
+        Promise.resolve(phase === "bee" ? makeBeeArchitectureResult(task) : makeArchResult(task.taskId))
     )
     // ACTUAR
     await manager.runTask("Design a REST API", "plan")
-    // NOTAR — solo 1 dispatch, y fue architecture
-    expect(dispatchSpy).toHaveBeenCalledTimes(1)
-    expect(dispatchSpy.mock.calls[0][0]).toBe("architecture")
+    // NOTAR — BEE enruta y solo Architecture genera el plan.
+    expect(dispatchSpy).toHaveBeenCalledTimes(2)
+    expect(dispatchSpy.mock.calls.map((call: any[]) => call[0])).toEqual(["bee", "architecture"])
     // ESTADO
     const tasks = db.query("SELECT status FROM code_tasks").all() as any[]
     expect(tasks[0]?.status).toBe("completed")
     const phases = db.query("SELECT coordinator FROM code_task_phases").all() as any[]
-    expect(phases.length).toBe(1)
-    expect(phases[0].coordinator).toBe("architecture")
+    expect(phases.length).toBe(2)
+    expect(phases.map((phase: any) => phase.coordinator)).toEqual(["bee", "architecture"])
 
     dispatchSpy.mockRestore()
   })
@@ -110,8 +122,8 @@ describe("e2e: modo PLAN", () => {
     setMode("plan")
 
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
-      (_phase: PhaseName, task: CoordinatorTask) =>
-        Promise.resolve(makeArchResult(task.taskId))
+      (phase: PhaseName, task: CoordinatorTask) =>
+        Promise.resolve(phase === "bee" ? makeBeeArchitectureResult(task) : makeArchResult(task.taskId))
     )
     // ACTUAR
     await manager.runTask("Draft architecture only", "plan")
@@ -160,7 +172,9 @@ describe("e2e: modo AUTO", () => {
 
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) =>
-        phase === "architecture"
+        phase === "bee"
+          ? Promise.resolve(makeBeeArchitectureResult(task))
+          : phase === "architecture"
           ? Promise.resolve(makeArchResult(task.taskId))
           : Promise.resolve(makePhaseResult(task.taskId, phase, task.phaseId))
     )
@@ -197,6 +211,7 @@ describe("e2e: modo AUTO", () => {
 
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) => {
+        if (phase === "bee") return Promise.resolve(makeBeeArchitectureResult(task))
         if (phase === "architecture") return Promise.resolve(makeArchResult(task.taskId))
         return Promise.resolve({
           taskId: task.taskId,
@@ -214,11 +229,12 @@ describe("e2e: modo AUTO", () => {
     // ESTADO
     const failedTask = db.query("SELECT status FROM code_tasks").get() as any
     expect(failedTask?.status).toBe("failed")
-    // NOTAR — solo arch + primera fase fallida (no más dispatches)
+    // NOTAR — BEE + arch + primer nivel fallido; no se ejecuta el siguiente nivel.
     const dispatched = dispatchSpy.mock.calls.map((c: any) => c[0])
     expect(dispatched).toContain("architecture")
-    // No debe haber más de 2 dispatches (arch + primera fase fallida)
-    expect(dispatched.length).toBeLessThanOrEqual(3)
+    expect(dispatched).toContain("security")
+    expect(dispatched).not.toContain("test")
+    expect(dispatched.length).toBeLessThanOrEqual(4)
 
     dispatchSpy.mockRestore()
   })
@@ -269,7 +285,9 @@ describe("e2e: modo APPROVAL", () => {
 
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) =>
-        phase === "architecture"
+        phase === "bee"
+          ? Promise.resolve(makeBeeArchitectureResult(task))
+          : phase === "architecture"
           ? Promise.resolve(makeArchResult(task.taskId))
           : Promise.resolve(makePhaseResult(task.taskId, phase, task.phaseId))
     )
@@ -293,7 +311,9 @@ describe("e2e: modo APPROVAL", () => {
 
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) =>
-        phase === "architecture"
+        phase === "bee"
+          ? Promise.resolve(makeBeeArchitectureResult(task))
+          : phase === "architecture"
           ? Promise.resolve(makeArchResult(task.taskId))
           : Promise.resolve(makePhaseResult(task.taskId, phase, task.phaseId))
     )
@@ -319,7 +339,9 @@ describe("e2e: modo APPROVAL", () => {
     let checkpointCount = 0
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) =>
-        phase === "architecture"
+        phase === "bee"
+          ? Promise.resolve(makeBeeArchitectureResult(task))
+          : phase === "architecture"
           ? Promise.resolve(makeArchResult(task.taskId))
           : Promise.resolve(makePhaseResult(task.taskId, phase, task.phaseId))
     )
@@ -346,7 +368,9 @@ describe("e2e: modo APPROVAL", () => {
 
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) =>
-        phase === "architecture"
+        phase === "bee"
+          ? Promise.resolve(makeBeeArchitectureResult(task))
+          : phase === "architecture"
           ? Promise.resolve(makeArchResult(task.taskId))
           : Promise.resolve(makePhaseResult(task.taskId, phase, task.phaseId))
     )
@@ -414,6 +438,7 @@ describe("e2e: transición de modo durante ejecución", () => {
 
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) => {
+        if (phase === "bee") return Promise.resolve(makeBeeArchitectureResult(task))
         if (phase === "architecture") {
           // Cambiar a plan mode DURANTE la ejecución de architecture
           setMode("plan")

@@ -184,12 +184,39 @@ const BASE_INIT = (mode: string): BunMessage => ({
   token_count: 0,
 })
 
+const STRUCTURED_PLAN = (): BunMessage => ({
+  type: "plan_update",
+  task_id: `e2e-plan-${Date.now()}`,
+  adr_title: "Separacion de modulos por responsabilidad",
+  adr_content: Array.from(
+    { length: 12 },
+    (_, index) => `Contexto ${index + 1}: se revisan limites del layout, dependencias y aprobacion antes de ejecutar cambios.`,
+  ).join("\n\n"),
+  status: "pending",
+  phases: [
+    {
+      name: "Ajustar layout PLAN",
+      coordinator: "frontend",
+      description: "Mantener todo el contenido dentro del panel y permitir su revision completa.",
+      depends_on: [],
+      level: 0,
+      status: "pending",
+    },
+  ],
+  risks: [
+    {
+      severity: "HIGH",
+      description: "Una linea sin recorte puede invadir el mapa de archivos.",
+    },
+  ],
+})
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MODO PLAN — Bee analiza, stream de pensamiento visible en Plan tab
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("E2E: modo PLAN", () => {
-  test("TUI arranca, recibe Init(plan) y navega automáticamente a Plan tab", async () => {
+  test("permanece en Focus hasta recibir un plan estructurado y entonces muestra scroll", async () => {
     const socketPath = path.join(os.tmpdir(), `hivetui-e2e-plan-${Date.now()}.sock`)
     const { server, waitForConnection } = await createIpcServer(socketPath)
     const { frames, kill } = await spawnTui(socketPath)
@@ -207,12 +234,15 @@ describe("E2E: modo PLAN", () => {
       expect(afterInit.tab).toBe("focus")   // Init siempre → Focus
       expect(afterInit.mode).toBe("plan")
 
-      // 3. StateUpdate activa el routing al tab del modo
+      // 3. StateUpdate mantiene Focus hasta que exista un plan aprobable.
       ipc.send({ type: "state_update", new_mode: "plan" })
-      const onPlan = await waitForFrame(iter, (f) => f.tab === "plan")
-      expect(onPlan.tab).toBe("plan")
+      const waitingForPlan = await waitForFrame(iter, (f) => f.mode === "plan" && f.tab === "focus")
+      expect(waitingForPlan.tab).toBe("focus")
 
-      // 4. Bee empieza a razonar (ThoughtChunk)
+      // 4. Bee empieza a razonar sin sacar la UI de Focus.
+      ipc.send({ type: "history_append", role: "user", content: "Revisar el layout de PLAN" })
+      ipc.send({ type: "status", running: true, msg: "generando plan" })
+      await waitForFrame(iter, (f) => f.running && f.tab === "focus")
       ipc.send({
         type: "thought_chunk",
         coordinator: "bee",
@@ -222,25 +252,21 @@ describe("E2E: modo PLAN", () => {
       const withThought = await waitForFrame(iter, (f) =>
         frameContains(f, "Anali") || frameContains(f, "RAZON")
       )
-      expect(withThought.tab).toBe("plan")
+      expect(withThought.tab).toBe("focus")
 
-      // 5. Llega ADR desde architecture
-      ipc.send({
-        type: "adr_update",
-        path: "docs/adr/001-auth.md",
-        title: "Usar JWT para autenticación",
-        content: "# ADR-001\nUsar JWT stateless para sesiones.",
-        status: "proposed",
-      })
-      const withAdr = await waitForFrame(iter, (f) =>
-        frameContains(f, "JWT") || frameContains(f, "ADR")
+      // 5. Solo un plan estructurado habilita PLAN; el cuerpo largo exige scrollbar.
+      ipc.send(STRUCTURED_PLAN())
+      const withPlan = await waitForFrame(iter, (f) =>
+        f.tab === "plan" && frameContains(f, "Separacion")
       )
-      expect(withAdr.mode).toBe("plan")
+      expect(withPlan.mode).toBe("plan")
+      expect(frameContains(withPlan, "PgUp/PgDn")).toBe(true)
+      expect(frameContains(withPlan, "█")).toBe(true)
 
-      // 6. AssistantDone → TUI va a Focus
+      // 6. Tras generar un plan válido, se mantiene visible para aprobarlo.
       ipc.send({ type: "assistant_done" })
-      const done = await waitForFrame(iter, (f) => f.tab === "focus" && !f.running)
-      expect(done.tab).toBe("focus")
+      const done = await waitForFrame(iter, (f) => f.tab === "plan" && !f.running)
+      expect(done.tab).toBe("plan")
 
       ipc.close()
     } finally {
@@ -402,14 +428,16 @@ describe("E2E: ciclo completo PLAN → APPROVAL → AUTO", () => {
       await iter.next()
 
       // ── FASE 1: PLAN mode ─────────────────────────────────────────────────
-      // Init siempre va a Focus; state_update activa el routing al tab del modo
+      // Init y state_update mantienen Focus mientras el plan aun no existe.
       ipc.send(BASE_INIT("plan"))
       await waitForFrame(iter, (f) => f.tab === "focus" && f.mode === "plan")
 
       ipc.send({ type: "state_update", new_mode: "plan" })
-      await waitForFrame(iter, (f) => f.tab === "plan")
+      await waitForFrame(iter, (f) => f.tab === "focus" && f.mode === "plan")
 
-      // Bee piensa en el plan
+      // Bee piensa en el plan mientras el usuario permanece en Focus.
+      ipc.send({ type: "status", running: true, msg: "generando plan" })
+      await waitForFrame(iter, (f) => f.running && f.tab === "focus")
       for (const content of [
         "Analizando el contexto del proyecto",
         "Identificando dependencias",
@@ -417,18 +445,14 @@ describe("E2E: ciclo completo PLAN → APPROVAL → AUTO", () => {
       ]) {
         ipc.send({ type: "thought_chunk", coordinator: "bee", phase: "planning", content })
       }
-      const planFrame = await waitForFrame(iter, (f) => f.tab === "plan")
-      expect(planFrame.mode).toBe("plan")
+      const focusFrame = await waitForFrame(iter, (f) => f.tab === "focus")
+      expect(focusFrame.mode).toBe("plan")
 
-      // Architecture genera un ADR
-      ipc.send({
-        type: "adr_update",
-        path: "docs/adr/002-modulos.md",
-        title: "Separación de módulos por responsabilidad",
-        content: "# ADR-002\nSeguir Clean Architecture.",
-        status: "accepted",
-      })
-      await waitForFrame(iter, (f) => frameContains(f, "ADR") || frameContains(f, "002"))
+      // Architecture genera ADR, fases y riesgos listos para aprobar.
+      ipc.send(STRUCTURED_PLAN())
+      const planFrame = await waitForFrame(iter, (f) => f.tab === "plan" && frameContains(f, "Separacion"))
+      expect(planFrame.mode).toBe("plan")
+      expect(frameContains(planFrame, "PgUp/PgDn")).toBe(true)
 
       // ── FASE 2: APPROVAL mode ─────────────────────────────────────────────
       ipc.send({ type: "state_update", new_mode: "approval" })
