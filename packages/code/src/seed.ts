@@ -7,7 +7,7 @@
 
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
-import { BUNDLED_SKILLS_DATA } from "../../skills/src/bundled-data.generated"
+import { SkillLoader } from "../../skills/src/loader"
 
 const log = logger.child("code-seed")
 
@@ -114,8 +114,8 @@ function seedCodeTools(): void {
 function seedCodeSkills(): void {
   const db = getDb()
 
-  // Filter code-related skills from bundled data
-  const codeSkills = BUNDLED_SKILLS_DATA.filter(
+  // SkillLoader uses static generated data in bundles and scans source files in development.
+  const codeSkills = new SkillLoader({ workspacePath: process.cwd() }).loadBundledSkills().filter(
     (s) => s.category === "code" || s.category === "git"
   )
 
@@ -143,7 +143,7 @@ function seedCodeSkills(): void {
         skill.category,
         JSON.stringify(skill.tools),
         JSON.stringify(skill.triggers),
-        skill.body
+        skill.content
       )
       count++
     } catch (err) {
