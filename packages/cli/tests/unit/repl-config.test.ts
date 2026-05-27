@@ -9,12 +9,12 @@ describe("repl-config: carga de estado inicial", () => {
   beforeAll(() => { resetTestDb() })
   afterAll(() => { cleanupTestDb() })
 
-  test("DB vacía → mode='plan', provider=''", () => {
+  test("DB vacía → mode='auto', provider=''", () => {
     // ARMAR: DB sin config (vacía por resetTestDb)
     // ACTUAR
     const state = loadInitialState()
     // NOTAR
-    expect(state.mode).toBe("plan")
+    expect(state.mode).toBe("auto")
     expect(state.provider).toBe("")
     expect(state.model).toBe("")
     expect(state.taskCount).toBe(0)

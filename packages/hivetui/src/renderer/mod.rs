@@ -3,7 +3,7 @@ use crate::{
     term::{Canvas, Rect},
     widgets::{
         checkpoint_bar, code_layout, command_popup, config_modal, conflict_bar,
-        dashboard_layout, header, history, info_modal, input, plan_layout,
+        dashboard_layout, header, history, info_modal, input, plan_approval_modal, plan_layout,
         review_layout, statusbar, tabbar, welcome,
     },
 };
@@ -21,16 +21,17 @@ pub fn render(canvas: &mut Canvas, state: &AppState) -> (u16, u16) {
     }
 
     // Popup de comandos: flota justo encima del input
-    if state.input.value().starts_with('/') && !matches!(state.modal, ModalState::Config(_) | ModalState::Info(_)) {
+    if state.input.value().starts_with('/') && !matches!(state.modal, ModalState::Config(_) | ModalState::Info(_) | ModalState::PlanApproval(_)) {
         let history_area = content_area_for_popup(area, state);
         command_popup::render(canvas, history_area, state);
     }
 
     // Modales: overlays sobre todo
     match &state.modal {
-        ModalState::Config(_) => config_modal::render(canvas, area, state),
-        ModalState::Info(_)   => info_modal::render(canvas, area, state),
-        ModalState::None      => {}
+        ModalState::Config(_)       => config_modal::render(canvas, area, state),
+        ModalState::Info(_)         => info_modal::render(canvas, area, state),
+        ModalState::PlanApproval(_) => plan_approval_modal::render(canvas, area, state),
+        ModalState::None            => {}
     }
 
     cursor_position(state, input_area)

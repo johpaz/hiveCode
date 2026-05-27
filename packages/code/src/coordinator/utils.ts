@@ -144,8 +144,14 @@ export function formatToolResult(toolName: string, result: unknown): string {
       summary = `✅ [${toolName}]: ${count} entries in ${r?.path || "."}`
       if (r?.entries?.length) {
         const lines = r.entries.map((e: any) => {
-          const size = e.size ? ` (${Math.round(e.size / 1024)}KB)` : ""
-          return `  ${e.type === "directory" ? "📁" : "📄"} ${e.name}${size}`
+          const isDir = e.type === "directory"
+          let size = ""
+          if (!isDir && e.size != null) {
+            if (e.size >= 1_048_576) size = ` (${(e.size / 1_048_576).toFixed(1)}MB)`
+            else if (e.size >= 1024) size = ` (${Math.round(e.size / 1024)}KB)`
+            else if (e.size > 0)    size = ` (${e.size}B)`
+          }
+          return `  ${isDir ? "📁" : "📄"} ${e.name}${size}`
         })
         summary += "\n" + smartTruncateLines(lines.join("\n"))
       }
@@ -258,4 +264,36 @@ export function parseGitDiffStat(stat: string): Record<string, { added: number; 
     }
   }
   return result
+}
+
+export interface DiffChunk {
+  kind: "add" | "remove" | "context"
+  text: string
+  old_line_no?: number
+  new_line_no?: number
+}
+
+export function parseUnifiedDiff(diffText: string): DiffChunk[] {
+  const chunks: DiffChunk[] = []
+  let oldLine = 0
+  let newLine = 0
+
+  for (const line of diffText.split("\n")) {
+    const hunkMatch = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
+    if (hunkMatch) {
+      oldLine = parseInt(hunkMatch[1], 10)
+      newLine = parseInt(hunkMatch[2], 10)
+      continue
+    }
+    if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") || line.startsWith("index ")) continue
+
+    if (line.startsWith("+")) {
+      chunks.push({ kind: "add", text: line.slice(1), new_line_no: newLine++ })
+    } else if (line.startsWith("-")) {
+      chunks.push({ kind: "remove", text: line.slice(1), old_line_no: oldLine++ })
+    } else if (line.startsWith(" ")) {
+      chunks.push({ kind: "context", text: line.slice(1), old_line_no: oldLine++, new_line_no: newLine++ })
+    }
+  }
+  return chunks
 }

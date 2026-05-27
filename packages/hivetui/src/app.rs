@@ -5,7 +5,8 @@ use crossterm::{
     cursor::Hide,
     cursor::MoveTo,
     cursor::Show,
-    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream,
+            DisableBracketedPaste, EnableBracketedPaste},
     execute,
     terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -13,7 +14,7 @@ use futures::StreamExt;
 use tokio::time::{self, Duration};
 
 use crate::{
-    controller::{handle_key_event, handle_mouse_event},
+    controller::{handle_key_event, handle_mouse_event, handle_paste_event},
     ipc::{self, TuiMessage},
     renderer,
     state::{AppState, Role},
@@ -185,6 +186,13 @@ pub async fn run() -> Result<()> {
                         handle_mouse_event(&mut state, mouse);
                         session.draw(&mut state)?;
                     }
+                    Some(Ok(Event::Paste(text))) => {
+                        handle_paste_event(&mut state, text);
+                        for msg in state.pending_ipc.drain(..) {
+                            let _ = ipc_ch.tx.try_send(msg);
+                        }
+                        session.draw(&mut state)?;
+                    }
                     Some(Ok(_)) => {}
                     Some(Err(err)) => return Err(err.into()),
                     None => break,
@@ -214,7 +222,7 @@ fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
         let mut stdout = stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen, Show, DisableMouseCapture);
+        let _ = execute!(stdout, LeaveAlternateScreen, Show, DisableBracketedPaste, DisableMouseCapture);
         previous(panic_info);
     }));
 }
@@ -229,7 +237,7 @@ impl TerminalSession {
         enable_raw_mode()?;
 
         let mut stdout = stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste, Hide)?;
         let (w, h) = terminal::size()?;
 
         Ok(Self {
@@ -254,6 +262,6 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.stdout, LeaveAlternateScreen, Show, DisableMouseCapture);
+        let _ = execute!(self.stdout, LeaveAlternateScreen, Show, DisableBracketedPaste, DisableMouseCapture);
     }
 }

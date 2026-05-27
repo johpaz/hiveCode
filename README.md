@@ -9,6 +9,10 @@
 > **TUI:** Rust + crossterm, renderer custom (`packages/hivetui/`)
 > **Licencia:** hivecode-NC-1.0 (no comercial)
 
+**Documentación técnica:**
+- [`docs/harness.md`](./docs/harness.md) — arquitectura completa del harness, las 4 capas del sistema, Learning Harness y comparación con Google ADK / Antigravity CLI.
+- [`docs/workers.md`](./docs/workers.md) — referencia detallada de los 13 coordinadores, 2 workers on-demand, 18 sub-agentes y tabla completa de herramientas por rol.
+
 ---
 
 ## Inicio rápido
@@ -140,27 +144,29 @@ Usuario escribe cualquier mensaje
   ▼                                                       ▼
 "respond" / "fix"                               "dispatch" / "architecture"
   │                                                       │
-  ▼                                              Nivel -1 (opcional):
-BEE responde o aplica                            ProductManager
-el fix directamente                              PRD + criterios de aceptación
+  ▼                                              Nivel 0: ProductManager
+BEE responde o aplica                            PRD + historias de usuario
+el fix directamente.                             + criterios de aceptación
+SIN activar ningún worker.                       (siempre, antes de todo diseño)
                                                          │
-                                                Nivel 0: Architecture
+                                                Nivel 1: Architecture
                                                 ADR + contratos TypeScript
                                                 Plan de fases por tipo de proyecto
                                                          │
-                                         Nivel 1 (paralelo — según tipo):
+                                         Nivel 2 (paralelo — según tipo):
                                          Backend + Frontend        (web fullstack)
                                          Backend + Mobile          (app móvil)
                                          Backend + DataScientist   (ML/IA)
                                          los tres juntos           (fullstack ML)
                                          Security (transversal — siempre)
                                                          │
-                                         Nivel 2 (paralelo):
-                                         QAEngineer + Security dedicado
+                                         Nivel 3 (paralelo):
+                                         QAEngineer + DBA
                                                          │
-                                         Nivel 3: DevOps
+                                         Nivel 4 (paralelo):
+                                         Integration + DevOps
                                                          │
-                                         Nivel 4: CodeReviewer
+                                         Nivel 5: CodeReviewer
                                            (modelo máximo, veredicto final)
                                                          │
                                   ┌──────────────────────┴──────────────────┐
@@ -169,6 +175,8 @@ el fix directamente                              PRD + criterios de aceptación
                            Librarian (post-sesión)                Workers relanzados
                            Destila sesión → agent_memory          con constraints del reviewer
 ```
+
+> **Modo inicial:** `auto`. BEE ejecuta el pipeline completo sin pausas. En modo `plan` solo muestra el ARNÉS sin ejecutar nada. En modo `approval` hace checkpoint entre cada nivel esperando confirmación del operador.
 
 Si un worker agota sus iteraciones sin completar, **ForensicAgent** se activa automáticamente antes de cualquier relanzamiento — analiza la causa raíz y recomienda `relanzar_con_constraint`, `reasignar` o `escalar_al_humano`.
 
@@ -298,28 +306,28 @@ Se activa solo cuando CodeReviewer emitió `APROBADO` o `APROBADO_CON_OBSERVACIO
 El `CoordinatorManager` agrupa las fases definidas por Architecture en niveles de dependencia. Todos los workers de un nivel se inician **en el mismo tick** con `Promise.all()`. El siguiente nivel solo comienza cuando todos los del nivel anterior reportaron `done`.
 
 ```
-Nivel -1 ─► product_manager              (opcional — features de alto nivel)
+Nivel 0  ─► product_manager             (siempre — sin PRD no hay arquitectura posible)
               │
-Nivel 0  ─► architecture                 (diseño, plan de fases)
+Nivel 1  ─► architecture                (diseño, ADR, plan de fases, contratos)
               │
               ├─ Tipo web fullstack:
               │   backend ──┐
-Nivel 1  ─►  │   frontend  ├─ Promise.all()  +  security (transversal)
+Nivel 2  ─►  │   frontend  ├─ Promise.all()  +  security (transversal)
               │
               ├─ Tipo mobile:
               │   backend ──┐
-Nivel 1  ─►  │   mobile    ├─ Promise.all()  +  security (transversal)
+Nivel 2  ─►  │   mobile    ├─ Promise.all()  +  security (transversal)
               │
               └─ Tipo ML:
                   backend ──────┐
-Nivel 1  ─►      data_scientist ├─ Promise.all()  +  security (transversal)
+Nivel 2  ─►      data_scientist ├─ Promise.all()  +  security (transversal)
                   frontend ─────┘ (si hay UI)
               │
-Nivel 2  ─► test + security_dedicado    (paralelo — QA conoce la implementación real)
+Nivel 3  ─► test + dba                  (paralelo — QA conoce la implementación real)
               │
-Nivel 3  ─► devops
+Nivel 4  ─► integration + devops        (paralelo — valida contratos y genera PR)
               │
-Nivel 4  ─► reviewer                    (modelo máximo, veredicto final)
+Nivel 5  ─► reviewer                    (modelo máximo, veredicto final)
               │
 Post-sesión ► librarian                 (solo si APROBADO)
 ```
@@ -351,6 +359,41 @@ Tipos de conocimiento persistido:
 | `forensic_lesson` | Lección de fallos analizados por el ForensicAgent |
 
 Los registros tienen `confirmed_count` / `refuted_count`. El sistema depreca automáticamente conocimiento que ya no aplica (`refuted_count > confirmed_count + 2`). El conocimiento no se borra — se depreca con trazabilidad completa.
+
+---
+
+## Learning Harness — Autocorrección
+
+El sistema detecta sus propios fallos durante la ejecución y genera propuestas de mejora que el operador puede revisar y aplicar. No hay autocorrección automática — **las propuestas en estado `pending` no tienen ningún efecto** hasta que el operador las apruebe.
+
+### Cómo funciona
+
+Cada fallo se registra inmediatamente en `learning_failures` (append-only). Al cerrar una tarea, BEE evalúa si hubo fricción y genera una propuesta. Cuando Architecture prepara un nuevo plan, consulta los fallos acumulados — si hay un patrón con 3+ ocurrencias, lo inyecta en su contexto y genera una propuesta adicional.
+
+```
+Ejecución
+  ├─ Tool falla      → learning_failures (tool_error)
+  ├─ Phase falla     → learning_failures (phase_failure)
+  └─ Task completa   → evalúa fricción → learning_proposals (pending)
+
+Próxima tarea con Architecture:
+  └─ 3+ fallos del mismo tipo → inyecta en contexto + nueva propuesta
+
+hivecode doctor → lista propuestas pendientes con detalle
+```
+
+### Ver y aplicar propuestas
+
+```bash
+# Ver propuestas pendientes
+hivecode doctor
+
+# Aplicar un cambio de prompt al agente afectado
+hivecode agent edit <name>
+
+# Agregar una skill nueva
+/skill add
+```
 
 ---
 
@@ -458,6 +501,9 @@ PRAGMA mmap_size    = 268435456;  -- 256 MB
 | `code_recovery_points` | Recovery points por nivel de ejecución |
 | `code_file_snapshots` | Snapshots para rollback |
 | `code_playbook` | Reglas aprendidas por el ACE Reflector (FTS5) |
+| `code_traces` | Trazas de ejecución de herramientas por agente |
+| `learning_failures` | Log append-only de fallos (tool_error, phase_failure, timeout…) |
+| `learning_proposals` | Propuestas de mejora generadas por BEE y Architecture (pending → aprobación manual) |
 
 ---
 

@@ -219,6 +219,7 @@ pub enum BunMessage {
         phases: Vec<PlanPhaseIpc>,
         risks: Vec<PlanRiskIpc>,
     },
+    PlanApprovalRequest,
 
     // ── Snapshots de inicio (dump de SQLite al conectar) ───────────────────────
     WorkersSnapshot { workers: Vec<WorkerSnapshotEntry> },

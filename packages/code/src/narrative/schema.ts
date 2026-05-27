@@ -190,7 +190,7 @@ CREATE TABLE IF NOT EXISTS code_context_state (
   session_id       TEXT PRIMARY KEY REFERENCES code_sessions(id) ON DELETE CASCADE,
   active_provider  TEXT DEFAULT 'anthropic',
   active_model     TEXT DEFAULT '',
-  active_mode      TEXT DEFAULT 'plan' CHECK(active_mode IN ('plan','approval','auto')),
+  active_mode      TEXT DEFAULT 'auto' CHECK(active_mode IN ('plan','approval','auto')),
   active_mcp       TEXT DEFAULT '[]',
   active_skills    TEXT DEFAULT '[]',
   updated_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
@@ -240,4 +240,34 @@ CREATE TABLE IF NOT EXISTS code_recovery_points (
   created_at        TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_recovery_task ON code_recovery_points(task_id);
+
+-- Learning failures: append-only log of every detected failure (tool, phase, output)
+-- Never updated — new rows only. Feeds learning_proposals via pattern detection.
+CREATE TABLE IF NOT EXISTS learning_failures (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id         TEXT REFERENCES code_tasks(id),
+  phase_id        TEXT REFERENCES code_task_phases(id),
+  agent           TEXT NOT NULL,
+  failure_type    TEXT NOT NULL CHECK(failure_type IN ('tool_error','phase_failure','invalid_output','plan_drift','timeout')),
+  error_message   TEXT NOT NULL,
+  context_summary TEXT,
+  resolved        INTEGER DEFAULT 0,
+  resolution      TEXT,
+  created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_lf_task  ON learning_failures(task_id);
+CREATE INDEX IF NOT EXISTS idx_lf_agent ON learning_failures(agent, failure_type);
+
+-- Learning proposals: improvement suggestions generated from failure patterns.
+-- status='pending' has NO effect on the system — operator must approve manually.
+CREATE TABLE IF NOT EXISTS learning_proposals (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_agent  TEXT NOT NULL,
+  proposal_type TEXT NOT NULL CHECK(proposal_type IN ('skill_adjust','new_skill','prompt_change','phase_order')),
+  description   TEXT NOT NULL,
+  failure_ids   TEXT NOT NULL DEFAULT '[]',
+  status        TEXT DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+  created_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_lp_status ON learning_proposals(status);
 `;

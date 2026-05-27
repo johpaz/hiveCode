@@ -8,6 +8,7 @@ pub mod header;
 pub mod history;
 pub mod info_modal;
 pub mod input;
+pub mod plan_approval_modal;
 pub mod mascot;
 pub mod plan_layout;
 pub mod review_layout;

@@ -27,6 +27,12 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
 
     // ── Modal de config activo ─────────────────────────────────────────────────
     if matches!(state.modal, ModalState::Config(_)) {
+        // Ctrl+V → pegar desde el campo de input principal como fallback
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('v') {
+            // El bracketed paste (Event::Paste) es la vía principal.
+            // Ctrl+V aquí funciona solo si el terminal lo envía como secuencia de escape.
+            return false;
+        }
         handle_config_modal_key(state, key.code);
         return false;
     }
@@ -40,6 +46,43 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
             }
             KeyCode::Up   => { info.scroll = info.scroll.saturating_sub(1); }
             KeyCode::Down => { info.scroll += 1; }
+            _ => {}
+        }
+        return false;
+    }
+
+    // ── Modal de aprobación del plan ───────────────────────────────────────────
+    if let ModalState::PlanApproval(approval) = &mut state.modal {
+        match key.code {
+            KeyCode::Esc => {
+                state.modal = ModalState::None;
+                // Cancel = send "n" so pendingPlanTask sees it as rejection
+                state.pending_ipc.push(TuiMessage::Submit { input: "n".to_string() });
+            }
+            KeyCode::Up => {
+                approval.selected = approval.selected.saturating_sub(1);
+                state.dirty.full = true;
+            }
+            KeyCode::Down => {
+                approval.selected = (approval.selected + 1).min(3);
+                state.dirty.full = true;
+            }
+            KeyCode::Enter => {
+                let selected = approval.selected;
+                state.modal = ModalState::None;
+                let input = match selected {
+                    0 => "/approve auto".to_string(),
+                    1 => "/approve review".to_string(),
+                    2 => "__plan_suggest__".to_string(), // signals: focus input for context
+                    _ => "n".to_string(),
+                };
+                if input == "__plan_suggest__" {
+                    // Don't send a message — just close modal and let user type
+                } else {
+                    state.pending_ipc.push(TuiMessage::Submit { input });
+                }
+                state.dirty.full = true;
+            }
             _ => {}
         }
         return false;
@@ -226,6 +269,9 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         (_, KeyCode::BackTab) => {
             state.session.mode = state.session.mode.next();
             state.dirty.session = true;
+            state.pending_ipc.push(TuiMessage::ModeChange {
+                mode: state.session.mode.as_str().to_string(),
+            });
         }
         (m, KeyCode::Left) if state.history_nav_mode && m.contains(KeyModifiers::SHIFT) => {
             state.history_hscroll = state.history_hscroll.saturating_sub(2);
@@ -707,6 +753,31 @@ mod tests {
         assert_eq!(state.plan.scroll, 8);
     }
 
+}
+
+// ── Paste event (bracketed paste o Ctrl+V desde terminal) ────────────────────
+
+pub fn handle_paste_event(state: &mut AppState, text: String) {
+    // Si hay un modal de config abierto, pega en el campo de texto/secreto enfocado
+    if let ModalState::Config(modal) = &mut state.modal {
+        let focused = state.modal_focused;
+        if modal.fields.get(focused).map(|f| f.kind != ModalFieldKind::Select).unwrap_or(false) {
+            if let Some(val) = modal.values.get_mut(focused) {
+                // Filtra saltos de línea y caracteres de control para campos de texto/secreto
+                let clean: String = text.chars().filter(|c| !c.is_control() || *c == ' ').collect();
+                val.push_str(&clean);
+            }
+        }
+        return;
+    }
+
+    // Sin modal → pega en el input principal carácter a carácter
+    for c in text.chars() {
+        if c == '\n' || c == '\r' {
+            continue; // no submittear al pegar
+        }
+        state.input.insert(c);
+    }
 }
 
 // ── Modal de configuración ────────────────────────────────────────────────────

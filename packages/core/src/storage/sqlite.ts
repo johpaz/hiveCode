@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+export type { Database };
 import { logger } from "../utils/logger.ts";
 import * as path from "node:path";
 import { existsSync, mkdirSync } from "node:fs";

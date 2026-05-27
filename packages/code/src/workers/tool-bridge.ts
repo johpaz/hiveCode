@@ -238,15 +238,43 @@ export function toolToLLMToolDef(tool: Tool): LLMToolDef {
   }
 }
 
+/** Meta-tools handled directly by the manager (not in allTools) */
+const BEE_META_TOOLS: LLMToolDef[] = [
+  {
+    type: "function",
+    function: {
+      name: "set_session_mode",
+      description: "Cambia el modo de ejecución de la sesión actual. Llámalo después de preguntar al usuario qué modo prefiere.",
+      parameters: {
+        type: "object",
+        properties: {
+          mode: {
+            type: "string",
+            enum: ["auto", "plan", "approval"],
+            description: "auto=ejecuta directo · plan=presenta plan y espera aprobación · approval=aprobación fase por fase",
+          },
+          reason: {
+            type: "string",
+            description: "Por qué se cambia el modo (para el log)",
+          },
+        },
+        required: ["mode"],
+      },
+    },
+  },
+]
+
 /** Get tools for a specific coordinator */
 export function getToolsForCoordinator(
   phase: PhaseName,
   allTools: Tool[]
 ): LLMToolDef[] {
   const allowed = new Set(COORDINATOR_TOOLS[phase])
-  return allTools
+  const tools = allTools
     .filter(t => allowed.has(t.name))
     .map(toolToLLMToolDef)
+  if (phase === "bee") return [...tools, ...BEE_META_TOOLS]
+  return tools
 }
 
 /** Execute a tool by name from the available tools list */

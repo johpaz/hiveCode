@@ -66,13 +66,12 @@ fn render_plan_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
             lines.len(),
             scroll,
         );
-        canvas.print(
-            area.x + 1,
-            area.bottom().saturating_sub(1),
-            "PgUp/PgDn · rueda",
-            Style::new().fg(DIM),
-        );
+        canvas.print(area.x + 1, area.bottom().saturating_sub(1), "PgUp/PgDn · rueda", Style::new().fg(DIM));
     }
+    // Approval hint always visible at bottom right
+    let hint = "↩ ejecutar  n/reject cancelar";
+    let hint_x = area.right().saturating_sub(hint.len() as u16 + 1);
+    canvas.print(hint_x, area.bottom().saturating_sub(1), hint, Style::new().fg(AMBER_DIM));
 }
 
 // ── Right panel top: filemap tree ─────────────────────────────────────────────

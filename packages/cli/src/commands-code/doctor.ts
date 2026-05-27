@@ -192,6 +192,39 @@ export async function doctor(flags: string[] = []): Promise<void> {
     })
   }
 
+  // Check 9: Learning proposals pending
+  const learningSpinner = hiveSpinner("default")
+  learningSpinner.start("Verificando propuestas de aprendizaje...")
+  try {
+    const db = getDb()
+    const pending = db.query(
+      "SELECT id, source_agent, proposal_type, description, created_at FROM learning_proposals WHERE status = 'pending' ORDER BY created_at DESC"
+    ).all() as any[]
+    learningSpinner.stop(
+      pending.length > 0
+        ? `${pending.length} propuesta(s) pendiente(s) de revisión`
+        : "Sin propuestas pendientes",
+      pending.length > 0 ? "warn" : "done",
+    )
+    checks.push({
+      name: "Learning Proposals",
+      status: pending.length > 0 ? "warn" : "pass",
+      message: pending.length > 0
+        ? `${pending.length} propuesta(s) pendiente(s) — revisa con: hivecode narrative show`
+        : "Sin propuestas pendientes",
+      detail: pending.length > 0
+        ? pending.slice(0, 3).map(p => `[${p.id}] ${p.source_agent}/${p.proposal_type}: ${String(p.description).slice(0, 70)}...`).join("\n     ")
+        : undefined,
+    })
+  } catch {
+    learningSpinner.stop("Tabla learning_proposals no disponible", "warn")
+    checks.push({
+      name: "Learning Proposals",
+      status: "warn",
+      message: "Tablas de aprendizaje no inicializadas (ejecuta una tarea primero)",
+    })
+  }
+
   // Render results
   console.log("")
   const passCount = checks.filter(c => c.status === "pass").length

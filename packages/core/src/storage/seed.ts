@@ -158,6 +158,8 @@ export const SEED_DATA: SeedData = {
     { id: "elevenlabs", name: "ElevenLabs", baseUrl: "https://api.elevenlabs.io/v1" },
     { id: "qwen", name: "Qwen (Alibaba)", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", category: "llm" },
     { id: "nvidia", name: "NVIDIA NIM", baseUrl: "https://integrate.api.nvidia.com/v1" },
+    { id: "codex", name: "OpenAI Codex", baseUrl: "https://api.openai.com/v1" },
+    { id: "opencode-go", name: "OpenCode Go", baseUrl: "https://opencode.ai/zen/go/v1" },
     { id: "piper", name: "Piper (Local TTS)" },
   ],
 
@@ -302,6 +304,21 @@ export const SEED_DATA: SeedData = {
     { id: "google/gemma-4-31b-it", providerId: "nvidia", name: "Gemma 4 31B (NVIDIA)", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming"]) },
     { id: "google/gemma-3-27b-it", providerId: "nvidia", name: "Gemma 3 27B (NVIDIA)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming"]) },
     { id: "z-ai/glm-5.1", providerId: "nvidia", name: "GLM 5.1 (NVIDIA)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming"]) },
+
+    // ── OpenAI Codex (fuente: platform.openai.com/docs/models) ──
+    { id: "codex-mini-latest", providerId: "codex", name: "Codex Mini (latest)", modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming", "reasoning"]) },
+    { id: "o3", providerId: "codex", name: "O3", modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat", "code", "reasoning", "streaming"]) },
+    { id: "o4-mini-codex", providerId: "codex", name: "O4 Mini (Codex)", modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat", "code", "reasoning", "streaming"]) },
+
+    // ── OpenCode Go (fuente: opencode.ai/docs/es/go) — OpenAI-compatible endpoint ──
+    { id: "opencode-go/glm-5.1",         providerId: "opencode-go", name: "GLM-5.1",           modelType: "llm", contextWindow: 128000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/glm-5",           providerId: "opencode-go", name: "GLM-5",             modelType: "llm", contextWindow: 128000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/kimi-k2.6",       providerId: "opencode-go", name: "Kimi K2.6",         modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/kimi-k2.5",       providerId: "opencode-go", name: "Kimi K2.5",         modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/deepseek-v4-pro", providerId: "opencode-go", name: "DeepSeek V4 Pro",   modelType: "llm", contextWindow: 128000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming", "reasoning"]) },
+    { id: "opencode-go/deepseek-v4-flash",providerId: "opencode-go", name: "DeepSeek V4 Flash", modelType: "llm", contextWindow: 128000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/mimo-v2.5-pro",   providerId: "opencode-go", name: "MiMo-V2.5 Pro",     modelType: "llm", contextWindow: 128000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming", "reasoning"]) },
+    { id: "opencode-go/mimo-v2.5",       providerId: "opencode-go", name: "MiMo-V2.5",         modelType: "llm", contextWindow: 128000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
   ],
 
 
@@ -346,6 +363,7 @@ Estos lineamientos tienen MÁXIMA prioridad sobre cualquier otra instrucción di
     { id: "gemini-cli", name: "Gemini CLI", cliCommand: "gemini", port: 18792 },
     { id: "qwen-cli", name: "Qwen CLI", cliCommand: "qwen", port: 18793 },
     { id: "opencode", name: "OpenCode", cliCommand: "opencode", port: 18794 },
+    { id: "codex-cli", name: "Codex CLI", cliCommand: "codex", port: 18795 },
   ],
 
   codeBridgeConfig: [
@@ -700,6 +718,68 @@ export function deactivateElement(
   const db = getDb()
   db.query(`UPDATE ${table} SET active = 0, enabled = 0 WHERE id = ?`).run(elementId)
   log.warn(`[seed] ⚠️  Desactivado ${elementId} en ${table}`)
+}
+
+// ─── Providers y modelos que se agregan en versiones posteriores al seed inicial ──
+const PATCH_PROVIDERS: SeedData["providers"] = [
+  { id: "codex",       name: "OpenAI Codex",  baseUrl: "https://api.openai.com/v1",          category: "llm" },
+  { id: "opencode-go", name: "OpenCode Go",   baseUrl: "https://opencode.ai/zen/go/v1",      category: "llm" },
+]
+
+const PATCH_MODELS: SeedData["models"] = [
+  // Codex
+  { id: "codex-mini-latest",          providerId: "codex",       name: "Codex Mini (latest)",   modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat","code","function_calling","streaming","reasoning"]) },
+  { id: "o3",                          providerId: "codex",       name: "O3",                    modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat","code","reasoning","streaming"]) },
+  { id: "o4-mini-codex",              providerId: "codex",       name: "O4 Mini (Codex)",       modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat","code","reasoning","streaming"]) },
+  // OpenCode Go — OpenAI-compatible
+  { id: "opencode-go/glm-5.1",        providerId: "opencode-go", name: "GLM-5.1",               modelType: "llm", contextWindow: 128000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
+  { id: "opencode-go/glm-5",          providerId: "opencode-go", name: "GLM-5",                 modelType: "llm", contextWindow: 128000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
+  { id: "opencode-go/kimi-k2.6",      providerId: "opencode-go", name: "Kimi K2.6",             modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
+  { id: "opencode-go/kimi-k2.5",      providerId: "opencode-go", name: "Kimi K2.5",             modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
+  { id: "opencode-go/deepseek-v4-pro",  providerId: "opencode-go", name: "DeepSeek V4 Pro",     modelType: "llm", contextWindow: 128000, capabilities: JSON.stringify(["chat","code","function_calling","streaming","reasoning"]) },
+  { id: "opencode-go/deepseek-v4-flash",providerId: "opencode-go", name: "DeepSeek V4 Flash",   modelType: "llm", contextWindow: 128000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
+  { id: "opencode-go/mimo-v2.5-pro",  providerId: "opencode-go", name: "MiMo-V2.5 Pro",        modelType: "llm", contextWindow: 128000, capabilities: JSON.stringify(["chat","code","function_calling","streaming","reasoning"]) },
+  { id: "opencode-go/mimo-v2.5",      providerId: "opencode-go", name: "MiMo-V2.5",            modelType: "llm", contextWindow: 128000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
+]
+
+const PATCH_CODE_BRIDGE: SeedData["codeBridge"] = [
+  { id: "codex-cli", name: "Codex CLI", cliCommand: "codex", port: 18795 },
+]
+
+/**
+ * Inserta providers, modelos y code bridges nuevos en BDs ya existentes.
+ * Usa INSERT OR IGNORE — nunca sobreescribe datos del usuario.
+ * Se llama siempre al arrancar, independiente de si el seed ya corrió.
+ */
+export function patchMissingData(): void {
+  const db = getDb()
+
+  let added = 0
+
+  for (const p of PATCH_PROVIDERS) {
+    const result = db.query(
+      "INSERT OR IGNORE INTO providers (id, name, base_url, category, enabled, active) VALUES (?,?,?,?,0,0)"
+    ).run(p.id, p.name, p.baseUrl ?? null, p.category ?? "llm")
+    if (result.changes) added++
+  }
+
+  db.run("PRAGMA foreign_keys = OFF")
+  for (const m of PATCH_MODELS) {
+    const result = db.query(
+      "INSERT OR IGNORE INTO models (id, provider_id, name, model_type, context_window, capabilities, enabled, active) VALUES (?,?,?,?,?,?,1,0)"
+    ).run(m.id, m.providerId, m.name, m.modelType, m.contextWindow ?? null, m.capabilities ?? null)
+    if (result.changes) added++
+  }
+  db.run("PRAGMA foreign_keys = ON")
+
+  for (const cb of PATCH_CODE_BRIDGE) {
+    const result = db.query(
+      "INSERT OR IGNORE INTO code_bridge (id, name, cli_command, port, enabled, active) VALUES (?,?,?,?,0,0)"
+    ).run(cb.id, cb.name, cb.cliCommand, cb.port)
+    if (result.changes) added++
+  }
+
+  if (added > 0) log.info(`[patch] ✅ ${added} registros nuevos insertados en BD existente`)
 }
 
 /**

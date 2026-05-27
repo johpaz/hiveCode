@@ -35,7 +35,7 @@ export function getSessionArray(): SharedArrayBuffer {
 }
 
 export function getMode(): SessionMode {
-  return MODE_REVERSE[Atomics.load(view, BYTE_MODE)] ?? "plan"
+  return MODE_REVERSE[Atomics.load(view, BYTE_MODE)] ?? "auto"
 }
 
 export function setMode(mode: SessionMode): void {

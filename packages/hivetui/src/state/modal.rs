@@ -35,9 +35,15 @@ pub struct InfoModalState {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct PlanApprovalState {
+    pub selected: usize,  // 0=auto, 1=approval, 2=suggest, 3=cancel
+}
+
+#[derive(Debug, Clone, Default)]
 pub enum ModalState {
     #[default]
     None,
     Config(ConfigModalState),
     Info(InfoModalState),
+    PlanApproval(PlanApprovalState),
 }

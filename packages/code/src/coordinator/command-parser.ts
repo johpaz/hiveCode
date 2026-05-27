@@ -72,7 +72,7 @@ function getCtx(db: ReturnType<typeof getDb>): ContextState {
   ).get(`provider_model_${provider}`) as any)?.value ?? "" : ""
   const mode = (db.query(
     "SELECT value FROM code_config WHERE key = 'default_mode'"
-  ).get() as any)?.value ?? "plan"
+  ).get() as any)?.value ?? "auto"
   const projectPath = (db.query(
     "SELECT project_path FROM code_sessions ORDER BY id DESC LIMIT 1"
   ).get() as any)?.project_path ?? process.cwd()
@@ -458,29 +458,81 @@ async function handleProviderCommand(
     }
     case "set": {
       if (ui?.showConfigModal) {
-        const providers = db.query(
-          "SELECT id, name FROM providers WHERE enabled = 1 AND api_key_encrypted IS NOT NULL AND api_key_encrypted != '' ORDER BY name"
-        ).all() as { id: string; name: string }[]
-        if (providers.length === 0) {
-          return { handled: true, output: "  No hay providers con API key configurada.\n  Agrega uno con: /provider add" }
+        // Muestra TODOS los providers LLM \u2014 con y sin API key
+        const allProviders = db.query(
+          "SELECT id, name, api_key_encrypted FROM providers WHERE category = 'llm' OR category IS NULL ORDER BY name"
+        ).all() as { id: string; name: string; api_key_encrypted: string | null }[]
+
+        if (allProviders.length === 0) {
+          return { handled: true, output: "  No hay providers registrados.\n  Agrega uno con: /provider add" }
         }
-        const options = providers.map(p => p.id)
-        const current = options.includes(ctx.activeProvider) ? ctx.activeProvider : options[0]
-        const values = await ui.showConfigModal("provider_set", "Cambiar Provider", [
-          { key: "provider", label: "Provider activo", placeholder: current, required: true, secret: false, field_type: "select", options, default_value: current },
+
+        // Marca los que ya tienen clave vs los que necesitan configuraci\u00f3n
+        const options = allProviders.map(p =>
+          p.api_key_encrypted ? p.id : `${p.id}  (sin clave)`
+        )
+        const rawIds = allProviders.map(p => p.id)
+        const current = rawIds.includes(ctx.activeProvider) ? ctx.activeProvider : rawIds[0]
+
+        const values = await ui.showConfigModal("provider_set", "Activar Provider", [
+          {
+            key: "provider",
+            label: "Selecciona provider",
+            placeholder: current,
+            required: true,
+            secret: false,
+            field_type: "select",
+            options,
+            default_value: current,
+          },
+          {
+            key: "api_key",
+            label: "API Key  (vac\u00edo si ya est\u00e1 configurada)",
+            placeholder: "sk-\u2026 / tu-api-key",
+            required: false,
+            secret: true,
+            field_type: "text",
+          },
         ])
+
         if (!values) return { handled: true, output: "  Cancelado" }
-        const name = values.provider || current
-        db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(name)
+
+        // El valor seleccionado puede tener el sufijo "  (sin clave)" \u2014 extraer id real
+        const rawSelected = values.provider || current
+        const selectedId = rawSelected.replace(/\s+\(sin clave\)$/, "").trim()
+
+        const providerRow = allProviders.find(p => p.id === selectedId)
+        const newKey = values.api_key?.trim() || ""
+        const existingKey = providerRow?.api_key_encrypted || ""
+
+        if (!newKey && !existingKey) {
+          return {
+            handled: true,
+            output: `  \u26a0 ${selectedId} no tiene API key.\n  Ingresa la clave en el campo "API Key" y vuelve a intentarlo.`,
+          }
+        }
+
+        if (newKey) {
+          db.query("UPDATE providers SET api_key_encrypted = ?, enabled = 1 WHERE id = ?")
+            .run(Buffer.from(newKey).toString("base64"), selectedId)
+        } else {
+          db.query("UPDATE providers SET enabled = 1 WHERE id = ?").run(selectedId)
+        }
+
+        db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(selectedId)
+
+        const verb = newKey ? "configurado y activado" : "activado"
         return {
           handled: true,
-          output: `  \u2b22 Provider: ${name}`,
-          newState: { activeProvider: name },
+          output: `  \u2b22 Provider ${selectedId} ${verb}`,
+          newState: { activeProvider: selectedId },
         }
       }
+
+      // Sin modal (modo texto puro)
       const name = rest[0]
       if (!name) {
-        const providers = db.query("SELECT id FROM providers WHERE enabled = 1").all() as { id: string }[]
+        const providers = db.query("SELECT id FROM providers ORDER BY id").all() as { id: string }[]
         return {
           handled: true,
           output: "uso: /provider set <nombre>\ndisponibles: " + providers.map(p => p.id).join(", "),

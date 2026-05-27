@@ -28,7 +28,7 @@ const _pkgVersion = (() => {
   }
 })();
 import { getDb, getDbPathLazy, initializeDatabase } from "../storage/sqlite";
-import { seedAllData } from "../storage/seed";
+import { seedAllData, patchMissingData } from "../storage/seed";
 import { decryptConfig } from "../storage/crypto.ts";
 import { resolveContext } from "./resolver";
 import { initializeGateway, type GatewayInitializationResult } from "./initializer";
@@ -215,6 +215,7 @@ export async function startGateway(config: Config): Promise<void> {
     const db = initializeDatabase();
     // Seed providers/models/hive_capabilities so setup wizard has data before onboarding completes
     seedAllData();
+    patchMissingData();
   } catch { /* si falla, los endpoints manejarán el error */ }
 
   // Setup mode: no DB file OR DB existe pero tiene 0 usuarios (primera ejecución interrumpida)

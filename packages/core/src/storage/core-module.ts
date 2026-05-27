@@ -1,6 +1,8 @@
 import { SCHEMA, PROJECTS_SCHEMA, CONTEXT_ENGINE_SCHEMA, MEETING_SCHEMA } from "./schema";
 import { logger } from "../utils/logger";
-import { seedAllData } from "./seed";
+import { seedAllData, patchMissingData } from "./seed";
+import { type Database } from "./sqlite";
+import { type BootstrapModule } from "./bootstrapper";
 
 const log = logger.child("core-init");
 
@@ -16,6 +18,7 @@ export const CoreModule: BootstrapModule = {
   },
   seedData: (_, force) => {
     seedAllData(force);
+    patchMissingData();
   }
 };
 

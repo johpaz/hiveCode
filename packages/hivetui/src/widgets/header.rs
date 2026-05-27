@@ -12,9 +12,16 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     let y = area.y;
     let mut x = area.x + 1;
 
-    // ⬡ hiveCode
+    // ⬡ hiveCode + mascot face (expression changes with mode)
     canvas.print(x, y, "⬡ hiveCode", Style::new().fg(AMBER_BRIGHT).bold());
     x += 10;
+    let face = match state.session.mode {
+        ReplMode::Plan     => "\\(^•^)/",
+        ReplMode::Approval => "(?•?)",
+        ReplMode::Auto     => "(•ᴗ•)",
+    };
+    canvas.print(x + 1, y, face, Style::new().fg(GREEN).bold());
+    x += 1 + face.chars().count() as u16;
 
     let sep = "  ·  ";
     macro_rules! sep {

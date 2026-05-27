@@ -243,7 +243,7 @@ export async function* runAgent(
 
     // Group tools to execute in parallel when possible
     const toolCalls = response.tool_calls
-    const results: Array<{ toolResultLLM: string, id: string, name: string, ms: number }> = []
+    const results: Array<{ toolResultLLM: string, toolResultJS?: unknown, id: string, name: string, ms: number, sig?: string }> = []
 
     // Phase 1: Validations and Confirmations (Sequential)
     const approvedTools: typeof toolCalls = []

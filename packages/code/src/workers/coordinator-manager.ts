@@ -32,7 +32,7 @@ import { CoordinatorBase } from "../coordinator/base.ts"
 import { makeGatewayEmitter } from "../context/ipc-emitter.ts"
 import {
   parseBeeDecision, formatBeeNarrative, formatToolCallForHuman,
-  formatToolResult, parseGitDiffStat, repairJson,
+  formatToolResult, parseGitDiffStat, parseUnifiedDiff, repairJson,
   smartTruncate, smartTruncateLines,
 } from "../coordinator/utils.ts"
 
@@ -87,6 +87,7 @@ export class CoordinatorManager extends CoordinatorBase {
   private onWorkerUpdate?: (update: { type: "tool_worker"; id: number; status: "idle" | "busy"; tool?: string }) => void
   private onTaskComplete?: (response: string) => void
   private onIpcEvent?: (event: string, payload: unknown) => void
+  private onModeChangeCb?: (mode: SessionMode) => void
 
   /** Reload secrets from Bun.secrets and providers table */
   reloadSecrets(): void {
@@ -379,6 +380,18 @@ export class CoordinatorManager extends CoordinatorBase {
         content: beeDecision.harness,
         timestamp: new Date().toISOString(),
       })
+      // Parse "ARCHIVOS ESTIMADOS" section so the risk map shows estimated files in plan mode
+      if (this.onIpcEvent) {
+        for (const line of beeDecision.harness.split("\n")) {
+          const newFile = line.match(/^\s+\+\s+(\S+)/)
+          const modFile = line.match(/^\s+~\s+(\S+)/)
+          if (newFile) {
+            this.onIpcEvent("file_risk_update", { path: newFile[1], risk: "low", operation: "created", agent: "bee" })
+          } else if (modFile) {
+            this.onIpcEvent("file_risk_update", { path: modFile[1], risk: "medium", operation: "modified", agent: "bee" })
+          }
+        }
+      }
     }
 
     // ── Route based on BEE's decision ─────────────────────────────────────────
@@ -659,6 +672,22 @@ export class CoordinatorManager extends CoordinatorBase {
       linesRemoved,
       durationMs,
     })
+    // Learning Harness — evaluate phases before marking completed
+    try {
+      const taskEval = this.scribe.evaluateTaskPhases(this.activeTaskId)
+      if (taskEval.hasFailures) {
+        const patterns = this.scribe.getFailurePatterns({ minOccurrences: 1 })
+        if (patterns.length > 0 && taskEval.frictionPhase) {
+          this.scribe.writeProposal({
+            sourceAgent: "bee",
+            proposalType: "prompt_change",
+            description: `Fase "${taskEval.frictionPhase}" tuvo fricción en tarea ${this.activeTaskId}. ${taskEval.failureSummary}`,
+            failureIds: patterns.flatMap(p => p.ids),
+          })
+        }
+      }
+    } catch { /* no bloquea el cierre */ }
+
     this.scribe.updateTaskStatus(this.activeTaskId, "completed")
     this.scribe.completeTurn(turnId, agentResponse, this.activeTaskId)
 
@@ -860,6 +889,16 @@ export class CoordinatorManager extends CoordinatorBase {
         if (result.status === "failed") {
           this.scribe.updateTaskStatus(this.activeTaskId!, "failed")
           log.error(`[coordinator-manager] ❌ ${phase} phase failed: ${result.blockerDescription}`)
+          // Learning Harness — capture phase failure (fire-and-forget)
+          try {
+            this.scribe.writeFailure({
+              taskId: this.activeTaskId!,
+              phaseId: null,
+              agent: phase,
+              failureType: "phase_failure",
+              errorMessage: result.blockerDescription ?? "unknown",
+            })
+          } catch { /* no bloquea el flujo */ }
           return false
         }
 
@@ -1246,6 +1285,29 @@ export class CoordinatorManager extends CoordinatorBase {
       sections.push(`# PROJECT NARRATIVE\n${narrative}`)
     }
 
+    // 5. Learning Harness — inject known failure patterns for Architecture coordinator
+    if (phase === "architecture") {
+      try {
+        const patterns = this.scribe.getFailurePatterns({ minOccurrences: 3 })
+        if (patterns.length > 0) {
+          const patternBlock = patterns
+            .map(p => `- ${p.agent}/${p.failureType}: ${p.count} ocurrencias (última: ${p.lastSeen})`)
+            .join("\n")
+          sections.push(`# PATRONES DE FALLO CONOCIDOS\nEvita repetir estos patrones al diseñar el plan:\n\n${patternBlock}`)
+          for (const p of patterns) {
+            try {
+              this.scribe.writeProposal({
+                sourceAgent: "architecture",
+                proposalType: p.failureType === "tool_error" ? "skill_adjust" : "prompt_change",
+                description: `Fallo repetido (${p.count}×): ${p.agent}/${p.failureType}. Revisar skill o prompt del agente.`,
+                failureIds: p.ids,
+              })
+            } catch { /* dedup silencioso si ya existe */ }
+          }
+        }
+      } catch { /* learning_failures puede no tener datos aún */ }
+    }
+
     return sections.join("\n\n")
   }
 
@@ -1329,6 +1391,20 @@ export class CoordinatorManager extends CoordinatorBase {
     }
 
     log.debug(`[coordinator-manager] 🛠️ ${name} calling tool: ${msg.toolName}`)
+
+    // Meta-tool: BEE changes session mode at runtime
+    if (msg.toolName === "set_session_mode") {
+      const newMode = ((msg.toolArgs as any)?.mode ?? "auto") as SessionMode
+      this.onModeChangeCb?.(newMode)
+      this.onIpcEvent?.("mode_change", { mode: newMode })
+      log.info(`[coordinator-manager] 🔄 Session mode changed to: ${newMode}`)
+      worker.postMessage(JSON.stringify({
+        type: "TOOL_RESULT",
+        toolCallId: msg.toolCallId,
+        result: JSON.stringify({ ok: true, mode: newMode }),
+      } as ManagerToWorkerMessage))
+      return
+    }
 
     // Stream tool call to TUI so user sees what the agent is doing
     if (this.onNarrativeChunk) {
@@ -1455,6 +1531,20 @@ export class CoordinatorManager extends CoordinatorBase {
     // Write tool execution trace (SPEC §5.4)
     this.writeToolTrace(name, msg.toolName, inputSummary, outputSummary, success, toolDurationNs)
 
+    // Learning Harness — capture tool failure (fire-and-forget, WAL-safe)
+    if (!success && this.activeTaskId) {
+      try {
+        this.scribe.writeFailure({
+          taskId: this.activeTaskId,
+          phaseId: null,
+          agent: name,
+          failureType: "tool_error",
+          errorMessage: outputSummary,
+          contextSummary: `tool=${msg.toolName} args=${JSON.stringify(msg.toolArgs ?? {}).slice(0, 200)}`,
+        })
+      } catch { /* no bloquea */ }
+    }
+
     // Evaluate file risk after a successful write so TUI can show risk badges
     if (success && writeTools.has(msg.toolName!) && msg.toolArgs) {
       const riskFilePath = (msg.toolArgs.path as string) || (msg.toolArgs.file as string) || ""
@@ -1463,6 +1553,24 @@ export class CoordinatorManager extends CoordinatorBase {
           ? "deleted"
           : msg.toolName === "fs_write" ? "created" : "modified"
         this.evaluateFileRisk(riskFilePath, riskOp as "created" | "modified" | "deleted", name)
+
+        // Emit file_diff so the CODE tab in TUI shows the actual changes
+        if (msg.toolName !== "fs_delete" && this.onIpcEvent) {
+          try {
+            const diffResult = await executeToolByName(
+              this.allTools, "git_diff",
+              { path: riskFilePath },
+              { configurable: { workspace: process.cwd() } }
+            ) as any
+            const rawDiff: string = diffResult?.diff ?? diffResult?.content ?? ""
+            if (rawDiff) {
+              const chunks = parseUnifiedDiff(rawDiff)
+              const added   = chunks.filter(c => c.kind === "add").length
+              const removed = chunks.filter(c => c.kind === "remove").length
+              this.onIpcEvent("file_diff", { path: riskFilePath, stats_added: added, stats_removed: removed, chunks })
+            }
+          } catch { /* diff is advisory — never block the write flow */ }
+        }
       }
     }
 
@@ -1565,6 +1673,11 @@ export class CoordinatorManager extends CoordinatorBase {
   /** Forward raw IPC events (file_risk_update, conflict_alert, etc.) to TUI socket. */
   setIpcCallback(cb: (event: string, payload: unknown) => void): void {
     this.onIpcEvent = cb
+  }
+
+  /** Called by BEE's set_session_mode tool to change mode at runtime. */
+  setModeChangeCallback(cb: (mode: SessionMode) => void): void {
+    this.onModeChangeCb = cb
   }
 
   /** Record a user override instruction into the narrative with is_override=1. */

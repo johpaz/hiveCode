@@ -25,7 +25,7 @@ pub use filemap::{FileEntry, FileMapState, RiskLevel};
 pub use history::{HistoryEntry, HistoryState, Role};
 pub use input::InputState;
 pub use logs::{LogEntry, LogState};
-pub use modal::{ConfigModalState, InfoModalState, ModalField, ModalFieldKind, ModalState};
+pub use modal::{ConfigModalState, InfoModalState, ModalField, ModalFieldKind, ModalState, PlanApprovalState};
 pub use plan::{PlanEntry, PlanPhase, PlanRisk, PlanState};
 pub use session::{ReplMode, SessionState, TabId};
 pub use thought::{ThoughtChunk, ThoughtStreamState};
@@ -233,10 +233,10 @@ impl AppState {
                         activity,
                     });
                 }
-                // Auto-routing: when a worker starts, switch to the execution tab
-                if !self.tab_locked && status == "running" {
+                // Auto-routing: only switch tab when a real executor worker starts, not BEE
+                if !self.tab_locked && status == "running" && worker != "bee" {
                     self.active_tab = match self.session.mode {
-                        ReplMode::Plan     => TabId::Focus,
+                        ReplMode::Plan     => TabId::Code,
                         ReplMode::Approval => TabId::Review,
                         ReplMode::Auto     => TabId::Code,
                     };
@@ -246,10 +246,10 @@ impl AppState {
             }
             // Legado: activity_update → actualiza coordinator activo
             BunMessage::ActivityUpdate { coordinator, phase, status, display_name, activity } => {
-                // Auto-routing basado en modo, no en nombre del coordinador
-                if !self.tab_locked && status == "running" {
+                // Auto-routing: only switch tab when a real executor coordinator starts, not BEE
+                if !self.tab_locked && status == "running" && coordinator != "bee" {
                     self.active_tab = match self.session.mode {
-                        ReplMode::Plan     => TabId::Focus,
+                        ReplMode::Plan     => TabId::Code,
                         ReplMode::Approval => TabId::Review,
                         ReplMode::Auto     => TabId::Code,
                     };
@@ -491,6 +491,13 @@ impl AppState {
                 self.dirty.full = true;
             }
 
+            // ── Aprobación del plan ─────────────────────────────────────────────
+            BunMessage::PlanApprovalRequest => {
+                self.modal = ModalState::PlanApproval(PlanApprovalState { selected: 0 });
+                if !self.tab_locked { self.active_tab = TabId::Plan; }
+                self.dirty.full = true;
+            }
+
             // ── Diff activo ─────────────────────────────────────────────────────
             BunMessage::FileDiff { path, branch, stats_added, stats_removed, chunks } => {
                 self.diff.path = path;
@@ -499,7 +506,8 @@ impl AppState {
                 self.diff.stats_removed = stats_removed.unwrap_or(0);
                 self.diff.lines = chunks;
                 self.diff.scroll = 0;
-                if !self.tab_locked {
+                // Only auto-route to Code when not in Plan mode (plan tab takes priority)
+                if !self.tab_locked && self.session.mode != ReplMode::Plan {
                     self.active_tab = TabId::Code;
                 }
                 self.dirty.diff = true;

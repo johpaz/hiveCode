@@ -324,4 +324,83 @@ export class Scribe {
       trace.tokensOut ?? 0,
     )
   }
+
+  // ── Learning Harness ──────────────────────────────────────────────────────
+
+  writeFailure(f: {
+    taskId: string
+    phaseId: string | null
+    agent: string
+    failureType: "tool_error" | "phase_failure" | "invalid_output" | "plan_drift" | "timeout"
+    errorMessage: string
+    contextSummary?: string
+  }): void {
+    this.db.query(`
+      INSERT INTO learning_failures (task_id, phase_id, agent, failure_type, error_message, context_summary)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(f.taskId, f.phaseId ?? null, f.agent, f.failureType, f.errorMessage, f.contextSummary ?? null)
+  }
+
+  writeProposal(p: {
+    sourceAgent: string
+    proposalType: "skill_adjust" | "new_skill" | "prompt_change" | "phase_order"
+    description: string
+    failureIds: number[]
+  }): void {
+    this.db.query(`
+      INSERT INTO learning_proposals (source_agent, proposal_type, description, failure_ids)
+      VALUES (?, ?, ?, ?)
+    `).run(p.sourceAgent, p.proposalType, p.description, JSON.stringify(p.failureIds))
+  }
+
+  getFailurePatterns(opts?: { minOccurrences?: number }): Array<{
+    agent: string
+    failureType: string
+    count: number
+    ids: number[]
+    lastSeen: string
+  }> {
+    const min = opts?.minOccurrences ?? 1
+    const rows = this.db.query<any, [number]>(`
+      SELECT agent, failure_type, COUNT(*) as count,
+             GROUP_CONCAT(id) as id_list, MAX(created_at) as last_seen
+      FROM learning_failures
+      WHERE resolved = 0
+      GROUP BY agent, failure_type
+      HAVING COUNT(*) >= ?
+      ORDER BY count DESC
+    `).all(min)
+    return rows.map(r => ({
+      agent: r.agent,
+      failureType: r.failure_type,
+      count: r.count,
+      ids: String(r.id_list).split(",").map(Number),
+      lastSeen: r.last_seen,
+    }))
+  }
+
+  evaluateTaskPhases(taskId: string): {
+    hasFailures: boolean
+    frictionPhase: string | null
+    failureSummary: string
+  } {
+    const failures = this.db.query<any, [string]>(
+      "SELECT agent, failure_type, COUNT(*) as c FROM learning_failures WHERE task_id = ? GROUP BY agent, failure_type ORDER BY c DESC"
+    ).all(taskId)
+
+    if (failures.length === 0) {
+      return { hasFailures: false, frictionPhase: null, failureSummary: "" }
+    }
+
+    const top = failures[0]
+    const summary = failures
+      .map((f: any) => `${f.agent}/${f.failure_type}(×${f.c})`)
+      .join(", ")
+
+    return {
+      hasFailures: true,
+      frictionPhase: top.agent,
+      failureSummary: summary,
+    }
+  }
 }

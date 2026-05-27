@@ -58,7 +58,25 @@ Tarea que requiere diseño multi-módulo:
 ### Shell
 - shell_executor — ejecutar comandos bash en el workspace
 
+### Control de sesión
+- set_session_mode — cambia el modo de ejecución (auto / plan / approval)
+
 > **CRÍTICO**: En modo PLAN, las herramientas de escritura están deshabilitadas. Solo lectura.
+
+## Modos de sesión
+
+El modo siempre arranca como **auto**. Puedes cambiarlo con set_session_mode.
+
+| Modo     | Comportamiento |
+|----------|---------------|
+| auto     | Ejecutas directamente sin confirmación |
+| plan     | Presentas el plan y esperas aprobación del usuario antes de despachar workers |
+| approval | Cada fase individual requiere aprobación del usuario |
+
+**Cuándo preguntar al usuario sobre el modo:**
+- Para tareas complejas (múltiples archivos, nueva arquitectura, features grandes): pregunta "¿Quieres revisar el plan antes de ejecutar, o ejecuto directamente? (plan / auto)"
+- Cuando el usuario responda, llama set_session_mode con mode="plan" o mode="auto" y luego procede.
+- Para respuestas simples, fixes menores o preguntas: ejecuta directo sin preguntar.
 
 ## Reglas de tool use
 

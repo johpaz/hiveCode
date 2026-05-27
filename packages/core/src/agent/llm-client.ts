@@ -23,6 +23,8 @@ import { KimiProvider } from "./llm-providers/kimi"
 import { LocalLlamaProvider } from "./llm-providers/local-llama"
 import { NvidiaProvider } from "./llm-providers/nvidia"
 import { QwenProvider } from "./llm-providers/qwen"
+import { CodexProvider } from "./llm-providers/codex"
+import { OpenCodeGoProvider } from "./llm-providers/opencode-go"
 import type { LLMProvider } from "./llm-providers/interface"
 
 const log = logger.child("llm-client")
@@ -94,7 +96,7 @@ export interface LLMResponse {
 
 const GEMINI_PROVIDERS = new Set(["gemini", "google"])
 
-const KNOWN_PROVIDERS = new Set(["anthropic", "gemini", "google", "ollama", "openai", "groq", "mistral", "openrouter", "deepseek", "kimi", "local-llama", "nvidia"])
+const KNOWN_PROVIDERS = new Set(["anthropic", "gemini", "google", "ollama", "openai", "groq", "mistral", "openrouter", "deepseek", "kimi", "local-llama", "nvidia", "codex", "opencode-go"])
 
 function getProvider(provider: string): LLMProvider {
   if (GEMINI_PROVIDERS.has(provider)) return new GeminiProvider()
@@ -114,6 +116,8 @@ function getProvider(provider: string): LLMProvider {
     case "local-llama": return new LocalLlamaProvider()
     case "nvidia":      return new NvidiaProvider()
     case "qwen":        return new QwenProvider()
+    case "codex":        return new CodexProvider()
+    case "opencode-go":  return new OpenCodeGoProvider()
     default:
       log.warn(`[llm-client] Unhandled provider "${provider}" — falling back to OpenAI-compatible endpoint`)
       return new OpenAIProvider()

@@ -47,6 +47,7 @@ export type BunMessage =
   | { type: "memory_update";      records_added: number; records_updated: number; records_deprecated: number }
   | { type: "librarian_progress"; status: "running" | "done"; records_written: number }
   | { type: "plan_update"; task_id: string; adr_title: string; adr_content: string; status: string; phases: { name: string; coordinator: string; description: string; depends_on: string[]; level: number; status: string }[]; risks: { severity: string; description: string }[] }
+  | { type: "plan_approval_request" }
 
 // ── TUI → Bun ────────────────────────────────────────────────────────────────
 

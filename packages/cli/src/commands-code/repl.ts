@@ -9,7 +9,7 @@ import {
   runProviderSetupWizard,
   runTelegramConnectWizard,
 } from "@johpaz/hivecode-tui-primitives"
-import { loadInitialState, saveMode } from "./repl-state"
+import { loadInitialState } from "./repl-state"
 import type { ReplMode } from "./repl-state"
 import { parseInternalCommand, getCtx, renderSuggestions } from "@johpaz/hivecode-code/coordinator/command-parser"
 import type { MenuItem } from "@johpaz/hivecode-code/coordinator/command-parser"
@@ -358,6 +358,8 @@ export async function repl(): Promise<void> {
     let currentMode:     ReplMode = init.mode
     let currentProvider: string   = init.provider
     let currentModel:    string   = init.model
+    // When in plan mode, track the task awaiting user approval before execution
+    let pendingPlanTask: string | null = null
 
     const tuiControl: {
       suspend: (() => Promise<void>) | null
@@ -375,6 +377,12 @@ export async function repl(): Promise<void> {
 
     // Wire live IPC events (file_risk_update, conflict_alert, etc.) to TUI socket
     _tuiIpcSend = (msg: any) => tuiControl.send?.(msg)
+
+    // BEE-initiated mode changes (set_session_mode tool) propagate back to TUI
+    manager.setModeChangeCallback((mode) => {
+      currentMode = mode as ReplMode
+      _tuiIpcSend?.({ type: "mode_change", mode })
+    })
 
     // Forward narrative chunks from coordinators to TUI
     manager.setNarrativeCallback((chunk) => {
@@ -490,7 +498,6 @@ export async function repl(): Promise<void> {
 
       onModeChange(mode) {
         currentMode = mode as ReplMode
-        saveMode(mode)
       },
 
       onExit() {
@@ -515,6 +522,53 @@ export async function repl(): Promise<void> {
       tuiControl,
 
       async onSubmit(input) {
+        // ── Plan approval gate ─────────────────────────────────────────────
+        if (pendingPlanTask) {
+          const originalTask = pendingPlanTask
+          const trimmed = input.trim().toLowerCase()
+
+          // Reject
+          if (trimmed === "n" || trimmed === "no" || trimmed.startsWith("/reject")) {
+            pendingPlanTask = null
+            return { output: "Plan cancelado. Puedes enviar una nueva tarea cuando quieras." }
+          }
+
+          // "Agregar contexto" option — keep pendingPlanTask so next submit gets the context
+          // (the modal closed and user will type context and hit Enter again)
+          if (!trimmed) {
+            // plain Enter = auto approve (same as /approve auto)
+          } else if (/^\/approve\s+review/.test(trimmed)) {
+            // Approval mode — phase-by-phase
+            pendingPlanTask = null
+            const guardResult = await ensureProvider(currentProvider)
+            const provider = guardResult ? guardResult.provider : currentProvider
+            const model    = guardResult ? guardResult.model    : currentModel
+            if (guardResult) { currentProvider = provider; currentModel = model; manager.reloadSecrets() }
+            if (!provider) return { output: "(×ᴗ×) Sin provider — ejecución cancelada." }
+            const out = await executeTask(originalTask, "approval", {
+              suspend: tuiControl.suspend ?? undefined, resume: tuiControl.resume ?? undefined, manager, quiet: true,
+            })
+            return { output: out, ...(guardResult && { newProvider: provider, newModel: model }) }
+          }
+
+          // Auto approve (default, /approve auto, or any context text)
+          pendingPlanTask = null
+          const isPlainApprove = /^(y|si|sí|ok|yes|\/approve)/.test(trimmed) || !trimmed
+          const taskWithContext = isPlainApprove
+            ? originalTask
+            : `${originalTask}\n\nContexto adicional del usuario: ${input}`
+
+          const guardResult = await ensureProvider(currentProvider)
+          const provider = guardResult ? guardResult.provider : currentProvider
+          const model    = guardResult ? guardResult.model    : currentModel
+          if (guardResult) { currentProvider = provider; currentModel = model; manager.reloadSecrets() }
+          if (!provider) return { output: "(×ᴗ×) Sin provider — ejecución cancelada." }
+          const output = await executeTask(taskWithContext, "auto", {
+            suspend: tuiControl.suspend ?? undefined, resume: tuiControl.resume ?? undefined, manager, quiet: true,
+          })
+          return { output, ...(guardResult && { newProvider: provider, newModel: model }) }
+        }
+
         if (input.startsWith("/")) {
           const result = await handleInternalCommand(
             input, currentMode, currentProvider, currentModel,
@@ -566,6 +620,13 @@ export async function repl(): Promise<void> {
           manager,
           quiet: true,
         })
+
+        // After a plan, show approval modal and wait for user decision
+        if (currentMode === "plan") {
+          pendingPlanTask = input
+          _tuiIpcSend?.({ type: "plan_approval_request" })
+        }
+
         return {
           output,
           ...(guardResult && { newProvider: provider, newModel: model }),

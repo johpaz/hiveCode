@@ -59,6 +59,9 @@ packages/tts/voices/*
 !packages/tts/voices/.gitkeep
 
 
+#cargo
+.cargo
+
 
 # agentes de codigo
 .claude
