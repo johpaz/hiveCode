@@ -1,17 +1,25 @@
 use crate::{
     state::{AppState, WorkerStatus},
     term::{
-        Canvas, Color, Rect, Style,
-        AMBER_BRIGHT, BG_ELEVATED, BG_PANEL, BLUE, CYAN,
-        DIM, GREEN, LAVENDER, PINK, PURPLE, RED, SECONDARY, YELLOW,
+        Canvas, Rect, Style, AMBER, BG_ELEVATED, BG_PANEL, DIM, GREEN, RED, SECONDARY, YELLOW,
     },
+    widgets::components::{render_table, worker_color, Align, TableCell, TableColumn},
 };
 
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     canvas.fill_rect(area, ' ', Style::new().bg(BG_PANEL));
 
+    let worker_area = if !state.tasks.tasks.is_empty() && area.h >= 10 {
+        let task_h = ((state.tasks.tasks.len() as u16).saturating_add(2)).min(6).min(area.h / 3);
+        let rows = area.vsplit(&[task_h, 0]);
+        render_task_strip(canvas, rows[0], state);
+        rows.get(1).copied().unwrap_or(area)
+    } else {
+        area
+    };
+
     if state.workers.workers.is_empty() {
-        render_empty(canvas, area);
+        render_empty(canvas, worker_area);
         return;
     }
 
@@ -19,21 +27,21 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     // Each card: min 18 wide × 6 tall
     let card_w: u16 = 22;
     let card_h: u16 = 6;
-    let cols_per_row = (area.w / card_w).max(1);
+    let cols_per_row = (worker_area.w / card_w).max(1);
 
     let mut idx = 0usize;
     for w in state.workers.workers.iter() {
         let col = (idx as u16) % cols_per_row;
         let row = (idx as u16) / cols_per_row;
 
-        let cx = area.x + col * card_w;
-        let cy = area.y + row * card_h;
+        let cx = worker_area.x + col * card_w;
+        let cy = worker_area.y + row * card_h;
 
-        if cy + card_h > area.bottom() {
+        if cy + card_h > worker_area.bottom() {
             break;
         }
 
-        let card = Rect::new(cx, cy, card_w.min(area.right().saturating_sub(cx)), card_h);
+        let card = Rect::new(cx, cy, card_w.min(worker_area.right().saturating_sub(cx)), card_h);
         canvas.with_clip(card, |canvas| render_worker_card(canvas, card, w));
         idx += 1;
     }
@@ -42,8 +50,59 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     let total = state.workers.workers.len();
     let running = state.workers.workers.iter().filter(|w| matches!(w.status, WorkerStatus::Running)).count();
     let summary = format!("⬡ {running}/{total} workers activos  ·  tokens:{}", fmt_tokens(state.session.token_count));
-    let sy = area.bottom().saturating_sub(1);
-    canvas.print(area.x + 1, sy, &summary, Style::new().fg(DIM));
+    let sy = worker_area.bottom().saturating_sub(1);
+    canvas.print(worker_area.x + 1, sy, &summary, Style::new().fg(DIM));
+}
+
+fn render_task_strip(canvas: &mut Canvas, area: Rect, state: &AppState) {
+    canvas.fill_rect(area, ' ', Style::new().bg(BG_ELEVATED));
+    canvas.print(area.x + 1, area.y, "⬡ TAREAS · PROYECCIÓN", Style::new().fg(AMBER).bold());
+
+    if area.h < 2 {
+        return;
+    }
+
+    let columns = [
+        TableColumn::fixed(12, Align::Left),
+        TableColumn::fill(Align::Left),
+        TableColumn::fixed(9, Align::Right),
+        TableColumn::fixed(18, Align::Right),
+    ];
+    let active = state.tasks.active_task_id.as_deref();
+    let rows: Vec<Vec<TableCell>> = state.tasks.tasks.iter().rev().take(area.h.saturating_sub(1) as usize).map(|task| {
+        let is_active = active == Some(task.task_id.as_str());
+        let marker = if is_active { "●" } else { "○" };
+        let status = format!("{marker} {}", task.status);
+        let workers = if task.active_workers.is_empty() {
+            String::new()
+        } else {
+            task.active_workers.join(" · ")
+        };
+        let status_style = task_status_style(&task.status);
+        vec![
+            TableCell::new(status, status_style),
+            TableCell::new(task.title.clone(), Style::new().fg(SECONDARY)),
+            TableCell::new(task.mode.clone(), Style::new().fg(DIM)),
+            TableCell::new(workers, Style::new().fg(DIM)),
+        ]
+    }).collect();
+
+    render_table(
+        canvas,
+        Rect::new(area.x + 1, area.y + 1, area.w.saturating_sub(2), area.h.saturating_sub(1)),
+        &columns,
+        &rows,
+    );
+}
+
+fn task_status_style(status: &str) -> Style {
+    match status {
+        "running" | "planning" | "approval" => Style::new().fg(GREEN).bold(),
+        "completed" => Style::new().fg(DIM),
+        "failed" => Style::new().fg(RED).bold(),
+        "cancelled" | "paused" => Style::new().fg(YELLOW),
+        _ => Style::new().fg(SECONDARY),
+    }
 }
 
 fn render_worker_card(canvas: &mut Canvas, area: Rect, w: &crate::state::Worker) {
@@ -94,19 +153,6 @@ fn render_empty(canvas: &mut Canvas, area: Rect) {
     canvas.print(x, y + 1, "inicia una tarea para ver el dashboard", Style::new().fg(DIM));
 }
 
-fn worker_color(name: &str) -> Color {
-    const ROLES: &[(&str, Color)] = &[
-        ("bee",    AMBER_BRIGHT),
-        ("arch",   PURPLE),
-        ("back",   BLUE),
-        ("front",  CYAN),
-        ("sec",    PINK),
-        ("test",   YELLOW),
-        ("devops", LAVENDER),
-    ];
-    ROLES.iter().find(|(k, _)| name.contains(k)).map(|(_, c)| *c).unwrap_or(SECONDARY)
-}
-
 fn fmt_tokens(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
@@ -114,5 +160,38 @@ fn fmt_tokens(n: u64) -> String {
         format!("{:.1}k", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Worker;
+
+    #[test]
+    fn dashboard_renders_task_projection_strip() {
+        let mut state = AppState::default();
+        state.tasks.upsert(
+            "task-1".to_string(),
+            Some("Corregir login".to_string()),
+            "running".to_string(),
+            Some("auto".to_string()),
+            Some(vec!["backend".to_string()]),
+        );
+        state.workers.workers.push(Worker {
+            name: "backend".to_string(),
+            display_name: "BackendEngineer".to_string(),
+            status: WorkerStatus::Running,
+            detail: Some("editando auth.ts".to_string()),
+            activity: None,
+        });
+
+        let mut canvas = Canvas::new(100, 24);
+        render(&mut canvas, Rect::new(0, 0, 100, 24), &state);
+        let rows = canvas.to_text_rows();
+
+        assert!(rows.iter().any(|row| row.contains("TAREAS")));
+        assert!(rows.iter().any(|row| row.contains("Corregir login")));
+        assert!(rows.iter().any(|row| row.contains("backend")));
     }
 }

@@ -7,6 +7,8 @@ import { OpenAICompatBase } from "./openai-compat-base"
  * - Temperature=1 is enforced by requiresTemperature1() in interface.ts.
  */
 export class KimiProvider extends OpenAICompatBase {
+  static readonly secretKey = "KIMI_API_KEY"
+
   constructor() {
     super("kimi")
   }

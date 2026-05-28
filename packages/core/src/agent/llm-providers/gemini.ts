@@ -6,6 +6,8 @@ import type { ContentPart, LLMMessage } from "../llm-client"
 const log = logger.child("llm-client")
 
 export class GeminiProvider implements LLMProvider {
+  static readonly secretKey = "GEMINI_API_KEY"
+
   private _convertContentPart(part: ContentPart): any {
     switch (part.type) {
       case "text":

@@ -1,5 +1,5 @@
 import { getDb } from "../../storage/sqlite"
-import { decryptApiKey, maskApiKey, encryptApiKey, encryptConfig, storeProviderApiKey, getProviderApiKey, hasProviderApiKey, deleteProviderApiKey } from "../../storage/crypto"
+import { maskApiKey, encryptConfig, storeProviderApiKey, getProviderApiKey, hasProviderApiKey, deleteProviderApiKey } from "../../storage/crypto"
 
 export async function handleGetProviders(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
   const rawProviders = getDb().query(`

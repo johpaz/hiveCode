@@ -23,6 +23,7 @@ import { checkAutomaticInterruption } from "../modes/interruptions"
 import { broadcastNarrative, broadcastPhase, broadcastMode, broadcastPhaseStart, broadcastPhaseEnd, broadcastTaskEnd, broadcastThinking } from "@johpaz/hivecode-core/gateway/task-streaming"
 import { validateCommand } from "@johpaz/hivecode-core/tools/code/command-validator"
 import { incrementTaskCounter, shouldRunReflector, runReflector, startReflectorCron, stopReflectorCron } from "../agent/reflector"
+import { WorkspaceLeaseManager, type WorkspaceLease, type WorkspaceLeaseOperation } from "../workspace/leases"
 import type {
   CoordinatorTask, CoordinatorResult, BeeDecision, ControlMessage,
   PhaseName, SessionMode, CoordinatorStatus,
@@ -48,6 +49,15 @@ const COORDINATOR_NAMES: PhaseName[] = [
   "security", "test", "devops",
   "dba", "integration", "reviewer",
 ]
+
+type NarrativeChunkCallback = (chunk: {
+  coordinator: string
+  phase: string
+  content: string
+  streamId?: string
+  taskId?: string
+  sessionId?: string
+}) => void
 
 const WORKER_EXT = import.meta.url.endsWith(".ts") ? ".worker.ts" : ".worker.js"
 
@@ -81,30 +91,18 @@ export class CoordinatorManager extends CoordinatorBase {
   private allTools: Tool[] = []
   private toolWorkerPool: Bun.Worker[] = []
   private currentLevel = 0
+  private workspaceLeases = new WorkspaceLeaseManager()
   private idleToolWorkers: Bun.Worker[] = []
   private toolResolvers = new Map<string, (res: any) => void>()
-  private onNarrativeChunk?: (chunk: { coordinator: string; phase: string; content: string; streamId?: string }) => void
+  private onNarrativeChunk?: NarrativeChunkCallback
   private onWorkerUpdate?: (update: { type: "tool_worker"; id: number; status: "idle" | "busy"; tool?: string }) => void
   private onTaskComplete?: (response: string) => void
   private onIpcEvent?: (event: string, payload: unknown) => void
   private onModeChangeCb?: (mode: SessionMode) => void
 
-  /** Reload secrets from Bun.secrets and providers table */
-  reloadSecrets(): void {
-    const db = getDb()
-    this.secrets = loadSecrets()
-
-    // Primary fallback: read API keys from providers table (stored by /provider wizard)
-    const providerRows = db.query(
-      "SELECT id, api_key_encrypted FROM providers WHERE enabled = 1 AND api_key_encrypted IS NOT NULL"
-    ).all() as { id: string; api_key_encrypted: string }[]
-    for (const row of providerRows) {
-      const envKey = `${row.id.toUpperCase().replace(/-/g, "_")}_API_KEY`
-      if (!this.secrets[envKey]) {
-        this.secrets[envKey] = Buffer.from(row.api_key_encrypted, "base64").toString()
-      }
-    }
-
+  /** Reload enabled provider keys from Bun.secrets only. */
+  async reloadSecrets(): Promise<void> {
+    this.secrets = await loadSecrets()
     const totalKeys = Object.keys(this.secrets).length
     if (totalKeys === 0) {
       console.info(
@@ -121,7 +119,7 @@ export class CoordinatorManager extends CoordinatorBase {
     log.info("[coordinator-manager] Starting BEE + 6 coordinators...")
 
     // Load and distribute secrets BEFORE creating workers
-    this.reloadSecrets()
+    await this.reloadSecrets()
 
     // Load all tools from core
     try {
@@ -220,6 +218,34 @@ export class CoordinatorManager extends CoordinatorBase {
     return this.activeSessionId
   }
 
+  private emitTaskUpdate(status: string, extra: {
+    title?: string
+    mode?: string
+    activeWorkers?: string[]
+  } = {}): void {
+    if (!this.activeTaskId) return
+    this.onIpcEvent?.("task_update", {
+      task_id: this.activeTaskId,
+      title: extra.title,
+      status,
+      mode: extra.mode,
+      active_workers: extra.activeWorkers,
+    })
+  }
+
+  private emitNarrativeChunk(chunk: {
+    coordinator: string
+    phase: string
+    content: string
+    streamId?: string
+  }): void {
+    this.onNarrativeChunk?.({
+      ...chunk,
+      taskId: this.activeTaskId ?? undefined,
+      sessionId: this.activeSessionId ?? undefined,
+    })
+  }
+
   private createWorker(name: PhaseName): void {
     try {
       const worker = new (Worker as any)(COORDINATOR_FILES[name], { smol: name === "security" || name === "devops" }) as Bun.Worker
@@ -295,6 +321,7 @@ export class CoordinatorManager extends CoordinatorBase {
     ])).flat()
 
     this.activeTaskId = this.scribe.createTask(this.activeSessionId, description, mode)
+    this.emitTaskUpdate("running", { title: description, mode })
     const taskStartTime = performance.now()
 
     // Resolve provider/model from code_config (set by REPL or provider add command)
@@ -344,6 +371,7 @@ export class CoordinatorManager extends CoordinatorBase {
       })
       this.scribe.updatePhaseStatus(beePhaseId, beeResult.status, beeResult.blockerDescription)
       this.scribe.updateTaskStatus(this.activeTaskId, "failed")
+      this.emitTaskUpdate("failed", { title: description, mode })
       const failMsg = beeResult.blockerDescription || "BEE failed"
       log.error(`[coordinator-manager] ❌ BEE phase failed: ${failMsg}`)
       throw new Error(failMsg)
@@ -400,6 +428,7 @@ export class CoordinatorManager extends CoordinatorBase {
     if (beeDecision.action === "respond" && mode !== "plan") {
       const response = beeDecision.content ?? ""
       this.scribe.updateTaskStatus(this.activeTaskId, "completed")
+      this.emitTaskUpdate("completed", { title: description, mode })
       this.scribe.updateTaskMetadata(this.activeTaskId, {
         tokensIn: beeResult.tokensIn ?? 0, tokensOut: beeResult.tokensOut ?? 0,
         filesChanged: 0, linesAdded: 0, linesRemoved: 0,
@@ -419,6 +448,7 @@ export class CoordinatorManager extends CoordinatorBase {
       }))
       if (fileChanges.length) this.scribe.writeFileChanges(this.activeTaskId, beePhaseId, fileChanges)
       this.scribe.updateTaskStatus(this.activeTaskId, "completed")
+      this.emitTaskUpdate("completed", { title: description, mode })
       this.scribe.updateTaskMetadata(this.activeTaskId, {
         tokensIn: beeResult.tokensIn ?? 0, tokensOut: beeResult.tokensOut ?? 0,
         filesChanged: fileChanges.length, linesAdded: 0, linesRemoved: 0,
@@ -689,6 +719,7 @@ export class CoordinatorManager extends CoordinatorBase {
     } catch { /* no bloquea el cierre */ }
 
     this.scribe.updateTaskStatus(this.activeTaskId, "completed")
+    this.emitTaskUpdate("completed")
     this.scribe.completeTurn(turnId, agentResponse, this.activeTaskId)
 
     if (this.onTaskComplete) {
@@ -952,6 +983,7 @@ export class CoordinatorManager extends CoordinatorBase {
 
         if (decision === "cancel") {
           this.scribe.updateTaskStatus(this.activeTaskId!, "cancelled")
+          this.emitTaskUpdate("cancelled")
           log.info(`[coordinator-manager] ❌ Task cancelled by user at level ${levelIdx}`)
           return false
         }
@@ -1350,14 +1382,12 @@ export class CoordinatorManager extends CoordinatorBase {
     }
 
     if (msg.type === "THINKING" && msg.content) {
-      if (this.onNarrativeChunk) {
-        this.onNarrativeChunk({
-          coordinator: name,
-          phase: "thinking",
-          content: msg.content,
-          streamId: (msg as any).streamId,
-        })
-      }
+      this.emitNarrativeChunk({
+        coordinator: name,
+        phase: "thinking",
+        content: msg.content,
+        streamId: (msg as any).streamId,
+      })
       // Also broadcast thinking events to WebSocket subscribers (ThinkingPanel in UI)
       if (this.activeTaskId) {
         broadcastThinking(name, { content: msg.content, taskId: this.activeTaskId })
@@ -1376,6 +1406,7 @@ export class CoordinatorManager extends CoordinatorBase {
   private async handleToolCall(name: PhaseName, msg: WorkerToManagerMessage): Promise<void> {
     const worker = this.workers.get(name)
     if (!worker || !msg.toolName || !msg.toolCallId) return
+    const taskId = msg.taskId || this.activeTaskId || "unknown"
 
     // Check automatic interruptions (SPEC §6.3)
     const interruption = checkAutomaticInterruption(msg)
@@ -1407,15 +1438,13 @@ export class CoordinatorManager extends CoordinatorBase {
     }
 
     // Stream tool call to TUI so user sees what the agent is doing
-    if (this.onNarrativeChunk) {
-      const humanDesc = formatToolCallForHuman(msg.toolName, msg.toolArgs || {})
-      this.onNarrativeChunk({
-        coordinator: name,
-        phase: msg.toolName || name,
-        content: humanDesc,
-        streamId: msg.toolCallId,
-      })
-    }
+    const humanDesc = formatToolCallForHuman(msg.toolName, msg.toolArgs || {})
+    this.emitNarrativeChunk({
+      coordinator: name,
+      phase: msg.toolName || name,
+      content: humanDesc,
+      streamId: msg.toolCallId,
+    })
 
 
     // Check plan mode gate
@@ -1439,33 +1468,8 @@ export class CoordinatorManager extends CoordinatorBase {
       }
     }
 
-    // Conflict detection + checkpoint before write operations
+    // Write tools need explicit safety gates and a file lease before mutation.
     const writeTools = new Set(["fs_write", "fs_edit", "fs_delete"])
-    if (writeTools.has(msg.toolName) && msg.toolArgs) {
-      const filePath = (msg.toolArgs.path as string) || (msg.toolArgs.file as string) || ""
-      if (filePath) {
-        // 1. Check blackboard for write conflicts
-        const canWrite = await this.checkWriteConflicts(name, filePath)
-        if (!canWrite) {
-          const errorMsg = `[CONFLICT] Another agent is writing to ${filePath}. Retry in a moment.`
-          log.warn(`[coordinator-manager] ⚠️ Conflict blocked ${name} from writing ${filePath}`)
-          this.writeToolTrace(name, msg.toolName, JSON.stringify(msg.toolArgs), errorMsg, false, 0n)
-          worker.postMessage(JSON.stringify({
-            type: "TOOL_RESULT",
-            toolCallId: msg.toolCallId,
-            error: errorMsg,
-          } as ManagerToWorkerMessage))
-          return
-        }
-        // 2. Create checkpoint before mutating
-        const op = msg.toolName === "fs_delete" ? "deleted" : "modified"
-        if (this.activeTaskId) {
-          const existingPaths = op !== "deleted" ? [filePath] : []
-          const newPaths     = op === "deleted"   ? []         : []
-          await this.checkpoint(`before ${msg.toolName} ${filePath}`, existingPaths, newPaths, name)
-        }
-      }
-    }
 
     // Enforce confirmation for destructive operations
     if (msg.toolName === "fs_delete") {
@@ -1506,6 +1510,68 @@ export class CoordinatorManager extends CoordinatorBase {
       }
     }
 
+    let activeLease: WorkspaceLease | null = null
+    const writePath = writeTools.has(msg.toolName) && msg.toolArgs
+      ? ((msg.toolArgs.path as string) || (msg.toolArgs.file as string) || "")
+      : ""
+
+    if (writePath) {
+      const operation: WorkspaceLeaseOperation =
+        msg.toolName === "fs_delete" ? "delete" :
+        msg.toolName === "fs_write" ? "write" : "edit"
+      const leaseResult = this.workspaceLeases.acquire({
+        taskId,
+        workspaceId: process.cwd(),
+        path: writePath,
+        heldByWorker: name,
+        operation,
+      })
+
+      if (leaseResult.ok === false) {
+        const conflict = leaseResult.conflict
+        const errorMsg = `[LEASE] ${writePath} is currently reserved by ${conflict.heldByWorker} for task ${conflict.taskId}. Retry after that write completes.`
+        log.warn(`[coordinator-manager] ⚠️ Lease blocked ${name} from writing ${writePath}`)
+        this.writeToolTrace(name, msg.toolName, JSON.stringify(msg.toolArgs), errorMsg, false, 0n)
+        this.onIpcEvent?.("conflict_alert", {
+          agent_a: conflict.heldByWorker,
+          agent_b: name,
+          file: writePath,
+          reason: "file lease conflict",
+          severity: "high",
+          detail: errorMsg,
+        })
+        worker.postMessage(JSON.stringify({
+          type: "TOOL_RESULT",
+          toolCallId: msg.toolCallId,
+          error: errorMsg,
+        } as ManagerToWorkerMessage))
+        return
+      }
+
+      activeLease = leaseResult.lease
+
+      const canWrite = await this.checkWriteConflicts(name, writePath)
+      if (!canWrite) {
+        this.workspaceLeases.release(activeLease.leaseId)
+        activeLease = null
+        const errorMsg = `[CONFLICT] Another agent is writing to ${writePath}. Retry in a moment.`
+        log.warn(`[coordinator-manager] ⚠️ Conflict blocked ${name} from writing ${writePath}`)
+        this.writeToolTrace(name, msg.toolName, JSON.stringify(msg.toolArgs), errorMsg, false, 0n)
+        worker.postMessage(JSON.stringify({
+          type: "TOOL_RESULT",
+          toolCallId: msg.toolCallId,
+          error: errorMsg,
+        } as ManagerToWorkerMessage))
+        return
+      }
+
+      if (this.activeTaskId) {
+        const existingPaths = operation !== "delete" ? [writePath] : []
+        const newPaths     = operation === "delete" ? []          : []
+        await this.checkpoint(`before ${msg.toolName} ${writePath}`, existingPaths, newPaths, name)
+      }
+    }
+
     // Execute the tool with timing (Heavy tools go to the worker pool)
     const inputSummary = JSON.stringify(msg.toolArgs || {}).slice(0, 2000)
     const toolStart = performance.now()
@@ -1513,15 +1579,19 @@ export class CoordinatorManager extends CoordinatorBase {
     const heavyTools = new Set(["code_search", "parse_ast", "check_types", "code_build", "code_test", "code_lint", "shell_executor"])
     let result: any
 
-    if (heavyTools.has(msg.toolName!)) {
-      result = await this.executeInToolWorker(msg.toolName!, msg.toolArgs || {}, { configurable: { workspace: process.cwd() } })
-    } else {
-      result = await executeToolByName(
-        this.allTools,
-        msg.toolName!,
-        msg.toolArgs || {},
-        { configurable: { workspace: process.cwd() } }
-      )
+    try {
+      if (heavyTools.has(msg.toolName!)) {
+        result = await this.executeInToolWorker(msg.toolName!, msg.toolArgs || {}, { configurable: { workspace: process.cwd() } })
+      } else {
+        result = await executeToolByName(
+          this.allTools,
+          msg.toolName!,
+          msg.toolArgs || {},
+          { configurable: { workspace: process.cwd() } }
+        )
+      }
+    } finally {
+      if (activeLease) this.workspaceLeases.release(activeLease.leaseId)
     }
     
     const toolDurationNs = BigInt(Math.round((performance.now() - toolStart) * 1_000_000))
@@ -1575,15 +1645,13 @@ export class CoordinatorManager extends CoordinatorBase {
     }
 
     // Stream tool result to TUI so user sees success/failure — use human-readable format
-    if (this.onNarrativeChunk) {
-      const formattedForHuman = formatToolResult(msg.toolName, result)
-      this.onNarrativeChunk({
-        coordinator: name,
-        phase: msg.toolName,
-        content: formattedForHuman,
-        streamId: msg.toolCallId,
-      })
-    }
+    const formattedForHuman = formatToolResult(msg.toolName, result)
+    this.emitNarrativeChunk({
+      coordinator: name,
+      phase: msg.toolName,
+      content: formattedForHuman,
+      streamId: msg.toolCallId,
+    })
 
 
     // Format tool result for LLM consumption (Kimi CLI style: <system> wrappers)
@@ -1658,7 +1726,7 @@ export class CoordinatorManager extends CoordinatorBase {
     return this.activeSessionId
   }
 
-  setNarrativeCallback(cb: (chunk: { coordinator: string; phase: string; content: string }) => void): void {
+  setNarrativeCallback(cb: NarrativeChunkCallback): void {
     this.onNarrativeChunk = cb
   }
 

@@ -6,6 +6,9 @@ import type { ContentPart, LLMMessage } from "../llm-client"
 const log = logger.child("llm-client")
 
 export class OllamaProvider implements LLMProvider {
+  /** Local provider — no API key required */
+  static readonly secretKey = null
+
   private _convertMessage(msg: LLMMessage): any {
     if (typeof msg.content === "string") {
       return { role: msg.role, content: msg.content }

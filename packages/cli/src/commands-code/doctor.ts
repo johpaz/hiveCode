@@ -137,7 +137,7 @@ export async function doctor(flags: string[] = []): Promise<void> {
   secretsSpinner.start("Verificando secrets...")
   try {
     const { loadSecrets } = await import("@johpaz/hivecode-code/workers/secrets")
-    const secrets = loadSecrets()
+    const secrets = await loadSecrets()
     const hasKeys = Object.keys(secrets).length > 0
     const keyNames = Object.keys(secrets).join(", ")
 

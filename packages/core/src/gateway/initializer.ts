@@ -14,6 +14,7 @@ import { createMCPManager, type MCPClientManager } from "@johpaz/hivecode-mcp";
 import { setMCPManager } from "../mcp/singleton";
 import { startMCPHotReload } from "../mcp/hot-reload";
 import { resolveAgentId, runStartupMigrations } from "../storage/onboarding";
+import { getProviderApiKey } from "../storage/crypto";
 
 
 const log = logger.child("gateway:init");
@@ -107,27 +108,25 @@ export async function loadAgentConfigFromDB(
     provider = provider || defaultProvider;
     model = model || defaultModel;
 
-    // Cargar API keys de los providers desde la DB
+    // Cargar API keys de providers activos desde el keystore del sistema.
     const providers = db.query(`
-      SELECT id, name, api_key_encrypted, api_key_iv, base_url
+      SELECT id, name, base_url
       FROM providers
-      WHERE active = 1 AND api_key_encrypted IS NOT NULL
+      WHERE active = 1
     `).all() as Array<{
       id: string;
       name: string;
-      api_key_encrypted: string;
-      api_key_iv: string;
       base_url: string | null
     }>;
 
     if (providers.length > 0) {
       config.models = config.models || {};
       (config.models as any).providers = (config.models as any).providers || {};
-
-      const { decryptApiKey } = await import("../storage/crypto");
+      let loadedProviders = 0;
 
       for (const p of providers) {
-        const apiKey = await decryptApiKey(p.api_key_encrypted, p.api_key_iv);
+        const apiKey = await getProviderApiKey(p.id);
+        if (!apiKey) continue;
 
         (config.models as any).providers[p.name] = {
           apiKey,
@@ -137,9 +136,10 @@ export async function loadAgentConfigFromDB(
           maxRetries: 3,
           timeoutMs: 30000,
         } as any;
+        loadedProviders++;
       }
 
-      log.info(`Loaded ${providers.length} provider(s) from DB with API keys`);
+      log.info(`Loaded ${loadedProviders} active provider key(s) from Bun.secrets`);
     }
 
     log.info(`Agent config loaded from DB: ${provider}/${model}`);

@@ -7,6 +7,8 @@ export * from "./modes/index"
 export * from "./modes/task-streaming"
 export * from "./modes/keyboard"
 export * from "./modes/interruptions"
+export * from "./runtime/index"
+export * from "./workspace/index"
 export { seedCodeData } from "./seed"
 
 import type { BootstrapModule } from "@johpaz/hivecode-core"

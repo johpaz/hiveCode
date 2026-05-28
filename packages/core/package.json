@@ -62,6 +62,7 @@
     "./storage/memory-db": "./src/storage/memory-db.ts",
     "./storage/memory-repo": "./src/storage/memory-repo.ts",
     "./tools": "./src/tools/index.ts",
+    "./tools/types": "./src/tools/types.ts",
     "./tools/agents": "./src/tools/agents/index.ts",
     "./tools/canvas": "./src/tools/canvas/index.ts",
     "./tools/cli": "./src/tools/cli/index.ts",

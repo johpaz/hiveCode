@@ -1,6 +1,7 @@
 pub mod checkpoint_bar;
 pub mod code_layout;
 pub mod command_popup;
+pub mod components;
 pub mod config_modal;
 pub mod conflict_bar;
 pub mod dashboard_layout;

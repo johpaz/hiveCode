@@ -14,8 +14,8 @@ describe("session-array", () => {
 	})
 
 	describe("mode", () => {
-		test("default mode is plan", () => {
-			expect(getMode()).toBe("plan")
+		test("default mode is auto", () => {
+			expect(getMode()).toBe("auto")
 		})
 
 		test("setMode changes mode atomically", () => {
@@ -81,10 +81,10 @@ describe("session-array", () => {
 
 		test("invalid coordinatorIndex is ignored", () => {
 			setWorkerBusy(-1, true)
-			setWorkerBusy(6, true)
+			setWorkerBusy(7, true)
 			expect(getWorkerBitmask()).toBe(0)
 			expect(isWorkerBusy(-1)).toBe(false)
-			expect(isWorkerBusy(6)).toBe(false)
+			expect(isWorkerBusy(7)).toBe(false)
 		})
 	})
 

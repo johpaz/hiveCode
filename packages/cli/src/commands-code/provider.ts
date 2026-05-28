@@ -18,6 +18,7 @@ import {
 
 const VERSION = "1.0.0"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { deleteProviderApiKey, storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
 
 function modelsForProvider(providerId: string): { value: string; label: string }[] {
   try {
@@ -89,6 +90,7 @@ export async function providerList(): Promise<void> {
       options: rows.map((r: any) => ({ value: r.id, label: r.id })),
     })
     if (!isCancel(sel)) {
+      await deleteProviderApiKey(sel as string)
       db.query("DELETE FROM providers WHERE id = ?").run(sel as string)
       hiveOutro(`Provider ${sel} eliminado`)
     }
@@ -99,6 +101,7 @@ export async function providerList(): Promise<void> {
     const known = rows.map((r: any) => r.id as string)
     const result = await runProviderSetupWizard(known, VERSION)
     if (!result) { hiveOutro("Cancelado", "error"); return }
+    await storeProviderApiKey(result.provider, result.apiKey)
     db.query(`
       INSERT INTO providers (id, name, base_url, enabled)
       VALUES (?,?,?,1)
@@ -109,13 +112,6 @@ export async function providerList(): Promise<void> {
     if (result.model) {
       db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?,?)")
         .run(`provider_model_${result.provider}`, result.model)
-    }
-    try {
-      const secrets = (Bun as any).secrets
-      if (secrets?.set) secrets.set(`${result.provider.toUpperCase().replace(/-/g, "_")}_API_KEY`, result.apiKey)
-    } catch {
-      db.query("UPDATE providers SET api_key_encrypted = ? WHERE id = ?")
-        .run(Buffer.from(result.apiKey).toString("base64"), result.provider)
     }
     hiveOutro(`Provider ${result.provider} agregado`)
   }
@@ -137,6 +133,7 @@ export async function providerAdd(name?: string): Promise<void> {
     return
   }
 
+  await storeProviderApiKey(result.provider, result.apiKey)
   db.query("INSERT INTO providers (id, name, base_url, enabled) VALUES (?, ?, ?, 1)")
     .run(result.provider, result.provider, result.baseUrl || null)
 
@@ -145,13 +142,6 @@ export async function providerAdd(name?: string): Promise<void> {
       .run(`provider_model_${result.provider}`, result.model)
   }
 
-  try {
-    const secrets = (Bun as any).secrets
-    if (secrets?.set) secrets.set(`${result.provider.toUpperCase().replace(/-/g, "_")}_API_KEY`, result.apiKey)
-  } catch {
-    db.query("UPDATE providers SET api_key_encrypted = ? WHERE id = ?")
-      .run(Buffer.from(result.apiKey).toString("base64"), result.provider)
-  }
 }
 
 export async function providerRemove(name?: string): Promise<void> {
@@ -169,6 +159,7 @@ export async function providerRemove(name?: string): Promise<void> {
     process.exit(1)
   }
 
+  await deleteProviderApiKey(name)
   db.query("DELETE FROM providers WHERE id = ?").run(name)
   hiveOutro(`Provider ${name} eliminado`)
 }
@@ -257,13 +248,7 @@ export async function providerEdit(name?: string): Promise<void> {
   )
 
   if (!isCancel(apiKey) && apiKey && typeof apiKey === "string") {
-    try {
-      const secrets = (Bun as any).secrets
-      if (secrets?.set) secrets.set(`${providerId.toUpperCase().replace(/-/g, "_")}_API_KEY`, apiKey)
-    } catch {
-      db.query("UPDATE providers SET api_key_encrypted = ? WHERE id = ?")
-        .run(Buffer.from(apiKey).toString("base64"), providerId)
-    }
+    await storeProviderApiKey(providerId, apiKey)
   }
 
   hiveOutro(`Provider ${providerId} actualizado`)

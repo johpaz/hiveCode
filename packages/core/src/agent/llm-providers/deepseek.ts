@@ -6,6 +6,8 @@ import { OpenAICompatBase } from "./openai-compat-base"
  *   be round-tripped in assistant messages for multi-turn tool calling.
  */
 export class DeepSeekProvider extends OpenAICompatBase {
+  static readonly secretKey = "DEEPSEEK_API_KEY"
+
   constructor() {
     super("deepseek")
   }

@@ -14,13 +14,21 @@ use tokio::net::UnixStream;
 // ── Wire format ───────────────────────────────────────────────────────────────
 
 /// Envelope que el servidor Bun envuelve alrededor de cada BunMessage.
-/// `{"priority":"normal","seq":5,"type":"worker_update","payload":{...}}`
+/// `{"protocol_version":1,"priority":"normal","seq":5,"session_id":"s1","type":"worker_update","payload":{...}}`
 ///
 /// Por qué existe: permite que el lado Rust enrute al canal correcto usando
 /// solo el campo `priority` sin deserializar el payload completo primero.
 #[derive(Deserialize)]
 struct IpcEnvelope {
+    #[serde(default, rename = "protocol_version")]
+    _protocol_version: Option<u16>,
     priority: String,
+    #[serde(default, rename = "seq")]
+    _seq: Option<u64>,
+    #[serde(default, rename = "session_id")]
+    session_id: Option<String>,
+    #[serde(default, rename = "task_id")]
+    task_id: Option<String>,
     #[serde(rename = "type")]
     msg_type: String,
     payload: sonic_rs::Value,
@@ -28,19 +36,35 @@ struct IpcEnvelope {
 
 /// Aplana envelope → JSON plano listo para deserializar como BunMessage.
 ///
-/// Entrada:  `{"priority":"normal","seq":5,"type":"worker_update","payload":{"worker":"bee",...}}`
-/// Salida:   `{"type":"worker_update","worker":"bee",...}`
+/// Entrada:  `{"protocol_version":1,"priority":"normal","seq":5,"task_id":"t1","type":"worker_update","payload":{"worker":"bee",...}}`
+/// Salida:   `{"type":"worker_update","task_id":"t1","worker":"bee",...}`
 ///
 /// Por qué string manipulation y no serde_json::merge: sonic_rs no expone
 /// merge de Value; manipular el string es O(n) y evita una segunda alocación.
 fn flatten_envelope(env: IpcEnvelope) -> Option<String> {
     let payload_str = sonic_rs::to_string(&env.payload).ok()?;
+    let mut metadata = Vec::with_capacity(2);
+    if let Some(session_id) = &env.session_id {
+        if !payload_str.contains(r#""session_id""#) {
+            metadata.push(format!(r#""session_id":{}"#, sonic_rs::to_string(session_id).ok()?));
+        }
+    }
+    if let Some(task_id) = &env.task_id {
+        if !payload_str.contains(r#""task_id""#) {
+            metadata.push(format!(r#""task_id":{}"#, sonic_rs::to_string(task_id).ok()?));
+        }
+    }
+    let metadata = if metadata.is_empty() {
+        String::new()
+    } else {
+        format!(",{}", metadata.join(","))
+    };
     let flat = if payload_str == "{}" {
         // AssistantDone y similares no tienen campos en payload
-        format!(r#"{{"type":"{}"}}"#, env.msg_type)
+        format!(r#"{{"type":"{}"{}}}"#, env.msg_type, metadata)
     } else {
         // payload_str empieza con '{' → lo reemplazamos con '"type":"...",`
-        format!(r#"{{"type":"{}",{}"#, env.msg_type, &payload_str[1..])
+        format!(r#"{{"type":"{}"{},{}"#, env.msg_type, metadata, &payload_str[1..])
     };
     Some(flat)
 }
@@ -100,6 +124,7 @@ pub enum BunMessage {
 
     // ── Workers y coordinador ──────────────────────────────────────────────────
     WorkerUpdate {
+        task_id: Option<String>,
         worker: String,
         phase: String,
         status: String,
@@ -108,6 +133,7 @@ pub enum BunMessage {
     },
     /// Legado: mismos campos que WorkerUpdate pero nombre diferente.
     ActivityUpdate {
+        task_id: Option<String>,
         coordinator: String,
         phase: String,
         status: String,
@@ -141,12 +167,14 @@ pub enum BunMessage {
 
     // ── Stream de pensamiento ──────────────────────────────────────────────────
     ThoughtChunk {
+        task_id: Option<String>,
         coordinator: String,
         phase: String,
         content: String,
     },
     /// Legado del tui-launcher: narrative_chunk ≡ thought_chunk.
     NarrativeChunk {
+        task_id: Option<String>,
         coordinator: String,
         phase: String,
         content: String,
@@ -220,6 +248,15 @@ pub enum BunMessage {
         risks: Vec<PlanRiskIpc>,
     },
     PlanApprovalRequest,
+
+    // ── Proyección de tareas concurrentes ─────────────────────────────────────
+    TaskUpdate {
+        task_id: String,
+        title: Option<String>,
+        status: String,
+        mode: Option<String>,
+        active_workers: Option<Vec<String>>,
+    },
 
     // ── Snapshots de inicio (dump de SQLite al conectar) ───────────────────────
     WorkersSnapshot { workers: Vec<WorkerSnapshotEntry> },
@@ -405,11 +442,17 @@ pub async fn connect() -> Result<IpcChannels> {
             let Ok(msg) = sonic_rs::from_str::<BunMessage>(&flat) else {
                 continue;
             };
-            let _ = match priority.as_str() {
-                "critical" => critical_tx.send(msg).await,
-                "low" => low_tx.send(msg).await,
-                _ => normal_tx.send(msg).await,
-            };
+            match priority.as_str() {
+                "critical" => {
+                    let _ = critical_tx.send(msg).await;
+                }
+                "low" => {
+                    let _ = low_tx.try_send(msg);
+                }
+                _ => {
+                    let _ = normal_tx.send(msg).await;
+                }
+            }
         }
     });
 
@@ -431,4 +474,40 @@ pub async fn connect() -> Result<IpcChannels> {
         low: low_rx,
         tx: out_tx,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flatten_envelope_preserves_routing_metadata() {
+        let raw = r#"{"protocol_version":1,"priority":"normal","seq":7,"session_id":"s1","task_id":"task-1","type":"activity_update","payload":{"coordinator":"backend","phase":"editing","status":"running"}}"#;
+        let env = sonic_rs::from_str::<IpcEnvelope>(raw).unwrap();
+        let flat = flatten_envelope(env).unwrap();
+        let msg = sonic_rs::from_str::<BunMessage>(&flat).unwrap();
+
+        match msg {
+            BunMessage::ActivityUpdate { task_id, coordinator, .. } => {
+                assert_eq!(task_id.as_deref(), Some("task-1"));
+                assert_eq!(coordinator, "backend");
+            }
+            _ => panic!("expected activity_update"),
+        }
+    }
+
+    #[test]
+    fn flatten_envelope_keeps_payload_task_id_when_present() {
+        let raw = r#"{"protocol_version":1,"priority":"normal","seq":8,"task_id":"route-task","type":"task_update","payload":{"task_id":"payload-task","status":"running"}}"#;
+        let env = sonic_rs::from_str::<IpcEnvelope>(raw).unwrap();
+        let flat = flatten_envelope(env).unwrap();
+        let msg = sonic_rs::from_str::<BunMessage>(&flat).unwrap();
+
+        match msg {
+            BunMessage::TaskUpdate { task_id, .. } => {
+                assert_eq!(task_id, "payload-task");
+            }
+            _ => panic!("expected task_update"),
+        }
+    }
 }

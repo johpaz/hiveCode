@@ -3,6 +3,7 @@ import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { runReflector } from "../agent/reflector"
 import { callLLM, resolveProviderConfig } from "@johpaz/hivecode-core/agent/llm-client"
 import { saveScratchpadNote, getScratchpad, deleteScratchpadNote } from "@johpaz/hivecode-core/agent/conversation-store"
+import { hasProviderApiKey, storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
 
 export interface ContextState {
   sessionId: string
@@ -388,20 +389,19 @@ async function handleProviderCommand(
         ])
         if (!values) return { handled: true, output: "  Configuraci\u00f3n cancelada" }
         const providerId = values.id.trim().toLowerCase()
+        await storeProviderApiKey(providerId, values.api_key)
         db.query(`
-          INSERT INTO providers (id, name, base_url, api_key_encrypted, enabled, category)
-          VALUES (?,?,?,?,1,?)
+          INSERT INTO providers (id, name, base_url, enabled, category)
+          VALUES (?,?,?,1,?)
           ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             base_url = excluded.base_url,
-            api_key_encrypted = excluded.api_key_encrypted,
             enabled = 1,
             category = excluded.category
         `).run(
           providerId,
           values.name || providerId,
           values.base_url || null,
-          Buffer.from(values.api_key).toString("base64"),
           values.category || "llm",
         )
         db.query("INSERT OR REPLACE INTO code_config (key,value) VALUES ('default_provider',?)").run(providerId)
@@ -418,14 +418,14 @@ async function handleProviderCommand(
         try {
           const result = await ui.runProviderSetupWizard(known, VERSION)
           if (result) {
+            await storeProviderApiKey(result.provider, result.apiKey)
             db.query(`
-              INSERT INTO providers (id, name, base_url, api_key_encrypted, enabled)
-              VALUES (?,?,?,?,1)
+              INSERT INTO providers (id, name, base_url, enabled)
+              VALUES (?,?,?,1)
               ON CONFLICT(id) DO UPDATE SET
                 base_url = excluded.base_url,
-                api_key_encrypted = excluded.api_key_encrypted,
                 enabled = 1
-            `).run(result.provider, result.provider, result.baseUrl || null, Buffer.from(result.apiKey).toString("base64"))
+            `).run(result.provider, result.provider, result.baseUrl || null)
             db.query("INSERT OR REPLACE INTO code_config (key,value) VALUES ('default_provider',?)").run(result.provider)
             if (result.model) {
               db.query("INSERT OR REPLACE INTO code_config (key,value) VALUES (?,?)").run(`provider_model_${result.provider}`, result.model)
@@ -453,23 +453,27 @@ async function handleProviderCommand(
       db.query("INSERT OR IGNORE INTO providers (id, name, enabled) VALUES (?, ?, 1)").run(name, name)
       return {
         handled: true,
-        output: `  \u2713 ${name} agregado\n\n  Configurar API key con: hivecode secret set ${name.toUpperCase()}_API_KEY\n  Activar con: /provider set ${name}`,
+        output: `  \u2713 ${name} agregado\n\n  Configurar API key con: hivecode secret set provider.${name}\n  Activar con: /provider set ${name}`,
       }
     }
     case "set": {
       if (ui?.showConfigModal) {
         // Muestra TODOS los providers LLM \u2014 con y sin API key
         const allProviders = db.query(
-          "SELECT id, name, api_key_encrypted FROM providers WHERE category = 'llm' OR category IS NULL ORDER BY name"
-        ).all() as { id: string; name: string; api_key_encrypted: string | null }[]
+          "SELECT id, name FROM providers WHERE category = 'llm' OR category IS NULL ORDER BY name"
+        ).all() as { id: string; name: string }[]
 
         if (allProviders.length === 0) {
           return { handled: true, output: "  No hay providers registrados.\n  Agrega uno con: /provider add" }
         }
 
         // Marca los que ya tienen clave vs los que necesitan configuraci\u00f3n
-        const options = allProviders.map(p =>
-          p.api_key_encrypted ? p.id : `${p.id}  (sin clave)`
+        const providerStates = await Promise.all(allProviders.map(async p => ({
+          ...p,
+          hasApiKey: await hasProviderApiKey(p.id),
+        })))
+        const options = providerStates.map(p =>
+          p.hasApiKey ? p.id : `${p.id}  (sin clave)`
         )
         const rawIds = allProviders.map(p => p.id)
         const current = rawIds.includes(ctx.activeProvider) ? ctx.activeProvider : rawIds[0]
@@ -501,9 +505,9 @@ async function handleProviderCommand(
         const rawSelected = values.provider || current
         const selectedId = rawSelected.replace(/\s+\(sin clave\)$/, "").trim()
 
-        const providerRow = allProviders.find(p => p.id === selectedId)
+        const providerRow = providerStates.find(p => p.id === selectedId)
         const newKey = values.api_key?.trim() || ""
-        const existingKey = providerRow?.api_key_encrypted || ""
+        const existingKey = providerRow?.hasApiKey ?? false
 
         if (!newKey && !existingKey) {
           return {
@@ -513,19 +517,26 @@ async function handleProviderCommand(
         }
 
         if (newKey) {
-          db.query("UPDATE providers SET api_key_encrypted = ?, enabled = 1 WHERE id = ?")
-            .run(Buffer.from(newKey).toString("base64"), selectedId)
-        } else {
-          db.query("UPDATE providers SET enabled = 1 WHERE id = ?").run(selectedId)
+          await storeProviderApiKey(selectedId, newKey)
         }
-
+        db.query("UPDATE providers SET enabled = 1 WHERE id = ?").run(selectedId)
         db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(selectedId)
 
+        // Cambiar al primer modelo del nuevo provider para evitar 401 por modelo incompatible
+        const firstModel = db.query(
+          "SELECT id FROM models WHERE provider = ? ORDER BY id ASC LIMIT 1"
+        ).get(selectedId) as { id: string } | null
+        const newModel = firstModel?.id ?? null
+        if (newModel) {
+          db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_model', ?)").run(newModel)
+        }
+
         const verb = newKey ? "configurado y activado" : "activado"
+        const modelLine = newModel ? `\n  Modelo: ${newModel}` : ""
         return {
           handled: true,
-          output: `  \u2b22 Provider ${selectedId} ${verb}`,
-          newState: { activeProvider: selectedId },
+          output: `  \u2b22 Provider ${selectedId} ${verb}${modelLine}`,
+          newState: { activeProvider: selectedId, ...(newModel && { activeModel: newModel }) },
         }
       }
 
@@ -657,23 +668,26 @@ async function handleModelCommand(
 
     case "set": {
       if (ui?.showConfigModal) {
-        const providers = db.query(
-          "SELECT id FROM providers WHERE enabled = 1 AND api_key_encrypted IS NOT NULL AND api_key_encrypted != '' ORDER BY id"
+        const enabledProviders = db.query(
+          "SELECT id FROM providers WHERE enabled = 1 ORDER BY id"
         ).all() as { id: string }[]
+        const providers = (await Promise.all(enabledProviders.map(async p => ({
+          ...p,
+          hasApiKey: await hasProviderApiKey(p.id),
+        })))).filter(p => p.hasApiKey)
         if (providers.length === 0) {
           return { handled: true, output: "  No hay providers con API key configurada. Agrega uno con: /provider add" }
         }
         // Build combined options: "provider :: modelId" — solo providers con API key
-        const dbModels = db.query(`
+        const providerIds = new Set(providers.map(p => p.id))
+        const dbModels = (db.query(`
           SELECT m.id, m.provider_id
           FROM models m
           JOIN providers p ON m.provider_id = p.id
           WHERE m.enabled = 1
             AND p.enabled = 1
-            AND p.api_key_encrypted IS NOT NULL
-            AND p.api_key_encrypted != ''
           ORDER BY m.provider_id, m.id
-        `).all() as { id: string; provider_id: string }[]
+        `).all() as { id: string; provider_id: string }[]).filter(m => providerIds.has(m.provider_id))
 
         const combinedOptions = dbModels.map(m => `${m.provider_id} :: ${m.id}`)
 

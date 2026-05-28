@@ -4,12 +4,13 @@ import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { getHiveDir } from "@johpaz/hivecode-core/config/loader"
 import { loadConfig, startGateway } from "@johpaz/hivecode-core/gateway"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
+import { storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
 import {
   isCancel, hiveSelect, hiveNote, hiveOutro, hiveSpinner,
   runProviderSetupWizard,
   runTelegramConnectWizard,
 } from "@johpaz/hivecode-tui-primitives"
-import { loadInitialState } from "./repl-state"
+import { loadInitialState, saveMode } from "./repl-state"
 import type { ReplMode } from "./repl-state"
 import { parseInternalCommand, getCtx, renderSuggestions } from "@johpaz/hivecode-code/coordinator/command-parser"
 import type { MenuItem } from "@johpaz/hivecode-code/coordinator/command-parser"
@@ -148,19 +149,19 @@ async function ensureProvider(
   const result = await runProviderSetupWizard(knownProviders, VERSION)
   if (!result) return null
 
+  await storeProviderApiKey(result.provider, result.apiKey)
+
   // Upsert provider row without DELETE (INSERT OR REPLACE breaks FK refs from models table)
   db.query(`
-    INSERT INTO providers (id, name, base_url, api_key_encrypted, enabled)
-    VALUES (?, ?, ?, ?, 1)
+    INSERT INTO providers (id, name, base_url, enabled)
+    VALUES (?, ?, ?, 1)
     ON CONFLICT(id) DO UPDATE SET
       base_url = excluded.base_url,
-      api_key_encrypted = excluded.api_key_encrypted,
       enabled = 1
   `).run(
     result.provider,
     result.provider,
     result.baseUrl || null,
-    Buffer.from(result.apiKey || "").toString("base64"),
   )
 
   db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(result.provider)
@@ -180,12 +181,6 @@ async function ensureProvider(
     UPDATE agents SET provider_id = ?, model_id = ?
     WHERE role = 'coordinator'
   `).run(result.provider, agentModelId)
-
-  try {
-    const secrets = (Bun as any).secrets
-    if (secrets?.set)
-      secrets.set(`${result.provider.toUpperCase().replace(/-/g, "_")}_API_KEY`, result.apiKey)
-  } catch { /* env secrets not available — key already stored in providers table */ }
 
   hiveOutro(`Provider ${result.provider} configurado`)
   return { provider: result.provider, model: result.model || "" }
@@ -328,9 +323,22 @@ export async function repl(): Promise<void> {
   let _tuiIpcSend: ((msg: any) => void) | null = null
   manager.setIpcCallback((event, payload) => {
     if (!_tuiIpcSend) return
+    const p = payload as any
+    const activeTaskId = typeof p?.task_id === "string" && p.task_id.length > 0
+      ? p.task_id
+      : manager.getActiveTaskId()
+    const withTaskRoute = (message: any) => {
+      if (
+        activeTaskId
+        && message.task_id === undefined
+        && ["activity_update", "narrative_chunk", "history_append", "file_risk_update", "file_diff", "plan_update", "task_update"].includes(message.type)
+      ) {
+        message.task_id = activeTaskId
+      }
+      return message
+    }
     if (event === "conflict_detected") {
-      const p = payload as any
-      _tuiIpcSend({
+      _tuiIpcSend(withTaskRoute({
         type: "conflict_alert",
         agent_a: p.agent_a ?? "",
         agent_b: p.agent_b ?? "",
@@ -338,9 +346,9 @@ export async function repl(): Promise<void> {
         reason: p.reason ?? p.description ?? "",
         severity: p.severity ?? "high",
         detail: p.detail ?? null,
-      })
+      }))
     } else {
-      _tuiIpcSend({ type: event, ...(payload as object) })
+      _tuiIpcSend(withTaskRoute({ type: event, ...(payload as object) }))
     }
   })
 
@@ -381,17 +389,19 @@ export async function repl(): Promise<void> {
     // BEE-initiated mode changes (set_session_mode tool) propagate back to TUI
     manager.setModeChangeCallback((mode) => {
       currentMode = mode as ReplMode
-      _tuiIpcSend?.({ type: "mode_change", mode })
+      _tuiIpcSend?.({ type: "state_update", new_mode: mode })
     })
 
     // Forward narrative chunks from coordinators to TUI
     manager.setNarrativeCallback((chunk) => {
       const content = chunk.content
+      const taskId = (chunk as any).taskId
       const contentType = chunk.phase === "thinking"
         ? "thinking"
         : isLikelyMarkdown(content) ? "markdown" : "plain"
       tuiControl.send?.({
         type: "narrative_chunk",
+        task_id: taskId,
         coordinator: chunk.coordinator,
         phase: chunk.phase,
         content,
@@ -402,6 +412,7 @@ export async function repl(): Promise<void> {
       if (chunk.phase !== "thinking" && chunk.phase !== "reason" && content.trim().length > 2) {
         tuiControl.send?.({
           type: "history_append",
+          task_id: taskId,
           role: "assistant",
           agent: chunk.coordinator,
           content,
@@ -426,6 +437,7 @@ export async function repl(): Promise<void> {
       }
       tuiControl.send?.({
         type: "activity_update",
+        task_id: taskId,
         coordinator: chunk.coordinator,
         phase: chunk.phase,
         status: chunk.phase === "thinking" || chunk.phase === "reason" ? "running" : "running",
@@ -498,6 +510,7 @@ export async function repl(): Promise<void> {
 
       onModeChange(mode) {
         currentMode = mode as ReplMode
+        saveMode(currentMode)
       },
 
       onExit() {
@@ -543,7 +556,7 @@ export async function repl(): Promise<void> {
             const guardResult = await ensureProvider(currentProvider)
             const provider = guardResult ? guardResult.provider : currentProvider
             const model    = guardResult ? guardResult.model    : currentModel
-            if (guardResult) { currentProvider = provider; currentModel = model; manager.reloadSecrets() }
+            if (guardResult) { currentProvider = provider; currentModel = model; await manager.reloadSecrets() }
             if (!provider) return { output: "(×ᴗ×) Sin provider — ejecución cancelada." }
             const out = await executeTask(originalTask, "approval", {
               suspend: tuiControl.suspend ?? undefined, resume: tuiControl.resume ?? undefined, manager, quiet: true,
@@ -561,7 +574,7 @@ export async function repl(): Promise<void> {
           const guardResult = await ensureProvider(currentProvider)
           const provider = guardResult ? guardResult.provider : currentProvider
           const model    = guardResult ? guardResult.model    : currentModel
-          if (guardResult) { currentProvider = provider; currentModel = model; manager.reloadSecrets() }
+          if (guardResult) { currentProvider = provider; currentModel = model; await manager.reloadSecrets() }
           if (!provider) return { output: "(×ᴗ×) Sin provider — ejecución cancelada." }
           const output = await executeTask(taskWithContext, "auto", {
             suspend: tuiControl.suspend ?? undefined, resume: tuiControl.resume ?? undefined, manager, quiet: true,
@@ -592,6 +605,9 @@ export async function repl(): Promise<void> {
           if (result.newMode)     currentMode     = result.newMode
           if (result.newProvider) currentProvider = result.newProvider
           if (result.newModel)    currentModel    = result.newModel
+          // Si el comando cambió el provider (o su clave), recargar secrets
+          // para que los workers la vean en la siguiente tarea.
+          if (result.newProvider) await manager.reloadSecrets()
           return {
             output:      result.output,
             newMode:     result.newMode,
@@ -607,7 +623,7 @@ export async function repl(): Promise<void> {
           currentProvider = provider
           currentModel    = model
           // Recargar secrets en el manager para que los workers las reciban en la próxima tarea
-          manager.reloadSecrets()
+          await manager.reloadSecrets()
         }
 
         if (!provider) {

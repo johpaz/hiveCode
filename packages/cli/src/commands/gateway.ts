@@ -86,7 +86,7 @@ function startUIServer(gatewayPort: number, uiPort: number): void {
           const html = entry.data.toString("utf8").replace("</head>", `${configScript}</head>`)
           return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } })
         }
-        return new Response(entry.data as unknown as Uint8Array, { headers: { "Content-Type": entry.mime } })
+        return new Response(entry.data as unknown as BodyInit, { headers: { "Content-Type": entry.mime } })
       }
 
       const filePath = path.join(uiDir!, subPath)

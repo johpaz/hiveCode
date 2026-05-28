@@ -10,6 +10,9 @@ const log = logger.child("llm-client")
  * Note: Hive-Code is terminal-only — local LLM server must be started manually
  */
 export class LocalLlamaProvider extends OpenAICompatBase {
+  /** Local provider — no API key required */
+  static readonly secretKey = null
+
   constructor() {
     super("local-llama")
   }

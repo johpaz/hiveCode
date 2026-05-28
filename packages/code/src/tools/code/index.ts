@@ -1,4 +1,4 @@
-import type { Tool } from "../types.ts"
+import type { Tool } from "@johpaz/hivecode-core/tools/types"
 import { validateCommand } from "./command-validator.ts"
 
 // ─── Git Status ──────────────────────────────────────────────────────────────
@@ -662,7 +662,7 @@ const findImportsTool: Tool = {
     const targetPath = params.path as string
     if (!targetPath) return { ok: false, error: "path is required" }
     try {
-      const { getDb } = await import("../../storage/sqlite.ts")
+      const { getDb } = await import("@johpaz/hivecode-core/storage/sqlite")
       const db = getDb()
       // Match both exact path and partial path (handles relative vs absolute)
       const basename = targetPath.split("/").pop()?.replace(/\.(ts|tsx|js|jsx)$/, "") ?? targetPath
@@ -1033,7 +1033,7 @@ const gitRollbackTool: Tool = {
     }
 
     try {
-      const { getDb } = await import("../../storage/sqlite.ts")
+      const { getDb } = await import("@johpaz/hivecode-core/storage/sqlite")
       const db = getDb()
       const snapshots = db.query(
         "SELECT * FROM code_file_snapshots WHERE task_id = ? ORDER BY id"

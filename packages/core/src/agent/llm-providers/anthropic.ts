@@ -23,6 +23,8 @@ function supportsThinking(model: string): boolean {
 }
 
 export class AnthropicProvider implements LLMProvider {
+  static readonly secretKey = "ANTHROPIC_API_KEY"
+
   private _convertContentPart(part: ContentPart): any {
     switch (part.type) {
       case "text":

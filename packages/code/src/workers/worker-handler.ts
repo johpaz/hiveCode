@@ -208,7 +208,8 @@ function compactMessagesIfNeeded(messages: LLMMessage[], model: string): LLMMess
   return result
 }
 
-/** Resolve API key using getEnvironmentData → task.secrets → env fallback */
+/** Resolve API key using getEnvironmentData → task.secrets → env fallback.
+ *  Each provider uses its own independent key — no sharing between providers. */
 function resolveApiKey(provider: string, taskSecrets?: Record<string, string>): string {
   const envKey = `${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`
   const envSecrets = readWorkerSecrets()

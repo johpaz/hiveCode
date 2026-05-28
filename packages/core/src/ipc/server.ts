@@ -30,6 +30,8 @@ export interface IpcServer {
 export interface IpcServerOptions {
   socketPath?: string
   tcp?: { hostname?: string; port?: number }
+  /** Session routing metadata included in every Bun -> TUI envelope. */
+  sessionId?: string
   onMessage: (msg: TuiMessage) => void
   onConnect?: () => void
   onDisconnect?: () => void
@@ -43,7 +45,11 @@ export function createIpcServer(opts: IpcServerOptions): IpcServer {
   const rawSend = (msg: BunMessage, priority?: "critical" | "normal" | "low") => {
     if (!socket) return
     const p = priority ?? messagePriority(msg)
-    const envelope = wrap(p, msg as unknown as { type: string } & Record<string, unknown>)
+    const envelope = wrap(
+      p,
+      msg as unknown as { type: string } & Record<string, unknown>,
+      { sessionId: opts.sessionId },
+    )
     socket.write(serialize(envelope))
   }
 

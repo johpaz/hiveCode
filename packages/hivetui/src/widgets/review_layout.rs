@@ -1,6 +1,7 @@
 use crate::{
     state::{AppState, ReplMode, RiskLevel},
     term::{Canvas, Rect, Style, AMBER, AMBER_BRIGHT, AMBER_DIM, BG_ELEVATED, BG_PANEL, DIM, GREEN, RED, SECONDARY, WHITE, YELLOW},
+    widgets::components::{render_table, Align, TableCell, TableColumn},
 };
 
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -116,26 +117,31 @@ fn render_approval_strip(canvas: &mut Canvas, area: Rect, state: &AppState) {
     }
 
     let list_rows = area.h.saturating_sub(3) as usize;
-    let mut y = area.y + 1;
+    let columns = [
+        TableColumn::fixed(1, Align::Left),
+        TableColumn::fill(Align::Left),
+        TableColumn::fixed(8, Align::Right),
+    ];
+    let mut rows = Vec::new();
     for entry in state.filemap.entries.iter().take(list_rows) {
-        if y >= area.bottom().saturating_sub(2) { break; }
-
         let (dot_color, risk_tag) = match entry.risk {
             RiskLevel::Low      => (GREEN,  "[low]   "),
             RiskLevel::Medium   => (YELLOW, "[medium]"),
             RiskLevel::High     => (AMBER,  "[high]  "),
             RiskLevel::Critical => (RED,    "[crit]  "),
         };
-        canvas.print(area.x + 1, y, "●", Style::new().fg(dot_color).bold());
-
-        let path_avail = area.w.saturating_sub(14) as usize;
-        let path: String = entry.path.chars().take(path_avail).collect();
-        canvas.print(area.x + 3, y, &path, Style::new().fg(WHITE));
-
-        let tag_x = area.right().saturating_sub(10);
-        canvas.print(tag_x, y, risk_tag, Style::new().fg(dot_color));
-        y += 1;
+        rows.push(vec![
+            TableCell::new("●", Style::new().fg(dot_color).bold()),
+            TableCell::new(entry.path.clone(), Style::new().fg(WHITE)),
+            TableCell::new(risk_tag.trim(), Style::new().fg(dot_color)),
+        ]);
     }
+    render_table(
+        canvas,
+        Rect::new(area.x + 1, area.y + 1, area.w.saturating_sub(2), list_rows as u16),
+        &columns,
+        &rows,
+    );
 
     // Hints de acción — más prominentes en modo APPROVAL
     let hint_y = area.bottom().saturating_sub(1);

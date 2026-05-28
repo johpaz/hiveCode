@@ -111,10 +111,10 @@ export function hiveSpinner(coordinator = "default") {
     update(message: string) {
       currentMsg = message
     },
-    stop(message: string, type: "done" | "error" = "done") {
+    stop(message: string, type: "done" | "warn" | "error" = "done") {
       if (interval) clearInterval(interval)
-      const symbol = type === "done" ? S.done : S.error
-      const msgColor = type === "done" ? C.white : C.red
+      const symbol = type === "done" ? S.done : type === "warn" ? S.warn : S.error
+      const msgColor = type === "done" ? C.white : type === "warn" ? C.amber : C.red
       process.stdout.write(
         `${C.clearLine} ${color}${symbol}${C.reset} ${msgColor}${message}${C.reset}\n`
       )

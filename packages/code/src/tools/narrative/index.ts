@@ -1,6 +1,6 @@
-import type { Tool } from "../types.ts";
-import { getDb } from "../../storage/sqlite.ts";
-import { logger } from "../../utils/logger.ts";
+import type { Tool } from "@johpaz/hivecode-core/tools/types";
+import { getDb } from "@johpaz/hivecode-core/storage/sqlite";
+import { logger } from "@johpaz/hivecode-core/utils/logger";
 
 const log = logger.child("narrative");
 

@@ -99,6 +99,18 @@
       "@johpaz/hive-code-code/*": [
         "./packages/code/src/*"
       ],
+      "@johpaz/hivecode-core": [
+        "./packages/core/src/index.ts"
+      ],
+      "@johpaz/hivecode-core/*": [
+        "./packages/core/src/*"
+      ],
+      "@johpaz/hivecode-code": [
+        "./packages/code/src/index.ts"
+      ],
+      "@johpaz/hivecode-code/*": [
+        "./packages/code/src/*"
+      ],
       "@johpaz/hive-tts": [
         "./packages/tts/src/index.ts"
       ],

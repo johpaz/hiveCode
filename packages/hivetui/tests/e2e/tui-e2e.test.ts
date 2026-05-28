@@ -26,6 +26,11 @@ const BINARY = path.resolve(
 // ── Tipos de IPC ──────────────────────────────────────────────────────────────
 
 type BunMessage = Record<string, unknown> & { type: string }
+type SendOptions = {
+  priority?: "critical" | "normal" | "low"
+  sessionId?: string
+  taskId?: string
+}
 type FrameSnapshot = {
   frame: number
   tab: string
@@ -39,7 +44,7 @@ type FrameSnapshot = {
 /** Crea un Unix socket server que acepta una conexión y la expone como stream. */
 async function createIpcServer(socketPath: string): Promise<{
   server: Server
-  waitForConnection: () => Promise<{ send: (msg: BunMessage) => void; close: () => void }>
+  waitForConnection: () => Promise<{ send: (msg: BunMessage, options?: SendOptions) => void; close: () => void }>
 }> {
   if (existsSync(socketPath)) unlinkSync(socketPath)
 
@@ -55,14 +60,17 @@ async function createIpcServer(socketPath: string): Promise<{
   })
 
   const waitForConnection = () =>
-    new Promise<{ send: (msg: BunMessage) => void; close: () => void }>((resolve) => {
+    new Promise<{ send: (msg: BunMessage, options?: SendOptions) => void; close: () => void }>((resolve) => {
       server.once("connection", (socket) => {
-        const send = (msg: BunMessage) => {
+        const send = (msg: BunMessage, options: SendOptions = {}) => {
           // El protocolo del IPC usa envelopes: {"priority":"normal","seq":N,"type":"...","payload":{...}}
           const { type, ...payload } = msg
           const envelope = JSON.stringify({
-            priority: "normal",
+            protocol_version: 1,
+            priority: options.priority ?? "normal",
             seq: Date.now(),
+            ...(options.sessionId ? { session_id: options.sessionId } : {}),
+            ...(options.taskId ? { task_id: options.taskId } : {}),
             type,
             payload,
           })
@@ -80,7 +88,7 @@ async function createIpcServer(socketPath: string): Promise<{
 async function createTcpIpcServer(): Promise<{
   endpoint: string
   server: Server
-  waitForConnection: () => Promise<{ send: (msg: BunMessage) => void; close: () => void }>
+  waitForConnection: () => Promise<{ send: (msg: BunMessage, options?: SendOptions) => void; close: () => void }>
 }> {
   const server = createServer()
   await new Promise<void>((resolve, reject) => {
@@ -91,13 +99,16 @@ async function createTcpIpcServer(): Promise<{
   const address = server.address() as AddressInfo
 
   const waitForConnection = () =>
-    new Promise<{ send: (msg: BunMessage) => void; close: () => void }>((resolve) => {
+    new Promise<{ send: (msg: BunMessage, options?: SendOptions) => void; close: () => void }>((resolve) => {
       server.once("connection", (socket) => {
-        const send = (msg: BunMessage) => {
+        const send = (msg: BunMessage, options: SendOptions = {}) => {
           const { type, ...payload } = msg
           socket.write(JSON.stringify({
-            priority: "normal",
+            protocol_version: 1,
+            priority: options.priority ?? "normal",
             seq: Date.now(),
+            ...(options.sessionId ? { session_id: options.sessionId } : {}),
+            ...(options.taskId ? { task_id: options.taskId } : {}),
             type,
             payload,
           }) + "\n")
@@ -246,6 +257,58 @@ const STRUCTURED_PLAN = (): BunMessage => ({
       description: "Una linea sin recorte puede invadir el mapa de archivos.",
     },
   ],
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IPC PRIORITY — actividad low no debe bloquear alertas críticas
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("E2E: prioridad IPC", () => {
+  test("una alerta crítica permanece visible después de un flood low-priority", async () => {
+    const { endpoint, server, waitForConnection } = await createTcpIpcServer()
+    const { frames, kill } = await spawnTui(endpoint)
+    const iter = frames()
+
+    try {
+      const ipc = await waitForConnection()
+      await iter.next()
+
+      ipc.send(BASE_INIT("auto"))
+      await waitForFrame(iter, (f) => f.mode === "auto")
+
+      for (let i = 0; i < 700; i++) {
+        ipc.send({
+          type: "log_entry",
+          timestamp: new Date().toISOString(),
+          level: "debug",
+          source: "flood",
+          message: `low-priority-noise-${i}`,
+        }, { priority: "low" })
+      }
+
+      ipc.send({
+        type: "conflict_alert",
+        agent_a: "backend",
+        agent_b: "security",
+        file: "src/critical-route.ts",
+        reason: "CRITICAL_SENTINEL_LEASE",
+        severity: "critical",
+        detail: "priority must win",
+      }, { priority: "critical" })
+
+      const frame = await waitForFrame(
+        iter,
+        (f) => frameContains(f, "CRITICAL_SENTINEL_LEASE") || frameContains(f, "critical-route"),
+        3000,
+      )
+      expect(frameContains(frame, "CRITICAL_SENTINEL_LEASE") || frameContains(frame, "critical-route")).toBe(true)
+
+      ipc.close()
+    } finally {
+      kill()
+      server.close()
+    }
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

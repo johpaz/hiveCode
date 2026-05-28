@@ -1,6 +1,7 @@
 use crate::{
     state::{AppState, WorkerStatus},
-    term::{Canvas, Rect, Style, AMBER, AMBER_BRIGHT, BG_ELEVATED, BG_PANEL, BLUE, CYAN, DIM, GREEN, LAVENDER, PINK, PURPLE, RED, SECONDARY, WHITE, YELLOW},
+    term::{Canvas, Rect, Style, AMBER, AMBER_BRIGHT, BG_ELEVATED, BG_PANEL, BLUE, CYAN, DIM, GREEN, PURPLE, RED, SECONDARY, WHITE, YELLOW},
+    widgets::components::{agent_display_name, worker_color},
 };
 
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -398,44 +399,4 @@ fn is_ts_type(word: &str) -> bool {
         "Request", "Response", "NextFunction", "Error", "Date", "RegExp", "Buffer",
     ];
     TYPES.contains(&word)
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn agent_display_name(name: &str) -> String {
-    match name {
-        "bee" => "Bee".to_string(),
-        "architecture" => "Architecture".to_string(),
-        "backend" => "BackendEngineer".to_string(),
-        "frontend" => "FrontendEngineer".to_string(),
-        "security" => "SecurityAuditor".to_string(),
-        "test" => "QAEngineer".to_string(),
-        "devops" => "DevOpsEngineer".to_string(),
-        "product_manager" => "ProductManager".to_string(),
-        "mobile" => "MobileEngineer".to_string(),
-        "data_scientist" => "DataScientist".to_string(),
-        "dba" => "DBA".to_string(),
-        "integration" => "IntegrationEngineer".to_string(),
-        "reviewer" => "Reviewer".to_string(),
-        _ => {
-            let mut s = name.to_string();
-            if let Some(first) = s.get_mut(0..1) {
-                first.make_ascii_uppercase();
-            }
-            s
-        }
-    }
-}
-
-fn worker_color(name: &str) -> crate::term::Color {
-    const ROLES: &[(&str, crate::term::Color)] = &[
-        ("bee",    AMBER_BRIGHT),
-        ("arch",   PURPLE),
-        ("back",   BLUE),
-        ("front",  CYAN),
-        ("sec",    PINK),
-        ("test",   YELLOW),
-        ("devops", LAVENDER),
-    ];
-    ROLES.iter().find(|(k, _)| name.contains(k)).map(|(_, c)| *c).unwrap_or(SECONDARY)
 }

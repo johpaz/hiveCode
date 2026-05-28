@@ -52,13 +52,6 @@ fn region_contains<F: Fn(char) -> bool>(canvas: &Canvas, x0: u16, y0: u16, x1: u
     false
 }
 
-/// True if any cell in the row at y (between x..x+len) matches predicate.
-fn row_contains<F: Fn(char) -> bool>(canvas: &Canvas, x: u16, y: u16, len: u16, f: F) -> bool {
-    (x..x + len)
-        .filter_map(|cx| canvas.cell_at(cx, y))
-        .any(|c| f(c.ch))
-}
-
 fn base_state() -> AppState {
     let mut s = AppState::default();
     s.apply_message(BunMessage::Init {
@@ -90,11 +83,14 @@ fn focus_shows_user_question_while_running_plan_mode() {
     state.history.entries.push(HistoryEntry {
         role: Role::User,
         content: "implementa el sistema de login".into(),
+        agent: None,
+        timestamp: None,
     });
     state.apply_message(BunMessage::Status { running: true, msg: "pensando…".into() });
 
     // Bee empieza a razonar — aún sin workers
     state.apply_message(BunMessage::ThoughtChunk {
+        task_id: None,
         coordinator: "bee".into(),
         phase: "planning".into(),
         content: "Analizando requerimientos de autenticación".into(),
@@ -124,18 +120,26 @@ fn focus_shows_workers_while_running_auto_mode() {
     let mut state = base_state();
     // Activar workers en estado Running
     state.apply_message(BunMessage::WorkerUpdate {
+        task_id: None,
         worker: "backend".into(),
         phase: "escribiendo src/auth/jwt.ts".into(),
         status: "running".into(),
+        display_name: None,
+        activity: None,
     });
     state.apply_message(BunMessage::WorkerUpdate {
+        task_id: None,
         worker: "frontend".into(),
         phase: "escribiendo src/components/Login.tsx".into(),
         status: "running".into(),
+        display_name: None,
+        activity: None,
     });
     state.history.entries.push(HistoryEntry {
         role: Role::User,
         content: "implementa login".into(),
+        agent: None,
+        timestamp: None,
     });
     state.apply_message(BunMessage::Status { running: true, msg: "workers activos".into() });
 
@@ -164,10 +168,14 @@ fn focus_shows_full_response_when_done() {
     state.history.entries.push(HistoryEntry {
         role: Role::User,
         content: "¿qué hace auth.ts?".into(),
+        agent: None,
+        timestamp: None,
     });
     state.history.entries.push(HistoryEntry {
         role: Role::Assistant,
         content: "Es el módulo de autenticación JWT.".into(),
+        agent: None,
+        timestamp: None,
     });
     state.running = false;
 
@@ -188,10 +196,10 @@ fn focus_shows_full_response_when_done() {
     );
 }
 
-// ── 4. Auto-routing: PLAN mode → Tab cambia a Plan ───────────────────────────
+// ── 4. Auto-routing: PLAN mode conserva Focus hasta recibir un plan ───────────
 
 #[test]
-fn routing_plan_mode_navigates_to_plan_tab() {
+fn routing_plan_mode_waits_for_structured_plan() {
     let mut state = base_state();
     state.apply_message(BunMessage::StateUpdate {
         new_mode: Some("plan".into()),
@@ -199,8 +207,8 @@ fn routing_plan_mode_navigates_to_plan_tab() {
         new_model: None,
     });
     assert_eq!(state.session.mode, ReplMode::Plan);
-    assert_eq!(state.active_tab, TabId::Plan,
-        "Cambiar a modo plan debe navegar a Plan tab automáticamente");
+    assert_eq!(state.active_tab, TabId::Focus,
+        "Cambiar a modo plan debe mantener Focus mientras el plan se genera");
 }
 
 // ── 5. Auto-routing: APPROVAL mode → Tab cambia a Review ─────────────────────
@@ -227,9 +235,12 @@ fn routing_auto_mode_code_then_focus() {
 
     // Worker activo → debe ir a Code
     state.apply_message(BunMessage::ActivityUpdate {
+        task_id: None,
         coordinator: "backend".into(),
         phase: "escribiendo archivos".into(),
         status: "running".into(),
+        display_name: None,
+        activity: None,
     });
     assert_eq!(state.active_tab, TabId::Code,
         "AUTO mode + worker running debe navegar a Code tab");
@@ -253,9 +264,12 @@ fn manual_tab_lock_overrides_auto_routing() {
 
     // Llega ActivityUpdate (normalmente iría a Code en AUTO mode)
     state.apply_message(BunMessage::ActivityUpdate {
+        task_id: None,
         coordinator: "backend".into(),
         phase: "escribiendo".into(),
         status: "running".into(),
+        display_name: None,
+        activity: None,
     });
     assert_eq!(state.active_tab, TabId::Review,
         "tab_locked=true debe impedir el auto-routing");
@@ -298,9 +312,12 @@ fn code_layout_renders_all_workers() {
         ("security", "auditando middleware"),
     ] {
         state.apply_message(BunMessage::WorkerUpdate {
+            task_id: None,
             worker: name.into(),
             phase: phase.into(),
             status: "running".into(),
+            display_name: None,
+            activity: None,
         });
     }
 
@@ -335,6 +352,7 @@ fn plan_layout_shows_adrs_in_plan_mode() {
     });
     // Añadir pensamiento para el panel izquierdo
     state.apply_message(BunMessage::ThoughtChunk {
+        task_id: None,
         coordinator: "bee".into(),
         phase: "planning".into(),
         content: "Diseñando la arquitectura de auth".into(),
@@ -366,6 +384,10 @@ fn review_layout_shows_approval_hints() {
         risk: "high".into(),
         operation: "create".into(),
         agent: "backend".into(),
+        adr_ref: None,
+        reason: None,
+        lines_added: None,
+        lines_removed: None,
     });
 
     let mut canvas = make_canvas(120, 20);
@@ -385,12 +407,12 @@ fn review_layout_shows_approval_hints() {
 fn history_compact_renders_one_line_per_old_turn() {
     let mut state = base_state();
     // Dos turns completos (User+Assistant) ya finalizados
-    state.history.entries.push(HistoryEntry { role: Role::User,      content: "turno uno".into() });
-    state.history.entries.push(HistoryEntry { role: Role::Assistant, content: "respuesta uno completa".into() });
-    state.history.entries.push(HistoryEntry { role: Role::User,      content: "turno dos".into() });
-    state.history.entries.push(HistoryEntry { role: Role::Assistant, content: "respuesta dos completa y más larga".into() });
+    state.history.entries.push(HistoryEntry { role: Role::User,      content: "turno uno".into(), agent: None, timestamp: None });
+    state.history.entries.push(HistoryEntry { role: Role::Assistant, content: "respuesta uno completa".into(), agent: None, timestamp: None });
+    state.history.entries.push(HistoryEntry { role: Role::User,      content: "turno dos".into(), agent: None, timestamp: None });
+    state.history.entries.push(HistoryEntry { role: Role::Assistant, content: "respuesta dos completa y más larga".into(), agent: None, timestamp: None });
     // El último turn activo
-    state.history.entries.push(HistoryEntry { role: Role::User,      content: "turno tres activo".into() });
+    state.history.entries.push(HistoryEntry { role: Role::User,      content: "turno tres activo".into(), agent: None, timestamp: None });
     state.running = false;
 
     let mut canvas = make_canvas(100, 20);
@@ -437,6 +459,8 @@ fn full_sequence_init_task_streaming_response() {
     state.history.entries.push(HistoryEntry {
         role: Role::User,
         content: "añade tests para jwt.ts".into(),
+        agent: None,
+        timestamp: None,
     });
 
     // 3. Bun responde con Status running
@@ -445,6 +469,7 @@ fn full_sequence_init_task_streaming_response() {
 
     // 4. Bee emite pensamiento
     state.apply_message(BunMessage::ThoughtChunk {
+        task_id: None,
         coordinator: "bee".into(),
         phase: "planning".into(),
         content: "Voy a analizar jwt.ts primero".into(),
@@ -453,9 +478,12 @@ fn full_sequence_init_task_streaming_response() {
 
     // 5. Worker activo → routing a Code
     state.apply_message(BunMessage::ActivityUpdate {
+        task_id: None,
         coordinator: "backend".into(),
         phase: "escribiendo tests".into(),
         status: "running".into(),
+        display_name: None,
+        activity: None,
     });
     assert_eq!(state.active_tab, TabId::Code);
 
@@ -465,12 +493,16 @@ fn full_sequence_init_task_streaming_response() {
         risk: "low".into(),
         operation: "create".into(),
         agent: "backend".into(),
+        adr_ref: None,
+        reason: None,
+        lines_added: None,
+        lines_removed: None,
     });
     assert_eq!(state.filemap.entries.len(), 1);
 
     // 7. Respuesta streaming (AssistantChunk × N)
-    state.apply_message(BunMessage::AssistantChunk { text: "He creado ".into() });
-    state.apply_message(BunMessage::AssistantChunk { text: "los tests JWT.".into() });
+    state.apply_message(BunMessage::AssistantChunk { text: "He creado ".into(), agent: None, timestamp: None });
+    state.apply_message(BunMessage::AssistantChunk { text: "los tests JWT.".into(), agent: None, timestamp: None });
     let last = state.history.entries.last().unwrap();
     assert_eq!(last.role, Role::Assistant);
     assert!(last.content.contains("He creado los tests JWT."));

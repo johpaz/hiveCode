@@ -12,6 +12,7 @@ mod logs;
 mod modal;
 mod plan;
 mod session;
+mod tasks;
 mod thought;
 mod workers;
 
@@ -28,6 +29,7 @@ pub use logs::{LogEntry, LogState};
 pub use modal::{ConfigModalState, InfoModalState, ModalField, ModalFieldKind, ModalState, PlanApprovalState};
 pub use plan::{PlanEntry, PlanPhase, PlanRisk, PlanState};
 pub use session::{ReplMode, SessionState, TabId};
+pub use tasks::{TaskProjection, TaskProjectionState};
 pub use thought::{ThoughtChunk, ThoughtStreamState};
 pub use workers::{Worker, WorkerState, WorkerStatus};
 
@@ -44,6 +46,7 @@ pub struct AppState {
     pub adrs: AdrState,
     pub diff: DiffState,
     pub plan: PlanState,
+    pub tasks: TaskProjectionState,
     pub modal: ModalState,
     pub logs: LogState,
     pub dirty: DirtyFlags,
@@ -80,6 +83,16 @@ pub struct AppState {
 }
 
 impl AppState {
+    fn note_task_worker(&mut self, task_id: Option<String>, worker: &str, status: &str) {
+        let Some(task_id) = task_id.filter(|task_id| !task_id.trim().is_empty()) else {
+            return;
+        };
+        self.tasks.mark_worker(task_id, worker.to_string(), status);
+        self.session.task_count = self.session.task_count.max(self.tasks.tasks.len() as u32);
+        self.dirty.session = true;
+        self.dirty.full = true;
+    }
+
     pub fn apply_message(&mut self, msg: crate::ipc::BunMessage) {
         use crate::ipc::BunMessage;
         match msg {
@@ -211,7 +224,7 @@ impl AppState {
             }
 
             // ── Workers ────────────────────────────────────────────────────────
-            BunMessage::WorkerUpdate { worker, phase, status, display_name, activity } => {
+            BunMessage::WorkerUpdate { task_id, worker, phase, status, display_name, activity } => {
                 let wstatus = match status.as_str() {
                     "running" => WorkerStatus::Running,
                     "done"    => WorkerStatus::Done,
@@ -235,25 +248,30 @@ impl AppState {
                 }
                 // Auto-routing: only switch tab when a real executor worker starts, not BEE
                 if !self.tab_locked && status == "running" && worker != "bee" {
-                    self.active_tab = match self.session.mode {
-                        ReplMode::Plan     => TabId::Code,
-                        ReplMode::Approval => TabId::Review,
-                        ReplMode::Auto     => TabId::Code,
-                    };
-                    self.dirty.full = true;
+                    if self.session.mode != ReplMode::Plan {
+                        self.active_tab = match self.session.mode {
+                            ReplMode::Approval => TabId::Review,
+                            ReplMode::Auto     => TabId::Code,
+                            ReplMode::Plan     => unreachable!(),
+                        };
+                        self.dirty.full = true;
+                    }
                 }
+                self.note_task_worker(task_id, &worker, &status);
                 self.dirty.workers = true;
             }
             // Legado: activity_update → actualiza coordinator activo
-            BunMessage::ActivityUpdate { coordinator, phase, status, display_name, activity } => {
+            BunMessage::ActivityUpdate { task_id, coordinator, phase, status, display_name, activity } => {
                 // Auto-routing: only switch tab when a real executor coordinator starts, not BEE
                 if !self.tab_locked && status == "running" && coordinator != "bee" {
-                    self.active_tab = match self.session.mode {
-                        ReplMode::Plan     => TabId::Code,
-                        ReplMode::Approval => TabId::Review,
-                        ReplMode::Auto     => TabId::Code,
-                    };
-                    self.dirty.full = true;
+                    if self.session.mode != ReplMode::Plan {
+                        self.active_tab = match self.session.mode {
+                            ReplMode::Approval => TabId::Review,
+                            ReplMode::Auto     => TabId::Code,
+                            ReplMode::Plan     => unreachable!(),
+                        };
+                        self.dirty.full = true;
+                    }
                 }
                 self.workers.active_coordinator = coordinator.clone();
                 self.workers.active_phase = phase.clone();
@@ -262,6 +280,7 @@ impl AppState {
                     if let Some(dn) = display_name { w.display_name = dn; }
                     if let Some(act) = activity { w.activity = Some(act); }
                 }
+                self.note_task_worker(task_id, &coordinator, &status);
                 self.dirty.workers = true;
             }
 
@@ -310,14 +329,22 @@ impl AppState {
             }
 
             // ── Stream de pensamiento ──────────────────────────────────────────
-            BunMessage::ThoughtChunk { coordinator, phase, content } => {
+            BunMessage::ThoughtChunk { task_id, coordinator, phase, content } => {
                 self.thought.chunks.push(ThoughtChunk { coordinator, phase, content });
                 if self.thought.chunks.len() > 100 { self.thought.chunks.remove(0); }
+                if let Some(chunk) = self.thought.chunks.last() {
+                    let coordinator = chunk.coordinator.clone();
+                    self.note_task_worker(task_id, &coordinator, "thinking");
+                }
                 self.dirty.thought = true;
             }
-            BunMessage::NarrativeChunk { coordinator, phase, content, .. } => {
+            BunMessage::NarrativeChunk { task_id, coordinator, phase, content, .. } => {
                 self.thought.chunks.push(ThoughtChunk { coordinator, phase, content });
                 if self.thought.chunks.len() > 100 { self.thought.chunks.remove(0); }
+                if let Some(chunk) = self.thought.chunks.last() {
+                    let coordinator = chunk.coordinator.clone();
+                    self.note_task_worker(task_id, &coordinator, "thinking");
+                }
                 self.dirty.thought = true;
             }
 
@@ -491,6 +518,14 @@ impl AppState {
                 self.dirty.full = true;
             }
 
+            // ── Proyección de tareas ────────────────────────────────────────────
+            BunMessage::TaskUpdate { task_id, title, status, mode, active_workers } => {
+                self.tasks.upsert(task_id, title, status, mode, active_workers);
+                self.session.task_count = self.session.task_count.max(self.tasks.tasks.len() as u32);
+                self.dirty.session = true;
+                self.dirty.full = true;
+            }
+
             // ── Aprobación del plan ─────────────────────────────────────────────
             BunMessage::PlanApprovalRequest => {
                 self.modal = ModalState::PlanApproval(PlanApprovalState { selected: 0 });
@@ -607,6 +642,7 @@ mod tests {
             new_model: None,
         });
         state.apply_message(BunMessage::ActivityUpdate {
+            task_id: None,
             coordinator: "architecture".to_string(),
             phase: "reading".to_string(),
             status: "running".to_string(),
@@ -662,5 +698,53 @@ mod tests {
             .entries
             .last()
             .is_some_and(|entry| entry.content.contains("incompleto")));
+    }
+
+    #[test]
+    fn task_update_tracks_active_projection_without_changing_tab() {
+        let mut state = AppState::default();
+
+        state.apply_message(BunMessage::TaskUpdate {
+            task_id: "task-1".to_string(),
+            title: Some("Corregir login".to_string()),
+            status: "running".to_string(),
+            mode: Some("auto".to_string()),
+            active_workers: Some(vec!["backend".to_string(), "test".to_string()]),
+        });
+
+        assert_eq!(state.active_tab, TabId::Focus);
+        assert_eq!(state.tasks.active_task_id.as_deref(), Some("task-1"));
+        assert_eq!(state.tasks.tasks[0].title, "Corregir login");
+        assert_eq!(state.tasks.tasks[0].active_workers.len(), 2);
+    }
+
+    #[test]
+    fn routed_worker_update_marks_task_projection() {
+        let mut state = AppState::default();
+
+        state.apply_message(BunMessage::WorkerUpdate {
+            task_id: Some("task-1".to_string()),
+            worker: "backend".to_string(),
+            phase: "editing".to_string(),
+            status: "running".to_string(),
+            display_name: None,
+            activity: None,
+        });
+
+        assert_eq!(state.tasks.active_task_id.as_deref(), Some("task-1"));
+        assert_eq!(state.tasks.tasks[0].active_workers, vec!["backend".to_string()]);
+        assert_eq!(state.session.task_count, 1);
+
+        state.apply_message(BunMessage::WorkerUpdate {
+            task_id: Some("task-1".to_string()),
+            worker: "backend".to_string(),
+            phase: "done".to_string(),
+            status: "done".to_string(),
+            display_name: None,
+            activity: None,
+        });
+
+        assert!(state.tasks.tasks[0].active_workers.is_empty());
+        assert_eq!(state.tasks.tasks[0].status, "running");
     }
 }

@@ -18,7 +18,7 @@ describe("messagePriority", () => {
 
   it("conflict_alert → critical", () => {
     const msg: BunMessage = {
-      type: "conflict_alert", agent: "backend", file: "src/db.ts",
+      type: "conflict_alert", agent_a: "backend", agent_b: "frontend", file: "src/db.ts",
       reason: "concurrent write", severity: "high",
     }
     expect(messagePriority(msg)).toBe("critical")
@@ -74,6 +74,7 @@ describe("envelope wrap/serialize/unwrap", () => {
   it("wrap preserves type and payload", () => {
     const msg: BunMessage = { type: "status", running: true, msg: "thinking..." }
     const env = wrap("normal", msg as any)
+    expect(env.protocol_version).toBe(1)
     expect(env.priority).toBe("normal")
     expect(env.type).toBe("status")
     expect((env.payload as any).running).toBe(true)
@@ -84,6 +85,17 @@ describe("envelope wrap/serialize/unwrap", () => {
     const a = wrap("low", { type: "log_entry", timestamp: "", level: "", source: "", message: "" } as any)
     const b = wrap("low", { type: "log_entry", timestamp: "", level: "", source: "", message: "" } as any)
     expect(b.seq).toBeGreaterThan(a.seq)
+  })
+
+  it("carries session and task routing metadata without changing the payload", () => {
+    const env = wrap(
+      "normal",
+      { type: "plan_update", task_id: "task-7", status: "pending" } as any,
+      { sessionId: "session-2" },
+    )
+    expect(env.session_id).toBe("session-2")
+    expect(env.task_id).toBe("task-7")
+    expect((env.payload as any).task_id).toBe("task-7")
   })
 
   it("serialize produces valid NDJSON line", () => {
@@ -103,6 +115,15 @@ describe("envelope wrap/serialize/unwrap", () => {
     expect(flat.type).toBe("status")
     expect((flat as any).running).toBe(false)
     expect((flat as any).msg).toBe("ok")
+  })
+
+  it("unwrap includes routing metadata when payload does not carry it", () => {
+    const msg: BunMessage = { type: "activity_update", coordinator: "backend", phase: "editing", status: "running" }
+    const env = wrap("normal", msg as any, { sessionId: "session-1", taskId: "task-1" })
+    const flat = unwrap(env)
+    expect(flat.type).toBe("activity_update")
+    expect((flat as any).session_id).toBe("session-1")
+    expect((flat as any).task_id).toBe("task-1")
   })
 
   it("roundtrip: wrap → serialize → JSON.parse → unwrap", () => {

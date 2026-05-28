@@ -117,8 +117,12 @@ pub async fn run() -> Result<()> {
     state.show_welcome = true;
     state.clock = Local::now().format("%H:%M:%S").to_string();
     let mut events = EventStream::new();
-    let mut tick = time::interval(Duration::from_millis(120));
+    let mut anim_tick_timer = time::interval(Duration::from_millis(120));
+    let mut frame_tick = time::interval(Duration::from_millis(16));
+    anim_tick_timer.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    frame_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut should_quit = false;
+    let mut draw_pending = false;
 
     session.draw(&mut state)?;
 
@@ -130,26 +134,14 @@ pub async fn run() -> Result<()> {
             Some(msg) = ipc_ch.critical.recv() => {
                 state.apply_message(msg);
                 session.draw(&mut state)?;
+                draw_pending = false;
             }
             // 2. Ctrl-C
             _ = tokio::signal::ctrl_c() => {
                 let _ = ipc_ch.tx.try_send(TuiMessage::Exit);
                 should_quit = true;
             }
-            // 3. Mensajes normales (Init, WorkerUpdate, CheckpointCreated, AssistantDone)
-            Some(msg) = ipc_ch.normal.recv() => {
-                state.apply_message(msg);
-                session.draw(&mut state)?;
-            }
-            // 4. Tick del cursor, reloj y animación bee
-            _ = tick.tick() => {
-                state.cursor_visible = !state.cursor_visible;
-                state.anim_tick = (state.anim_tick + 1) % 8;
-                state.slow_tick = (state.slow_tick + 1) % 30;
-                state.clock = Local::now().format("%H:%M:%S").to_string();
-                session.draw(&mut state)?;
-            }
-            // 5. Eventos de teclado y ratón
+            // 3. Eventos de teclado y ratón: latencia interactiva, dibujar ya.
             maybe_event = events.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) => {
@@ -177,14 +169,17 @@ pub async fn run() -> Result<()> {
                             let _ = ipc_ch.tx.try_send(msg);
                         }
                         session.draw(&mut state)?;
+                        draw_pending = false;
                     }
                     Some(Ok(Event::Resize(w, h))) => {
                         session.resize(w, h);
                         session.draw(&mut state)?;
+                        draw_pending = false;
                     }
                     Some(Ok(Event::Mouse(mouse))) => {
                         handle_mouse_event(&mut state, mouse);
                         session.draw(&mut state)?;
+                        draw_pending = false;
                     }
                     Some(Ok(Event::Paste(text))) => {
                         handle_paste_event(&mut state, text);
@@ -192,16 +187,37 @@ pub async fn run() -> Result<()> {
                             let _ = ipc_ch.tx.try_send(msg);
                         }
                         session.draw(&mut state)?;
+                        draw_pending = false;
                     }
                     Some(Ok(_)) => {}
                     Some(Err(err)) => return Err(err.into()),
                     None => break,
                 }
             }
-            // 6. Mensajes low (ThoughtChunk, FileRiskUpdate, AssistantChunk)
+            // 4. Tick del cursor, reloj y animación bee
+            _ = anim_tick_timer.tick() => {
+                state.cursor_visible = !state.cursor_visible;
+                state.anim_tick = (state.anim_tick + 1) % 8;
+                state.slow_tick = (state.slow_tick + 1) % 30;
+                state.clock = Local::now().format("%H:%M:%S").to_string();
+                draw_pending = true;
+            }
+            // 5. Frame cap: coalescer ráfagas IPC y animación a ~60fps.
+            _ = frame_tick.tick() => {
+                if draw_pending {
+                    session.draw(&mut state)?;
+                    draw_pending = false;
+                }
+            }
+            // 6. Mensajes normales (Init, WorkerUpdate, CheckpointCreated, AssistantDone)
+            Some(msg) = ipc_ch.normal.recv() => {
+                state.apply_message(msg);
+                draw_pending = true;
+            }
+            // 7. Mensajes low (ThoughtChunk, FileRiskUpdate, AssistantChunk)
             Some(msg) = ipc_ch.low.recv() => {
                 state.apply_message(msg);
-                session.draw(&mut state)?;
+                draw_pending = true;
             }
         }
     }

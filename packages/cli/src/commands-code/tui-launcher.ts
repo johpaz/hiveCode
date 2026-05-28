@@ -192,6 +192,7 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
       ipcServer = createIpcServer({
         socketPath,
         tcp: process.platform === "win32" ? { hostname: "127.0.0.1" } : undefined,
+        sessionId: callbacks.sessionId,
         onMessage(msg) {
           if (msg.type === "suspended") {
             suspendedResolve?.()

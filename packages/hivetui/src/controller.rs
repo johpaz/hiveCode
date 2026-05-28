@@ -3,6 +3,9 @@ use std::io::{stdout, Write};
 
 #[cfg(not(test))]
 use base64::Engine as _;
+
+#[cfg(not(test))]
+use arboard::Clipboard;
 use crossterm::{
     event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -27,10 +30,11 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
 
     // ── Modal de config activo ─────────────────────────────────────────────────
     if matches!(state.modal, ModalState::Config(_)) {
-        // Ctrl+V → pegar desde el campo de input principal como fallback
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('v') {
-            // El bracketed paste (Event::Paste) es la vía principal.
-            // Ctrl+V aquí funciona solo si el terminal lo envía como secuencia de escape.
+        // Ctrl+V o Ctrl+Shift+V → leer directamente del portapapeles del sistema
+        let is_paste_key = key.modifiers.contains(KeyModifiers::CONTROL)
+            && (key.code == KeyCode::Char('v') || key.code == KeyCode::Char('V'));
+        if is_paste_key {
+            paste_from_clipboard(state);
             return false;
         }
         handle_config_modal_key(state, key.code);
@@ -754,6 +758,20 @@ mod tests {
     }
 
 }
+
+// ── Clipboard paste (Ctrl+V directo al portapapeles del sistema) ─────────────
+
+#[cfg(not(test))]
+fn paste_from_clipboard(state: &mut AppState) {
+    if let Ok(mut cb) = Clipboard::new() {
+        if let Ok(text) = cb.get_text() {
+            handle_paste_event(state, text);
+        }
+    }
+}
+
+#[cfg(test)]
+fn paste_from_clipboard(_state: &mut AppState) {}
 
 // ── Paste event (bracketed paste o Ctrl+V desde terminal) ────────────────────
 

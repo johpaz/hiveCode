@@ -15,7 +15,8 @@ import { readWorkerSecrets } from "./secrets"
 const COORDINATOR_PROVIDER = process.env.HIVE_COORDINATOR_PROVIDER || "anthropic"
 const COORDINATOR_MODEL = process.env.HIVE_COORDINATOR_MODEL || "claude-sonnet-4-6"
 
-/** Resolve API key using getEnvironmentData → env fallback */
+/** Resolve API key using getEnvironmentData → env fallback.
+ *  Each provider uses its own independent key — no sharing between providers. */
 function resolveApiKey(provider: string, taskSecrets?: Record<string, string>): string {
   const envKey = `${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`
   const envSecrets = readWorkerSecrets()

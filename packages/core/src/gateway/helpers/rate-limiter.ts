@@ -91,4 +91,5 @@ export function cleanupRateLimitStore(): void {
 }
 
 // Auto-cleanup every 60 seconds
-setInterval(cleanupRateLimitStore, 60_000);
+const cleanupTimer = setInterval(cleanupRateLimitStore, 60_000);
+cleanupTimer.unref();

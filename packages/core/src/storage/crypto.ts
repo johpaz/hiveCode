@@ -21,12 +21,14 @@ export function decryptConfig(encrypted: string | null | undefined, _iv?: string
   }
 }
 
-export function encryptApiKey(apiKey: string): { encrypted: string; iv: string } {
-  return { encrypted: apiKey, iv: "legacy" };
+/** @deprecated Provider API keys must never be serialized into SQLite. */
+export function encryptApiKey(_apiKey: string): never {
+  throw new Error("encryptApiKey is disabled; use storeProviderApiKey() with Bun.secrets");
 }
 
-export function decryptApiKey(encrypted: string | null | undefined, _iv?: string | null): string {
-  return encrypted || "";
+/** @deprecated Legacy SQLite API key material is intentionally not readable. */
+export function decryptApiKey(_encrypted: string | null | undefined, _iv?: string | null): never {
+  throw new Error("decryptApiKey is disabled; use getProviderApiKey() with Bun.secrets");
 }
 
 export function maskApiKey(key: string): string {

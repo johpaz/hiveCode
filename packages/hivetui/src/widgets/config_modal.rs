@@ -96,13 +96,14 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &AppState) {
             ModalFieldKind::Secret => {
                 if row_y < area.bottom().saturating_sub(1) {
                     let value = modal.values.get(i).map(String::as_str).unwrap_or("");
-                    let masked = "•".repeat(value.len());
+                    let char_count = value.chars().count();
                     let visible_w = field_w.saturating_sub(2) as usize;
-                    let start = masked.len().saturating_sub(visible_w);
-                    let shown = &masked[start..];
-                    canvas.print(field_x, row_y, shown, Style::new().fg(GREEN));
+                    // Always work in character counts — "•" is 3 bytes so byte arithmetic panics
+                    let show_count = char_count.min(visible_w);
+                    let shown = "•".repeat(show_count);
+                    canvas.print(field_x, row_y, &shown, Style::new().fg(GREEN));
                     if focused {
-                        let cx = (field_x + shown.chars().count() as u16).min(field_x + field_w - 1);
+                        let cx = (field_x + show_count as u16).min(field_x + field_w - 1);
                         canvas.print(cx, row_y, "▌", Style::new().fg(AMBER));
                     }
                     row_y += 1;
@@ -112,8 +113,11 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &AppState) {
                 if row_y < area.bottom().saturating_sub(1) {
                     let value = modal.values.get(i).map(String::as_str).unwrap_or("");
                     let visible_w = field_w.saturating_sub(2) as usize;
-                    let start = value.len().saturating_sub(visible_w);
-                    let shown = &value[start..];
+                    // Use char indices to avoid splitting multi-byte characters
+                    let char_count = value.chars().count();
+                    let skip = char_count.saturating_sub(visible_w);
+                    let start_byte = value.char_indices().nth(skip).map(|(b, _)| b).unwrap_or(0);
+                    let shown = &value[start_byte..];
                     canvas.print(field_x, row_y, shown, Style::new().fg(GREEN));
                     if focused {
                         let cx = (field_x + shown.chars().count() as u16).min(field_x + field_w - 1);

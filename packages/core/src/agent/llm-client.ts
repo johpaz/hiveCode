@@ -148,8 +148,6 @@ export async function resolveProviderConfig(
   modelId: string
 ): Promise<Pick<LLMCallOptions, "provider" | "model" | "apiKey" | "baseUrl" | "numCtx" | "numGpu">> {
   const { getDb } = await import("../storage/sqlite")
-  const { decryptApiKey } = await import("../storage/crypto")
-
   const db = getDb()
   const providerRow = db
     .query<any, [string]>("SELECT * FROM providers WHERE id = ? AND enabled = 1")

@@ -1,9 +1,8 @@
 use crate::{
     state::AppState,
     term::{
-        Canvas, Cell, Color, Rect, Style,
-        AMBER, AMBER_BRIGHT, AMBER_DIM, BG_MAIN, BLUE, CYAN, DIM, GREEN, LAVENDER, PINK,
-        PURPLE, SECONDARY, WHITE, YELLOW,
+        Canvas, Cell, Color, Rect, Style, AMBER, AMBER_BRIGHT, AMBER_DIM, BG_MAIN, DIM, GREEN,
+        SECONDARY, WHITE, YELLOW,
     },
 };
 
@@ -297,17 +296,5 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
 // ── Helpers públicos ──────────────────────────────────────────────────────────
 
 pub fn worker_color(name: &str) -> Color {
-    const ROLES: &[(&str, Color)] = &[
-        ("bee",    AMBER_BRIGHT),
-        ("arch",   PURPLE),
-        ("back",   BLUE),
-        ("front",  CYAN),
-        ("sec",    PINK),
-        ("test",   YELLOW),
-        ("devops", LAVENDER),
-    ];
-    ROLES.iter()
-        .find(|(k, _)| name.contains(k))
-        .map(|(_, c)| *c)
-        .unwrap_or(SECONDARY)
+    crate::widgets::components::worker_color(name)
 }

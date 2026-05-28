@@ -1,6 +1,7 @@
 use crate::{
     state::{AppState, RiskLevel, Role, WorkerStatus},
     term::{Canvas, Rect, Style, AMBER, AMBER_BRIGHT, AMBER_DIM, DIM, GREEN, RED, SECONDARY, WHITE, YELLOW, BG_ELEVATED},
+    widgets::components::{agent_display_name, render_scrollbar, worker_color},
 };
 use unicode_width::UnicodeWidthChar;
 
@@ -206,6 +207,8 @@ fn render_expanded_turn(canvas: &mut Canvas, area: Rect, state: &AppState, last_
                 ),
                 response_lines.len(),
                 scroll,
+                Style::new().fg(AMBER_DIM),
+                Style::new().fg(DIM),
             );
             let hint = "PgUp/PgDn · rueda";
             canvas.print(
@@ -483,30 +486,6 @@ fn wrap_line(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn render_scrollbar(canvas: &mut Canvas, area: Rect, total: usize, start: usize) {
-    if area.h == 0 || total == 0 {
-        return;
-    }
-
-    let visible = area.h as usize;
-    let thumb_h = (visible * visible / total).max(1).min(visible);
-    let max_start = total.saturating_sub(visible);
-    let thumb_top = if max_start == 0 {
-        0
-    } else {
-        start.min(max_start) * visible.saturating_sub(thumb_h) / max_start
-    };
-
-    for row in 0..visible {
-        let (glyph, style) = if row >= thumb_top && row < thumb_top + thumb_h {
-            ("█", Style::new().fg(AMBER_DIM))
-        } else {
-            ("│", Style::new().fg(DIM))
-        };
-        canvas.print(area.x, area.y + row as u16, glyph, style);
-    }
-}
-
 /// Renderiza una línea de texto resaltando segmentos entre backticks (`code`) en color verde.
 fn print_line_with_inline_code(
     canvas: &mut Canvas,
@@ -545,45 +524,6 @@ fn print_line_with_inline_code(
         let slice: String = buf.chars().take(max_width - drawn).collect();
         canvas.print(cx, y, &slice, if in_code { code_style } else { base_style });
     }
-}
-
-fn agent_display_name(name: &str) -> String {
-    match name {
-        "bee" => "Bee".to_string(),
-        "architecture" => "Architecture".to_string(),
-        "backend" => "BackendEngineer".to_string(),
-        "frontend" => "FrontendEngineer".to_string(),
-        "security" => "SecurityAuditor".to_string(),
-        "test" => "QAEngineer".to_string(),
-        "devops" => "DevOpsEngineer".to_string(),
-        "product_manager" => "ProductManager".to_string(),
-        "mobile" => "MobileEngineer".to_string(),
-        "data_scientist" => "DataScientist".to_string(),
-        "dba" => "DBA".to_string(),
-        "integration" => "IntegrationEngineer".to_string(),
-        "reviewer" => "Reviewer".to_string(),
-        _ => {
-            let mut s = name.to_string();
-            if let Some(first) = s.get_mut(0..1) {
-                first.make_ascii_uppercase();
-            }
-            s
-        }
-    }
-}
-
-fn worker_color(name: &str) -> crate::term::Color {
-    use crate::term::{AMBER_BRIGHT, BLUE, CYAN, LAVENDER, PINK, PURPLE, YELLOW};
-    const ROLES: &[(&str, crate::term::Color)] = &[
-        ("bee",    AMBER_BRIGHT),
-        ("arch",   PURPLE),
-        ("back",   BLUE),
-        ("front",  CYAN),
-        ("sec",    PINK),
-        ("test",   YELLOW),
-        ("devops", LAVENDER),
-    ];
-    ROLES.iter().find(|(k, _)| name.contains(k)).map(|(_, c)| *c).unwrap_or(SECONDARY)
 }
 
 // Kept for external callers (controller.rs uses entry_at_y for click detection)

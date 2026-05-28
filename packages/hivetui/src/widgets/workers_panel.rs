@@ -1,7 +1,7 @@
 use crate::{
     state::{AppState, WorkerStatus},
     term::{Canvas, Rect, Style, CYAN, DIM, GREEN, RED, SECONDARY, YELLOW},
-    widgets::welcome::worker_color as name_color,
+    widgets::components::worker_color,
 };
 
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -31,7 +31,7 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
 
         let max_name = (area.w.saturating_sub(7) as usize).min(14);
         let name: String = w.name.chars().take(max_name).collect();
-        let wcolor = name_color(&w.name);
+        let wcolor = worker_color(&w.name);
         canvas.print(area.x + 3, y, "⬡ ", Style::new().fg(wcolor));
         canvas.print(area.x + 5, y, &name, Style::new().fg(wcolor).bold());
 

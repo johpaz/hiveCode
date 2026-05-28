@@ -64,6 +64,24 @@ afterAll(() => {
 })
 
 describe("TUI plan output boundary", () => {
+  test("live narrative callback carries active task routing metadata", () => {
+    const manager = new CoordinatorManager()
+    const chunks: Array<Record<string, unknown>> = []
+    manager.setNarrativeCallback((chunk) => chunks.push(chunk))
+
+    ;(manager as any).activeTaskId = "task-route-1"
+    ;(manager as any).activeSessionId = "session-route-1"
+    ;(manager as any).handleWorkerMessage("backend", {
+      type: "THINKING",
+      content: "leyendo archivos relevantes",
+    })
+
+    expect(chunks).toHaveLength(1)
+    expect(chunks[0].taskId).toBe("task-route-1")
+    expect(chunks[0].sessionId).toBe("session-route-1")
+    expect(chunks[0].coordinator).toBe("backend")
+  })
+
   test("structured plan is delivered through IPC/callback without raw stdout", async () => {
     initSessionArray()
     setMode("plan")

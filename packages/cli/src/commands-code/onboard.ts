@@ -10,6 +10,7 @@ import {
 } from "@johpaz/hivecode-tui-primitives"
 
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
 
 const VERSION = "1.0.0"
 
@@ -38,19 +39,19 @@ export async function onboard(version = VERSION): Promise<void> {
     return
   }
 
+  await storeProviderApiKey(result.provider, result.apiKey)
+
   // Upsert provider
   db.query(`
-    INSERT INTO providers (id, name, base_url, api_key_encrypted, enabled)
-    VALUES (?, ?, ?, ?, 1)
+    INSERT INTO providers (id, name, base_url, enabled)
+    VALUES (?, ?, ?, 1)
     ON CONFLICT(id) DO UPDATE SET
       base_url = excluded.base_url,
-      api_key_encrypted = excluded.api_key_encrypted,
       enabled = 1
   `).run(
     result.provider,
     result.provider,
     result.baseUrl || null,
-    Buffer.from(result.apiKey).toString("base64"),
   )
 
   // Set as default
@@ -71,12 +72,6 @@ export async function onboard(version = VERSION): Promise<void> {
     UPDATE agents SET provider_id = ?, model_id = ?
     WHERE role = 'coordinator'
   `).run(result.provider, agentModelId)
-
-  try {
-    const secrets = (Bun as any).secrets
-    if (secrets?.set)
-      secrets.set(`${result.provider.toUpperCase().replace(/-/g, "_")}_API_KEY`, result.apiKey)
-  } catch { /* env secrets not available — key already stored in providers table */ }
 
   hiveOutro(`Onboarding completo · Provider ${result.provider} configurado`)
 }
