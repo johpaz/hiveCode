@@ -120,6 +120,7 @@ pub enum BunMessage {
         new_mode: Option<String>,
         new_provider: Option<String>,
         new_model: Option<String>,
+        new_token_count: Option<u64>,
     },
 
     // ── Workers y coordinador ──────────────────────────────────────────────────

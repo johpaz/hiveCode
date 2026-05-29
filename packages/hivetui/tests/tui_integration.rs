@@ -78,6 +78,7 @@ fn focus_shows_user_question_while_running_plan_mode() {
         new_mode: Some("plan".into()),
         new_provider: None,
         new_model: None,
+        new_token_count: None,
     });
     // Usuario envía tarea
     state.history.entries.push(HistoryEntry {
@@ -205,6 +206,7 @@ fn routing_plan_mode_waits_for_structured_plan() {
         new_mode: Some("plan".into()),
         new_provider: None,
         new_model: None,
+        new_token_count: None,
     });
     assert_eq!(state.session.mode, ReplMode::Plan);
     assert_eq!(state.active_tab, TabId::Focus,
@@ -220,6 +222,7 @@ fn routing_approval_mode_navigates_to_review_tab() {
         new_mode: Some("approval".into()),
         new_provider: None,
         new_model: None,
+        new_token_count: None,
     });
     assert_eq!(state.session.mode, ReplMode::Approval);
     assert_eq!(state.active_tab, TabId::Review,
@@ -369,6 +372,30 @@ fn renderer_registers_split_handle_hit_regions() {
         .any(|region| region.id == "split:code:main"));
 }
 
+#[test]
+fn renderer_registers_chrome_resize_hit_regions() {
+    let mut state = base_state();
+
+    let mut canvas = make_canvas(120, 30);
+    renderer::render(&mut canvas, &mut state);
+
+    assert!(state
+        .hit_map
+        .regions()
+        .iter()
+        .any(|region| region.id == "chrome:header"));
+    assert!(state
+        .hit_map
+        .regions()
+        .iter()
+        .any(|region| region.id == "chrome:input"));
+    assert!(state
+        .hit_map
+        .regions()
+        .iter()
+        .any(|region| region.id == "chrome:footer"));
+}
+
 // ── 9. Code layout: split dinámico con 3+ workers activos ────────────────────
 
 #[test]
@@ -412,6 +439,7 @@ fn plan_layout_shows_adrs_in_plan_mode() {
         new_mode: Some("plan".into()),
         new_provider: None,
         new_model: None,
+        new_token_count: None,
     });
     state.apply_message(BunMessage::AdrUpdate {
         path: "docs/adr/001-jwt.md".into(),
@@ -447,6 +475,7 @@ fn review_layout_shows_approval_hints() {
         new_mode: Some("approval".into()),
         new_provider: None,
         new_model: None,
+        new_token_count: None,
     });
     state.apply_message(BunMessage::FileRiskUpdate {
         path: "src/auth/jwt.ts".into(),

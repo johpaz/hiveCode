@@ -25,7 +25,7 @@ export type BunMessage =
   // normal priority — live streaming output
   | { type: "history_append";  role: string; content: string; content_type?: string; agent?: string; timestamp?: string; task_id?: string }
   | { type: "status";          running: boolean; msg: string }
-  | { type: "state_update";    new_mode?: string; new_provider?: string; new_model?: string }
+  | { type: "state_update";    new_mode?: string; new_provider?: string; new_model?: string; new_token_count?: number }
   | { type: "suggestions";     items: string[] }
   | { type: "quick_menu";      items: { label: string; cmd: string; desc: string }[] }
   | { type: "shell_output";    stdout: string; stderr: string; exit_code: number }

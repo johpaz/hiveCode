@@ -18,8 +18,11 @@ export function loadInitialState() {
     (db.query("SELECT project_path FROM code_sessions ORDER BY id DESC LIMIT 1").get() as any)?.project_path ?? process.cwd()
   const taskCount =
     (db.query("SELECT COUNT(*) as c FROM code_tasks WHERE status NOT IN ('cancelled','completed')").get() as any)?.c ?? 0
-  const tokenCount =
-    (db.query("SELECT COALESCE(SUM(tokens_in + tokens_out), 0) as t FROM code_traces").get() as any)?.t ?? 0
+  const traceTokens =
+    Number((db.query("SELECT COALESCE(SUM(tokens_in + tokens_out), 0) as t FROM code_traces").get() as any)?.t ?? 0)
+  const taskTokens =
+    Number((db.query("SELECT COALESCE(SUM(tokens_in + tokens_out), 0) as t FROM code_tasks").get() as any)?.t ?? 0)
+  const tokenCount = Math.max(traceTokens, taskTokens)
   return { mode, provider, model, projectPath, taskCount, tokenCount }
 }
 

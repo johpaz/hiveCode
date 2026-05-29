@@ -561,7 +561,7 @@ export async function repl(): Promise<void> {
             const out = await executeTask(originalTask, "approval", {
               suspend: tuiControl.suspend ?? undefined, resume: tuiControl.resume ?? undefined, manager, quiet: true,
             })
-            return { output: out, ...(guardResult && { newProvider: provider, newModel: model }) }
+            return { output: out, newTokenCount: loadInitialState().tokenCount, ...(guardResult && { newProvider: provider, newModel: model }) }
           }
 
           // Auto approve (default, /approve auto, or any context text)
@@ -579,7 +579,7 @@ export async function repl(): Promise<void> {
           const output = await executeTask(taskWithContext, "auto", {
             suspend: tuiControl.suspend ?? undefined, resume: tuiControl.resume ?? undefined, manager, quiet: true,
           })
-          return { output, ...(guardResult && { newProvider: provider, newModel: model }) }
+          return { output, newTokenCount: loadInitialState().tokenCount, ...(guardResult && { newProvider: provider, newModel: model }) }
         }
 
         if (input.startsWith("/")) {
@@ -613,6 +613,7 @@ export async function repl(): Promise<void> {
             newMode:     result.newMode,
             newProvider: result.newProvider,
             newModel:    result.newModel,
+            newTokenCount: loadInitialState().tokenCount,
           }
         }
 
@@ -645,6 +646,7 @@ export async function repl(): Promise<void> {
 
         return {
           output,
+          newTokenCount: loadInitialState().tokenCount,
           ...(guardResult && { newProvider: provider, newModel: model }),
         }
       },

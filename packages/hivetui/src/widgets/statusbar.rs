@@ -8,6 +8,7 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     if area.h == 0 {
         return;
     }
+    canvas.fill_rect(area, ' ', Style::new());
 
     let mode = if state.history_nav_mode { "NAV" } else { "INPUT" };
     let mode_style = if state.history_nav_mode {

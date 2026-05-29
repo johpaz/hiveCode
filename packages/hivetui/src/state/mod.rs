@@ -264,7 +264,7 @@ impl AppState {
                 }
                 self.dirty.session = true;
             }
-            BunMessage::StateUpdate { new_mode, new_provider, new_model } => {
+            BunMessage::StateUpdate { new_mode, new_provider, new_model, new_token_count } => {
                 if let Some(m) = new_mode {
                     self.session.mode = ReplMode::from(m.as_str());
                     // Al cambiar de modo, navegar al layout correspondiente
@@ -283,6 +283,7 @@ impl AppState {
                 }
                 if let Some(p) = new_provider { self.session.provider = p; }
                 if let Some(m) = new_model { self.session.model = m; }
+                if let Some(t) = new_token_count { self.session.token_count = t; }
                 self.dirty.session = true;
             }
 
@@ -780,6 +781,7 @@ mod tests {
             new_mode: Some("plan".to_string()),
             new_provider: None,
             new_model: None,
+            new_token_count: None,
         });
         state.apply_message(BunMessage::ActivityUpdate {
             task_id: None,
@@ -911,5 +913,19 @@ mod tests {
         assert!(state.harness.approval_pending);
         assert_eq!(state.harness.active_task_status.as_deref(), Some("approval"));
         assert_eq!(state.active_tab, TabId::Plan);
+    }
+
+    #[test]
+    fn state_update_refreshes_token_count() {
+        let mut state = AppState::default();
+
+        state.apply_message(BunMessage::StateUpdate {
+            new_mode: None,
+            new_provider: None,
+            new_model: None,
+            new_token_count: Some(42_000),
+        });
+
+        assert_eq!(state.session.token_count, 42_000);
     }
 }

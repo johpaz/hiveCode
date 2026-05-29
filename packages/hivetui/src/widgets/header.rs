@@ -126,14 +126,12 @@ fn fmt_tokens(n: u64) -> String {
 }
 
 fn token_meter(n: u64) -> String {
-    const SOFT_LIMIT: u64 = 200_000;
-    let cells = 8usize;
-    let filled = ((n.min(SOFT_LIMIT) * cells as u64) / SOFT_LIMIT) as usize;
-    let mut bar = String::with_capacity(cells);
-    for idx in 0..cells {
-        bar.push(if idx < filled { '█' } else { '░' });
+    if n == 0 {
+        return "ctx:0 tok".to_string();
     }
-    format!("tokens:[{bar}] {}", fmt_tokens(n))
+    const SOFT_LIMIT: u64 = 200_000;
+    let pct = ((n.min(SOFT_LIMIT) * 100) / SOFT_LIMIT).max(1);
+    format!("ctx:{} / 200k ({}%)", fmt_tokens(n), pct)
 }
 
 #[cfg(test)]
@@ -152,7 +150,20 @@ mod tests {
         render(&mut canvas, Rect::new(0, 0, 80, 2), &state);
         let rows = canvas.to_text_rows();
 
-        assert!(rows[0].contains("tokens:["));
+        assert!(rows[0].contains("ctx:42.0k"));
         assert!(rows[0].contains("12:34:56"));
+    }
+
+    #[test]
+    fn header_zero_tokens_does_not_draw_empty_meter() {
+        let mut state = AppState::default();
+        state.session.token_count = 0;
+
+        let mut canvas = Canvas::new(80, 2);
+        render(&mut canvas, Rect::new(0, 0, 80, 2), &state);
+        let row = &canvas.to_text_rows()[0];
+
+        assert!(row.contains("ctx:0 tok"));
+        assert!(!row.contains("tokens:["));
     }
 }

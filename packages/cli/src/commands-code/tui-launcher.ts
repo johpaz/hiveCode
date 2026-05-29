@@ -95,7 +95,7 @@ export interface TuiCallbacks {
   taskCount:        number
   tokenCount:       number
   workers:          string[]
-  onSubmit:   (input: string) => Promise<{ output: string; newMode?: string; newProvider?: string; newModel?: string }>
+  onSubmit:   (input: string) => Promise<{ output: string; newMode?: string; newProvider?: string; newModel?: string; newTokenCount?: number }>
   getSuggestions: (query: string) => string[]
   onModeChange?:  (mode: string) => void
   onExit?:        () => void
@@ -346,12 +346,13 @@ async function handleTuiMessage(
         }
         send({ type: "status",         running: false,    msg: "Listo · [shift+tab] cambiar modo" })
         send({ type: "activity_update", coordinator: "", phase: "", status: "idle" })
-        if (result.newMode || result.newProvider || result.newModel) {
+        if (result.newMode || result.newProvider || result.newModel || result.newTokenCount !== undefined) {
           send({
             type:         "state_update",
             new_mode:     result.newMode,
             new_provider: result.newProvider,
             new_model:    result.newModel,
+            new_token_count: result.newTokenCount,
           })
         }
       } catch (err) {

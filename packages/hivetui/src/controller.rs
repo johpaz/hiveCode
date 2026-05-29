@@ -893,6 +893,17 @@ mod tests {
         assert!(state.dirty.full);
     }
 
+    #[test]
+    fn chrome_drag_updates_input_height() {
+        let mut state = AppState::default();
+        state.panels.begin_drag("chrome:input".to_string());
+
+        assert!(update_active_split_drag(&mut state, 0, 18));
+
+        assert!(state.panels.input_height > 4);
+        assert!(state.dirty.full);
+    }
+
 }
 
 // ── Clipboard paste (Ctrl+V directo al portapapeles del sistema) ─────────────
