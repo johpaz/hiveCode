@@ -203,14 +203,14 @@ impl InputState {
         let mut text = String::new();
 
         for c in self.buffer.chars() {
-            let char_width = UnicodeWidthChar::width(c).unwrap_or(0);
+            let char_width = UnicodeWidthChar::width(c).unwrap_or(1).max(1);
 
             if seen_cols + char_width <= start_col {
                 seen_cols += char_width;
                 continue;
             }
 
-            if visible_cols >= width {
+            if visible_cols + char_width > width {
                 break;
             }
 
@@ -263,6 +263,21 @@ mod tests {
 
         input.move_home();
         assert_eq!(input.scroll_offset(10), 0);
+    }
+
+    #[test]
+    fn visible_segment_never_overflows_cell_width() {
+        let mut input = InputState::default();
+        input.set("abc🐝Z");
+
+        let visible = input.visible_segment(4);
+
+        let width: usize = visible
+            .text
+            .chars()
+            .map(|c| UnicodeWidthChar::width(c).unwrap_or(1).max(1))
+            .sum();
+        assert!(width <= 4);
     }
 
     #[test]

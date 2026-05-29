@@ -5,7 +5,7 @@
 import type { Tool } from "../types.ts";
 import { webSearchTool } from "./web-search.ts";
 import { webFetchTool } from "./web-fetch.ts";
-import { browserScreenshotTool, browserCaptureClipboardTool } from "./browser.ts";
+import { browserScreenshotTool, browserCaptureClipboardTool, browserPreviewHtmlTool } from "./browser.ts";
 
 export function createTools(): Tool[] {
   return [
@@ -13,6 +13,7 @@ export function createTools(): Tool[] {
     webFetchTool,
     browserScreenshotTool,
     browserCaptureClipboardTool,
+    browserPreviewHtmlTool,
   ];
 }
 

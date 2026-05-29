@@ -1,6 +1,7 @@
 use crate::{
     state::AppState,
     term::{Canvas, Rect, Style, AMBER, CYAN, DIM, GREEN},
+    ui::truncate_cells,
 };
 
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -34,5 +35,6 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     } else {
         Style::new().fg(DIM)
     };
-    canvas.print(area.x + 13, area.y, &right_content, style);
+    let shown = truncate_cells(&right_content, area.w.saturating_sub(14) as usize);
+    canvas.print(area.x + 13, area.y, &shown, style);
 }

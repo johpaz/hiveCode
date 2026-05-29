@@ -1,6 +1,7 @@
 use crate::{
     state::{AppState, WorkerStatus},
     term::{Canvas, Rect, Style, AMBER, AMBER_BRIGHT, BG_ELEVATED, BG_PANEL, BLUE, CYAN, DIM, GREEN, PURPLE, RED, SECONDARY, WHITE, YELLOW},
+    ui::{cell_width, render_split_handles, split_panes, truncate_cells, Axis, Constraint, SplitPane},
     widgets::components::{agent_display_name, worker_color},
 };
 
@@ -11,10 +12,13 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
         return;
     }
 
-    // 55/45 split: more space for diff
-    let left_w = area.w * 55 / 100;
-    let cols = area.hsplit(&[left_w, 0]);
+    let split = SplitPane::new(
+        Axis::Horizontal,
+        vec![Constraint::Percent(state.panels.code_main_percent), Constraint::Fill(1)],
+    );
+    let (cols, handles) = split_panes(area, &split);
     canvas.with_clip(cols[0], |canvas| render_diff_pane(canvas, cols[0], state));
+    render_split_handles(canvas, &handles, Axis::Horizontal);
     canvas.with_clip(cols[1], |canvas| render_workers_pane(canvas, cols[1], state));
 }
 
@@ -40,12 +44,12 @@ fn render_diff_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
     let header_left = format!("⬡ {}", path);
     let header_right = format!("{} {}", stats, branch);
 
-    let hl_shown: String = header_left.chars().take(area.w.saturating_sub(3) as usize).collect();
+    let hl_shown = truncate_cells(&header_left, area.w.saturating_sub(3) as usize);
     canvas.print(area.x + 1, area.y, &hl_shown, Style::new().fg(AMBER).bold());
 
     if !header_right.is_empty() {
         let hr_x = area.right().saturating_sub(header_right.chars().count() as u16 + 1);
-        if hr_x > area.x + 1 + hl_shown.len() as u16 {
+        if hr_x > area.x + 1 + cell_width(&hl_shown) as u16 {
             canvas.print(hr_x, area.y, &header_right, Style::new().fg(DIM));
         }
     }
@@ -83,11 +87,7 @@ fn render_diff_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
         canvas.print(area.x + line_no_w as u16 + 1, y, prefix, Style::new().fg(prefix_fg));
 
         // Content with syntax highlight
-        let text = if dl.text.len() > content_w {
-            dl.text.chars().take(content_w).collect::<String>()
-        } else {
-            dl.text.clone()
-        };
+        let text = truncate_cells(&dl.text, content_w);
         render_code_line(canvas, content_x, y, &text, content_w, bg);
 
         y += 1;
@@ -98,7 +98,7 @@ fn render_diff_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
         let total = state.diff.lines.len();
         let pct = (start * 100) / total.max(1);
         let hint = format!("{}% · ↑↓", pct);
-        canvas.print(area.right().saturating_sub(hint.len() as u16 + 1),
+        canvas.print(area.right().saturating_sub(cell_width(&hint) as u16 + 1),
                      area.bottom().saturating_sub(1), &hint, Style::new().fg(DIM));
     }
 }
@@ -131,7 +131,7 @@ fn render_filemap_fallback(canvas: &mut Canvas, area: Rect, state: &AppState) {
         };
         canvas.print(area.x + 1, y, "●", Style::new().fg(dot_color).bold());
         let avail = area.w.saturating_sub(4) as usize;
-        let path: String = entry.path.chars().take(avail).collect();
+        let path = truncate_cells(&entry.path, avail);
         canvas.print(area.x + 3, y, &path, Style::new().fg(WHITE));
         if !entry.operation.is_empty() {
             let op = format!("[{}]", entry.operation);
@@ -147,9 +147,21 @@ fn render_filemap_fallback(canvas: &mut Canvas, area: Rect, state: &AppState) {
 fn render_workers_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
     canvas.fill_rect(area, ' ', Style::new().bg(BG_ELEVATED));
 
-    let workers_h = if area.h > 10 { area.h * 68 / 100 } else { area.h };
-    let panels = area.vsplit(&[workers_h, 0]);
+    let workers_h = if area.h > 10 {
+        area.h * state.panels.code_workers_percent / 100
+    } else {
+        area.h
+    };
+    let split = SplitPane::new(
+        Axis::Vertical,
+        vec![
+            Constraint::Fixed(workers_h),
+            Constraint::Fill(1),
+        ],
+    );
+    let (panels, handles) = split_panes(area, &split);
     canvas.with_clip(panels[0], |canvas| render_all_workers(canvas, panels[0], state));
+    render_split_handles(canvas, &handles, Axis::Vertical);
     if area.h > 10 {
         canvas.with_clip(panels[1], |canvas| render_checkpoint_card(canvas, panels[1], state));
     }
@@ -210,7 +222,7 @@ fn render_all_workers(canvas: &mut Canvas, area: Rect, state: &AppState) {
         canvas.print(name_x + 2, y, &display, Style::new().fg(wcolor).bold());
 
         // Status label
-        let status_x = name_x + 2 + display.len() as u16 + 2;
+        let status_x = name_x + 2 + cell_width(&display) as u16 + 2;
         canvas.print(status_x, y, status_label, Style::new().fg(status_color));
 
         // Activity description
@@ -219,7 +231,7 @@ fn render_all_workers(canvas: &mut Canvas, area: Rect, state: &AppState) {
             let act_x = status_x + status_label.len() as u16 + 2;
             let avail = area.right().saturating_sub(act_x + 1) as usize;
             if avail > 3 {
-                let shown: String = activity_text.chars().take(avail).collect();
+                let shown = truncate_cells(activity_text, avail);
                 canvas.print(act_x, y, &shown, Style::new().fg(SECONDARY));
             }
         }
@@ -239,7 +251,7 @@ fn render_all_workers(canvas: &mut Canvas, area: Rect, state: &AppState) {
             .collect();
         if !idle_names.is_empty() {
             let footer = format!("○ ---- {} agents idle ({}) ---- ○", idle_count, idle_names.join(" · "));
-            let shown: String = footer.chars().take(area.w.saturating_sub(2) as usize).collect();
+            let shown = truncate_cells(&footer, area.w.saturating_sub(2) as usize);
             canvas.print(area.x + 1, y, &shown, Style::new().fg(DIM));
         }
     }
@@ -272,7 +284,7 @@ fn render_checkpoint_card(canvas: &mut Canvas, area: Rect, state: &AppState) {
         y += 1;
     }
 
-    let desc: String = cp.description.chars().take(area.w.saturating_sub(3) as usize).collect();
+    let desc = truncate_cells(&cp.description, area.w.saturating_sub(3) as usize);
     canvas.print(area.x + 1, y, &desc, Style::new().fg(SECONDARY));
     y += 1;
 
@@ -316,8 +328,8 @@ fn render_code_line(
         if in_string {
             buf.push(ch);
             if ch == string_delim && (i == 0 || chars[i.saturating_sub(1)] != '\\') {
-                flush_ts_token(canvas, cx, y, &buf, true, bg, &mut drawn);
-                cx += buf.chars().count() as u16;
+                let token_w = flush_ts_token(canvas, cx, y, &buf, true, bg, max_width, &mut drawn);
+                cx = cx.saturating_add(token_w as u16);
                 buf.clear();
                 in_string = false;
             }
@@ -326,8 +338,8 @@ fn render_code_line(
 
         if ch == '\'' || ch == '"' || ch == '`' {
             if !buf.is_empty() {
-                flush_ts_token(canvas, cx, y, &buf, false, bg, &mut drawn);
-                cx += buf.chars().count() as u16;
+                let token_w = flush_ts_token(canvas, cx, y, &buf, false, bg, max_width, &mut drawn);
+                cx = cx.saturating_add(token_w as u16);
                 buf.clear();
             }
             in_string = true;
@@ -340,20 +352,21 @@ fn render_code_line(
             buf.push(ch);
         } else {
             if !buf.is_empty() {
-                flush_ts_token(canvas, cx, y, &buf, false, bg, &mut drawn);
-                cx += buf.chars().count() as u16;
+                let token_w = flush_ts_token(canvas, cx, y, &buf, false, bg, max_width, &mut drawn);
+                cx = cx.saturating_add(token_w as u16);
                 buf.clear();
             }
-            if drawn < max_width {
+            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+            if drawn + ch_width <= max_width {
                 canvas.print(cx, y, &ch.to_string(), Style::new().fg(WHITE).bg(bg.map(|s| s.bg).unwrap_or(crate::term::BG_PANEL)));
-                cx += 1;
-                drawn += 1;
+                cx = cx.saturating_add(ch_width as u16);
+                drawn += ch_width;
             }
         }
     }
 
     if !buf.is_empty() && drawn < max_width {
-        flush_ts_token(canvas, cx, y, &buf, in_string, bg, &mut drawn);
+        flush_ts_token(canvas, cx, y, &buf, in_string, bg, max_width, &mut drawn);
     }
 }
 
@@ -364,20 +377,28 @@ fn flush_ts_token(
     token: &str,
     is_string: bool,
     bg: Option<Style>,
+    max_width: usize,
     drawn: &mut usize,
-) {
+) -> usize {
+    let remaining = max_width.saturating_sub(*drawn);
+    let token = truncate_cells(token, remaining);
+    if token.is_empty() {
+        return 0;
+    }
     let base_bg = bg.map(|s| s.bg).unwrap_or(crate::term::BG_PANEL);
     let style = if is_string {
         Style::new().fg(GREEN).bg(base_bg)
-    } else if is_ts_keyword(token) {
+    } else if is_ts_keyword(&token) {
         Style::new().fg(CYAN).bg(base_bg)
-    } else if is_ts_type(token) {
+    } else if is_ts_type(&token) {
         Style::new().fg(PURPLE).bg(base_bg)
     } else {
         Style::new().fg(WHITE).bg(base_bg)
     };
-    canvas.print(x, y, token, style);
-    *drawn += token.chars().count();
+    canvas.print(x, y, &token, style);
+    let width = cell_width(&token);
+    *drawn += width;
+    width
 }
 
 fn is_ts_keyword(word: &str) -> bool {
@@ -399,4 +420,38 @@ fn is_ts_type(word: &str) -> bool {
         "Request", "Response", "NextFunction", "Error", "Date", "RegExp", "Buffer",
     ];
     TYPES.contains(&word)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_line_renderer_respects_cell_width_for_long_tokens() {
+        let mut canvas = Canvas::new(24, 1);
+
+        render_code_line(
+            &mut canvas,
+            0,
+            0,
+            "const very_long_identifier_tail = 1;",
+            10,
+            None,
+        );
+        let row = canvas.to_text_rows()[0].clone();
+
+        assert!(!row.contains("tail"));
+        assert!(cell_width(row.trim_end()) <= 10);
+    }
+
+    #[test]
+    fn code_line_renderer_counts_wide_cells() {
+        let mut canvas = Canvas::new(12, 1);
+
+        render_code_line(&mut canvas, 0, 0, "abc🐝TAIL", 4, None);
+        let row = canvas.to_text_rows()[0].clone();
+
+        assert!(row.contains("abc"));
+        assert!(!row.contains("TAIL"));
+    }
 }

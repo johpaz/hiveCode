@@ -22,9 +22,11 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
     // Write tools — BEE uses these for simple direct fixes
     "fs_write", "fs_edit", "fs_delete",
     "git_commit", "git_branch",
-    "check_types", "code_build", "code_test", "code_lint",
+    "check_types", "code_build", "code_test", "code_test_parallel", "code_lint",
     "run_script", "shell_executor",
     "append_narrative", "write_decision",
+    // Browser preview — verify generated web output before reporting done
+    "browser_screenshot", "browser_preview_html",
   ],
   architecture: [
     "fs_read",
@@ -52,6 +54,7 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
     "code_search",
     "code_build",
     "code_test",
+    "code_test_parallel",
     "code_lint",
     "parse_ast",
     "check_types",
@@ -74,6 +77,7 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
     "code_search",
     "code_build",
     "code_test",
+    "code_test_parallel",
     "code_lint",
     "parse_ast",
     "check_types",
@@ -81,6 +85,8 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
     "read_narrative",
     "append_narrative",
     "shell_executor",
+    "browser_screenshot",
+    "browser_preview_html",
   ],
   security: [
     "fs_read",
@@ -102,6 +108,7 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
     "git_status",
     "code_search",
     "code_test",
+    "code_test_parallel",
     "code_build",
     "parse_ast",
     "check_types",
@@ -109,6 +116,8 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
     "read_narrative",
     "append_narrative",
     "shell_executor",
+    "browser_screenshot",
+    "browser_preview_html",
   ],
   devops: [
     "fs_read",
@@ -125,6 +134,7 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
     "git_rollback",
     "code_build",
     "code_test",
+    "code_test_parallel",
     "code_lint",
     "read_narrative",
     "append_narrative",
@@ -209,6 +219,7 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
     "read_narrative",
     "append_narrative",
     "shell_executor",
+    "browser_screenshot",
   ],
   data_scientist: [
     "fs_read",
@@ -308,7 +319,8 @@ export function isToolAllowed(
   const allowed = COORDINATOR_TOOLS[phase]
   if (!allowed.includes(toolName)) return false
 
-  // In plan mode, only read-only tools are allowed
+  // In plan mode, code/worktree mutations are blocked. Blackboard writes
+  // (append_narrative/write_decision) remain allowed for PRD/ADR capture.
   if (mode === "plan") {
     const writeTools = new Set([
       "fs_write",
@@ -318,8 +330,6 @@ export function isToolAllowed(
       "git_branch",
       "git_create_pr",
       "git_rollback",
-      "append_narrative",
-      "write_decision",
     ])
     if (writeTools.has(toolName)) return false
   }

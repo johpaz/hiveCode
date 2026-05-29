@@ -8,3 +8,5 @@ hot = true
 
 [test]
 coverage = false
+timeout = 30000
+smol = true

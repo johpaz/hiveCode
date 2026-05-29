@@ -3,6 +3,7 @@ import { CoordinatorManager } from "../../src/workers/coordinator-manager"
 import { initSessionArray, setMode } from "../../src/modes/session-array"
 import type { Tool } from "@johpaz/hivecode-core/tools"
 import { cleanupTestDb, resetTestDb } from "../helpers/setup-db"
+import { WorkspaceManager } from "../../src/workspace/manager"
 
 beforeAll(() => {
   resetTestDb()
@@ -18,11 +19,18 @@ describe("CoordinatorManager file leases", () => {
     setMode("auto")
 
     let releaseFirst!: (value: object) => void
+    let firstConfig: any
+    let markFirstStarted!: () => void
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve })
     const fsEditTool: Tool = {
       name: "fs_edit",
       description: "edit file",
       parameters: { type: "object", properties: {} },
-      execute: () => new Promise((resolve) => { releaseFirst = resolve }),
+      execute: (_params, config) => {
+        firstConfig = config
+        markFirstStarted()
+        return new Promise((resolve) => { releaseFirst = resolve })
+      },
     }
 
     const backendMessages: string[] = []
@@ -30,6 +38,15 @@ describe("CoordinatorManager file leases", () => {
     const ipcEvents: Array<{ event: string; payload: any }> = []
 
     const manager = new CoordinatorManager() as any
+    manager.workspaceManager = new WorkspaceManager({
+      rootDir: "/tmp/hivecode-test-worktrees",
+      runCommand: async (cmd) => {
+        if (cmd.includes("write-tree")) return { ok: true, stdout: "tree-sha\n" }
+        if (cmd.includes("rev-parse")) return { ok: true, stdout: "head-sha\n" }
+        if (cmd.includes("commit-tree")) return { ok: true, stdout: "baseline-sha\n" }
+        return { ok: true, stdout: "" }
+      },
+    })
     const sessionId = manager.scribe.createSession(process.cwd())
     const taskId = manager.scribe.createTask(sessionId, "lease test", "auto")
     manager.activeTaskId = taskId
@@ -49,7 +66,7 @@ describe("CoordinatorManager file leases", () => {
       toolCallId: "call-1",
     })
 
-    await Promise.resolve()
+    await firstStarted
 
     await manager.handleToolCall("frontend", {
       type: "TOOL_CALL",
@@ -63,6 +80,7 @@ describe("CoordinatorManager file leases", () => {
 
     expect(frontendMessages.join("\n")).toContain("[LEASE]")
     expect(ipcEvents.some(({ event }) => event === "conflict_alert")).toBe(true)
+    expect(firstConfig.configurable.workspace).toContain("/tmp/hivecode-test-worktrees")
 
     releaseFirst({ ok: true, edited: true })
     await first

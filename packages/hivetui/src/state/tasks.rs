@@ -5,6 +5,11 @@ pub struct TaskProjection {
     pub status: String,
     pub mode: String,
     pub active_workers: Vec<String>,
+    pub workspace_id: Option<String>,
+    pub workspace_path: Option<String>,
+    pub branch_name: Option<String>,
+    pub isolated: bool,
+    pub integration_status: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +37,11 @@ impl TaskProjectionState {
         status: String,
         mode: Option<String>,
         active_workers: Option<Vec<String>>,
+        workspace_id: Option<String>,
+        workspace_path: Option<String>,
+        branch_name: Option<String>,
+        isolated: Option<bool>,
+        integration_status: Option<String>,
     ) {
         if let Some(task) = self.tasks.iter_mut().find(|task| task.task_id == task_id) {
             if let Some(title) = title.filter(|title| !title.is_empty()) {
@@ -44,6 +54,21 @@ impl TaskProjectionState {
             if let Some(active_workers) = active_workers {
                 task.active_workers = active_workers;
             }
+            if workspace_id.is_some() {
+                task.workspace_id = workspace_id;
+            }
+            if workspace_path.is_some() {
+                task.workspace_path = workspace_path;
+            }
+            if branch_name.is_some() {
+                task.branch_name = branch_name;
+            }
+            if let Some(isolated) = isolated {
+                task.isolated = isolated;
+            }
+            if integration_status.is_some() {
+                task.integration_status = integration_status;
+            }
         } else {
             self.tasks.push(TaskProjection {
                 task_id: task_id.clone(),
@@ -51,6 +76,11 @@ impl TaskProjectionState {
                 status: status.clone(),
                 mode: mode.unwrap_or_default(),
                 active_workers: active_workers.unwrap_or_default(),
+                workspace_id,
+                workspace_path,
+                branch_name,
+                isolated: isolated.unwrap_or(false),
+                integration_status,
             });
         }
 
@@ -91,7 +121,7 @@ impl TaskProjectionState {
             _ => existing_status.unwrap_or_else(|| "running".to_string()),
         };
 
-        self.upsert(task_id.to_string(), None, status, None, None);
+        self.upsert(task_id.to_string(), None, status, None, None, None, None, None, None, None);
 
         if let Some(task) = self.tasks.iter_mut().find(|task| task.task_id == task_id) {
             match worker_status {
@@ -123,6 +153,11 @@ mod tests {
             "running".to_string(),
             Some("auto".to_string()),
             Some(vec!["backend".to_string()]),
+            Some("worktree:task-1".to_string()),
+            Some("/tmp/task-1".to_string()),
+            Some("hivecode/task-task-1".to_string()),
+            Some(true),
+            Some("isolated".to_string()),
         );
         state.upsert(
             "task-1".to_string(),
@@ -130,11 +165,18 @@ mod tests {
             "completed".to_string(),
             None,
             None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
 
         assert_eq!(state.tasks.len(), 1);
         assert_eq!(state.tasks[0].title, "Fix auth");
         assert_eq!(state.tasks[0].status, "completed");
+        assert!(state.tasks[0].isolated);
+        assert_eq!(state.tasks[0].integration_status.as_deref(), Some("isolated"));
         assert_eq!(state.active_task_id, None);
     }
 

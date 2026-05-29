@@ -70,6 +70,11 @@ export interface CoordinatorTask {
   compiledContext?: string
   /** Recent conversation turns in this session — gives BEE chat context */
   conversationHistory?: ConversationTurn[]
+  /** Workspace routing for isolated task execution */
+  workspaceId?: string
+  workspacePath?: string
+  branchName?: string
+  isolated?: boolean
 }
 
 export interface CoordinatorResult {

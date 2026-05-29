@@ -256,6 +256,11 @@ pub enum BunMessage {
         status: String,
         mode: Option<String>,
         active_workers: Option<Vec<String>>,
+        workspace_id: Option<String>,
+        workspace_path: Option<String>,
+        branch_name: Option<String>,
+        isolated: Option<bool>,
+        integration_status: Option<String>,
     },
 
     // ── Snapshots de inicio (dump de SQLite al conectar) ───────────────────────

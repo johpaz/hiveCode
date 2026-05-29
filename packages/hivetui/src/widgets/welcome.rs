@@ -4,6 +4,7 @@ use crate::{
         Canvas, Cell, Color, Rect, Style, AMBER, AMBER_BRIGHT, AMBER_DIM, BG_MAIN, DIM, GREEN,
         SECONDARY, WHITE, YELLOW,
     },
+    ui::text::ellipsize_cells,
 };
 
 // ── BeeMascot — pixel grid estático (igual que en el diseño JSX) ──────────────
@@ -137,8 +138,13 @@ fn draw_boot_lines(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &AppState
 
     let worker_count = state.workers.workers.len();
     let has_session  = !state.session.session_id.is_empty();
-    let adr_count    = state.adrs.entries.len();
     let provider     = &state.session.provider;
+    let provider_label = if provider.trim().is_empty() { "sin provider" } else { provider.as_str() };
+    let model_label = if state.session.model.trim().is_empty() {
+        "modelo pendiente"
+    } else {
+        state.session.model.as_str()
+    };
 
     // Cada línea: (tag_pad, texto, es_last, ok_si_true)
     let load_txt = if worker_count > 0 {
@@ -151,18 +157,26 @@ fn draw_boot_lines(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &AppState
     } else {
         "sqlite + FTS5 · WAL mode".to_string()
     };
-    let adr_txt = if adr_count > 0 {
-        format!("{adr_count} ADR(s) cargados")
-    } else {
-        "sin ADRs — cargando...".to_string()
-    };
-    let ready_txt = format!("listo · provider: {provider} · ⬡ escribe tu tarea");
+    let mode_txt = format!(
+        "{} · modo {} · {} · {}",
+        state.harness.health_label(provider, state.running),
+        state.session.mode.label(),
+        provider_label,
+        model_label
+    );
+    let task_txt = state.harness.task_label();
+    let workspace_txt = state.harness.workspace_label();
+    let activity_txt = state.harness.activity_label();
+    let ipc_txt = state.harness.event_label();
 
     let lines: &[(&str, String, bool, bool)] = &[
-        ("load ", load_txt,    false, worker_count > 0),
-        ("db   ", sqlite_txt,  false, has_session),
-        ("adr  ", adr_txt,     false, adr_count > 0),
-        ("ready", ready_txt,   true,  true),
+        ("load ", load_txt,      false, worker_count > 0),
+        ("db   ", sqlite_txt,    false, has_session),
+        ("mode ", mode_txt,      false, !provider.trim().is_empty()),
+        ("task ", task_txt,      false, state.harness.active_task_id.is_some()),
+        ("work ", workspace_txt, false, state.harness.active_workspace_status.is_some()),
+        ("agent", activity_txt,  false, state.harness.last_agent.is_some()),
+        ("ipc  ", ipc_txt,       true,  state.harness.event_count > 0),
     ];
 
     for (tag, text, is_last, ok) in lines {
@@ -172,7 +186,7 @@ fn draw_boot_lines(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &AppState
         let tag_w = bracket_tag.chars().count() as u16;
         let msg_x = x + tag_w + 1;
         let max_msg = w.saturating_sub(tag_w + 1 + 4) as usize;
-        let shown: String = text.chars().take(max_msg).collect();
+        let shown = ellipsize_cells(text, max_msg);
         let msg_style = if *ok { Style::new().fg(SECONDARY) } else { Style::new().fg(DIM) };
         canvas.print(msg_x, row, &shown, msg_style);
         if *is_last {
@@ -215,8 +229,8 @@ fn draw_right_with_provider(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: 
     draw_hints(canvas, x, row, w)
 }
 
-fn draw_right_no_provider(canvas: &mut Canvas, x: u16, y: u16, w: u16, version: &str) -> u16 {
-    let mut row = draw_right_base(canvas, x, y, w, version);
+fn draw_right_no_provider(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &AppState) -> u16 {
+    let mut row = draw_right_base(canvas, x, y, w, &state.session.version);
 
     // ⚠ Sin provider — extensión propia (fuera del diseño original pero solicitada)
     canvas.print(x, row, "⚠  Sin provider de IA configurado", Style::new().fg(YELLOW).bold());
@@ -236,29 +250,7 @@ fn draw_right_no_provider(canvas: &mut Canvas, x: u16, y: u16, w: u16, version: 
     canvas.print(x, row, "Escribe el comando arriba y pulsa Enter ↵", Style::new().fg(SECONDARY));
     row += 2;
 
-    // Boot lines estándar del diseño (con [wait] en lugar de [ready])
-    let lines: &[(&str, &str, bool)] = &[
-        ("load ", "cargando workers · bee · arch · back · front · sec · test", false),
-        ("sqlite", "sqlite + FTS5 · .hivecode/state.db · WAL mode (~0.6ms)", false),
-        ("adr  ", "cargando ADRs · ADR-003 activo", false),
-        ("wait ", "esperando configuración del provider", true),
-    ];
-    for (tag, text, is_last) in lines {
-        let bracket_tag = format!("[{tag}]");
-        canvas.print(x, row, &bracket_tag, Style::new().fg(AMBER));
-        let tag_w = bracket_tag.chars().count() as u16;
-        let msg_x = x + tag_w + 1;
-        let max_msg = w.saturating_sub(tag_w + 1 + 4) as usize;
-        let shown: String = text.chars().take(max_msg).collect();
-        let msg_style = if *is_last { Style::new().fg(AMBER) } else { Style::new().fg(SECONDARY) };
-        canvas.print(msg_x, row, &shown, msg_style);
-        if !is_last {
-            canvas.print((x + w).saturating_sub(3), row, "OK", Style::new().fg(GREEN).bold());
-        }
-        row += 1;
-    }
-
-    row
+    draw_boot_lines(canvas, x, row, w, state)
 }
 
 // ── Punto de entrada ──────────────────────────────────────────────────────────
@@ -287,7 +279,7 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     draw_bee(canvas, area.x + 1, y, state.slow_tick);
 
     if state.session.provider.is_empty() {
-        draw_right_no_provider(canvas, right_x, y, right_w, &state.session.version);
+        draw_right_no_provider(canvas, right_x, y, right_w, state);
     } else {
         draw_right_with_provider(canvas, right_x, y, right_w, state);
     }

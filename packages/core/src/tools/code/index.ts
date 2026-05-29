@@ -398,6 +398,18 @@ const codeTestTool: Tool = {
         type: "number",
         description: "Timeout in seconds (default: 180)",
       },
+      parallel: {
+        type: "boolean",
+        description: "Run test files concurrently (bun test --concurrent). Faster on multi-core.",
+      },
+      workers: {
+        type: "number",
+        description: "Max worker threads for test parallelism (bun test --max-workers N).",
+      },
+      smol: {
+        type: "boolean",
+        description: "Use smol workers to reduce memory usage per worker (bun test --smol).",
+      },
     },
   },
   async execute(params) {
@@ -414,6 +426,11 @@ const codeTestTool: Tool = {
       }
     }
     if (params.filter) cmd += ` -t "${params.filter}"`
+    if (cmd.startsWith("bun test")) {
+      if (params.parallel) cmd += " --concurrent"
+      if (params.workers) cmd += ` --max-workers ${params.workers as number}`
+      if (params.smol) cmd += " --smol"
+    }
     const validation = validateCommand(cmd, { workspace: path })
     if (!validation.ok) {
       return { ok: false, error: `Command blocked by safety validator: ${(validation as any).reason}` }
@@ -1045,6 +1062,198 @@ const gitRollbackTool: Tool = {
   },
 }
 
+// ─── Code Test Parallel ───────────────────────────────────────────────────────
+
+interface TestSuiteConfig {
+  /** Working directory for this suite (also passed as the test path to bun test) */
+  path: string
+  /** Override the test command entirely (default: "bun test <path>") */
+  command?: string
+  /** Filter pattern (-t flag) */
+  filter?: string
+  /** Human-readable label for results */
+  label?: string
+}
+
+interface SuiteResult {
+  label: string
+  ok: boolean
+  pass: number
+  fail: number
+  durationMs: number
+  output: string
+  error?: string
+}
+
+function parseJUnitCounts(xml: string): { pass: number; fail: number } {
+  const testsMatch = xml.match(/<testsuites[^>]+\btests="(\d+)"/)
+  const failuresMatch = xml.match(/<testsuites[^>]+\bfailures="(\d+)"/)
+  const tests = testsMatch ? parseInt(testsMatch[1], 10) : 0
+  const failures = failuresMatch ? parseInt(failuresMatch[1], 10) : 0
+  return { pass: tests - failures, fail: failures }
+}
+
+const codeTestParallelTool: Tool = {
+  name: "code_test_parallel",
+  description:
+    "Run multiple test suites concurrently and return aggregated pass/fail counts. " +
+    "Use when you need to validate unit tests + e2e tests + integration tests simultaneously " +
+    "before reporting a task as done. Much faster than sequential code_test calls. " +
+    "Spanish keywords: tests en paralelo, ejecutar suites, validar solución, pruebas concurrentes",
+  parameters: {
+    type: "object",
+    properties: {
+      suites: {
+        type: "array",
+        description: "List of test suites to run in parallel",
+        items: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Directory or file to test (used as cwd and test path)" },
+            command: { type: "string", description: "Full test command override" },
+            filter: { type: "string", description: "Test name pattern (-t flag)" },
+            label: { type: "string", description: "Display name for this suite in results" },
+          },
+          required: ["path"],
+        },
+      },
+      timeout: {
+        type: "number",
+        description: "Timeout in seconds per suite (default: 120)",
+      },
+    },
+    required: ["suites"],
+  },
+  async execute(params) {
+    const suites = params.suites as TestSuiteConfig[]
+    if (!Array.isArray(suites) || suites.length === 0) {
+      return { ok: false, error: "suites must be a non-empty array" }
+    }
+    const timeoutMs = ((params.timeout as number) || 120) * 1000
+
+    const runSuite = async (suite: TestSuiteConfig): Promise<SuiteResult> => {
+      const label = suite.label || suite.path
+      const start = Bun.nanoseconds()
+
+      let baseCmd: string
+      let isBunTest = true
+      if (suite.command) {
+        baseCmd = suite.command
+        isBunTest = suite.command.startsWith("bun test")
+      } else {
+        const pkgFile = Bun.file(`${suite.path}/package.json`)
+        if (await pkgFile.exists()) {
+          const pkg = await pkgFile.json()
+          if (pkg.scripts?.test) {
+            baseCmd = pkg.scripts.test
+            isBunTest = baseCmd.startsWith("bun test")
+          } else {
+            baseCmd = `bun test ${suite.path}`
+          }
+        } else {
+          baseCmd = `bun test ${suite.path}`
+        }
+      }
+
+      if (suite.filter) baseCmd += ` -t "${suite.filter}"`
+
+      const validation = validateCommand(baseCmd, { workspace: suite.path })
+      if (!validation.ok) {
+        return {
+          label,
+          ok: false,
+          pass: 0,
+          fail: 0,
+          durationMs: 0,
+          output: "",
+          error: `Blocked by safety validator: ${(validation as any).reason}`,
+        }
+      }
+
+      // Use JUnit reporter to capture exact pass/fail counts for bun test
+      const junitPath = isBunTest
+        ? `/tmp/hive_junit_${Date.now()}_${Math.random().toString(36).slice(2)}.xml`
+        : null
+      const cmd = isBunTest && junitPath
+        ? `${baseCmd} --reporter=junit --reporter-outfile ${junitPath}`
+        : baseCmd
+
+      try {
+        const proc = Bun.spawn(["/bin/sh", "-c", cmd], {
+          cwd: ".",
+          timeout: timeoutMs,
+          stdout: "pipe",
+          stderr: "pipe",
+        })
+        const stdout = await new Response(proc.stdout).text()
+        const stderr = await new Response(proc.stderr).text()
+        const exitCode = await proc.exited
+        const durationMs = Math.round((Bun.nanoseconds() - start) / 1_000_000)
+
+        let counts = { pass: 0, fail: 0 }
+        if (junitPath) {
+          try {
+            const xml = await Bun.file(junitPath).text()
+            counts = parseJUnitCounts(xml)
+          } catch { /* JUnit file unavailable — counts stay 0 */ }
+          finally { try { Bun.spawn(["rm", "-f", junitPath]) } catch { /* ignore */ } }
+        }
+
+        return {
+          label,
+          ok: exitCode === 0,
+          pass: counts.pass,
+          fail: counts.fail,
+          durationMs,
+          output: (stdout || stderr).substring(0, 1500),
+          error: exitCode !== 0 ? (stderr || stdout).substring(0, 800) : undefined,
+        }
+      } catch (err) {
+        if (junitPath) try { Bun.spawn(["rm", "-f", junitPath]) } catch { /* ignore */ }
+        const durationMs = Math.round((Bun.nanoseconds() - start) / 1_000_000)
+        return {
+          label,
+          ok: false,
+          pass: 0,
+          fail: 0,
+          durationMs,
+          output: "",
+          error: (err as Error).message,
+        }
+      }
+    }
+
+    const results: SuiteResult[] = await Promise.all(suites.map(runSuite))
+
+    const totalPass = results.reduce((sum, r) => sum + r.pass, 0)
+    const totalFail = results.reduce((sum, r) => sum + r.fail, 0)
+    const allOk = results.every(r => r.ok)
+    const failedLabels = results.filter(r => !r.ok).map(r => r.label)
+    const totalDuration = results.reduce((max, r) => Math.max(max, r.durationMs), 0)
+
+    return {
+      ok: allOk,
+      result: {
+        summary: `${totalPass} pass, ${totalFail} fail across ${results.length} suite(s) in ${totalDuration}ms`,
+        totalPass,
+        totalFail,
+        suites: results.map(r => ({
+          label: r.label,
+          ok: r.ok,
+          pass: r.pass,
+          fail: r.fail,
+          durationMs: r.durationMs,
+        })),
+        failed: failedLabels,
+      },
+      error: !allOk
+        ? `Failed suites: ${failedLabels.join(", ")}. Check result.suites for details.`
+        : undefined,
+      hint: !allOk ? "Review individual suite outputs via result.suites." : undefined,
+    }
+  },
+}
+
 // ─── Export ──────────────────────────────────────────────────────────────────
 
 export function createTools(): Tool[] {
@@ -1057,6 +1266,7 @@ export function createTools(): Tool[] {
     codeSearchTool,
     codeBuildTool,
     codeTestTool,
+    codeTestParallelTool,
     codeLintTool,
     codeDiffCreateTool,
     parseAstTool,
@@ -1077,6 +1287,7 @@ export {
   codeSearchTool,
   codeBuildTool,
   codeTestTool,
+  codeTestParallelTool,
   codeLintTool,
   codeDiffCreateTool,
   parseAstTool,

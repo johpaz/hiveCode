@@ -1,7 +1,7 @@
 use crate::{
     state::{AppState, ReplMode, RiskLevel},
-    term::{Canvas, Rect, Style, AMBER, AMBER_BRIGHT, AMBER_DIM, BG_ELEVATED, BG_PANEL, DIM, GREEN, RED, SECONDARY, WHITE, YELLOW},
-    widgets::components::{render_table, Align, TableCell, TableColumn},
+    term::{Canvas, Rect, Style, AMBER, AMBER_BRIGHT, AMBER_DIM, BG_ELEVATED, BG_PANEL, DIM, GREEN, RED, WHITE, YELLOW},
+    ui::{render_data_table, render_markdown, DataTable, MarkdownView, TableAlign, TableCell, TableColumn, TableState},
 };
 
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -48,43 +48,17 @@ fn render_adr_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
     canvas.print(area.right().saturating_sub(adr.status.len() as u16 + 2), area.y,
                  &adr.status, Style::new().fg(status_color).bold());
 
-    let avail_w = area.w.saturating_sub(3) as usize;
-    let mut y = area.y + 1;
-
-    // Renderizar contenido con markdown básico
-    let lines: Vec<&str> = adr.content.lines().collect();
-    let avail_h = area.h.saturating_sub(2) as usize;
+    let markdown_area = Rect::new(area.x + 2, area.y + 1, area.w.saturating_sub(4), area.h.saturating_sub(2));
+    let lines = crate::ui::build_markdown_lines(&adr.content, markdown_area.w as usize);
+    let avail_h = markdown_area.h as usize;
     let start = state.adrs.scroll.min(lines.len().saturating_sub(avail_h));
+    render_markdown(
+        canvas,
+        markdown_area,
+        &adr.content,
+        MarkdownView { scroll: state.adrs.scroll },
+    );
 
-    for raw in lines.iter().skip(start) {
-        if y >= area.bottom().saturating_sub(1) {
-            break;
-        }
-        let line = raw.trim_end();
-        let (style, offset) = if line.starts_with("### ") {
-            (Style::new().fg(AMBER_DIM), 4)
-        } else if line.starts_with("## ") {
-            (Style::new().fg(AMBER).bold(), 3)
-        } else if line.starts_with("# ") {
-            (Style::new().fg(AMBER_BRIGHT).bold(), 2)
-        } else if line.starts_with("```") || line.starts_with("    ") {
-            (Style::new().fg(WHITE).bg(BG_ELEVATED), 0)
-        } else if line.starts_with("> ") {
-            (Style::new().fg(DIM), 2)
-        } else if line.starts_with("- ") || line.starts_with("* ") {
-            (Style::new().fg(SECONDARY), 0)
-        } else {
-            (Style::new().fg(SECONDARY), 0)
-        };
-
-        let content: String = line.chars().skip(offset).take(avail_w).collect();
-        if !content.is_empty() || line.is_empty() {
-            canvas.print(area.x + 2, y, &content, style);
-        }
-        y += 1;
-    }
-
-    // Hint scroll al fondo
     if lines.len() > avail_h {
         let pct = (start * 100) / lines.len().max(1);
         let hint = format!("{}% · ↑↓ scroll", pct);
@@ -118,9 +92,9 @@ fn render_approval_strip(canvas: &mut Canvas, area: Rect, state: &AppState) {
 
     let list_rows = area.h.saturating_sub(3) as usize;
     let columns = [
-        TableColumn::fixed(1, Align::Left),
-        TableColumn::fill(Align::Left),
-        TableColumn::fixed(8, Align::Right),
+        TableColumn::fixed("", 1, TableAlign::Left),
+        TableColumn::fill("archivo", 1, TableAlign::Left),
+        TableColumn::fixed("riesgo", 8, TableAlign::Right),
     ];
     let mut rows = Vec::new();
     for entry in state.filemap.entries.iter().take(list_rows) {
@@ -136,11 +110,13 @@ fn render_approval_strip(canvas: &mut Canvas, area: Rect, state: &AppState) {
             TableCell::new(risk_tag.trim(), Style::new().fg(dot_color)),
         ]);
     }
-    render_table(
+    render_data_table(
         canvas,
         Rect::new(area.x + 1, area.y + 1, area.w.saturating_sub(2), list_rows as u16),
         &columns,
         &rows,
+        TableState::default(),
+        &DataTable { show_header: false, ..DataTable::default() },
     );
 
     // Hints de acción — más prominentes en modo APPROVAL

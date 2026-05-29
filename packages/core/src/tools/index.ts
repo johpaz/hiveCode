@@ -113,6 +113,7 @@ export {
   webFetchTool,
   browserScreenshotTool,
   browserCaptureClipboardTool,
+  browserPreviewHtmlTool,
 } from "./web/index.ts";
 
 export {
@@ -160,6 +161,7 @@ export {
   codeSearchTool,
   codeBuildTool,
   codeTestTool,
+  codeTestParallelTool,
   codeLintTool,
   codeDiffCreateTool,
   parseAstTool,

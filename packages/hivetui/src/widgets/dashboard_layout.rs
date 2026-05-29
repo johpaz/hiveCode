@@ -3,7 +3,8 @@ use crate::{
     term::{
         Canvas, Rect, Style, AMBER, BG_ELEVATED, BG_PANEL, DIM, GREEN, RED, SECONDARY, YELLOW,
     },
-    widgets::components::{render_table, worker_color, Align, TableCell, TableColumn},
+    ui::{render_data_table, DataTable, TableAlign, TableCell, TableColumn, TableState},
+    widgets::components::worker_color,
 };
 
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -63,13 +64,13 @@ fn render_task_strip(canvas: &mut Canvas, area: Rect, state: &AppState) {
     }
 
     let columns = [
-        TableColumn::fixed(12, Align::Left),
-        TableColumn::fill(Align::Left),
-        TableColumn::fixed(9, Align::Right),
-        TableColumn::fixed(18, Align::Right),
+        TableColumn::fixed("estado", 12, TableAlign::Left),
+        TableColumn::fill("tarea", 1, TableAlign::Left),
+        TableColumn::fixed("workspace", 14, TableAlign::Right),
+        TableColumn::fixed("workers", 18, TableAlign::Right),
     ];
     let active = state.tasks.active_task_id.as_deref();
-    let rows: Vec<Vec<TableCell>> = state.tasks.tasks.iter().rev().take(area.h.saturating_sub(1) as usize).map(|task| {
+    let rows: Vec<Vec<TableCell>> = state.tasks.tasks.iter().rev().take(area.h.saturating_sub(2) as usize).map(|task| {
         let is_active = active == Some(task.task_id.as_str());
         let marker = if is_active { "●" } else { "○" };
         let status = format!("{marker} {}", task.status);
@@ -79,19 +80,32 @@ fn render_task_strip(canvas: &mut Canvas, area: Rect, state: &AppState) {
             task.active_workers.join(" · ")
         };
         let status_style = task_status_style(&task.status);
+        let workspace = if task.isolated {
+            match task.integration_status.as_deref() {
+                Some("conflict") => format!("{} WT!", task.mode),
+                Some("failed") => format!("{} WT?", task.mode),
+                Some("integrated") => format!("{} WT✓", task.mode),
+                Some(_) => format!("{} WT", task.mode),
+                None => format!("{} WT", task.mode),
+            }
+        } else {
+            task.mode.clone()
+        };
         vec![
             TableCell::new(status, status_style),
             TableCell::new(task.title.clone(), Style::new().fg(SECONDARY)),
-            TableCell::new(task.mode.clone(), Style::new().fg(DIM)),
+            TableCell::new(workspace, Style::new().fg(DIM)),
             TableCell::new(workers, Style::new().fg(DIM)),
         ]
     }).collect();
 
-    render_table(
+    render_data_table(
         canvas,
         Rect::new(area.x + 1, area.y + 1, area.w.saturating_sub(2), area.h.saturating_sub(1)),
         &columns,
         &rows,
+        TableState::default(),
+        &DataTable::default(),
     );
 }
 
@@ -177,6 +191,11 @@ mod tests {
             "running".to_string(),
             Some("auto".to_string()),
             Some(vec!["backend".to_string()]),
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         state.workers.workers.push(Worker {
             name: "backend".to_string(),

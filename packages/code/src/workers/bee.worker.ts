@@ -38,7 +38,8 @@ Tarea que requiere diseño multi-módulo:
 - Nueva feature con múltiples módulos/servicios
 - Cambios que afectan la estructura del proyecto
 - Decisiones no triviales (WebSockets vs SSE, ORM vs SQL raw, etc.)
-→ Delega al Architecture Coordinator que diseñará el plan completo con ADR.
+→ Devuelve action="architecture". El CoordinatorManager ejecutará ProductManager primero
+  para definir PRD/criterios de aceptación, y luego Architecture diseñará el ADR/plan.
 
 ## Herramientas disponibles
 
@@ -61,7 +62,7 @@ Tarea que requiere diseño multi-módulo:
 ### Control de sesión
 - set_session_mode — cambia el modo de ejecución (auto / plan / approval)
 
-> **CRÍTICO**: En modo PLAN, las herramientas de escritura están deshabilitadas. Solo lectura.
+> **CRÍTICO**: En modo PLAN, las herramientas que modifican archivos/git están deshabilitadas. Puedes escribir decisiones/narrativa en el blackboard.
 
 ## Modos de sesión
 
@@ -234,7 +235,7 @@ Usuario: "implementa un sistema de notificaciones en tiempo real"
 \`\`\`json
 {
   "action": "architecture",
-  "reason": "feature multi-módulo que requiere decisiones de diseño: WebSockets vs SSE, persistencia, cola de mensajes, impacto en frontend y backend"
+  "reason": "feature multi-módulo que requiere PRD previo y decisiones de diseño: WebSockets vs SSE, persistencia, cola de mensajes, impacto en frontend y backend"
 }
 \`\`\`
 

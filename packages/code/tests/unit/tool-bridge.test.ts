@@ -53,6 +53,49 @@ describe("COORDINATOR_TOOLS mapping", () => {
 			expect(COORDINATOR_TOOLS[phase]).toContain("read_narrative")
 		}
 	})
+
+	test("frontend has browser preview tools", () => {
+		const tools = COORDINATOR_TOOLS.frontend
+		expect(tools).toContain("browser_screenshot")
+		expect(tools).toContain("browser_preview_html")
+	})
+
+	test("test coordinator has browser preview tools", () => {
+		const tools = COORDINATOR_TOOLS.test
+		expect(tools).toContain("browser_screenshot")
+		expect(tools).toContain("browser_preview_html")
+	})
+
+	test("bee has browser preview tools", () => {
+		const tools = COORDINATOR_TOOLS.bee
+		expect(tools).toContain("browser_screenshot")
+		expect(tools).toContain("browser_preview_html")
+	})
+
+	test("mobile has browser_screenshot but not browser_preview_html", () => {
+		const tools = COORDINATOR_TOOLS.mobile
+		expect(tools).toContain("browser_screenshot")
+		expect(tools).not.toContain("browser_preview_html")
+	})
+
+	test("architecture and security do NOT have browser tools", () => {
+		expect(COORDINATOR_TOOLS.architecture).not.toContain("browser_screenshot")
+		expect(COORDINATOR_TOOLS.architecture).not.toContain("browser_preview_html")
+		expect(COORDINATOR_TOOLS.security).not.toContain("browser_screenshot")
+		expect(COORDINATOR_TOOLS.security).not.toContain("browser_preview_html")
+	})
+
+	test("bee, test, backend, frontend, devops have code_test_parallel", () => {
+		const withParallel: PhaseName[] = ["bee", "test", "backend", "frontend", "devops"]
+		for (const phase of withParallel) {
+			expect(COORDINATOR_TOOLS[phase]).toContain("code_test_parallel")
+		}
+	})
+
+	test("architecture and security do NOT have code_test_parallel", () => {
+		expect(COORDINATOR_TOOLS.architecture).not.toContain("code_test_parallel")
+		expect(COORDINATOR_TOOLS.security).not.toContain("code_test_parallel")
+	})
 })
 
 describe("toolToLLMToolDef", () => {
@@ -163,7 +206,11 @@ describe("isToolAllowed", () => {
 		expect(isToolAllowed("fs_delete", "backend", "plan")).toBe(false)
 		expect(isToolAllowed("git_commit", "backend", "plan")).toBe(false)
 		expect(isToolAllowed("git_branch", "devops", "plan")).toBe(false)
-		expect(isToolAllowed("append_narrative", "test", "plan")).toBe(false)
+	})
+
+	test("allows blackboard writes in plan mode", () => {
+		expect(isToolAllowed("append_narrative", "test", "plan")).toBe(true)
+		expect(isToolAllowed("write_decision", "product_manager", "plan")).toBe(true)
 	})
 
 	test("allows write tools in approval mode", () => {
@@ -180,5 +227,26 @@ describe("isToolAllowed", () => {
 		expect(isToolAllowed("fs_write", "architecture", "auto")).toBe(false)
 		expect(isToolAllowed("git_create_pr", "security", "approval")).toBe(false)
 		expect(isToolAllowed("shell_executor", "architecture", "auto")).toBe(false)
+	})
+
+	test("allows browser_screenshot and browser_preview_html for frontend in auto mode", () => {
+		expect(isToolAllowed("browser_screenshot", "frontend", "auto")).toBe(true)
+		expect(isToolAllowed("browser_preview_html", "frontend", "auto")).toBe(true)
+	})
+
+	test("allows browser tools for test coordinator in auto mode", () => {
+		expect(isToolAllowed("browser_screenshot", "test", "auto")).toBe(true)
+		expect(isToolAllowed("browser_preview_html", "test", "auto")).toBe(true)
+	})
+
+	test("blocks browser tools for architecture and security", () => {
+		expect(isToolAllowed("browser_screenshot", "architecture", "auto")).toBe(false)
+		expect(isToolAllowed("browser_preview_html", "security", "auto")).toBe(false)
+	})
+
+	test("browser tools are not blocked as write tools in plan mode", () => {
+		// browser_screenshot is a read/observe tool — should not be in the write-block list
+		expect(isToolAllowed("browser_screenshot", "frontend", "plan")).toBe(true)
+		expect(isToolAllowed("browser_preview_html", "test", "plan")).toBe(true)
 	})
 })

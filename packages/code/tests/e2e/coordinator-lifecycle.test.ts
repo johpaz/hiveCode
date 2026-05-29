@@ -43,6 +43,18 @@ function makeBeeArchitectureResult(task: CoordinatorTask): CoordinatorResult {
   }
 }
 
+function makeProductResult(task: CoordinatorTask): CoordinatorResult {
+  return {
+    taskId: task.taskId,
+    phaseId: task.phaseId,
+    coordinator: "product_manager",
+    status: "completed",
+    narrativeEntry: "PRD: Items CRUD. Acceptance criteria: create, list, update and delete items.",
+    filesModified: [],
+    durationMs: 500,
+  }
+}
+
 function makePhaseResult(taskId: string, coordinator: string, phaseId: number): CoordinatorResult {
   return {
     taskId,
@@ -73,23 +85,25 @@ describe("e2e: CoordinatorManager.runTask — plan mode", () => {
 
   afterAll(() => { cleanupTestDb() })
 
-  test("plan mode: session → task → architecture → ADR → DB, no further phases", async () => {
+  test("plan mode: session → task → product manager → architecture → ADR → DB, no further phases", async () => {
     const { manager } = setupManager()
     setMode("plan")
 
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) => {
         if (phase === "bee") return Promise.resolve(makeBeeArchitectureResult(task))
+        if (phase === "product_manager") return Promise.resolve(makeProductResult(task))
         expect(phase).toBe("architecture")
         expect(task.mode).toBe("plan")
+        expect(task.narrative).toContain("ProductManager PRD")
         return Promise.resolve(makeArchResult(task.taskId))
       }
     )
 
     await manager.runTask("Build a REST API for items", "plan")
 
-    expect(dispatchSpy).toHaveBeenCalledTimes(2)
-    expect(dispatchSpy.mock.calls.map((call: any[]) => call[0])).toEqual(["bee", "architecture"])
+    expect(dispatchSpy).toHaveBeenCalledTimes(3)
+    expect(dispatchSpy.mock.calls.map((call: any[]) => call[0])).toEqual(["bee", "product_manager", "architecture"])
 
     const rows = db.query("SELECT * FROM code_tasks WHERE description = 'Build a REST API for items'").all() as any[]
     expect(rows.length).toBe(1)
@@ -101,6 +115,8 @@ describe("e2e: CoordinatorManager.runTask — plan mode", () => {
 
     const narratives = db.query("SELECT * FROM code_narrative WHERE coordinator = 'architecture'").all() as any[]
     expect(narratives.length).toBe(1)
+    const productNarratives = db.query("SELECT * FROM code_narrative WHERE coordinator = 'product_manager'").all() as any[]
+    expect(productNarratives.length).toBe(1)
 
     dispatchSpy.mockRestore()
   })
@@ -123,6 +139,7 @@ describe("e2e: CoordinatorManager.runTask — auto mode with multiple phases", (
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) => {
         if (phase === "bee") return Promise.resolve(makeBeeArchitectureResult(task))
+        if (phase === "product_manager") return Promise.resolve(makeProductResult(task))
         if (phase === "architecture") return Promise.resolve(makeArchResult(task.taskId))
         return Promise.resolve(makePhaseResult(task.taskId, phase, task.phaseId))
       }
@@ -132,6 +149,7 @@ describe("e2e: CoordinatorManager.runTask — auto mode with multiple phases", (
 
     expect(dispatchSpy.mock.calls.length).toBeGreaterThanOrEqual(3)
     const dispatchedPhases = dispatchSpy.mock.calls.map((c: any) => c[0])
+    expect(dispatchedPhases).toContain("product_manager")
     expect(dispatchedPhases).toContain("architecture")
     expect(dispatchedPhases).toContain("backend")
     expect(dispatchedPhases).toContain("test")
@@ -172,6 +190,7 @@ describe("e2e: CoordinatorManager.runTask — approval mode with checkpoint", ()
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) => {
         if (phase === "bee") return Promise.resolve(makeBeeArchitectureResult(task))
+        if (phase === "product_manager") return Promise.resolve(makeProductResult(task))
         if (phase === "architecture") return Promise.resolve(makeArchResult(task.taskId))
         return Promise.resolve(makePhaseResult(task.taskId, phase, task.phaseId))
       }
@@ -203,6 +222,7 @@ describe("e2e: CoordinatorManager.runTask — approval mode with checkpoint", ()
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) => {
         if (phase === "bee") return Promise.resolve(makeBeeArchitectureResult(task))
+        if (phase === "product_manager") return Promise.resolve(makeProductResult(task))
         if (phase === "architecture") return Promise.resolve(makeArchResult(task.taskId))
         return Promise.resolve(makePhaseResult(task.taskId, phase, task.phaseId))
       }
@@ -234,6 +254,19 @@ describe("e2e: CoordinatorManager.runTask — architecture failure", () => {
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) => {
         if (phase === "bee") return Promise.resolve(makeBeeArchitectureResult(task))
+        if (phase === "product_manager") return Promise.resolve(makeProductResult(task))
+        if (phase === "architecture") {
+          return Promise.resolve({
+            taskId: task.taskId,
+            phaseId: task.phaseId,
+            coordinator: "architecture",
+            status: "failed",
+            narrativeEntry: "Architecture failed: could not determine approach",
+            filesModified: [],
+            blockerDescription: "Ambiguous requirements",
+            durationMs: 1000,
+          } as CoordinatorResult)
+        }
         return Promise.resolve({
           taskId: task.taskId,
           phaseId: 1,
@@ -277,6 +310,7 @@ describe("e2e: full pipeline — session → task → phases → narrative → d
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) => {
         if (phase === "bee") return Promise.resolve(makeBeeArchitectureResult(task))
+        if (phase === "product_manager") return Promise.resolve(makeProductResult(task))
         if (phase === "architecture") return Promise.resolve(makeArchResult(task.taskId))
         return Promise.resolve(makePhaseResult(task.taskId, phase, task.phaseId))
       }
@@ -299,6 +333,7 @@ describe("e2e: full pipeline — session → task → phases → narrative → d
     const narratives = db.query("SELECT * FROM code_narrative ORDER BY id").all() as any[]
     expect(narratives.length).toBeGreaterThanOrEqual(2)
     const coordinators = narratives.map(n => n.coordinator)
+    expect(coordinators).toContain("product_manager")
     expect(coordinators).toContain("architecture")
     expect(coordinators).toContain("backend")
 

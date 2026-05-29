@@ -1,6 +1,7 @@
 use crate::{
     state::{AppState, RiskLevel},
     term::{Canvas, Rect, Style, AMBER, AMBER_DIM, BG_ELEVATED, BG_PANEL, DIM, GREEN, PURPLE, RED, SECONDARY, WHITE, YELLOW},
+    ui::{render_markdown, render_split_handles, split_panes, Axis, Constraint, MarkdownView, SplitPane},
     widgets::components::{
         agent_display_name, push_wrapped_lines, render_scrollbar, text_width, truncate_cells,
         worker_color, StyledLine,
@@ -14,18 +15,24 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
         return;
     }
 
-    // 60/40 split: left = plan, right = filemap + ADR extract
-    let left_w = area.w * 60 / 100;
-    let cols = area.hsplit(&[left_w, 0]);
+    let split = SplitPane::new(
+        Axis::Horizontal,
+        vec![Constraint::Percent(state.panels.plan_main_percent), Constraint::Fill(1)],
+    );
+    let (cols, handles) = split_panes(area, &split);
     let left = cols[0];
     let right = cols[1];
 
     canvas.with_clip(left, |canvas| render_plan_pane(canvas, left, state));
+    render_split_handles(canvas, &handles, Axis::Horizontal);
 
-    // Right panel: vertical split — filemap top (~65%), ADR extract bottom (~35%)
-    let filemap_h = right.h * 65 / 100;
-    let right_rows = right.vsplit(&[filemap_h, 0]);
+    let right_split = SplitPane::new(
+        Axis::Vertical,
+        vec![Constraint::Percent(state.panels.plan_right_percent), Constraint::Fill(1)],
+    );
+    let (right_rows, right_handles) = split_panes(right, &right_split);
     canvas.with_clip(right_rows[0], |canvas| render_filemap_tree(canvas, right_rows[0], state));
+    render_split_handles(canvas, &right_handles, Axis::Vertical);
     canvas.with_clip(right_rows[1], |canvas| render_adr_extract(canvas, right_rows[1], state));
 }
 
@@ -203,24 +210,12 @@ fn render_adr_extract(canvas: &mut Canvas, area: Rect, state: &AppState) {
     let title = format!("⬡ {} - extracto", title_text);
     canvas.print(area.x + 1, area.y + 1, &title, Style::new().fg(PURPLE).bold());
 
-    let content_w = area.w.saturating_sub(4) as usize;
-    let mut y = area.y + 3;
-    let max_y = area.bottom().saturating_sub(1);
-
-    for paragraph in content_text.split("\n\n") {
-        if y >= max_y { break; }
-        let trimmed = paragraph.trim();
-        if trimmed.is_empty() { continue; }
-
-        let mut wrapped = Vec::new();
-        push_wrapped_lines(&mut wrapped, trimmed, content_w, Style::new().fg(SECONDARY), 0);
-        for line in wrapped {
-            if y >= max_y { break; }
-            canvas.print(area.x + 2 + line.indent, y, &line.text, line.style);
-            y += 1;
-        }
-        y += 1;
-    }
+    render_markdown(
+        canvas,
+        Rect::new(area.x + 2, area.y + 3, area.w.saturating_sub(4), area.h.saturating_sub(4)),
+        &content_text,
+        MarkdownView::default(),
+    );
 }
 
 fn build_plan_lines(state: &AppState, width: usize) -> Vec<StyledLine> {

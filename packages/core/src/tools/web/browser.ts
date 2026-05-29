@@ -91,7 +91,7 @@ async function takeScreenshot(
 
   try {
     view = new Bun.WebView({
-      url: url.startsWith("http") ? url : `file://${url}`,
+      url: (url.startsWith("http") || url.startsWith("file://")) ? url : `file://${url}`,
       width: options.width || 1280,
       height: options.height || 720,
       headless: true,
@@ -266,5 +266,69 @@ export const browserCaptureClipboardTool: Tool = {
       log.info(`[browser] Clipboard capture OK ${result.width}×${result.height} ${result.mimeType}`);
     }
     return result;
+  },
+};
+
+// ── HTML preview ───────────────────────────────────────────────────────────
+
+/**
+ * Write raw HTML to a temp file and screenshot it via Bun.WebView.
+ * Coordinators use this to verify generated web components without a server.
+ */
+export const browserPreviewHtmlTool: Tool = {
+  name: "browser_preview_html",
+  description:
+    "Write raw HTML to a temp file and capture a screenshot via Bun.WebView (headless). " +
+    "Use to verify generated web components without starting a server. Returns base64 WebP.",
+  parameters: {
+    type: "object",
+    properties: {
+      html: {
+        type: "string",
+        description: "Full HTML document to preview",
+      },
+      waitMs: {
+        type: "number",
+        description: "Milliseconds to wait after page load before capture (default: 800)",
+      },
+      selector: {
+        type: "string",
+        description: "CSS selector to wait for before capture",
+      },
+      width: {
+        type: "number",
+        description: "Viewport width (default: 1280)",
+      },
+      height: {
+        type: "number",
+        description: "Viewport height (default: 720)",
+      },
+    },
+    required: ["html"],
+  },
+  async execute(args: Record<string, unknown>): Promise<string | object> {
+    const html = String(args.html);
+    const tmpPath = `/tmp/hive_preview_${Date.now()}_${Math.random().toString(36).slice(2)}.html`;
+
+    log.info(`[browser] HTML preview → ${tmpPath}`);
+    await Bun.write(tmpPath, html);
+
+    try {
+      const result = await takeScreenshot(`file://${tmpPath}`, {
+        width: args.width ? Number(args.width) : undefined,
+        height: args.height ? Number(args.height) : undefined,
+        waitMs: args.waitMs ? Number(args.waitMs) : 800,
+        selector: args.selector ? String(args.selector) : undefined,
+        applyPipeline: true,
+      });
+      if (!result.ok) {
+        log.error(`[browser] HTML preview failed: ${result.error}`);
+      } else {
+        log.info(`[browser] HTML preview OK ${result.width}×${result.height} ${result.mimeType}`);
+      }
+      return result;
+    } finally {
+      try { await Bun.file(tmpPath).exists() && Bun.spawn(["rm", "-f", tmpPath]); } catch { /* ignore */ }
+    }
   },
 };

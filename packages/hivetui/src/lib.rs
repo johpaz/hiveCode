@@ -4,4 +4,5 @@ pub mod ipc;
 pub mod renderer;
 pub mod state;
 pub mod term;
+pub mod ui;
 pub mod widgets;

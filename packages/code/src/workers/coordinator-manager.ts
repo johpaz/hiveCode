@@ -23,7 +23,11 @@ import { checkAutomaticInterruption } from "../modes/interruptions"
 import { broadcastNarrative, broadcastPhase, broadcastMode, broadcastPhaseStart, broadcastPhaseEnd, broadcastTaskEnd, broadcastThinking } from "@johpaz/hivecode-core/gateway/task-streaming"
 import { validateCommand } from "@johpaz/hivecode-core/tools/code/command-validator"
 import { incrementTaskCounter, shouldRunReflector, runReflector, startReflectorCron, stopReflectorCron } from "../agent/reflector"
+import { existsSync } from "node:fs"
+import { isAbsolute, relative, resolve } from "node:path"
+import { TaskSupervisor } from "../runtime/task-supervisor"
 import { WorkspaceLeaseManager, type WorkspaceLease, type WorkspaceLeaseOperation } from "../workspace/leases"
+import { WorkspaceManager, type WorkspaceAssignment } from "../workspace/manager"
 import type {
   CoordinatorTask, CoordinatorResult, BeeDecision, ControlMessage,
   PhaseName, SessionMode, CoordinatorStatus,
@@ -91,7 +95,11 @@ export class CoordinatorManager extends CoordinatorBase {
   private allTools: Tool[] = []
   private toolWorkerPool: Bun.Worker[] = []
   private currentLevel = 0
+  private taskSupervisor = new TaskSupervisor()
+  private workspaceManager = new WorkspaceManager()
   private workspaceLeases = new WorkspaceLeaseManager()
+  private taskWorkspaces = new Map<string, WorkspaceAssignment>()
+  private preparedWorkspaces = new Set<string>()
   private idleToolWorkers: Bun.Worker[] = []
   private toolResolvers = new Map<string, (res: any) => void>()
   private onNarrativeChunk?: NarrativeChunkCallback
@@ -222,15 +230,86 @@ export class CoordinatorManager extends CoordinatorBase {
     title?: string
     mode?: string
     activeWorkers?: string[]
+    workspace?: WorkspaceAssignment
+    integrationStatus?: string
   } = {}): void {
     if (!this.activeTaskId) return
+    const workspace = extra.workspace ?? this.taskWorkspaces.get(this.activeTaskId)
     this.onIpcEvent?.("task_update", {
       task_id: this.activeTaskId,
       title: extra.title,
       status,
       mode: extra.mode,
       active_workers: extra.activeWorkers,
+      workspace_id: workspace?.workspaceId,
+      workspace_path: workspace?.worktreePath,
+      branch_name: workspace?.branchName,
+      isolated: workspace?.isolated,
+      integration_status: extra.integrationStatus,
     })
+  }
+
+  private getTaskWorkspace(taskId: string | null | undefined = this.activeTaskId): WorkspaceAssignment {
+    const id = taskId || this.activeTaskId || "current"
+    let workspace = this.taskWorkspaces.get(id)
+    if (!workspace) {
+      workspace = this.workspaceManager.createAssignment({
+        taskId: id,
+        projectPath: process.cwd(),
+        mutating: false,
+      })
+      this.taskWorkspaces.set(id, workspace)
+      this.taskSupervisor.assignWorkspace(id, {
+        workspaceId: workspace.workspaceId,
+        worktreePath: workspace.worktreePath,
+        branchName: workspace.branchName,
+      })
+    }
+    return workspace
+  }
+
+  private getTaskWorkspacePath(taskId: string | null | undefined = this.activeTaskId): string {
+    return this.getTaskWorkspace(taskId).worktreePath
+  }
+
+  private async ensureTaskWorkspace(taskId: string, mutating: boolean): Promise<WorkspaceAssignment> {
+    const existing = this.taskWorkspaces.get(taskId)
+    if (existing && (!mutating || existing.isolated)) return existing
+
+    const workspace = this.workspaceManager.createAssignment({
+      taskId,
+      projectPath: process.cwd(),
+      mutating,
+    })
+    this.taskWorkspaces.set(taskId, workspace)
+    this.taskSupervisor.markMutating(taskId, mutating)
+    this.taskSupervisor.assignWorkspace(taskId, {
+      workspaceId: workspace.workspaceId,
+      worktreePath: workspace.worktreePath,
+      branchName: workspace.branchName,
+    })
+
+    if (workspace.isolated && !this.preparedWorkspaces.has(workspace.workspaceId)) {
+      await this.workspaceManager.prepare(workspace)
+      this.preparedWorkspaces.add(workspace.workspaceId)
+      if (this.activeTaskId === taskId) {
+        this.scribe.updateTaskStatus(taskId, "planning", { branchName: workspace.branchName })
+        this.emitTaskUpdate("planning", { workspace, integrationStatus: "isolated" })
+      }
+      log.info(`[coordinator-manager] 🌿 Worktree created for ${taskId}: ${workspace.worktreePath}`)
+    }
+
+    return workspace
+  }
+
+  private logicalPath(filePath: string, workspacePath: string): string {
+    if (!isAbsolute(filePath)) return filePath.replace(/\\/g, "/").replace(/^\.\//, "")
+    const rel = relative(workspacePath, filePath)
+    return rel.startsWith("..") || isAbsolute(rel) ? filePath : rel.replace(/\\/g, "/")
+  }
+
+  private workspacePath(filePath: string, workspacePath: string): string {
+    return isAbsolute(filePath) ? filePath : resolve(workspacePath, filePath)
   }
 
   private emitNarrativeChunk(chunk: {
@@ -321,6 +400,14 @@ export class CoordinatorManager extends CoordinatorBase {
     ])).flat()
 
     this.activeTaskId = this.scribe.createTask(this.activeSessionId, description, mode)
+    this.taskSupervisor.createTask({
+      taskId: this.activeTaskId,
+      sessionId: this.activeSessionId,
+      title: description,
+      stage: mode === "plan" ? "planning" : "understanding",
+      executionPolicy: mode === "approval" ? "approval" : "auto",
+    })
+    const initialWorkspace = await this.ensureTaskWorkspace(this.activeTaskId, false)
     this.emitTaskUpdate("running", { title: description, mode })
     const taskStartTime = performance.now()
 
@@ -345,7 +432,11 @@ export class CoordinatorManager extends CoordinatorBase {
       description,
       narrative: "",
       mode: mode ?? getMode(),
-      projectPath: process.cwd(),
+      projectPath: initialWorkspace.worktreePath,
+      workspaceId: initialWorkspace.workspaceId,
+      workspacePath: initialWorkspace.worktreePath,
+      branchName: initialWorkspace.branchName,
+      isolated: initialWorkspace.isolated,
       conversationHistory,
       secrets: this.secrets,
       provider: configuredProvider || undefined,
@@ -429,6 +520,7 @@ export class CoordinatorManager extends CoordinatorBase {
       const response = beeDecision.content ?? ""
       this.scribe.updateTaskStatus(this.activeTaskId, "completed")
       this.emitTaskUpdate("completed", { title: description, mode })
+      this.taskSupervisor.updateStage(this.activeTaskId, "completed")
       this.scribe.updateTaskMetadata(this.activeTaskId, {
         tokensIn: beeResult.tokensIn ?? 0, tokensOut: beeResult.tokensOut ?? 0,
         filesChanged: 0, linesAdded: 0, linesRemoved: 0,
@@ -447,8 +539,15 @@ export class CoordinatorManager extends CoordinatorBase {
         filePath: f, changeType: "modified" as const, linesAdded: 0, linesRemoved: 0,
       }))
       if (fileChanges.length) this.scribe.writeFileChanges(this.activeTaskId, beePhaseId, fileChanges)
+      const integrationState = await this.integrateTaskWorkspace(this.activeTaskId, mode, onApprovalCheckpoint)
+      if (integrationState !== "completed") {
+        this.scribe.completeTurn(turnId, response, this.activeTaskId)
+        if (this.onTaskComplete) this.onTaskComplete(response)
+        return
+      }
       this.scribe.updateTaskStatus(this.activeTaskId, "completed")
       this.emitTaskUpdate("completed", { title: description, mode })
+      this.taskSupervisor.updateStage(this.activeTaskId, "completed")
       this.scribe.updateTaskMetadata(this.activeTaskId, {
         tokensIn: beeResult.tokensIn ?? 0, tokensOut: beeResult.tokensOut ?? 0,
         filesChanged: fileChanges.length, linesAdded: 0, linesRemoved: 0,
@@ -472,6 +571,9 @@ export class CoordinatorManager extends CoordinatorBase {
         description: p.description,
         dependsOn: p.dependsOn as Array<Exclude<PhaseName, "bee">>,
       }))
+      if (this.activeTaskId && this.phasesNeedIsolatedWorkspace(dispatchPhases)) {
+        await this.ensureTaskWorkspace(this.activeTaskId, true)
+      }
       const completed = await this.executePhaseLoop(
         dispatchPhases,
         description,
@@ -483,39 +585,88 @@ export class CoordinatorManager extends CoordinatorBase {
         onApprovalCheckpoint,
       )
       if (!completed) return
-      await this.finalizeTask(taskStartTime, turnId, "BEE dispatch completed")
+      await this.finalizeTask(taskStartTime, turnId, "BEE dispatch completed", { mode, onApprovalCheckpoint })
       log.info(`[coordinator-manager] ✅ Task ${this.activeTaskId} completed (BEE dispatch)`)
       return
     }
 
-    // ARCHITECTURE (default): Create git branch then run Architecture + specialists
-    const branchName = `hivecode/task-${this.activeTaskId}`
-    try {
-      const gitResult = await executeToolByName(this.allTools, "git_branch", {
-        action: "create",
-        name: branchName,
-        path: process.cwd(),
-      }, { configurable: { workspace: process.cwd() } })
-      if ((gitResult as any)?.ok) {
-        this.scribe.updateTaskStatus(this.activeTaskId, "planning", { branchName })
-        log.info(`[coordinator-manager] 🌿 Branch created: ${branchName}`)
-      } else {
-        log.warn(`[coordinator-manager] ⚠️  Could not create branch: ${(gitResult as any)?.error || "unknown"}`)
-      }
-    } catch (err) {
-      log.warn(`[coordinator-manager] ⚠️  Git branch creation failed: ${(err as Error).message}`)
+    // ── Phase 1: ProductManager ───────────────────────────────────────────────
+    // Architecture must not invent the "what". For tasks that need a design
+    // plan, ProductManager first turns the request into a PRD/acceptance scope.
+    const productWorkspace = this.getTaskWorkspace(this.activeTaskId)
+    const productPhaseId = this.scribe.createPhase(this.activeTaskId, "product_manager", "product_manager")
+    const productTask: CoordinatorTask = {
+      taskId: this.activeTaskId,
+      phaseId: productPhaseId,
+      phase: "product_manager",
+      description,
+      narrative: beeResult.narrativeEntry,
+      mode: mode ?? getMode(),
+      projectPath: productWorkspace.worktreePath,
+      workspaceId: productWorkspace.workspaceId,
+      workspacePath: productWorkspace.worktreePath,
+      branchName: productWorkspace.branchName,
+      isolated: productWorkspace.isolated,
+      secrets: this.secrets,
+      provider: configuredProvider || undefined,
+      model: configuredModel || undefined,
+    }
+    const productResult = await this.dispatchPhase("product_manager", productTask)
+
+    if (productResult.status === "failed" || productResult.status === "blocked") {
+      this.scribe.appendNarrative({
+        taskId: this.activeTaskId,
+        sessionId: this.activeSessionId!,
+        coordinator: productResult.coordinator,
+        phase: "product_manager",
+        entry: productResult.narrativeEntry || productResult.blockerDescription || "",
+        isDraft: false,
+        isOverride: false,
+      })
+      this.scribe.updatePhaseStatus(productPhaseId, productResult.status, productResult.blockerDescription)
+      this.scribe.updateTaskStatus(this.activeTaskId, "failed")
+      const failMsg = productResult.blockerDescription || "ProductManager coordinator failed"
+      log.error(`[coordinator-manager] ❌ ProductManager phase failed: ${failMsg}`)
+      throw new Error(failMsg)
     }
 
-    // ── Phase 1: Architecture ─────────────────────────────────────────────────
+    const productNarrative = productResult.narrativeEntry || ""
+    this.scribe.appendNarrative({
+      taskId: this.activeTaskId,
+      sessionId: this.activeSessionId!,
+      coordinator: productResult.coordinator,
+      phase: "product_manager",
+      entry: productNarrative,
+      isDraft: false,
+      isOverride: false,
+    })
+    this.scribe.updatePhaseStatus(productPhaseId, "completed", productNarrative)
+    this.scribe.updatePhaseMetadata(productPhaseId, productResult.tokensIn ?? 0, productResult.tokensOut ?? 0, productResult.durationMs)
+
+    // ── Phase 2: Architecture ─────────────────────────────────────────────────
+    // Architecture is read-only and starts from ProductManager's PRD. Mutating
+    // implementation phases get an isolated worktree after the plan is parsed.
+    const architectureWorkspace = this.getTaskWorkspace(this.activeTaskId)
     const archPhaseId = this.scribe.createPhase(this.activeTaskId, "architecture", "architecture")
+    const architectureNarrative = [
+      "BEE decision:",
+      beeResult.narrativeEntry,
+      "",
+      "ProductManager PRD:",
+      productNarrative,
+    ].join("\n")
     const archTask: CoordinatorTask = {
       taskId: this.activeTaskId,
       phaseId: archPhaseId,
       phase: "architecture",
       description,
-      narrative: beeResult.narrativeEntry,
+      narrative: architectureNarrative,
       mode: mode ?? getMode(),
-      projectPath: process.cwd(),
+      projectPath: architectureWorkspace.worktreePath,
+      workspaceId: architectureWorkspace.workspaceId,
+      workspacePath: architectureWorkspace.worktreePath,
+      branchName: architectureWorkspace.branchName,
+      isolated: architectureWorkspace.isolated,
       secrets: this.secrets,
       provider: configuredProvider || undefined,
       model: configuredModel || undefined,
@@ -635,6 +786,9 @@ export class CoordinatorManager extends CoordinatorBase {
 
     // Execute dynamic phases from the architecture plan
     const phases = plan.phases.length > 0 ? plan.phases : getDefaultPhases()
+    if (this.activeTaskId && this.phasesNeedIsolatedWorkspace(phases)) {
+      await this.ensureTaskWorkspace(this.activeTaskId, true)
+    }
     const completed = await this.executePhaseLoop(
       phases,
       description,
@@ -647,13 +801,30 @@ export class CoordinatorManager extends CoordinatorBase {
     )
     if (!completed) return
 
-    await this.finalizeTask(taskStartTime, turnId, archResult.narrativeEntry)
+    await this.finalizeTask(taskStartTime, turnId, archResult.narrativeEntry, { mode, onApprovalCheckpoint })
     log.info(`[coordinator-manager] ✅ Task ${this.activeTaskId} completed`)
   }
 
   /** Persist task-level metadata (tokens, files, duration) and close the turn */
-  private async finalizeTask(taskStartMs: number, turnId: string, agentResponse: string): Promise<void> {
+  private async finalizeTask(
+    taskStartMs: number,
+    turnId: string,
+    agentResponse: string,
+    options: {
+      mode?: SessionMode
+      onApprovalCheckpoint?: (ctx: {
+        phase: string
+        phaseIndex: number
+        totalPhases: number
+        narrativeEntry: string
+        nextPhase?: string
+      }) => Promise<"approve" | "skip" | "cancel">
+    } = {},
+  ): Promise<void> {
     if (!this.activeTaskId) return
+    const taskId = this.activeTaskId
+    const workspace = this.getTaskWorkspace(taskId)
+    const workspaceRoot = workspace.worktreePath
     const durationMs = Math.round(performance.now() - taskStartMs)
 
     // Aggregate tokens from all phases
@@ -666,17 +837,19 @@ export class CoordinatorManager extends CoordinatorBase {
     // Collect git changes after task
     let fileChanges: FileChange[] = []
     try {
-      const gitStat = await executeToolByName(this.allTools, "git_status", { path: process.cwd() }, { configurable: { workspace: process.cwd() } }) as any
+      const gitStat = await executeToolByName(this.allTools, "git_status", { path: workspaceRoot }, { configurable: { workspace: workspaceRoot } }) as any
+      const statusResult = gitStat?.result ?? gitStat
       const changedFiles: string[] = [
-        ...(gitStat?.staged ?? []),
-        ...(gitStat?.unstaged ?? []),
+        ...(statusResult?.staged ?? []),
+        ...(statusResult?.unstaged ?? []),
       ].filter((v, i, a) => a.indexOf(v) === i)
 
       // Parse git diff --stat for line counts
       const diffStat = await executeToolByName(this.allTools, "git_diff", {
-        path: process.cwd(), stat: true,
-      }, { configurable: { workspace: process.cwd() } }) as any
-      const diffText: string = diffStat?.diff ?? ""
+        path: workspaceRoot, stat: true,
+      }, { configurable: { workspace: workspaceRoot } }) as any
+      const diffResult = diffStat?.result ?? diffStat
+      const diffText: string = diffResult?.diff ?? ""
       const lineStats = parseGitDiffStat(diffText)
 
       fileChanges = changedFiles.map(f => ({
@@ -704,29 +877,37 @@ export class CoordinatorManager extends CoordinatorBase {
     })
     // Learning Harness — evaluate phases before marking completed
     try {
-      const taskEval = this.scribe.evaluateTaskPhases(this.activeTaskId)
+      const taskEval = this.scribe.evaluateTaskPhases(taskId)
       if (taskEval.hasFailures) {
         const patterns = this.scribe.getFailurePatterns({ minOccurrences: 1 })
         if (patterns.length > 0 && taskEval.frictionPhase) {
           this.scribe.writeProposal({
             sourceAgent: "bee",
             proposalType: "prompt_change",
-            description: `Fase "${taskEval.frictionPhase}" tuvo fricción en tarea ${this.activeTaskId}. ${taskEval.failureSummary}`,
+            description: `Fase "${taskEval.frictionPhase}" tuvo fricción en tarea ${taskId}. ${taskEval.failureSummary}`,
             failureIds: patterns.flatMap(p => p.ids),
           })
         }
       }
     } catch { /* no bloquea el cierre */ }
 
-    this.scribe.updateTaskStatus(this.activeTaskId, "completed")
+    const integrationState = await this.integrateTaskWorkspace(taskId, options.mode, options.onApprovalCheckpoint)
+    if (integrationState !== "completed") {
+      this.scribe.completeTurn(turnId, agentResponse, taskId)
+      if (this.onTaskComplete) this.onTaskComplete(agentResponse)
+      return
+    }
+
+    this.scribe.updateTaskStatus(taskId, "completed")
     this.emitTaskUpdate("completed")
-    this.scribe.completeTurn(turnId, agentResponse, this.activeTaskId)
+    this.taskSupervisor.updateStage(taskId, "completed")
+    this.scribe.completeTurn(turnId, agentResponse, taskId)
 
     if (this.onTaskComplete) {
       this.onTaskComplete(agentResponse)
     }
 
-    broadcastTaskEnd(this.activeTaskId, "completed", durationMs)
+    broadcastTaskEnd(taskId, "completed", durationMs)
 
     // ACE Reflector: auto-run every N tasks or when trace threshold is met
     incrementTaskCounter()
@@ -738,6 +919,113 @@ export class CoordinatorManager extends CoordinatorBase {
       }).catch((err) => {
         log.warn("[coordinator-manager] ACE Reflector auto-run failed:", (err as Error).message)
       })
+    }
+  }
+
+  private phasesNeedIsolatedWorkspace(phases: ParsedPhase[]): boolean {
+    const mutatingCoordinators = new Set<PhaseName>([
+      "backend", "frontend", "mobile", "data_scientist", "devops", "dba", "integration",
+    ])
+    return phases.some((phase) => mutatingCoordinators.has(phase.coordinator))
+  }
+
+  private async integrateTaskWorkspace(
+    taskId: string,
+    mode?: SessionMode,
+    onApprovalCheckpoint?: (ctx: {
+      phase: string
+      phaseIndex: number
+      totalPhases: number
+      narrativeEntry: string
+      nextPhase?: string
+    }) => Promise<"approve" | "skip" | "cancel">,
+  ): Promise<"completed" | "paused" | "cancelled"> {
+    const workspace = this.taskWorkspaces.get(taskId)
+    if (!workspace?.isolated) return "completed"
+
+    this.taskSupervisor.updateStage(taskId, "integrating")
+    this.emitTaskUpdate("integrating", { workspace, integrationStatus: "diff" })
+
+    let diff = ""
+    try {
+      diff = await this.workspaceManager.diff(workspace)
+    } catch (err) {
+      const errorMsg = `[WORKTREE] Could not diff ${workspace.worktreePath}: ${(err as Error).message}`
+      this.scribe.updateTaskStatus(taskId, "paused")
+      this.emitTaskUpdate("paused", { workspace, integrationStatus: "failed" })
+      this.onIpcEvent?.("conflict_alert", {
+        agent_a: "integration",
+        agent_b: "workspace",
+        file: workspace.worktreePath,
+        reason: "worktree diff failed",
+        severity: "high",
+        detail: errorMsg,
+      })
+      return "paused"
+    }
+
+    if (mode === "approval" && onApprovalCheckpoint && diff.trim()) {
+      const decision = await onApprovalCheckpoint({
+        phase: "integration",
+        phaseIndex: 0,
+        totalPhases: 1,
+        narrativeEntry: smartTruncateLines(diff, 200),
+      })
+      if (decision === "cancel") {
+        this.scribe.updateTaskStatus(taskId, "cancelled")
+        this.emitTaskUpdate("cancelled", { workspace, integrationStatus: "cancelled" })
+        return "cancelled"
+      }
+      if (decision === "skip") {
+        this.scribe.updateTaskStatus(taskId, "paused")
+        this.emitTaskUpdate("paused", { workspace, integrationStatus: "skipped" })
+        return "paused"
+      }
+    }
+
+    const result = await this.workspaceManager.integrate(workspace)
+    if (result.status === "conflict" || result.status === "failed") {
+      const errorMsg = result.error || "unknown integration failure"
+      this.scribe.updateTaskStatus(taskId, "paused")
+      this.emitTaskUpdate("paused", { workspace, integrationStatus: result.status })
+      this.onIpcEvent?.("conflict_alert", {
+        agent_a: "integration",
+        agent_b: "workspace",
+        file: workspace.worktreePath,
+        reason: `worktree ${result.status}`,
+        severity: result.status === "conflict" ? "critical" : "high",
+        detail: errorMsg,
+      })
+      log.warn(`[coordinator-manager] ⚠️ Worktree integration ${result.status}: ${errorMsg}`)
+      return "paused"
+    }
+
+    try {
+      await this.workspaceManager.cleanup(workspace)
+      this.preparedWorkspaces.delete(workspace.workspaceId)
+    } catch (err) {
+      log.warn(`[coordinator-manager] ⚠️ Worktree cleanup failed: ${(err as Error).message}`)
+    }
+
+    this.emitTaskUpdate("integrating", { workspace, integrationStatus: result.status })
+    return "completed"
+  }
+
+  private async cleanupTaskWorkspaceIfClean(taskId: string, status = "paused"): Promise<void> {
+    const workspace = this.taskWorkspaces.get(taskId)
+    if (!workspace?.isolated) return
+
+    try {
+      const diff = await this.workspaceManager.diff(workspace)
+      if (diff.trim()) {
+        this.emitTaskUpdate(status, { workspace, integrationStatus: "retained" })
+        return
+      }
+      await this.workspaceManager.cleanup(workspace)
+      this.preparedWorkspaces.delete(workspace.workspaceId)
+      this.emitTaskUpdate(status, { workspace, integrationStatus: "discarded" })
+    } catch (err) {
+      log.warn(`[coordinator-manager] ⚠️ Clean workspace cleanup failed: ${(err as Error).message}`)
     }
   }
 
@@ -769,7 +1057,10 @@ export class CoordinatorManager extends CoordinatorBase {
     let globalPhaseIndex = 0
 
     for (let levelIdx = 0; levelIdx < levels.length; levelIdx++) {
-      if (isCancelled()) return false
+      if (isCancelled()) {
+        if (this.activeTaskId) await this.cleanupTaskWorkspaceIfClean(this.activeTaskId, "cancelled")
+        return false
+      }
 
       // Track current level for worker_activity writes
       this.currentLevel = levelIdx
@@ -798,6 +1089,7 @@ export class CoordinatorManager extends CoordinatorBase {
 
       const levelTasks: Array<{ phase: PhaseName; task: CoordinatorTask; startedAt: number }> = levelPhases.map(phaseDef => {
         const phase = phaseDef.coordinator
+        const workspace = this.getTaskWorkspace(this.activeTaskId)
         // Override model to most capable for reviewer
         const effectiveModel = phase === "reviewer" ? this.getHighestCapabilityModel() || model : model
         const task: CoordinatorTask = {
@@ -809,7 +1101,11 @@ export class CoordinatorManager extends CoordinatorBase {
           interfaces,
           narrative: archNarrative || "",
           mode: phaseMode,
-          projectPath: process.cwd(),
+          projectPath: workspace.worktreePath,
+          workspaceId: workspace.workspaceId,
+          workspacePath: workspace.worktreePath,
+          branchName: workspace.branchName,
+          isolated: workspace.isolated,
           secrets: this.secrets,
           provider: provider || undefined,
           model: effectiveModel || undefined,
@@ -823,6 +1119,7 @@ export class CoordinatorManager extends CoordinatorBase {
       const levelHasEngineers = levelPhases.some(p => engineerPhases.includes(p.coordinator))
       const securityAlreadyInLevel = levelPhases.some(p => p.coordinator === "security")
       if (levelHasEngineers && !securityAlreadyInLevel) {
+        const workspace = this.getTaskWorkspace(this.activeTaskId)
         const secTask: CoordinatorTask = {
           taskId: this.activeTaskId || "current",
           phaseId: this.scribe.createPhase(this.activeTaskId || "current", "security", "security"),
@@ -832,7 +1129,11 @@ export class CoordinatorManager extends CoordinatorBase {
           interfaces,
           narrative: archNarrative || "",
           mode: phaseMode,
-          projectPath: process.cwd(),
+          projectPath: workspace.worktreePath,
+          workspaceId: workspace.workspaceId,
+          workspacePath: workspace.worktreePath,
+          branchName: workspace.branchName,
+          isolated: workspace.isolated,
           secrets: this.secrets,
           provider: provider || undefined,
           model: model || undefined,
@@ -883,6 +1184,7 @@ export class CoordinatorManager extends CoordinatorBase {
             if (this.onIpcEvent) {
               this.onIpcEvent("forensic_alert", { worker: phase, analysis: forensicResult.narrativeEntry, recommendation: recommendation.detail })
             }
+            await this.cleanupTaskWorkspaceIfClean(this.activeTaskId!, "paused")
             return false
           }
 
@@ -904,6 +1206,7 @@ export class CoordinatorManager extends CoordinatorBase {
             if (retryResult.status === "failed") {
               this.scribe.updateTaskStatus(this.activeTaskId!, "failed")
               log.error(`[coordinator-manager] ❌ ${phase} failed after ForensicAgent retry`)
+              await this.cleanupTaskWorkspaceIfClean(this.activeTaskId!, "failed")
               return false
             }
             this.scribe.updatePhaseStatus(constraintTask.phaseId, "completed", retryResult.narrativeEntry)
@@ -914,6 +1217,7 @@ export class CoordinatorManager extends CoordinatorBase {
           // Reasign: handle as regular failure
           this.scribe.updateTaskStatus(this.activeTaskId!, "failed")
           log.error(`[coordinator-manager] ❌ ${phase} phase failed (ForensicAgent recommends reasign)`)
+          await this.cleanupTaskWorkspaceIfClean(this.activeTaskId!, "failed")
           return false
         }
 
@@ -930,6 +1234,7 @@ export class CoordinatorManager extends CoordinatorBase {
               errorMessage: result.blockerDescription ?? "unknown",
             })
           } catch { /* no bloquea el flujo */ }
+          await this.cleanupTaskWorkspaceIfClean(this.activeTaskId!, "failed")
           return false
         }
 
@@ -937,6 +1242,7 @@ export class CoordinatorManager extends CoordinatorBase {
           this.scribe.updatePhaseStatus(task.phaseId, "blocked", result.blockerDescription)
           this.scribe.updateTaskStatus(this.activeTaskId!, "paused")
           log.warn(`[coordinator-manager] ⚠️ ${phase} phase blocked: ${result.blockerDescription}`)
+          await this.cleanupTaskWorkspaceIfClean(this.activeTaskId!, "paused")
           return false
         }
 
@@ -985,6 +1291,7 @@ export class CoordinatorManager extends CoordinatorBase {
           this.scribe.updateTaskStatus(this.activeTaskId!, "cancelled")
           this.emitTaskUpdate("cancelled")
           log.info(`[coordinator-manager] ❌ Task cancelled by user at level ${levelIdx}`)
+          await this.cleanupTaskWorkspaceIfClean(this.activeTaskId!, "cancelled")
           return false
         }
 
@@ -1048,6 +1355,7 @@ export class CoordinatorManager extends CoordinatorBase {
     failedResult: CoordinatorResult
   ): Promise<CoordinatorResult> {
     const taskId = this.activeTaskId || "forensic"
+    const workspace = this.getTaskWorkspace(taskId)
     const phaseId = this.scribe.createPhase(taskId, "forensic", "forensic")
     const forensicTask: CoordinatorTask = {
       taskId,
@@ -1056,7 +1364,11 @@ export class CoordinatorManager extends CoordinatorBase {
       description: `Analyze why ${failedPhase} failed after exhausting iterations. Failed narrative: ${failedResult.narrativeEntry?.slice(0, 500)}`,
       narrative: originalTask.narrative || "",
       mode: originalTask.mode,
-      projectPath: process.cwd(),
+      projectPath: workspace.worktreePath,
+      workspaceId: workspace.workspaceId,
+      workspacePath: workspace.worktreePath,
+      branchName: workspace.branchName,
+      isolated: workspace.isolated,
       secrets: this.secrets,
       provider: originalTask.provider,
       model: originalTask.model,
@@ -1148,15 +1460,20 @@ export class CoordinatorManager extends CoordinatorBase {
     }
 
     const taskId = this.activeTaskId
+    const workspace = this.getTaskWorkspace(taskId)
     const phaseId = this.scribe.createPhase(taskId, "librarian", "librarian")
     const libTask: CoordinatorTask = {
       taskId,
       phaseId,
       phase: "librarian",
-      description: `Distill session knowledge into agent_memory for project: ${process.cwd()}`,
+      description: `Distill session knowledge into agent_memory for project: ${workspace.worktreePath}`,
       narrative: reviewerTask.narrative || "",
       mode: reviewerTask.mode,
-      projectPath: process.cwd(),
+      projectPath: workspace.worktreePath,
+      workspaceId: workspace.workspaceId,
+      workspacePath: workspace.worktreePath,
+      branchName: workspace.branchName,
+      isolated: workspace.isolated,
       secrets: this.secrets,
       provider: provider || undefined,
       model: model || undefined,
@@ -1449,11 +1766,11 @@ export class CoordinatorManager extends CoordinatorBase {
 
     // Check plan mode gate
     const mode = getMode()
+    const writeTools = new Set(["fs_write", "fs_edit", "fs_delete"])
     if (mode === "plan") {
       const planBlockedTools = new Set([
         "fs_write", "fs_edit", "fs_delete",
         "git_commit", "git_branch", "git_create_pr", "git_rollback",
-        "append_narrative", "write_decision",
       ])
       if (planBlockedTools.has(msg.toolName)) {
         const errorMsg = `Tool '${msg.toolName}' is disabled in PLAN mode. Only read operations are allowed.`
@@ -1468,8 +1785,25 @@ export class CoordinatorManager extends CoordinatorBase {
       }
     }
 
-    // Write tools need explicit safety gates and a file lease before mutation.
-    const writeTools = new Set(["fs_write", "fs_edit", "fs_delete"])
+    let workspace = this.getTaskWorkspace(taskId)
+    const writePath = writeTools.has(msg.toolName) && msg.toolArgs
+      ? ((msg.toolArgs.path as string) || (msg.toolArgs.file as string) || "")
+      : ""
+    if (writePath) {
+      try {
+        workspace = await this.ensureTaskWorkspace(taskId, true)
+      } catch (err) {
+        const errorMsg = `[WORKTREE] Could not create isolated workspace: ${(err as Error).message}`
+        log.warn(`[coordinator-manager] ⚠️ ${errorMsg}`)
+        worker.postMessage(JSON.stringify({
+          type: "TOOL_RESULT",
+          toolCallId: msg.toolCallId,
+          error: errorMsg,
+        } as ManagerToWorkerMessage))
+        return
+      }
+    }
+    const workspaceRoot = workspace.worktreePath
 
     // Enforce confirmation for destructive operations
     if (msg.toolName === "fs_delete") {
@@ -1492,7 +1826,7 @@ export class CoordinatorManager extends CoordinatorBase {
     if (shellTools.has(msg.toolName) && msg.toolArgs) {
       const shellCmd = (msg.toolArgs.command || msg.toolArgs.path || "") as string
       if (shellCmd) {
-        const cmdValidation = validateCommand(shellCmd, { workspace: process.cwd(), mode })
+        const cmdValidation = validateCommand(shellCmd, { workspace: workspaceRoot, mode })
         if (!cmdValidation.ok) {
           const v = cmdValidation as { ok: false; reason: string; fatal: boolean }
           const errorMsg = `[SAFETY] Command blocked: ${v.reason}`
@@ -1511,9 +1845,6 @@ export class CoordinatorManager extends CoordinatorBase {
     }
 
     let activeLease: WorkspaceLease | null = null
-    const writePath = writeTools.has(msg.toolName) && msg.toolArgs
-      ? ((msg.toolArgs.path as string) || (msg.toolArgs.file as string) || "")
-      : ""
 
     if (writePath) {
       const operation: WorkspaceLeaseOperation =
@@ -1521,7 +1852,7 @@ export class CoordinatorManager extends CoordinatorBase {
         msg.toolName === "fs_write" ? "write" : "edit"
       const leaseResult = this.workspaceLeases.acquire({
         taskId,
-        workspaceId: process.cwd(),
+        workspaceId: workspace.workspaceId,
         path: writePath,
         heldByWorker: name,
         operation,
@@ -1550,7 +1881,8 @@ export class CoordinatorManager extends CoordinatorBase {
 
       activeLease = leaseResult.lease
 
-      const canWrite = await this.checkWriteConflicts(name, writePath)
+      const logicalWritePath = this.logicalPath(writePath, workspaceRoot)
+      const canWrite = await this.checkWriteConflicts(name, logicalWritePath)
       if (!canWrite) {
         this.workspaceLeases.release(activeLease.leaseId)
         activeLease = null
@@ -1566,8 +1898,10 @@ export class CoordinatorManager extends CoordinatorBase {
       }
 
       if (this.activeTaskId) {
-        const existingPaths = operation !== "delete" ? [writePath] : []
-        const newPaths     = operation === "delete" ? []          : []
+        const absoluteWritePath = this.workspacePath(writePath, workspaceRoot)
+        const exists = existsSync(absoluteWritePath)
+        const existingPaths = exists ? [absoluteWritePath] : []
+        const newPaths     = !exists && operation !== "delete" ? [absoluteWritePath] : []
         await this.checkpoint(`before ${msg.toolName} ${writePath}`, existingPaths, newPaths, name)
       }
     }
@@ -1581,13 +1915,13 @@ export class CoordinatorManager extends CoordinatorBase {
 
     try {
       if (heavyTools.has(msg.toolName!)) {
-        result = await this.executeInToolWorker(msg.toolName!, msg.toolArgs || {}, { configurable: { workspace: process.cwd() } })
+        result = await this.executeInToolWorker(msg.toolName!, msg.toolArgs || {}, { configurable: { workspace: workspaceRoot } })
       } else {
         result = await executeToolByName(
           this.allTools,
           msg.toolName!,
           msg.toolArgs || {},
-          { configurable: { workspace: process.cwd() } }
+          { configurable: { workspace: workspaceRoot } }
         )
       }
     } finally {
@@ -1619,25 +1953,26 @@ export class CoordinatorManager extends CoordinatorBase {
     if (success && writeTools.has(msg.toolName!) && msg.toolArgs) {
       const riskFilePath = (msg.toolArgs.path as string) || (msg.toolArgs.file as string) || ""
       if (riskFilePath) {
+        const logicalRiskPath = this.logicalPath(riskFilePath, workspaceRoot)
         const riskOp = msg.toolName === "fs_delete"
           ? "deleted"
           : msg.toolName === "fs_write" ? "created" : "modified"
-        this.evaluateFileRisk(riskFilePath, riskOp as "created" | "modified" | "deleted", name)
+        this.evaluateFileRisk(logicalRiskPath, riskOp as "created" | "modified" | "deleted", name)
 
         // Emit file_diff so the CODE tab in TUI shows the actual changes
         if (msg.toolName !== "fs_delete" && this.onIpcEvent) {
           try {
             const diffResult = await executeToolByName(
               this.allTools, "git_diff",
-              { path: riskFilePath },
-              { configurable: { workspace: process.cwd() } }
+              { path: workspaceRoot, file: logicalRiskPath },
+              { configurable: { workspace: workspaceRoot } }
             ) as any
             const rawDiff: string = diffResult?.diff ?? diffResult?.content ?? ""
             if (rawDiff) {
               const chunks = parseUnifiedDiff(rawDiff)
               const added   = chunks.filter(c => c.kind === "add").length
               const removed = chunks.filter(c => c.kind === "remove").length
-              this.onIpcEvent("file_diff", { path: riskFilePath, stats_added: added, stats_removed: removed, chunks })
+              this.onIpcEvent("file_diff", { path: logicalRiskPath, stats_added: added, stats_removed: removed, chunks, task_id: taskId })
             }
           } catch { /* diff is advisory — never block the write flow */ }
         }

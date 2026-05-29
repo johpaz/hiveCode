@@ -16,6 +16,9 @@ use crossterm::{
 use crate::{
     ipc::TuiMessage,
     state::{AppState, HistoryEntry, InfoModalState, ModalFieldKind, ModalState, ReplMode, Role, TabId},
+    renderer::layout_areas,
+    term::Rect,
+    ui::{split_panes, Axis, Constraint, HitAction, SplitPane},
     widgets::{command_popup, history, tabbar},
 };
 
@@ -420,11 +423,16 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
             move_history_selection(state, 1);
         }
         MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(action) = state.hit_map.hit(mouse.column, mouse.row).map(|r| r.action.clone()) {
+                if handle_hit_action(state, action) {
+                    return;
+                }
+            }
             // Click en la fila del tabbar (fila 2 — header ocupa 2 filas)
             if mouse.row == 2 {
                 if let Some((w, _h)) = terminal::size().ok() {
                     let tabbar_area = crate::term::Rect::new(0, 2, w, 1);
-                    if let Some(tab) = tabbar::tab_at_col(tabbar_area, mouse.column) {
+                    if let Some(tab) = tabbar::tab_at_col(tabbar_area, mouse.column, state) {
                         state.active_tab = tab;
                         if tab != TabId::Focus {
                             state.history_nav_mode = false;
@@ -435,7 +443,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                     }
                 }
             }
-            let history_area = history_rect_from_size(terminal::size().ok());
+            let history_area = content_rect_from_size(state, terminal::size().ok());
             if state.active_tab == TabId::Focus {
                 if let Some(area) = history_area {
                     if let Some(entry_idx) = history::entry_at_y(state, area, mouse.row) {
@@ -448,8 +456,16 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                 }
             }
         }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if update_active_split_drag(state, mouse.column, mouse.row) {
+                return;
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            state.panels.end_drag();
+        }
         MouseEventKind::Down(MouseButton::Right) => {
-            let history_area = history_rect_from_size(terminal::size().ok());
+            let history_area = content_rect_from_size(state, terminal::size().ok());
             if state.active_tab == TabId::Focus {
                 if let Some(area) = history_area {
                     if let Some(entry_idx) = history::entry_at_y(state, area, mouse.row) {
@@ -469,17 +485,125 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
     }
 }
 
-fn history_rect_from_size(size: Option<(u16, u16)>) -> Option<crate::term::Rect> {
+fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
+    match action {
+        HitAction::ActivateTab(name) => {
+            let Some(tab) = TabId::from_name(&name) else {
+                return false;
+            };
+            state.active_tab = tab;
+            if tab != TabId::Focus {
+                state.history_nav_mode = false;
+                state.history_hscroll = 0;
+            }
+            state.show_welcome = false;
+            true
+        }
+        HitAction::Command(command) => {
+            state.input.set(&command);
+            true
+        }
+        HitAction::ResizeSplit { id } => {
+            state.panels.begin_drag(id);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn update_active_split_drag(state: &mut AppState, col: u16, row: u16) -> bool {
+    let Some(id) = state.panels.active_drag.clone() else {
+        return false;
+    };
+    let Some(screen_area) = screen_rect_from_size(terminal::size().ok()) else {
+        return false;
+    };
+    let areas = layout_areas(screen_area, &state.panels);
+    let content_area = areas.content;
+
+    let percent = match id.as_str() {
+        "chrome:header" => {
+            let height = row.saturating_sub(screen_area.y).saturating_add(1);
+            state.panels.set_chrome_height(&id, height);
+            state.dirty.full = true;
+            return true;
+        }
+        "chrome:input" => {
+            let height = screen_area
+                .bottom()
+                .saturating_sub(row)
+                .saturating_sub(state.panels.footer_height);
+            state.panels.set_chrome_height(&id, height);
+            state.dirty.full = true;
+            return true;
+        }
+        "chrome:footer" => {
+            let height = screen_area.bottom().saturating_sub(row);
+            state.panels.set_chrome_height(&id, height);
+            state.dirty.full = true;
+            return true;
+        }
+        "code:main" | "plan:main" => percent_from_x(content_area, col),
+        "code:workers" => {
+            let right = right_split_area(
+                content_area,
+                state.panels.code_main_percent,
+            );
+            percent_from_y(right, row)
+        }
+        "plan:right" => {
+            let right = right_split_area(
+                content_area,
+                state.panels.plan_main_percent,
+            );
+            percent_from_y(right, row)
+        }
+        _ => return false,
+    };
+
+    state.panels.set_percent(&id, percent);
+    state.dirty.full = true;
+    true
+}
+
+fn percent_from_x(area: Rect, col: u16) -> u16 {
+    if area.w == 0 {
+        return 50;
+    }
+    let offset = col.saturating_sub(area.x).min(area.w.saturating_sub(1));
+    ((offset as u32 * 100) / area.w as u32).clamp(20, 80) as u16
+}
+
+fn percent_from_y(area: Rect, row: u16) -> u16 {
+    if area.h == 0 {
+        return 50;
+    }
+    let offset = row.saturating_sub(area.y).min(area.h.saturating_sub(1));
+    ((offset as u32 * 100) / area.h as u32).clamp(20, 80) as u16
+}
+
+fn right_split_area(content_area: Rect, left_percent: u16) -> Rect {
+    let split = SplitPane::new(
+        Axis::Horizontal,
+        vec![Constraint::Percent(left_percent), Constraint::Fill(1)],
+    );
+    let (cols, _) = split_panes(content_area, &split);
+    cols.get(1).copied().unwrap_or(content_area)
+}
+
+fn screen_rect_from_size(size: Option<(u16, u16)>) -> Option<crate::term::Rect> {
     #[cfg(test)]
     let (w, h) = size.unwrap_or((80, 24));
 
     #[cfg(not(test))]
     let (w, h) = size?;
 
-    let area = crate::term::Rect::new(0, 0, w, h);
-    // Layout: header(2) + tabbar(1) + content(fill) + checkpoint(1) + conflict(1) + input(4) + statusbar(1)
-    let vertical = area.vsplit(&[2, 1, 0, 1, 1, 4, 1]);
-    vertical.get(2).copied()
+    Some(crate::term::Rect::new(0, 0, w, h))
+}
+
+fn content_rect_from_size(state: &AppState, size: Option<(u16, u16)>) -> Option<crate::term::Rect> {
+    let area = screen_rect_from_size(size)?;
+    Some(layout_areas(area, &state.panels).content)
 }
 
 fn move_history_selection(state: &mut AppState, delta: isize) {
@@ -755,6 +879,18 @@ mod tests {
         let key = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
         let _ = handle_key_event(&mut state, key);
         assert_eq!(state.plan.scroll, 8);
+    }
+
+    #[test]
+    fn split_drag_updates_panel_percent() {
+        let mut state = AppState::default();
+        state.active_tab = TabId::Code;
+        state.panels.begin_drag("code:main".to_string());
+
+        assert!(update_active_split_drag(&mut state, 60, 6));
+
+        assert!(state.panels.code_main_percent > 55);
+        assert!(state.dirty.full);
     }
 
 }

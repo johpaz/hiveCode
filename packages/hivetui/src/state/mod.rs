@@ -6,10 +6,12 @@ mod conflicts;
 mod diff;
 mod dirty;
 mod filemap;
+mod harness;
 mod history;
 mod input;
 mod logs;
 mod modal;
+mod panels;
 mod plan;
 mod session;
 mod tasks;
@@ -23,10 +25,12 @@ pub use diff::DiffState;
 pub use crate::ipc::DiffLine;
 pub use dirty::DirtyFlags;
 pub use filemap::{FileEntry, FileMapState, RiskLevel};
+pub use harness::{HarnessHealth, HarnessState};
 pub use history::{HistoryEntry, HistoryState, Role};
 pub use input::InputState;
 pub use logs::{LogEntry, LogState};
 pub use modal::{ConfigModalState, InfoModalState, ModalField, ModalFieldKind, ModalState, PlanApprovalState};
+pub use panels::PanelLayoutState;
 pub use plan::{PlanEntry, PlanPhase, PlanRisk, PlanState};
 pub use session::{ReplMode, SessionState, TabId};
 pub use tasks::{TaskProjection, TaskProjectionState};
@@ -47,9 +51,13 @@ pub struct AppState {
     pub diff: DiffState,
     pub plan: PlanState,
     pub tasks: TaskProjectionState,
+    pub harness: HarnessState,
     pub modal: ModalState,
     pub logs: LogState,
     pub dirty: DirtyFlags,
+    pub panels: PanelLayoutState,
+    /// Per-frame mouse hit regions emitted by renderer and consumed by controller.
+    pub hit_map: crate::ui::HitMap,
     pub cursor_visible: bool,
     pub history_nav_mode: bool,
     pub history_hscroll: usize,
@@ -82,6 +90,47 @@ pub struct AppState {
     pub tab_locked: bool,
 }
 
+fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
+    use crate::ipc::BunMessage;
+    match msg {
+        BunMessage::Init { .. } => "init",
+        BunMessage::AssistantChunk { .. } => "assistant_chunk",
+        BunMessage::AssistantDone => "assistant_done",
+        BunMessage::HistoryAppend { .. } => "history_append",
+        BunMessage::Status { .. } => "status",
+        BunMessage::StateUpdate { .. } => "state_update",
+        BunMessage::WorkerUpdate { .. } => "worker_update",
+        BunMessage::ActivityUpdate { .. } => "activity_update",
+        BunMessage::CheckpointCreated { .. } => "checkpoint_created",
+        BunMessage::FileRiskUpdate { .. } => "file_risk_update",
+        BunMessage::ThoughtChunk { .. } => "thought_chunk",
+        BunMessage::NarrativeChunk { .. } => "narrative_chunk",
+        BunMessage::ShowConfigModal { .. } => "show_config_modal",
+        BunMessage::ShowInfoModal { .. } => "show_info_modal",
+        BunMessage::LogEntry { .. } => "log_entry",
+        BunMessage::ConflictAlert { .. } => "conflict_alert",
+        BunMessage::Error { .. } => "error",
+        BunMessage::CheckpointRollback { .. } => "checkpoint_rollback",
+        BunMessage::AdrUpdate { .. } => "adr_update",
+        BunMessage::FileDiff { .. } => "file_diff",
+        BunMessage::PlanUpdate { .. } => "plan_update",
+        BunMessage::PlanApprovalRequest => "plan_approval_request",
+        BunMessage::TaskUpdate { .. } => "task_update",
+        BunMessage::WorkersSnapshot { .. } => "workers_snapshot",
+        BunMessage::FilesSnapshot { .. } => "files_snapshot",
+        BunMessage::Suggestions { .. } => "suggestions",
+        BunMessage::QuickMenu { .. } => "quick_menu",
+        BunMessage::ShellOutput { .. } => "shell_output",
+        BunMessage::Suspend => "suspend",
+        BunMessage::Resume => "resume",
+        BunMessage::ContextUpdate { .. } => "context_update",
+    }
+}
+
+fn short_event_text(text: &str) -> String {
+    crate::ui::text::ellipsize_cells(text.trim(), 80)
+}
+
 impl AppState {
     fn note_task_worker(&mut self, task_id: Option<String>, worker: &str, status: &str) {
         let Some(task_id) = task_id.filter(|task_id| !task_id.trim().is_empty()) else {
@@ -95,6 +144,8 @@ impl AppState {
 
     pub fn apply_message(&mut self, msg: crate::ipc::BunMessage) {
         use crate::ipc::BunMessage;
+        self.harness.record_event(bun_event_name(&msg));
+
         match msg {
             // ── Inicialización ─────────────────────────────────────────────────
             BunMessage::Init { session_id, workers, mode, provider, model,
@@ -135,6 +186,9 @@ impl AppState {
 
             // ── Respuesta del agente ───────────────────────────────────────────
             BunMessage::AssistantChunk { text, agent, timestamp } => {
+                if let Some(agent_name) = agent.as_ref().filter(|agent| !agent.trim().is_empty()) {
+                    self.harness.last_agent = Some(agent_name.clone());
+                }
                 match self.history.entries.last_mut() {
                     Some(e) if e.role == Role::Assistant => e.content.push_str(&text),
                     _ => self.history.entries.push(HistoryEntry {
@@ -150,6 +204,9 @@ impl AppState {
             }
             BunMessage::AssistantDone => {
                 self.running = false;
+                if !self.harness.approval_pending {
+                    self.harness.active_task_status = Some("idle".to_string());
+                }
                 self.history.scroll = 0;
                 self.tab_locked = false;
                 self.active_tab = if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
@@ -163,6 +220,9 @@ impl AppState {
             // Protocolo legado: respuesta completa en un mensaje
             BunMessage::HistoryAppend { role, content, agent, timestamp, .. } => {
                 let r = Role::from(role.as_str());
+                if let Some(agent_name) = agent.as_ref().filter(|agent| !agent.trim().is_empty()) {
+                    self.harness.last_agent = Some(agent_name.clone());
+                }
                 self.history.entries.push(HistoryEntry { role: r, content, agent, timestamp });
                 self.history.scroll = 0;
                 self.history.selected = Some(self.history.entries.len().saturating_sub(1));
@@ -188,6 +248,9 @@ impl AppState {
                 let was_running = self.running;
                 self.running = running;
                 self.status_msg = msg;
+                if !self.harness.approval_pending {
+                    self.harness.active_task_status = Some(if running { "running" } else { "idle" }.to_string());
+                }
                 // Cuando la tarea termina (running: true → false) ir a Focus igual que AssistantDone.
                 // Esto maneja el protocolo del tui-launcher que usa Status en vez de AssistantDone.
                 if was_running && !running && !self.tab_locked {
@@ -225,6 +288,15 @@ impl AppState {
 
             // ── Workers ────────────────────────────────────────────────────────
             BunMessage::WorkerUpdate { task_id, worker, phase, status, display_name, activity } => {
+                self.harness.last_agent = Some(worker.clone());
+                self.harness.last_phase = Some(phase.clone());
+                if let Some(activity_text) = activity.as_ref().filter(|text| !text.trim().is_empty()) {
+                    self.harness.last_activity = Some(short_event_text(activity_text));
+                }
+                if let Some(task_id) = task_id.as_ref().filter(|task_id| !task_id.trim().is_empty()) {
+                    self.harness.active_task_id = Some(task_id.clone());
+                    self.harness.active_task_status = Some(status.clone());
+                }
                 let wstatus = match status.as_str() {
                     "running" => WorkerStatus::Running,
                     "done"    => WorkerStatus::Done,
@@ -262,6 +334,15 @@ impl AppState {
             }
             // Legado: activity_update → actualiza coordinator activo
             BunMessage::ActivityUpdate { task_id, coordinator, phase, status, display_name, activity } => {
+                self.harness.last_agent = Some(coordinator.clone());
+                self.harness.last_phase = Some(phase.clone());
+                if let Some(activity_text) = activity.as_ref().filter(|text| !text.trim().is_empty()) {
+                    self.harness.last_activity = Some(short_event_text(activity_text));
+                }
+                if let Some(task_id) = task_id.as_ref().filter(|task_id| !task_id.trim().is_empty()) {
+                    self.harness.active_task_id = Some(task_id.clone());
+                    self.harness.active_task_status = Some(status.clone());
+                }
                 // Auto-routing: only switch tab when a real executor coordinator starts, not BEE
                 if !self.tab_locked && status == "running" && coordinator != "bee" {
                     if self.session.mode != ReplMode::Plan {
@@ -286,6 +367,7 @@ impl AppState {
 
             // ── Checkpoints ────────────────────────────────────────────────────
             BunMessage::CheckpointCreated { id, description, file_count, agent, tests_passed, tests_total } => {
+                self.harness.last_agent = Some(agent.clone());
                 let time = chrono::Local::now().format("%H:%M").to_string();
                 self.checkpoints.push(Checkpoint {
                     id,
@@ -301,6 +383,8 @@ impl AppState {
 
             // ── Mapa de riesgo ─────────────────────────────────────────────────
             BunMessage::FileRiskUpdate { path, risk, operation, agent, adr_ref, lines_added, lines_removed, .. } => {
+                self.harness.last_agent = Some(agent.clone());
+                self.harness.active_workspace_status = Some(operation.clone());
                 let risk_level = match risk.as_str() {
                     "medium"   => RiskLevel::Medium,
                     "high"     => RiskLevel::High,
@@ -330,6 +414,9 @@ impl AppState {
 
             // ── Stream de pensamiento ──────────────────────────────────────────
             BunMessage::ThoughtChunk { task_id, coordinator, phase, content } => {
+                self.harness.last_agent = Some(coordinator.clone());
+                self.harness.last_phase = Some(phase.clone());
+                self.harness.last_activity = Some(short_event_text(&content));
                 self.thought.chunks.push(ThoughtChunk { coordinator, phase, content });
                 if self.thought.chunks.len() > 100 { self.thought.chunks.remove(0); }
                 if let Some(chunk) = self.thought.chunks.last() {
@@ -339,6 +426,9 @@ impl AppState {
                 self.dirty.thought = true;
             }
             BunMessage::NarrativeChunk { task_id, coordinator, phase, content, .. } => {
+                self.harness.last_agent = Some(coordinator.clone());
+                self.harness.last_phase = Some(phase.clone());
+                self.harness.last_activity = Some(short_event_text(&content));
                 self.thought.chunks.push(ThoughtChunk { coordinator, phase, content });
                 if self.thought.chunks.len() > 100 { self.thought.chunks.remove(0); }
                 if let Some(chunk) = self.thought.chunks.last() {
@@ -407,6 +497,8 @@ impl AppState {
 
             // ── Alertas ────────────────────────────────────────────────────────
             BunMessage::ConflictAlert { agent_a, agent_b, file, reason, severity, detail } => {
+                self.harness.active_workspace_status = Some("conflict".to_string());
+                self.harness.last_activity = Some(short_event_text(&reason));
                 self.conflicts.entries.push(AgentConflict {
                     agent_a,
                     agent_b,
@@ -418,6 +510,8 @@ impl AppState {
                 self.dirty.conflicts = true;
             }
             BunMessage::Error { message } => {
+                self.harness.active_workspace_status = Some("error".to_string());
+                self.harness.last_activity = Some(short_event_text(&message));
                 self.history.entries.push(HistoryEntry {
                     role: Role::System,
                     content: format!("Error: {message}"),
@@ -490,6 +584,10 @@ impl AppState {
                     self.dirty.full = true;
                     return;
                 }
+                self.harness.active_task_id = Some(task_id.clone());
+                self.harness.active_task_title = Some(adr_title.clone());
+                self.harness.active_task_status = Some(status.clone());
+                self.harness.approval_pending = status == "pending" || status == "approval";
                 self.plan.current = Some(crate::state::PlanEntry {
                     task_id,
                     adr_title,
@@ -519,8 +617,47 @@ impl AppState {
             }
 
             // ── Proyección de tareas ────────────────────────────────────────────
-            BunMessage::TaskUpdate { task_id, title, status, mode, active_workers } => {
-                self.tasks.upsert(task_id, title, status, mode, active_workers);
+            BunMessage::TaskUpdate {
+                task_id,
+                title,
+                status,
+                mode,
+                active_workers,
+                workspace_id,
+                workspace_path,
+                branch_name,
+                isolated,
+                integration_status,
+            } => {
+                self.harness.active_task_id = Some(task_id.clone());
+                if let Some(title) = title.as_ref().filter(|title| !title.trim().is_empty()) {
+                    self.harness.active_task_title = Some(title.clone());
+                }
+                self.harness.active_task_status = Some(status.clone());
+                if let Some(path) = workspace_path.as_ref().filter(|path| !path.trim().is_empty()) {
+                    self.harness.active_workspace_path = Some(path.clone());
+                }
+                let workspace_status = integration_status
+                    .clone()
+                    .or_else(|| isolated.filter(|value| *value).map(|_| "isolated".to_string()));
+                if let Some(workspace_status) = workspace_status {
+                    self.harness.active_workspace_status = Some(workspace_status);
+                }
+                if matches!(status.as_str(), "completed" | "done" | "failed" | "cancelled") {
+                    self.harness.approval_pending = false;
+                }
+                self.tasks.upsert(
+                    task_id,
+                    title,
+                    status,
+                    mode,
+                    active_workers,
+                    workspace_id,
+                    workspace_path,
+                    branch_name,
+                    isolated,
+                    integration_status,
+                );
                 self.session.task_count = self.session.task_count.max(self.tasks.tasks.len() as u32);
                 self.dirty.session = true;
                 self.dirty.full = true;
@@ -528,6 +665,8 @@ impl AppState {
 
             // ── Aprobación del plan ─────────────────────────────────────────────
             BunMessage::PlanApprovalRequest => {
+                self.harness.approval_pending = true;
+                self.harness.active_task_status = Some("approval".to_string());
                 self.modal = ModalState::PlanApproval(PlanApprovalState { selected: 0 });
                 if !self.tab_locked { self.active_tab = TabId::Plan; }
                 self.dirty.full = true;
@@ -541,6 +680,7 @@ impl AppState {
                 self.diff.stats_removed = stats_removed.unwrap_or(0);
                 self.diff.lines = chunks;
                 self.diff.scroll = 0;
+                self.harness.active_workspace_status = Some("diff".to_string());
                 // Only auto-route to Code when not in Plan mode (plan tab takes priority)
                 if !self.tab_locked && self.session.mode != ReplMode::Plan {
                     self.active_tab = TabId::Code;
@@ -710,12 +850,23 @@ mod tests {
             status: "running".to_string(),
             mode: Some("auto".to_string()),
             active_workers: Some(vec!["backend".to_string(), "test".to_string()]),
+            workspace_id: Some("worktree:task-1".to_string()),
+            workspace_path: Some("/tmp/task-1".to_string()),
+            branch_name: Some("hivecode/task-task-1".to_string()),
+            isolated: Some(true),
+            integration_status: Some("isolated".to_string()),
         });
 
         assert_eq!(state.active_tab, TabId::Focus);
         assert_eq!(state.tasks.active_task_id.as_deref(), Some("task-1"));
         assert_eq!(state.tasks.tasks[0].title, "Corregir login");
         assert_eq!(state.tasks.tasks[0].active_workers.len(), 2);
+        assert!(state.tasks.tasks[0].isolated);
+        assert_eq!(state.harness.active_task_id.as_deref(), Some("task-1"));
+        assert_eq!(state.harness.active_task_title.as_deref(), Some("Corregir login"));
+        assert_eq!(state.harness.active_workspace_path.as_deref(), Some("/tmp/task-1"));
+        assert_eq!(state.harness.active_workspace_status.as_deref(), Some("isolated"));
+        assert_eq!(state.harness.last_event_type, "task_update");
     }
 
     #[test]
@@ -746,5 +897,19 @@ mod tests {
 
         assert!(state.tasks.tasks[0].active_workers.is_empty());
         assert_eq!(state.tasks.tasks[0].status, "running");
+        assert_eq!(state.harness.last_agent.as_deref(), Some("backend"));
+        assert_eq!(state.harness.last_phase.as_deref(), Some("done"));
+        assert_eq!(state.harness.active_task_status.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn plan_approval_sets_harness_pending_state() {
+        let mut state = AppState::default();
+
+        state.apply_message(BunMessage::PlanApprovalRequest);
+
+        assert!(state.harness.approval_pending);
+        assert_eq!(state.harness.active_task_status.as_deref(), Some("approval"));
+        assert_eq!(state.active_tab, TabId::Plan);
     }
 }

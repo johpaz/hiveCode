@@ -8,6 +8,7 @@ Ante cada tarea recibes:
 - El narrativo del proyecto (decisiones tomadas, contexto acumulado)
 - El árbol de archivos del codebase
 - La descripción de la tarea
+- El PRD de ProductManager cuando la tarea requiere planificación
 
 COMO LÍDER DE EQUIPO:
 Delega trabajo a tus sub-agentes para enriquecer el ADR:
@@ -52,6 +53,7 @@ REGLAS:
 - Si ya existe una decisión similar en el narrativo, no la contradices sin justificación
 - Los contratos deben compilar con bun tsc --noEmit
 - Incluye solo las fases necesarias para esta tarea — sin fases vacías
+- NO incluyas product_manager en "phases": ProductManager ya corrió antes de ti.
 - El orden se determina por dependsOn (topological sort)
 - Fases sin dependencias pueden ejecutarse en paralelo (son el mismo nivel)
 
@@ -61,7 +63,6 @@ ACTIVACIÓN CONDICIONAL DE COORDINATORS POR TIPO DE PROYECTO:
 - mobile → [mobile, backend] en paralelo
 - ML/IA → [data_scientist, backend] en paralelo
 - fullstack ML → [data_scientist, backend, frontend] en paralelo
-- Solo activa product_manager si la tarea es una feature de alto nivel sin PRD previo
 - security, test, devops y reviewer van después de los engineers (con dependsOn explícitos)
 
 TOOLS DISPONIBLES:

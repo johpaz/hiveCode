@@ -109,7 +109,7 @@ cd packages/hivetui && cargo build --release
 
 | Modo | Qué hace | Comando rápido |
 |------|----------|---------------|
-| `plan` | BEE diseña el ADR y la lista de fases. **Ningún archivo se modifica.** | `/mode set plan` |
+| `plan` | BEE enruta, ProductManager define el PRD y Architecture diseña el ADR/lista de fases. **Ningún archivo se modifica.** | `/mode set plan` |
 | `approval` | Checkpoint interactivo entre cada nivel. Muestra archivos a crear/modificar y pide confirmación. | `/mode set approval` |
 | `auto` | Ejecución completa sin intervención. | `/mode set auto` |
 
@@ -196,14 +196,14 @@ Cada worker es un **Bun Worker independiente** (proceso JS separado con su propi
 ---
 
 #### 1. ProductManager
-Solo se activa cuando BEE clasifica como `architecture` y la tarea es una feature de alto nivel sin especificación previa. Traduce requisitos ambiguos de negocio en un PRD estructurado: objetivo, historias de usuario, criterios de aceptación verificables, y constraints técnicos conocidos. Lo escribe en el blackboard como `type=decision` — Architecture lo usa como punto de partida, QAEngineer usa los criterios de aceptación para los tests.
+Se activa cuando BEE clasifica como `architecture`, antes de cualquier diseño. Traduce requisitos ambiguos o de producto en un PRD estructurado: objetivo, historias de usuario, criterios de aceptación verificables, y constraints técnicos conocidos. Lo escribe en el blackboard como `type=decision` — Architecture lo usa como punto de partida, QAEngineer usa los criterios de aceptación para los tests.
 
 **No inventa detalles de implementación. Herramientas:** solo lectura + `write_decision`
 
 ---
 
 #### 2. Architecture — Diseñador de Sistemas
-Se activa después de ProductManager (si hubo) o directamente cuando BEE clasifica como `architecture`. Lee el PRD del blackboard, los ADRs activos y los registros de `agent_memory` tipo `pattern` y `contract`. Produce:
+Se activa después de ProductManager cuando BEE clasifica como `architecture`. Lee el PRD del blackboard, los ADRs activos y los registros de `agent_memory` tipo `pattern` y `contract`. Produce:
 - Un **ADR** con contexto, opciones evaluadas y decisión justificada
 - Un **plan de fases con niveles de dependencia** — determina qué engineers del nivel 1 se despachan según el tipo de proyecto (web, mobile, ML, fullstack)
 - **Contratos TypeScript** entre módulos

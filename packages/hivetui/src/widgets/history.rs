@@ -3,7 +3,6 @@ use crate::{
     term::{Canvas, Rect, Style, AMBER, AMBER_BRIGHT, AMBER_DIM, DIM, GREEN, RED, SECONDARY, WHITE, YELLOW, BG_ELEVATED},
     widgets::components::{agent_display_name, render_scrollbar, worker_color},
 };
-use unicode_width::UnicodeWidthChar;
 
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     if state.history.entries.is_empty() {
@@ -372,118 +371,15 @@ struct ResponseLine {
 }
 
 fn build_response_lines(content: &str, width: usize) -> Vec<ResponseLine> {
-    let mut lines = Vec::new();
-    let mut in_code_block = false;
-
-    for raw_line in content.lines() {
-        if raw_line.starts_with("```") {
-            in_code_block = !in_code_block;
-            if in_code_block {
-                let lang = raw_line.trim_start_matches('`');
-                push_wrapped_lines(&mut lines, lang, width, Style::new().fg(DIM), false, 0);
-            }
-            continue;
-        }
-
-        if in_code_block {
-            push_wrapped_lines(
-                &mut lines,
-                raw_line,
-                width.saturating_sub(1).max(1),
-                Style::new().fg(GREEN).bg(BG_ELEVATED),
-                false,
-                1,
-            );
-            continue;
-        }
-
-        let (style, skip) = if raw_line.starts_with("### ") {
-            (Style::new().fg(AMBER_DIM).bold(), 4)
-        } else if raw_line.starts_with("## ") {
-            (Style::new().fg(AMBER).bold(), 3)
-        } else if raw_line.starts_with("# ") {
-            (Style::new().fg(AMBER_BRIGHT).bold(), 2)
-        } else if raw_line.starts_with("- ")
-            || raw_line.starts_with("· ")
-            || raw_line.starts_with("* ")
-        {
-            (Style::new().fg(SECONDARY), 0)
-        } else {
-            (Style::new().fg(WHITE), 0)
-        };
-        let text: String = raw_line.chars().skip(skip).collect();
-        push_wrapped_lines(&mut lines, &text, width, style, true, 0);
-    }
-
-    if lines.is_empty() {
-        lines.push(ResponseLine {
-            text: String::new(),
-            style: Style::new().fg(WHITE),
-            inline_code: false,
-            indent: 0,
-        });
-    }
-
-    lines
-}
-
-fn push_wrapped_lines(
-    lines: &mut Vec<ResponseLine>,
-    text: &str,
-    width: usize,
-    style: Style,
-    inline_code: bool,
-    indent: u16,
-) {
-    for line in wrap_line(text, width) {
-        lines.push(ResponseLine {
-            text: line,
-            style,
-            inline_code,
-            indent,
-        });
-    }
-}
-
-fn wrap_line(text: &str, width: usize) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-
-    let chars: Vec<char> = text.chars().collect();
-    let mut lines = Vec::new();
-    let mut start = 0usize;
-    let width = width.max(1);
-
-    while start < chars.len() {
-        let mut hard_end = start;
-        let mut displayed = 0usize;
-        while hard_end < chars.len() {
-            let next_width = UnicodeWidthChar::width(chars[hard_end]).unwrap_or(1).max(1);
-            if hard_end > start && displayed + next_width > width {
-                break;
-            }
-            displayed += next_width;
-            hard_end += 1;
-        }
-        let end = if hard_end < chars.len() {
-            (start..hard_end)
-                .rev()
-                .find(|&idx| chars[idx].is_whitespace() && idx > start)
-                .unwrap_or(hard_end)
-        } else {
-            hard_end
-        };
-
-        let line: String = chars[start..end].iter().collect();
-        lines.push(line.trim_end().to_string());
-        start = end;
-        while start < chars.len() && chars[start].is_whitespace() {
-            start += 1;
-        }
-    }
-
-    lines
+    crate::ui::build_markdown_lines(content, width)
+        .into_iter()
+        .map(|line| ResponseLine {
+            inline_code: line.text.contains('`') && line.style.bg != BG_ELEVATED,
+            text: line.text,
+            style: line.style,
+            indent: line.indent,
+        })
+        .collect()
 }
 
 /// Renderiza una línea de texto resaltando segmentos entre backticks (`code`) en color verde.

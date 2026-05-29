@@ -58,6 +58,18 @@ function makeBeeArchitectureResult(task: CoordinatorTask): CoordinatorResult {
   }
 }
 
+function makeProductResult(task: CoordinatorTask): CoordinatorResult {
+  return {
+    taskId: task.taskId,
+    phaseId: task.phaseId,
+    coordinator: "product_manager",
+    status: "completed",
+    narrativeEntry: "PRD: Task management API with acceptance criteria for CRUD behavior.",
+    filesModified: [],
+    durationMs: 500,
+  }
+}
+
 function makePhaseResult(taskId: string, coordinator: string, phaseId: number): CoordinatorResult {
   return {
     taskId,
@@ -90,26 +102,32 @@ describe("e2e: modo PLAN", () => {
 
   afterAll(() => { cleanupTestDb() })
 
-  test("solo ejecuta architecture — no dispatcha otras fases", async () => {
+  test("ejecuta product manager y architecture — no dispatcha engineers", async () => {
     // ARMAR
     const manager = setupManager()
     setMode("plan")
 
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) =>
-        Promise.resolve(phase === "bee" ? makeBeeArchitectureResult(task) : makeArchResult(task.taskId))
+        Promise.resolve(
+          phase === "bee"
+            ? makeBeeArchitectureResult(task)
+            : phase === "product_manager"
+              ? makeProductResult(task)
+              : makeArchResult(task.taskId)
+        )
     )
     // ACTUAR
     await manager.runTask("Design a REST API", "plan")
-    // NOTAR — BEE enruta y solo Architecture genera el plan.
-    expect(dispatchSpy).toHaveBeenCalledTimes(2)
-    expect(dispatchSpy.mock.calls.map((call: any[]) => call[0])).toEqual(["bee", "architecture"])
+    // NOTAR — BEE enruta, ProductManager define el "qué" y Architecture genera el plan.
+    expect(dispatchSpy).toHaveBeenCalledTimes(3)
+    expect(dispatchSpy.mock.calls.map((call: any[]) => call[0])).toEqual(["bee", "product_manager", "architecture"])
     // ESTADO
     const tasks = db.query("SELECT status FROM code_tasks").all() as any[]
     expect(tasks[0]?.status).toBe("completed")
     const phases = db.query("SELECT coordinator FROM code_task_phases").all() as any[]
-    expect(phases.length).toBe(2)
-    expect(phases.map((phase: any) => phase.coordinator)).toEqual(["bee", "architecture"])
+    expect(phases.length).toBe(3)
+    expect(phases.map((phase: any) => phase.coordinator)).toEqual(["bee", "product_manager", "architecture"])
 
     dispatchSpy.mockRestore()
   })
@@ -123,7 +141,13 @@ describe("e2e: modo PLAN", () => {
 
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) =>
-        Promise.resolve(phase === "bee" ? makeBeeArchitectureResult(task) : makeArchResult(task.taskId))
+        Promise.resolve(
+          phase === "bee"
+            ? makeBeeArchitectureResult(task)
+            : phase === "product_manager"
+              ? makeProductResult(task)
+              : makeArchResult(task.taskId)
+        )
     )
     // ACTUAR
     await manager.runTask("Draft architecture only", "plan")
@@ -165,7 +189,7 @@ describe("e2e: modo AUTO", () => {
 
   afterAll(() => { cleanupTestDb() })
 
-  test("pipeline completo: arch → backend → test (todas completadas)", async () => {
+  test("pipeline completo: product → arch → backend → test (todas completadas)", async () => {
     // ARMAR
     const manager = setupManager()
     setMode("auto")
@@ -174,15 +198,18 @@ describe("e2e: modo AUTO", () => {
       (phase: PhaseName, task: CoordinatorTask) =>
         phase === "bee"
           ? Promise.resolve(makeBeeArchitectureResult(task))
+          : phase === "product_manager"
+          ? Promise.resolve(makeProductResult(task))
           : phase === "architecture"
           ? Promise.resolve(makeArchResult(task.taskId))
           : Promise.resolve(makePhaseResult(task.taskId, phase, task.phaseId))
     )
     // ACTUAR
     await manager.runTask("Build full REST API", "auto")
-    // NOTAR — mínimo 3 fases: arch + backend + test
-    expect(dispatchSpy.mock.calls.length).toBeGreaterThanOrEqual(3)
+    // NOTAR — mínimo 4 fases: product + arch + backend + test
+    expect(dispatchSpy.mock.calls.length).toBeGreaterThanOrEqual(4)
     const dispatched = dispatchSpy.mock.calls.map((c: any) => c[0])
+    expect(dispatched).toContain("product_manager")
     expect(dispatched).toContain("architecture")
     expect(dispatched).toContain("backend")
     expect(dispatched).toContain("test")
@@ -212,6 +239,7 @@ describe("e2e: modo AUTO", () => {
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) => {
         if (phase === "bee") return Promise.resolve(makeBeeArchitectureResult(task))
+        if (phase === "product_manager") return Promise.resolve(makeProductResult(task))
         if (phase === "architecture") return Promise.resolve(makeArchResult(task.taskId))
         return Promise.resolve({
           taskId: task.taskId,
@@ -229,12 +257,13 @@ describe("e2e: modo AUTO", () => {
     // ESTADO
     const failedTask = db.query("SELECT status FROM code_tasks").get() as any
     expect(failedTask?.status).toBe("failed")
-    // NOTAR — BEE + arch + primer nivel fallido; no se ejecuta el siguiente nivel.
+    // NOTAR — BEE + product + arch + primer nivel fallido; no se ejecuta el siguiente nivel.
     const dispatched = dispatchSpy.mock.calls.map((c: any) => c[0])
+    expect(dispatched).toContain("product_manager")
     expect(dispatched).toContain("architecture")
     expect(dispatched).toContain("security")
     expect(dispatched).not.toContain("test")
-    expect(dispatched.length).toBeLessThanOrEqual(4)
+    expect(dispatched.length).toBeLessThanOrEqual(5)
 
     dispatchSpy.mockRestore()
   })
@@ -287,6 +316,8 @@ describe("e2e: modo APPROVAL", () => {
       (phase: PhaseName, task: CoordinatorTask) =>
         phase === "bee"
           ? Promise.resolve(makeBeeArchitectureResult(task))
+          : phase === "product_manager"
+          ? Promise.resolve(makeProductResult(task))
           : phase === "architecture"
           ? Promise.resolve(makeArchResult(task.taskId))
           : Promise.resolve(makePhaseResult(task.taskId, phase, task.phaseId))
@@ -313,6 +344,8 @@ describe("e2e: modo APPROVAL", () => {
       (phase: PhaseName, task: CoordinatorTask) =>
         phase === "bee"
           ? Promise.resolve(makeBeeArchitectureResult(task))
+          : phase === "product_manager"
+          ? Promise.resolve(makeProductResult(task))
           : phase === "architecture"
           ? Promise.resolve(makeArchResult(task.taskId))
           : Promise.resolve(makePhaseResult(task.taskId, phase, task.phaseId))
@@ -341,6 +374,8 @@ describe("e2e: modo APPROVAL", () => {
       (phase: PhaseName, task: CoordinatorTask) =>
         phase === "bee"
           ? Promise.resolve(makeBeeArchitectureResult(task))
+          : phase === "product_manager"
+          ? Promise.resolve(makeProductResult(task))
           : phase === "architecture"
           ? Promise.resolve(makeArchResult(task.taskId))
           : Promise.resolve(makePhaseResult(task.taskId, phase, task.phaseId))
@@ -370,6 +405,8 @@ describe("e2e: modo APPROVAL", () => {
       (phase: PhaseName, task: CoordinatorTask) =>
         phase === "bee"
           ? Promise.resolve(makeBeeArchitectureResult(task))
+          : phase === "product_manager"
+          ? Promise.resolve(makeProductResult(task))
           : phase === "architecture"
           ? Promise.resolve(makeArchResult(task.taskId))
           : Promise.resolve(makePhaseResult(task.taskId, phase, task.phaseId))
@@ -412,10 +449,16 @@ describe("e2e: isToolAllowed por modo de ejecución", () => {
   })
 
   test("todos los coordinadores pueden leer en plan mode", () => {
-    const coords = ["architecture", "backend", "frontend", "security", "test", "devops"] as const
+    const coords = ["product_manager", "architecture", "backend", "frontend", "security", "test", "devops"] as const
     for (const coord of coords) {
       expect(isToolAllowed("fs_read", coord, "plan")).toBe(true)
     }
+  })
+
+  test("product manager y architecture pueden escribir decisiones en plan mode", () => {
+    expect(isToolAllowed("write_decision", "product_manager", "plan")).toBe(true)
+    expect(isToolAllowed("append_narrative", "product_manager", "plan")).toBe(true)
+    expect(isToolAllowed("write_decision", "architecture", "plan")).toBe(true)
   })
 })
 
@@ -439,6 +482,7 @@ describe("e2e: transición de modo durante ejecución", () => {
     const dispatchSpy = spyOn(manager as any, "dispatchPhase").mockImplementation(
       (phase: PhaseName, task: CoordinatorTask) => {
         if (phase === "bee") return Promise.resolve(makeBeeArchitectureResult(task))
+        if (phase === "product_manager") return Promise.resolve(makeProductResult(task))
         if (phase === "architecture") {
           // Cambiar a plan mode DURANTE la ejecución de architecture
           setMode("plan")

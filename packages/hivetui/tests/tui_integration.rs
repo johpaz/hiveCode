@@ -288,7 +288,7 @@ fn welcome_screen_does_not_render_input_widget() {
     // history vacío → welcome se activa
 
     let mut canvas = make_canvas(120, 30);
-    renderer::render(&mut canvas, &state);
+    renderer::render(&mut canvas, &mut state);
 
     // El input widget está en las últimas 4 filas (rows[5] = 4 de altura).
     // La fila del input (y=24 para h=30) NO debe tener la bee '🐝' ni el hex '⬡'
@@ -298,6 +298,75 @@ fn welcome_screen_does_not_render_input_widget() {
         canvas.cell_at(x, input_y).map(|c| c.ch == '🐝').unwrap_or(false)
     });
     assert!(!has_bee, "Welcome screen debe cubrir el input widget — la bee no debe ser visible");
+}
+
+#[test]
+fn welcome_screen_exposes_harness_status() {
+    let mut state = base_state();
+    state.show_welcome = true;
+    state.apply_message(BunMessage::TaskUpdate {
+        task_id: "task-42".into(),
+        title: Some("Corregir login".into()),
+        status: "running".into(),
+        mode: Some("auto".into()),
+        active_workers: Some(vec!["backend".into()]),
+        workspace_id: Some("worktree:task-42".into()),
+        workspace_path: Some("/tmp/task-42".into()),
+        branch_name: Some("hivecode/task-task-42".into()),
+        isolated: Some(true),
+        integration_status: Some("isolated".into()),
+    });
+    state.apply_message(BunMessage::ActivityUpdate {
+        task_id: Some("task-42".into()),
+        coordinator: "backend".into(),
+        phase: "fix".into(),
+        status: "running".into(),
+        display_name: None,
+        activity: Some("editando auth".into()),
+    });
+
+    let mut canvas = make_canvas(140, 34);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+
+    assert!(frame.contains("modo AUTO"));
+    assert!(frame.contains("Corregir login"));
+    assert!(frame.contains("isolated"));
+    assert!(frame.contains("backend"));
+    assert!(frame.contains("activity_update"));
+}
+
+#[test]
+fn renderer_registers_badged_tab_hit_regions() {
+    let mut state = base_state();
+    state.harness.approval_pending = true;
+
+    let mut canvas = make_canvas(120, 30);
+    renderer::render(&mut canvas, &mut state);
+
+    let plan_region = state
+        .hit_map
+        .regions()
+        .iter()
+        .find(|region| region.id == "tab:plan")
+        .expect("plan tab hit region");
+
+    assert!(plan_region.rect.w > "⬡ PLAN[2]  ".chars().count() as u16);
+}
+
+#[test]
+fn renderer_registers_split_handle_hit_regions() {
+    let mut state = base_state();
+    state.active_tab = TabId::Code;
+
+    let mut canvas = make_canvas(120, 30);
+    renderer::render(&mut canvas, &mut state);
+
+    assert!(state
+        .hit_map
+        .regions()
+        .iter()
+        .any(|region| region.id == "split:code:main"));
 }
 
 // ── 9. Code layout: split dinámico con 3+ workers activos ────────────────────

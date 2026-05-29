@@ -45,7 +45,7 @@ pub async fn run_headless() -> Result<()> {
     let mut frame: u64 = 0;
     let mut stdout = stdout();
 
-    let emit = |canvas: &mut Canvas, state: &AppState, frame: u64, out: &mut dyn Write| {
+    let emit = |canvas: &mut Canvas, state: &mut AppState, frame: u64, out: &mut dyn Write| {
         renderer::render(canvas, state);
         let rows = canvas.to_text_rows();
         let tab = format!("{:?}", state.active_tab).to_lowercase();
@@ -65,7 +65,7 @@ pub async fn run_headless() -> Result<()> {
     };
 
     // Initial frame (empty state)
-    emit(&mut canvas, &state, frame, &mut stdout);
+    emit(&mut canvas, &mut state, frame, &mut stdout);
 
     loop {
         tokio::select! {
@@ -73,17 +73,17 @@ pub async fn run_headless() -> Result<()> {
             Some(msg) = ipc_ch.critical.recv() => {
                 state.apply_message(msg);
                 frame += 1;
-                emit(&mut canvas, &state, frame, &mut stdout);
+                emit(&mut canvas, &mut state, frame, &mut stdout);
             }
             Some(msg) = ipc_ch.normal.recv() => {
                 state.apply_message(msg);
                 frame += 1;
-                emit(&mut canvas, &state, frame, &mut stdout);
+                emit(&mut canvas, &mut state, frame, &mut stdout);
             }
             Some(msg) = ipc_ch.low.recv() => {
                 state.apply_message(msg);
                 frame += 1;
-                emit(&mut canvas, &state, frame, &mut stdout);
+                emit(&mut canvas, &mut state, frame, &mut stdout);
             }
             else => break,
         }
