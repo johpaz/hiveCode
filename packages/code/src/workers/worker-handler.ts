@@ -243,6 +243,16 @@ RULES FOR TOOL USE:
    - A task like "hola" or a simple question should be answered in 0-1 tool calls, NEVER 20.
    - When you see ⚠️ STOPPING signal, you MUST respond immediately without any more tool calls.
 
+DYNAMIC TOOL DISCOVERY:
+- You start with a MINIMAL toolset: get_project_context, search_knowledge, fs_read, shell_executor, save_note, notify, report_progress.
+- ALWAYS call get_project_context() FIRST before exploring — it gives you the global project summary (structure, key modules, ADRs).
+- To discover additional tools (fs_write, fs_edit, code_build, git_commit, etc.), call:
+  search_knowledge(type="tools", query="<what you need>")
+- The discovered tools will be AUTOMATICALLY added to your available tools after the search.
+- To discover skills: search_knowledge(type="skills", query="<what you need>")
+- To search the project codebase: search_knowledge(type="code", query="<function or class name>")
+- ALWAYS search for tools before trying to use tools that are not in your initial set.
+
 SPAWNING SUB-AGENTS:
 As the team lead, you may delegate work to specialized sub-agents using spawn_subagent.
 - Only spawn sub-agents relevant to your domain
@@ -298,6 +308,7 @@ class WorkerAgent {
   private task: CoordinatorTask | null = null
   private messages: LLMMessage[] = []
   private tools: LLMToolDef[] = []
+  private allTools: any[] = []
   private iterations = 0
   private pendingToolResolvers = new Map<string, (result: unknown) => void>()
   private isRunning = false
@@ -323,6 +334,7 @@ class WorkerAgent {
 
     // Add spawn_subagent to available tools
     this.tools = [...tools, SPAWN_SUBAGENT_TOOL]
+    this.allTools = (task.allTools ?? []) as any[]
 
     const startTime = performance.now()
 
@@ -552,6 +564,54 @@ while (this.iterations < MAX_ITERATIONS) {
         })
         const remoteResults = await Promise.all(remotePromises)
 
+        // Dynamic tool injection: when search_knowledge finds tools, add them to loadout
+        for (const tc of remoteCalls) {
+          if (tc.function.name === "search_knowledge") {
+            try {
+              const result = JSON.parse(remoteResults.find(r => r.tool_call_id === tc.id)?.content ?? "{}") as any
+              const foundTools: Array<{ name: string }> = result?.tools ?? []
+              const foundMcpTools: Array<{ tool_name: string; full_name?: string; id?: string }> = result?.toolsmcp ?? []
+              const currentToolNames = new Set(this.tools.map(t => t.function?.name))
+
+              for (const found of foundTools) {
+                if (!currentToolNames.has(found.name)) {
+                  const nativeTool = this.allTools.find((t: any) => t.name === found.name)
+                  if (nativeTool) {
+                    this.tools.push({
+                      type: "function",
+                      function: {
+                        name: nativeTool.name,
+                        description: nativeTool.description ?? "",
+                        parameters: nativeTool.parameters ?? { type: "object", properties: {} },
+                      },
+                    })
+                    currentToolNames.add(found.name)
+                  }
+                }
+              }
+
+              for (const found of foundMcpTools) {
+                const mcpFullName = found.full_name || found.id
+                if (mcpFullName && !currentToolNames.has(mcpFullName)) {
+                  const mcpTool = this.allTools.find((t: any) => t.name === mcpFullName)
+                  if (mcpTool) {
+                    this.tools.push({
+                      type: "function",
+                      function: {
+                        name: mcpTool.name,
+                        description: mcpTool.description ?? "",
+                        parameters: mcpTool.parameters ?? { type: "object", properties: {} },
+                      },
+                    })
+                    currentToolNames.add(mcpFullName)
+                  }
+                }
+              }
+            } catch {
+              // ignore parse errors
+            }
+          }
+        }
 
         // Add all tool results to messages
         for (const tr of [...localResults, ...remoteResults]) {

@@ -41,6 +41,7 @@
     "./workspace/manager": "./src/workspace/manager.ts",
     "./seed": "./src/seed.ts",
     "./agent/code-indexer": "./src/agent/code-indexer.ts",
+    "./agent/context-retriever": "./src/agent/context-retriever.ts",
     "./context": "./src/context/index.ts",
     "./context/blackboard": "./src/context/blackboard.ts",
     "./context/conflict-detector": "./src/context/conflict-detector.ts",

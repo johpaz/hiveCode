@@ -14,6 +14,7 @@
 import { logger } from "../../utils/logger";
 import type { Tool } from "../types";
 import { browserScreenshotTool } from "./browser";
+import { detectBrowser } from "./browser-detector";
 
 const log = logger.child("browser-agent");
 
@@ -62,11 +63,22 @@ let activeBrowserSessionId: string | null = null;
 
 // ── Subprocess helper ────────────────────────────────────────────────────────
 
+function buildExecPathArgs(): string[] {
+  if (process.env.AGENT_BROWSER_EXECUTABLE_PATH) return [];
+  const detected = detectBrowser();
+  if (!detected) return [];
+  // Skip flatpak/snap native binaries — they need the container environment;
+  // agent-browser (Playwright) will hang trying to connect to them via CDP.
+  if (detected.name.includes("flatpak") || detected.name.includes("snap")) return [];
+  return ["--executable-path", detected.path];
+}
+
 async function runAgentBrowser(
   args: string[],
   timeoutMs = 30_000,
 ): Promise<{ ok: boolean; stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn([AGENT_BROWSER_BIN!, ...args], {
+  const execArgs = buildExecPathArgs();
+  const proc = Bun.spawn([AGENT_BROWSER_BIN!, ...execArgs, ...args], {
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -144,6 +156,7 @@ export const browserNavigateTool: Tool = {
     }
 
     const cliArgs = ["navigate", url, "--json"];
+    if (url.startsWith("file://")) cliArgs.push("--allow-file-access");
     if (args.waitFor) { cliArgs.push("--wait-for", String(args.waitFor)); }
     if (args.newSession === true) { cliArgs.push("--new-session"); }
 
@@ -156,10 +169,10 @@ export const browserNavigateTool: Tool = {
     }
 
     const parsed = parseJsonOutput(result.stdout) as Record<string, unknown>;
-    if (parsed.sessionId) {
-      activeBrowserSessionId = String(parsed.sessionId);
-      log.info(`[browser-agent] session: ${activeBrowserSessionId}`);
-    }
+    // Agent-browser uses named persistent sessions; default session is "default".
+    // Newer CLI versions no longer echo sessionId in the navigate response.
+    activeBrowserSessionId = parsed.sessionId ? String(parsed.sessionId) : "default";
+    log.info(`[browser-agent] session: ${activeBrowserSessionId}`);
 
     return parsed;
   },
@@ -200,7 +213,7 @@ export const browserClickTool: Tool = {
 
     log.info(`[browser-agent] click ${selector}`);
     const result = await runAgentBrowser(
-      ["click", selector, "--session-id", sessionId, "--json"],
+      ["click", selector, "--session", sessionId, "--json"],
       timeoutMs,
     );
 
@@ -246,7 +259,7 @@ export const browserTypeTool: Tool = {
     const selector = String(args.selector);
     const text = String(args.text);
 
-    const cliArgs = ["type", selector, text, "--session-id", sessionId, "--json"];
+    const cliArgs = ["type", selector, text, "--session", sessionId, "--json"];
     if (args.clear === true) cliArgs.push("--clear");
 
     log.info(`[browser-agent] type into ${selector}`);
@@ -287,12 +300,28 @@ export const browserExtractTool: Tool = {
     const sessionId = args.sessionId ? String(args.sessionId) : activeBrowserSessionId;
     if (!sessionId) return { ok: false, error: NO_SESSION_ERROR };
 
-    const cliArgs = ["extract"];
-    if (args.selector) cliArgs.push(String(args.selector));
-    cliArgs.push("--format", args.format ? String(args.format) : "text");
-    cliArgs.push("--session-id", sessionId, "--json");
+    const format = args.format ? String(args.format) : "text";
+    const selector = args.selector ? String(args.selector) : null;
 
-    log.info(`[browser-agent] extract format=${args.format ?? "text"}`);
+    log.info(`[browser-agent] extract format=${format}`);
+
+    let cliArgs: string[];
+    if (format === "json") {
+      // Accessibility tree snapshot — best structured format for AI agents
+      cliArgs = ["snapshot", "--session", sessionId, "--json"];
+    } else if (format === "links") {
+      // Eval JS to get all anchor hrefs + text
+      const script = `JSON.stringify(Array.from(document.querySelectorAll('${selector ?? "a"}')).map(a=>({text:a.innerText.trim(),href:a.href})))`;
+      cliArgs = ["eval", script, "--session", sessionId, "--json"];
+    } else {
+      // text: get text content of selector or full body
+      if (selector) {
+        cliArgs = ["get", "text", selector, "--session", sessionId, "--json"];
+      } else {
+        cliArgs = ["eval", "document.body.innerText", "--session", sessionId, "--json"];
+      }
+    }
+
     const result = await runAgentBrowser(cliArgs, 15_000);
 
     if (!result.ok) return { ok: false, error: result.stderr || `Exit code ${result.exitCode}` };
@@ -334,7 +363,7 @@ export const browserScriptTool: Tool = {
 
     log.info(`[browser-agent] eval script (${script.length} chars)`);
     const result = await runAgentBrowser(
-      ["eval", script, "--session-id", sessionId, "--json"],
+      ["eval", script, "--session", sessionId, "--json"],
       timeoutMs,
     );
 
@@ -377,7 +406,7 @@ export const browserWaitTool: Tool = {
 
     log.info(`[browser-agent] wait for ${selector}`);
     const result = await runAgentBrowser(
-      ["wait", selector, "--timeout", String(timeoutMs), "--session-id", sessionId, "--json"],
+      ["wait", selector, "--timeout", String(timeoutMs), "--session", sessionId, "--json"],
       timeoutMs + 2_000,
     );
 

@@ -395,9 +395,11 @@ export async function compileContext(opts: {
       `Estas 4 herramientas nativas están SIEMPRE disponibles en tu contexto y tienen prioridad sobre MCP:\n\n` +
       `${minimalToolsDocs}\n\n` +
       `**REGLAS DE USO:**\n` +
-      `1. Si necesitas una herramienta que no esté en la lista arriba → USA \`search_knowledge\` para encontrarla:\n` +
+      `1. Llama \`get_project_context()\` PRIMERO para obtener el resumen global del proyecto.\n` +
+      `2. Si necesitas una herramienta que no esté en la lista arriba → USA \`search_knowledge\` para encontrarla:\n` +
       `   - Herramientas nativas: \`search_knowledge(type="tools", query="<qué necesitas>")\`\n` +
       `   - Herramientas MCP (externas): \`search_knowledge(type="mcp", query="<qué necesitas>")\`\n` +
+      `   - Código fuente del proyecto: \`search_knowledge(type="code", query="<función o clase>")\`\n` +
       `   - Todo junto: \`search_knowledge(type="all", query="<qué necesitas>")\`\n` +
       `2. NUNCA uses una herramienta MCP si existe una nativa equivalente en el catálogo\n` +
       `3. Las herramientas MCP se activan dinámicamente vía search_knowledge — NO están en tu contexto por defecto\n\n` +

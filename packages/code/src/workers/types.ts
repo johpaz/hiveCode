@@ -66,6 +66,8 @@ export interface CoordinatorTask {
   model?: string
   /** Tools available to this coordinator (injected by manager) */
   tools?: any[]
+  /** All tools registry for dynamic discovery via search_knowledge */
+  allTools?: any[]
   /** Pre-compiled context from Context Compiler (skills, playbook, scratchpad) */
   compiledContext?: string
   /** Recent conversation turns in this session — gives BEE chat context */

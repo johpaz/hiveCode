@@ -81,7 +81,7 @@ describe("Schema DDL", () => {
   }
 
   test("FTS5 virtual tables exist", () => {
-    const ftsTables = ["code_narrative_fts", "code_playbook_fts", "code_commands_fts"]
+    const ftsTables = ["code_narrative_fts", "code_playbook_fts", "code_commands_fts", "code_fts"]
     for (const t of ftsTables) {
       const row = db.query(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?"

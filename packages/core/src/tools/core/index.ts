@@ -141,17 +141,17 @@ function buildFtsMatch(words: string[]): string {
 
 export const searchKnowledgeTool: Tool = {
   name: "search_knowledge",
-  description: "Busca herramientas NATIVAS (tools), MCP (tools externas), habilidades (skills) o reglas del playbook en la base de conocimientos. Usa búsqueda full-text (FTS5) con fallback bilingüe español→inglés. type='mcp' para herramientas MCP, type='all' para buscar en todo.",
+  description: "Busca herramientas NATIVAS (tools), MCP (tools externas), habilidades (skills), reglas del playbook o CÓDIGO FUENTE del proyecto en la base de conocimientos. Usa búsqueda full-text (FTS5) con fallback bilingüe español→inglés. type='mcp' para herramientas MCP, type='code' para buscar en el código fuente, type='all' para buscar en todo.",
   parameters: {
     type: "object",
     properties: {
       query: {
         type: "string",
-        description: "Término de búsqueda (nombre, descripción, categoría). Se busca primero en español, luego en inglés si hay pocos resultados.",
+        description: "Término de búsqueda (nombre, descripción, categoría, función, clase). Se busca primero en español, luego en inglés si hay pocos resultados.",
       },
       type: {
         type: "string",
-        enum: ["all", "tools", "skills", "playbook", "mcp"],
+        enum: ["all", "tools", "skills", "playbook", "mcp", "code"],
         description: "Tipo de conocimiento a buscar",
       },
       limit: {
@@ -174,7 +174,7 @@ export const searchKnowledgeTool: Tool = {
       const words = normalizedQuery.split(/\s+/).filter(w => w.length > 0);
       const ftsMatch = buildFtsMatch(words);
 
-      const result: any = { query, type, tools: [], skills: [], playbook: [], toolsmcp: [] };
+      const result: any = { query, type, tools: [], skills: [], playbook: [], toolsmcp: [], code: [] };
 
       // ─── Search functions (reusable for bilingual fallback) ───────────
 
@@ -241,14 +241,36 @@ export const searchKnowledgeTool: Tool = {
         } catch { return []; }
       }
 
+      function searchCode(matchExpr: string): any[] {
+        if (type !== "all" && type !== "code") return [];
+        try {
+          const sessionRow = db.query<any, []>(
+            "SELECT id FROM code_sessions WHERE status = 'active' ORDER BY last_active DESC LIMIT 1"
+          ).get();
+          const sessionId = sessionRow?.id ?? "";
+          if (!sessionId) return [];
+          return db.query(`
+            SELECT
+              file_path,
+              highlight(code_fts, 2, '<match>', '</match>') AS snippet,
+              bm25(code_fts) AS rank
+            FROM code_fts
+            WHERE session_id = ? AND code_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+          `).all(sessionId, matchExpr, limit) as any[];
+        } catch { return []; }
+      }
+
       // ─── Pass 1: Search with original query ─────────────────────────
 
       const tools1 = searchTools(ftsMatch);
       const skills1 = searchSkills(ftsMatch);
       const playbook1 = searchPlaybook(ftsMatch);
       const mcp1 = searchMcpTools(ftsMatch);
+      const code1 = searchCode(ftsMatch);
 
-      const totalFirst = tools1.length + skills1.length + playbook1.length + mcp1.length;
+      const totalFirst = tools1.length + skills1.length + playbook1.length + mcp1.length + code1.length;
 
       // Map results
       result.tools = tools1.map((t: any) => ({
@@ -273,6 +295,11 @@ export const searchKnowledgeTool: Tool = {
         description: t.description, category: t.category,
         active: t.active === 1, rank: t.rank,
       }));
+      result.code = code1.map((c: any) => ({
+        file_path: c.file_path,
+        snippet: c.snippet,
+        rank: c.rank,
+      }));
 
       // ─── Pass 2: Bilingual fallback (ES → EN) ──────────────────────
 
@@ -289,6 +316,7 @@ export const searchKnowledgeTool: Tool = {
             ...result.skills.map((s: any) => s.id),
             ...result.playbook.map((p: any) => p.id),
             ...result.toolsmcp.map((t: any) => t.id),
+            ...result.code.map((c: any) => c.file_path),
           ]);
 
           // Merge English results (dedup by id)
@@ -334,10 +362,20 @@ export const searchKnowledgeTool: Tool = {
               existingIds.add(t.id);
             }
           }
+          for (const c of searchCode(enMatch)) {
+            if (!existingIds.has(c.file_path)) {
+              result.code.push({
+                file_path: c.file_path,
+                snippet: c.snippet,
+                rank: c.rank,
+              });
+              existingIds.add(c.file_path);
+            }
+          }
         }
       }
 
-      result.totalResults = result.tools.length + result.skills.length + result.playbook.length + result.toolsmcp.length;
+      result.totalResults = result.tools.length + result.skills.length + result.playbook.length + result.toolsmcp.length + result.code.length;
 
       return { ok: true, ...result };
     } catch (error) {
@@ -345,6 +383,49 @@ export const searchKnowledgeTool: Tool = {
         ok: false,
         error: `Search failed: ${(error as Error).message}`,
       };
+    }
+  },
+};
+
+// ─── notify ──────────────────────────────────────────────────────────────────
+
+// ─── get_project_context ─────────────────────────────────────────────────────
+
+export const getProjectContextTool: Tool = {
+  name: "get_project_context",
+  description: "Retrieve the global project context summary: structure, key files, critical modules, and active ADRs. Call this FIRST before exploring the project — it replaces fs_list/fs_glob for understanding the codebase.",
+  parameters: {
+    type: "object",
+    properties: {},
+    required: [],
+  },
+  execute: async (_params: Record<string, unknown>, _config?: any) => {
+    const db = getDb();
+    try {
+      const sessionRow = db.query<any, []>(
+        "SELECT id FROM code_sessions WHERE status = 'active' ORDER BY last_active DESC LIMIT 1"
+      ).get();
+      const sessionId = sessionRow?.id ?? "";
+      if (!sessionId) {
+        return { ok: false, error: "No active session found." };
+      }
+
+      const cacheRow = db.query<{ compiled: string }, [string]>(/* sql */ `
+        SELECT compiled FROM code_context_cache
+        WHERE cache_key = ? AND expires_at > datetime('now')
+      `).get(`project_context:${sessionId}`);
+
+      if (cacheRow?.compiled) {
+        return { ok: true, context: cacheRow.compiled };
+      }
+
+      return {
+        ok: false,
+        error: "Project context not cached yet. Run 'hivecode init' or wait for reconciliation.",
+        hint: "You can still use search_knowledge(type='code', query='...') to find specific symbols.",
+      };
+    } catch (error) {
+      return { ok: false, error: `Failed to retrieve project context: ${(error as Error).message}` };
     }
   },
 };
@@ -472,5 +553,5 @@ export const reportProgressTool: Tool = {
 };
 
 export function createTools(): Tool[] {
-  return [searchKnowledgeTool, notifyTool, saveNoteTool, reportProgressTool];
+  return [searchKnowledgeTool, getProjectContextTool, notifyTool, saveNoteTool, reportProgressTool];
 }

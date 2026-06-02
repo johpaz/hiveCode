@@ -227,6 +227,17 @@ CREATE TABLE IF NOT EXISTS code_graph (
 CREATE INDEX IF NOT EXISTS idx_code_graph_session ON code_graph(session_id);
 CREATE INDEX IF NOT EXISTS idx_code_graph_file ON code_graph(file_path);
 
+-- Code FTS: full-text search over source files (standalone, synced by code-indexer)
+CREATE VIRTUAL TABLE IF NOT EXISTS code_fts USING fts5(
+  session_id UNINDEXED,
+  file_path UNINDEXED,
+  content,
+  exports,
+  functions,
+  classes,
+  tokenize='porter'
+);
+
 -- Recovery points: per-phase checkpoints to resume interrupted tasks
 CREATE TABLE IF NOT EXISTS code_recovery_points (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,

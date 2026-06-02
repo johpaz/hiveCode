@@ -18,6 +18,8 @@ import { plan as runPlan } from "./plan"
 import { run as runTask } from "./run"
 import { launchTui, tuiAvailable } from "./tui-launcher"
 import { CoordinatorManager } from "@johpaz/hivecode-code/workers/coordinator-manager"
+import { reconcileCodeIndex } from "@johpaz/hivecode-code/agent/code-indexer"
+import { buildProjectContext, getProjectContext } from "@johpaz/hivecode-code/agent/context-retriever"
 
 const VERSION = "1.0.0"
 
@@ -359,6 +361,18 @@ export async function repl(): Promise<void> {
   await manager.startAll()
   const sessionId = manager.openSession()
   logger.info(`[repl] Session started: ${sessionId}`)
+
+  // Reconcile code index on startup: detect external edits and new files
+  const cwd = process.cwd()
+  reconcileCodeIndex(sessionId, cwd).catch((err) => {
+    logger.debug(`[repl] Code index reconciliation failed: ${(err as Error).message}`)
+  })
+
+  // Ensure project context exists for this session
+  if (!getProjectContext(sessionId)) {
+    buildProjectContext(sessionId, cwd)
+    logger.info(`[repl] Project context built for session ${sessionId}`)
+  }
 
   const activeWorkers: string[] = (getDb()
     .query("SELECT name FROM agents WHERE role='coordinator' AND enabled=1")

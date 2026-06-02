@@ -23,6 +23,8 @@ import { checkAutomaticInterruption } from "../modes/interruptions"
 import { broadcastNarrative, broadcastPhase, broadcastMode, broadcastPhaseStart, broadcastPhaseEnd, broadcastTaskEnd, broadcastThinking } from "@johpaz/hivecode-core/gateway/task-streaming"
 import { validateCommand } from "@johpaz/hivecode-core/tools/code/command-validator"
 import { incrementTaskCounter, shouldRunReflector, runReflector, startReflectorCron, stopReflectorCron } from "../agent/reflector"
+import { updateFileIndex } from "../agent/code-indexer"
+import { getProjectContext } from "../agent/context-retriever"
 import { existsSync } from "node:fs"
 import { isAbsolute, relative, resolve } from "node:path"
 import { TaskSupervisor } from "../runtime/task-supervisor"
@@ -1570,7 +1572,7 @@ export class CoordinatorManager extends CoordinatorBase {
     // Send task with tools + compiled context via string fast-path (SPEC §3.1: ~500 ns latency)
     const msg: ManagerToWorkerMessage = {
       type: "TASK",
-      task: { ...task, tools: tools as any, compiledContext },
+      task: { ...task, tools: tools as any, allTools: this.allTools, compiledContext },
     }
       worker.postMessage(JSON.stringify(msg))
 
@@ -1584,6 +1586,22 @@ export class CoordinatorManager extends CoordinatorBase {
   private compileWorkerContext(phase: PhaseName, taskDescription: string, narrative: string): string {
     const db = getDb()
     const sections: string[] = []
+
+    // 0. Project context — injected for ALL coordinators (especially Bee)
+    // This gives every worker a global map of the project without having to discover it
+    try {
+      const activeSession = db.query<any, []>(
+        "SELECT id FROM code_sessions WHERE status = 'active' ORDER BY last_active DESC LIMIT 1"
+      ).get()
+      if (activeSession?.id) {
+        const projectCtx = getProjectContext(activeSession.id)
+        if (projectCtx) {
+          sections.push(projectCtx)
+        }
+      }
+    } catch {
+      // skip if no active session or cache miss
+    }
 
     // 1. Skills — minimal + FTS5-discovered for this phase
     try {
@@ -1980,6 +1998,14 @@ export class CoordinatorManager extends CoordinatorBase {
           ? "deleted"
           : msg.toolName === "fs_write" ? "created" : "modified"
         this.evaluateFileRisk(logicalRiskPath, riskOp as "created" | "modified" | "deleted", name)
+
+        // Sync code_fts index after successful write/edit (fire-and-forget)
+        if (this.activeSessionId) {
+          const absolutePath = this.workspacePath(riskFilePath, workspaceRoot)
+          updateFileIndex(this.activeSessionId, absolutePath, workspaceRoot).catch((err) => {
+            log.debug(`[coordinator-manager] code_fts sync failed for ${absolutePath}: ${(err as Error).message}`)
+          })
+        }
 
         // Emit file_diff so the CODE tab in TUI shows the actual changes
         if (msg.toolName !== "fs_delete" && this.onIpcEvent) {

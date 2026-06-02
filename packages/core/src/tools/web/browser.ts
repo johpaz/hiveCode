@@ -10,20 +10,26 @@
 
 import { logger } from "../../utils/logger";
 import type { Tool } from "../types";
+import { detectBrowser } from "./browser-detector";
 
 const log = logger.child("browser");
 
 // ── Image pipeline helpers ──────────────────────────────────────────────────
 
+type BunImageInstance = {
+  resize(w: number, h: number): BunImageInstance;
+  webp(opts?: { quality?: number }): BunImageInstance; // synchronous in Bun >=1.3.14
+  png(): BunImageInstance;                             // synchronous in Bun >=1.3.14
+  toBuffer(): Promise<Buffer>;
+  bytes(): Promise<Uint8Array>;
+  blob(): Promise<Blob>;
+  metadata(): { width?: number; height?: number };
+};
+
 type BunImageConstructor = {
-  new(src: Buffer | string): {
-    resize(w: number, h: number): any;
-    webp(opts?: { quality?: number }): Promise<ArrayBuffer>;
-    png(): Promise<ArrayBuffer>;
-    metadata(): { width?: number; height?: number };
-  };
+  new(src: Buffer | string): BunImageInstance;
   hasClipboardImage(): boolean;
-  fromClipboard(): Promise<any>;
+  fromClipboard(): Promise<BunImageInstance>;
 };
 
 const BunImage: BunImageConstructor | null = (() => {
@@ -35,31 +41,51 @@ const BunImage: BunImageConstructor | null = (() => {
 })();
 
 /**
- * Resize a PNG buffer to 800×600 and encode as WebP at 70% quality.
- * Falls through to the original PNG if Bun.Image is unavailable.
+ * Resize to targetWidth×targetHeight and encode as WebP at 70% quality.
+ * Accepts a Buffer, Blob, or Bun.Image (returned by view.screenshot() in Bun >=1.3.14).
+ * Falls through to raw PNG if Bun.Image is unavailable or the pipeline fails.
+ *
+ * Bun 1.3.14 API:
+ *   view.screenshot()           → Blob
+ *   new Bun.Image(buf)          → Image
+ *   img.resize(w, h)            → Image  (synchronous)
+ *   img.webp({ quality })       → Image  (synchronous, encodes on access)
+ *   await encodedImg.toBuffer() → Buffer
  */
 async function applyImagePipeline(
-  pngBuffer: Buffer,
+  src: Buffer | Blob | BunImageInstance,
   targetWidth = 800,
   targetHeight = 600,
 ): Promise<{ data: Buffer; mimeType: string; width: number; height: number }> {
-  if (!BunImage) {
-    return { data: pngBuffer, mimeType: "image/png", width: targetWidth, height: targetHeight };
+  if (BunImage) {
+    try {
+      let img: BunImageInstance;
+      if (src instanceof Buffer) {
+        img = new BunImage(src);
+      } else if (src instanceof Blob) {
+        img = new BunImage(Buffer.from(await src.arrayBuffer()));
+      } else {
+        img = src as BunImageInstance; // already a Bun.Image
+      }
+      const webpImg = img.resize(targetWidth, targetHeight).webp({ quality: 70 });
+      const webpBuffer = await webpImg.toBuffer();
+      return { data: webpBuffer, mimeType: "image/webp", width: targetWidth, height: targetHeight };
+    } catch (err) {
+      log.warn(`[browser] Image pipeline failed, returning raw PNG: ${(err as Error).message}`);
+    }
   }
-  try {
-    const img = new BunImage(pngBuffer);
-    const resized = img.resize(targetWidth, targetHeight);
-    const webpBuffer = Buffer.from(await resized.webp({ quality: 70 }));
-    return {
-      data: webpBuffer,
-      mimeType: "image/webp",
-      width: targetWidth,
-      height: targetHeight,
-    };
-  } catch (err) {
-    log.warn(`[browser] Image pipeline failed, returning raw PNG: ${(err as Error).message}`);
-    return { data: pngBuffer, mimeType: "image/png", width: targetWidth, height: targetHeight };
+
+  // Fallback: raw PNG
+  let pngBuffer: Buffer;
+  if (src instanceof Buffer) {
+    pngBuffer = src;
+  } else if (src instanceof Blob) {
+    pngBuffer = Buffer.from(await src.arrayBuffer());
+  } else {
+    // Bun.Image: encode as PNG and get the buffer
+    pngBuffer = await (src as BunImageInstance).png().toBuffer();
   }
+  return { data: pngBuffer, mimeType: "image/png", width: targetWidth, height: targetHeight };
 }
 
 // ── Screenshot ─────────────────────────────────────────────────────────────
@@ -85,6 +111,15 @@ async function takeScreenshot(
 ): Promise<ScreenshotResult> {
   if (typeof Bun.WebView !== "function") {
     return { ok: false, error: "Bun.WebView is not available in this build (requires macOS/Linux desktop)" };
+  }
+
+  // Auto-detect the OS browser if BUN_CHROME_PATH is not already set
+  if (!process.env.BUN_CHROME_PATH) {
+    const detected = detectBrowser();
+    if (detected) {
+      process.env.BUN_CHROME_PATH = detected.path;
+      log.info(`[browser] Using ${detected.name} at ${detected.path}`);
+    }
   }
 
   let view: InstanceType<typeof Bun.WebView> | null = null;
@@ -120,16 +155,17 @@ async function takeScreenshot(
       if (!found) log.warn(`[browser] Selector ${options.selector} not found after 6s`);
     }
 
-    const rawPng = Buffer.from(await (view.screenshot() as unknown as Promise<Buffer>));
+    // Bun.WebView.screenshot() returns Buffer (old), Blob, or Bun.Image (>=1.3.14)
+    const screenshotResult = await (view.screenshot() as unknown as Promise<Buffer | Blob | BunImageInstance>);
     view.close();
     view = null;
 
-    if (!rawPng || rawPng.length === 0) {
-      return { ok: false, error: "Screenshot returned empty buffer" };
+    if (!screenshotResult) {
+      return { ok: false, error: "Screenshot returned empty result" };
     }
 
     if (options.applyPipeline !== false) {
-      const processed = await applyImagePipeline(rawPng, 800, 600);
+      const processed = await applyImagePipeline(screenshotResult, 800, 600);
       return {
         ok: true,
         imageBase64: processed.data.toString("base64"),
@@ -139,9 +175,11 @@ async function takeScreenshot(
       };
     }
 
+    // applyPipeline=false: return the raw screenshot as PNG
+    const raw = await applyImagePipeline(screenshotResult, options.width || 1280, options.height || 720);
     return {
       ok: true,
-      imageBase64: rawPng.toString("base64"),
+      imageBase64: raw.data.toString("base64"),
       mimeType: "image/png",
       width: options.width || 1280,
       height: options.height || 720,
@@ -152,8 +190,9 @@ async function takeScreenshot(
       return {
         ok: false,
         error:
-          "Chrome/Chromium not installed. " +
-          "Install google-chrome-stable or chromium, or set BUN_CHROME_PATH.",
+          "No Chromium-compatible browser found. " +
+          "Install google-chrome-stable, chromium, brave, or microsoft-edge, " +
+          "or set BUN_CHROME_PATH to the browser executable path.",
       };
     }
     return { ok: false, error: message };
@@ -232,7 +271,7 @@ export async function captureClipboard(): Promise<ScreenshotResult> {
     const img = await BunImage.fromClipboard();
     const meta = img.metadata();
     const processed = await applyImagePipeline(
-      Buffer.from(await img.png()),
+      img,
       Math.min(meta.width ?? 800, 800),
       Math.min(meta.height ?? 600, 600),
     );
@@ -272,14 +311,15 @@ export const browserCaptureClipboardTool: Tool = {
 // ── HTML preview ───────────────────────────────────────────────────────────
 
 /**
- * Write raw HTML to a temp file and screenshot it via Bun.WebView.
- * Coordinators use this to verify generated web components without a server.
+ * Serve raw HTML via a temporary local HTTP server and screenshot it via Bun.WebView.
+ * Using HTTP avoids file:// access restrictions that affect sandboxed Chrome builds
+ * (flatpak, snap) which may block local filesystem access in headless mode.
  */
 export const browserPreviewHtmlTool: Tool = {
   name: "browser_preview_html",
   description:
-    "Write raw HTML to a temp file and capture a screenshot via Bun.WebView (headless). " +
-    "Use to verify generated web components without starting a server. Returns base64 WebP.",
+    "Serve raw HTML on a temporary local HTTP server and capture a screenshot via Bun.WebView " +
+    "(headless). Use to verify generated web components without starting a server. Returns base64 WebP.",
   parameters: {
     type: "object",
     properties: {
@@ -308,13 +348,19 @@ export const browserPreviewHtmlTool: Tool = {
   },
   async execute(args: Record<string, unknown>): Promise<string | object> {
     const html = String(args.html);
-    const tmpPath = `/tmp/hive_preview_${Date.now()}_${Math.random().toString(36).slice(2)}.html`;
 
-    log.info(`[browser] HTML preview → ${tmpPath}`);
-    await Bun.write(tmpPath, html);
+    // Serve HTML via local HTTP to avoid file:// sandbox restrictions (flatpak/snap Chrome)
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+      },
+    });
+
+    log.info(`[browser] HTML preview → http://localhost:${server.port}/`);
 
     try {
-      const result = await takeScreenshot(`file://${tmpPath}`, {
+      const result = await takeScreenshot(`http://localhost:${server.port}/`, {
         width: args.width ? Number(args.width) : undefined,
         height: args.height ? Number(args.height) : undefined,
         waitMs: args.waitMs ? Number(args.waitMs) : 800,
@@ -328,7 +374,7 @@ export const browserPreviewHtmlTool: Tool = {
       }
       return result;
     } finally {
-      try { await Bun.file(tmpPath).exists() && Bun.spawn(["rm", "-f", tmpPath]); } catch { /* ignore */ }
+      server.stop();
     }
   },
 };

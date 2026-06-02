@@ -75,6 +75,7 @@
     "./tools/filesystem": "./src/tools/filesystem/index.ts",
 "./tools/filesystem/workspace-guard": "./src/tools/filesystem/workspace-guard.ts",
     "./tools/web": "./src/tools/web/index.ts",
+    "./tools/web/browser-detector": "./src/tools/web/browser-detector.ts",
     "./db": "./src/db/index.ts",
     "./db/client": "./src/db/client.ts",
     "./db/schema": "./src/db/schema.ts",

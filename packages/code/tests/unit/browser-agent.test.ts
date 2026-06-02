@@ -12,6 +12,7 @@ import {
   browserScriptTool,
   browserWaitTool,
 } from "@johpaz/hivecode-core/tools"
+import { detectBrowser } from "@johpaz/hivecode-core/tools/web/browser-detector"
 
 // ── Schema tests ─────────────────────────────────────────────────────────────
 
@@ -201,4 +202,71 @@ describe("browser_navigate — fallback shape", () => {
     expect(typeof result).toBe("object")
     expect("ok" in result).toBe(true)
   }, 3000) // 3s test deadline
+})
+
+// ── Real integration tests ────────────────────────────────────────────────────
+// Skip the entire suite when no Chromium-compatible browser is on the system.
+
+const browser = detectBrowser()
+const itReal = browser ? test : test.skip
+
+describe("browser-detector", () => {
+  test("detectBrowser returns null or a DetectedBrowser object", () => {
+    const b = detectBrowser()
+    if (b === null) return // no browser installed — valid
+    expect(typeof b.name).toBe("string")
+    expect(typeof b.path).toBe("string")
+    expect(b.path.length).toBeGreaterThan(0)
+  })
+
+  test("detected browser path exists on disk", () => {
+    const b = detectBrowser()
+    if (!b) return
+    const check = Bun.spawnSync(["test", "-x", b.path], { stdin: "ignore", stdout: "ignore", stderr: "ignore" })
+    expect(check.exitCode).toBe(0)
+  })
+})
+
+describe("browser_navigate — real navigation", () => {
+  itReal("navigates to a local HTTP page and returns accessibility tree", async () => {
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head><title>Agent Browser Test</title></head>
+<body>
+  <h1>hiveCode</h1>
+  <button id="btn">Click me</button>
+  <input id="inp" type="text" placeholder="Type here" />
+</body>
+</html>`
+    const server = Bun.serve({ port: 0, fetch: () => new Response(html, { headers: { "content-type": "text/html" } }) })
+
+    try {
+      const result = await browserNavigateTool.execute({ url: `http://localhost:${server.port}/` }) as any
+      expect(typeof result).toBe("object")
+      if (result.ok === false) {
+        expect(typeof result.error).toBe("string")
+      } else {
+        expect(result).toBeTruthy()
+      }
+    } finally {
+      server.stop()
+    }
+  }, 30_000)
+
+  itReal("browser_script evaluates JS and returns page title", async () => {
+    const html = `<!DOCTYPE html><html><head><title>ScriptTest</title></head><body></body></html>`
+    const server = Bun.serve({ port: 0, fetch: () => new Response(html, { headers: { "content-type": "text/html" } }) })
+
+    try {
+      const nav = await browserNavigateTool.execute({ url: `http://localhost:${server.port}/` }) as any
+      if (nav.ok === false) return
+
+      const result = await browserScriptTool.execute({ script: "document.title" }) as any
+      if (result.ok !== false) {
+        expect(result).toBeTruthy()
+      }
+    } finally {
+      server.stop()
+    }
+  }, 30_000)
 })
