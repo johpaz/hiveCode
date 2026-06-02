@@ -53,6 +53,9 @@
     "./adr": "./src/adr/index.ts",
     "./adr/loader": "./src/adr/loader.ts",
     "./adr/analyzer": "./src/adr/analyzer.ts",
-    "./adr/risk": "./src/adr/risk.ts"
+    "./adr/risk": "./src/adr/risk.ts",
+    "./errors": "./src/errors/index.ts",
+    "./recovery": "./src/recovery/index.ts",
+    "./recovery/failure-recovery-scheduler": "./src/recovery/failure-recovery-scheduler.ts"
   }
 }

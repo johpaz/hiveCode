@@ -2,10 +2,12 @@ import {
   hiveIntro, hiveOutro, hiveModeBar,
   hivePhaseComplete, hivePhaseActive, hiveSpinner,
   hiveNote, hiveText, hiveCheckpoint, isCancel,
-} from "@johpaz/hivecode-tui-primitives"
+} from "../cli-ui.ts"
 import { getExecutionMode, setExecutionMode } from "@johpaz/hivecode-core"
 import { CoordinatorManager } from "@johpaz/hivecode-code/workers/coordinator-manager"
 import { listenModeToggle, stopModeToggle } from "@johpaz/hivecode-code/modes/keyboard"
+import { classifyError } from "@johpaz/hivecode-code/errors"
+import { FailureRecoveryScheduler } from "@johpaz/hivecode-code/recovery"
 
 export async function run(description?: string, flags: string[] = [], options?: { keyboard?: boolean; exitOnError?: boolean; manager?: CoordinatorManager; quiet?: boolean }): Promise<void> {
   const exitOnError = options?.exitOnError ?? true
@@ -103,11 +105,34 @@ export async function run(description?: string, flags: string[] = [], options?: 
     const taskId = manager.getActiveTaskId()
     if (!quiet) hiveOutro(`Tarea completada${taskId ? ` · ID: ${taskId.slice(0, 8)}` : ""}`)
   } catch (err) {
-    if (!quiet) hiveOutro(`Error: ${(err as Error).message}`, "error")
-    if (exitOnError) process.exit(1)
-    else throw err
+    const hiveErr = classifyError(err)
+    if (!quiet) hiveNote(`Fallo (${hiveErr.errorClass})`, [hiveErr.message])
+
+    const recovery = FailureRecoveryScheduler.getInstance()
+    const taskId = manager.getActiveTaskId() ?? "unknown"
+
+    await recovery.scheduleRetry({
+      error: hiveErr,
+      task: typeof task === "string" ? task : "tarea desconocida",
+      sessionId: manager.getSessionId() ?? "unknown",
+      taskId,
+      mode,
+    })
+
+    // If a retry is pending, keep the process alive; otherwise exit or rethrow
+    if (recovery.hasPendingRetry(taskId)) {
+      await recovery.waitForRetry(taskId)
+    } else if (exitOnError) {
+      process.exit(1)
+    } else {
+      throw hiveErr
+    }
   } finally {
-    if (!externalManager) await manager.stopAll()
+    const recovery = FailureRecoveryScheduler.getInstance()
+    const taskId = manager.getActiveTaskId() ?? "unknown"
+    if (!externalManager && !recovery.hasPendingRetry(taskId)) {
+      await manager.stopAll()
+    }
     setExecutionMode(prevMode)
     if (!quiet) stopModeToggle()
   }

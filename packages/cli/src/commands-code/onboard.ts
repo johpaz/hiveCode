@@ -7,7 +7,7 @@
 import {
   hiveIntro, hiveOutro, hiveNote, isCancel,
   runProviderSetupWizard,
-} from "@johpaz/hivecode-tui-primitives"
+} from "../cli-ui.ts"
 
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"

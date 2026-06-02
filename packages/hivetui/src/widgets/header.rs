@@ -1,7 +1,7 @@
 use crate::{
     state::{AppState, ReplMode, WorkerStatus},
     term::{Canvas, Color, Rect, Style, AMBER_BRIGHT, AMBER_DIM, BG_PANEL, DIM, GREEN, SECONDARY, WHITE},
-    ui::{cell_width, truncate_cells},
+    ui::{cell_width, fmt_tokens, truncate_cells},
 };
 
 const BORDER_SUBTLE: Color = Color::Rgb { r: 35, g: 30, b: 20 };
@@ -112,16 +112,6 @@ fn mode_badge(mode: &ReplMode) -> (&'static str, Color, Color) {
         ReplMode::Plan     => (" PLAN ",       Color::Rgb { r: 17, g: 24, b: 39  }, Color::Rgb { r: 74, g: 158, b: 255 }),
         ReplMode::Approval => (" APPROVAL ",   Color::Rgb { r: 28, g: 20, b: 0   }, Color::Rgb { r: 252, g: 211, b: 77 }),
         ReplMode::Auto     => (" AUTO ",       Color::Rgb { r: 5, g: 31, b: 18   }, Color::Rgb { r: 74, g: 222, b: 128 }),
-    }
-}
-
-fn fmt_tokens(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
     }
 }
 

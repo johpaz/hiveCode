@@ -9,7 +9,7 @@ import {
   isCancel, hiveSelect, hiveNote, hiveOutro, hiveSpinner,
   runProviderSetupWizard,
   runTelegramConnectWizard,
-} from "@johpaz/hivecode-tui-primitives"
+} from "../cli-ui.ts"
 import { loadInitialState, saveMode } from "./repl-state"
 import type { ReplMode } from "./repl-state"
 import { parseInternalCommand, getCtx, renderSuggestions } from "@johpaz/hivecode-code/coordinator/command-parser"
@@ -318,6 +318,9 @@ export async function repl(): Promise<void> {
   // Start coordinator workers and open a session (one per TUI lifecycle)
   const manager = new CoordinatorManager()
 
+  // Set to true only when Architecture actually fires a plan_update during a task.
+  let planGeneratedThisTask = false
+
   // Lazy IPC forwarder — populated once TUI socket is ready, null before that.
   // Events fired before TUI connects (should not happen in practice) are silently dropped.
   let _tuiIpcSend: ((msg: any) => void) | null = null
@@ -348,6 +351,7 @@ export async function repl(): Promise<void> {
         detail: p.detail ?? null,
       }))
     } else {
+      if (event === "plan_update") planGeneratedThisTask = true
       _tuiIpcSend(withTaskRoute({ type: event, ...(payload as object) }))
     }
   })
@@ -368,7 +372,6 @@ export async function repl(): Promise<void> {
     let currentModel:    string   = init.model
     // When in plan mode, track the task awaiting user approval before execution
     let pendingPlanTask: string | null = null
-
     const tuiControl: {
       suspend: (() => Promise<void>) | null
       resume: (() => void) | null
@@ -631,6 +634,7 @@ export async function repl(): Promise<void> {
           return { output: "(×ᴗ×) Sin provider — tarea cancelada." }
         }
 
+        planGeneratedThisTask = false
         const output = await executeTask(input, currentMode, {
           suspend: tuiControl.suspend ?? undefined,
           resume: tuiControl.resume ?? undefined,
@@ -638,8 +642,9 @@ export async function repl(): Promise<void> {
           quiet: true,
         })
 
-        // After a plan, show approval modal and wait for user decision
-        if (currentMode === "plan") {
+        // Only show the approval modal if Architecture actually produced a plan.
+        // BEE "respond" actions skip Architecture entirely — no modal needed.
+        if (currentMode === "plan" && planGeneratedThisTask) {
           pendingPlanTask = input
           _tuiIpcSend?.({ type: "plan_approval_request" })
         }

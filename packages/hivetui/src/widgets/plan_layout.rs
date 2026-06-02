@@ -1,5 +1,5 @@
 use crate::{
-    state::{AppState, RiskLevel},
+    state::{AppState, ModalState, PlanApprovalState, RiskLevel},
     term::{Canvas, Rect, Style, AMBER, AMBER_DIM, BG_ELEVATED, BG_PANEL, DIM, GREEN, PURPLE, RED, SECONDARY, WHITE, YELLOW},
     ui::{render_markdown, render_split_handles, split_panes, Axis, Constraint, MarkdownView, SplitPane},
     widgets::components::{
@@ -8,6 +8,50 @@ use crate::{
     },
 };
 
+const APPROVAL_OPTIONS: &[(&str, &str)] = &[
+    ("⚡", "Ejecutar auto"),
+    ("🔍", "Fase por fase"),
+    ("💬", "Agregar contexto"),
+    ("✗",  "Cancelar"),
+];
+
+/// Renderiza el strip de aprobación integrado en la parte inferior del plan layout.
+fn render_approval_strip(canvas: &mut Canvas, area: Rect, approval: &PlanApprovalState) {
+    // Línea separadora
+    canvas.fill_rect(Rect { h: 1, ..area }, ' ', Style::new().fg(AMBER).bg(BG_ELEVATED));
+    for x in area.x..(area.right()) {
+        canvas.print(x, area.y, "─", Style::new().fg(AMBER));
+    }
+    canvas.print(area.x + 2, area.y, " ⬡ ¿Ejecutar este plan? ", Style::new().fg(AMBER).bold());
+
+    // Opciones en horizontal, distribuidas en la segunda fila
+    let opt_y = area.y + 1;
+    canvas.fill_rect(Rect { y: opt_y, h: area.h - 1, ..area }, ' ', Style::new().bg(BG_ELEVATED));
+
+    let mut x = area.x + 2;
+    for (i, (icon, label)) in APPROVAL_OPTIONS.iter().enumerate() {
+        let selected = approval.selected == i;
+        let text = format!(" {} {} ", icon, label);
+        if selected {
+            canvas.print(x, opt_y, &text, Style::new().fg(AMBER).bold().bg(BG_ELEVATED));
+            // Subrayado visual del seleccionado
+            for bx in x..(x + text.len() as u16) {
+                canvas.print(bx, opt_y + 1, "▔", Style::new().fg(AMBER));
+            }
+        } else {
+            canvas.print(x, opt_y, &text, Style::new().fg(SECONDARY));
+        }
+        x += text.len() as u16 + 2;
+    }
+
+    // Hint en el lado derecho
+    let hint = "←→ · ↩ confirmar · Esc cancelar";
+    let hint_x = area.right().saturating_sub(hint.len() as u16 + 2);
+    if hint_x > x {
+        canvas.print(hint_x, opt_y, hint, Style::new().fg(DIM));
+    }
+}
+
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     canvas.fill_rect(area, ' ', Style::new().bg(BG_PANEL));
 
@@ -15,16 +59,28 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
         return;
     }
 
+    // Si hay aprobación pendiente, reservamos 4 filas en el fondo para el strip
+    let approval_h = if matches!(state.modal, ModalState::PlanApproval(_)) { 4u16 } else { 0u16 };
+    let content_area = Rect { h: area.h.saturating_sub(approval_h), ..area };
+    let strip_area   = Rect { y: area.bottom().saturating_sub(approval_h), h: approval_h, ..area };
+
     let split = SplitPane::new(
         Axis::Horizontal,
         vec![Constraint::Percent(state.panels.plan_main_percent), Constraint::Fill(1)],
     );
-    let (cols, handles) = split_panes(area, &split);
+    let (cols, handles) = split_panes(content_area, &split);
     let left = cols[0];
     let right = cols[1];
 
     canvas.with_clip(left, |canvas| render_plan_pane(canvas, left, state));
     render_split_handles(canvas, &handles, Axis::Horizontal);
+
+    // Strip de aprobación integrado
+    if approval_h > 0 {
+        if let ModalState::PlanApproval(approval) = &state.modal {
+            render_approval_strip(canvas, strip_area, approval);
+        }
+    }
 
     let right_split = SplitPane::new(
         Axis::Vertical,

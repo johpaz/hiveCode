@@ -30,6 +30,7 @@ export const OPENAI_COMPAT_BASE_URLS: Record<string, string> = {
   qwen: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
   codex: "https://api.openai.com/v1",
   "opencode-go": "https://opencode.ai/zen/go/v1",
+  minimax: "https://api.minimaxi.com/v1",
 }
 
 // ─── Provider profiles ────────────────────────────────────────────────────────
@@ -70,6 +71,7 @@ export const PROVIDER_PROFILES: Record<string, ProviderProfile> = {
   "local-llama": { ...DEFAULT_PROFILE },
   codex: { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
   "opencode-go": { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
+  minimax: { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
 }
 
 export function getProviderProfile(provider: string): ProviderProfile {

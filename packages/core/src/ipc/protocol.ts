@@ -65,6 +65,7 @@ export type TuiMessage =
   | { type: "exit" }
   | { type: "quit" }
   | { type: "rollback"; checkpoint_id: string }
+  | { type: "request_settings" }
 
 // ── Priority helpers ──────────────────────────────────────────────────────────
 

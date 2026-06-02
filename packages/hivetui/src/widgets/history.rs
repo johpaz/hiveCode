@@ -61,14 +61,15 @@ fn render_compact_turns(canvas: &mut Canvas, area: Rect, state: &AppState, expan
             let label = format!("⬡ {}", name_shown);
             canvas.print(area.x + 1, y, &label, Style::new().fg(col).bold());
 
-            // First line of content after agent name
-            let first_line = entry.content.lines().next().unwrap_or("").trim();
+            // Primera línea de contenido — limpiada y acotada para la vista compacta
             let label_end = area.x + 1 + label.chars().count() as u16 + 1;
             let ts_width = entry.timestamp.as_ref().map(|t| t.chars().count() as u16 + 3).unwrap_or(3);
             let content_avail = area.right().saturating_sub(label_end + ts_width + 2) as usize;
-            if content_avail > 5 && !first_line.is_empty() {
-                let shown: String = first_line.chars().take(content_avail).collect();
-                canvas.print(label_end, y, &shown, Style::new().fg(SECONDARY));
+            // Limitar a 60 chars máximo para evitar que líneas largas llenen toda la fila
+            let preview_limit = content_avail.min(60);
+            let preview = clean_preview(&entry.content, preview_limit);
+            if preview_limit > 5 && !preview.is_empty() {
+                canvas.print(label_end, y, &preview, Style::new().fg(SECONDARY));
             }
 
             if let Some(ref ts) = entry.timestamp {
@@ -88,10 +89,9 @@ fn render_compact_turns(canvas: &mut Canvas, area: Rect, state: &AppState, expan
                 Role::Thinking  => ("… ", Style::new().fg(DIM)),
             };
 
-            let first_line = entry.content.lines().next().unwrap_or("").trim();
-            let max_content = avail_w.saturating_sub(prefix.len() + 3);
-            let shown: String = first_line.chars().take(max_content).collect();
-            let ellipsis = if entry.content.lines().count() > 1 || first_line.len() > max_content { "…" } else { "✓" };
+            let max_content = avail_w.saturating_sub(prefix.len() + 3).min(80);
+            let shown = clean_preview(&entry.content, max_content);
+            let ellipsis = if entry.content.lines().count() > 1 || entry.content.len() > avail_w { "…" } else { "✓" };
 
             canvas.print(area.x + 1, y, prefix, pfx_style);
             canvas.print(area.x + 1 + prefix.len() as u16, y, &shown, Style::new().fg(DIM));
@@ -305,7 +305,10 @@ fn render_live_activity(canvas: &mut Canvas, area: Rect, state: &AppState, start
             };
             canvas.print(area.x + 2, y, prefix, prefix_style);
             let avail = area.w.saturating_sub(5) as usize;
-            let shown: String = chunk.content.chars().take(avail).collect();
+            // Strip <think>/<\/think> XML tags so raw model reasoning doesn't pollute the live feed
+            let clean = chunk.content.replace("<think>", "").replace("</think>", "");
+            let shown: String = clean.chars().take(avail).collect();
+            if shown.trim().is_empty() { continue; }
             canvas.print(area.x + 4, y, &shown, content_style);
             y += 1;
         }
@@ -368,6 +371,35 @@ struct ResponseLine {
     style: Style,
     inline_code: bool,
     indent: u16,
+}
+
+/// Extrae un fragmento limpio para la vista compacta:
+/// - Elimina tags <system>...</system>
+/// - Toma solo el primer segmento significativo (antes de doble newline)
+/// - Limita a max_chars para evitar líneas largas que distorsionan el layout
+fn clean_preview(content: &str, max_chars: usize) -> String {
+    // Quitar wrapper <system> si existe
+    let stripped = if content.trim_start().starts_with("<system>") {
+        let inner = content.trim_start()
+            .strip_prefix("<system>").unwrap_or(content)
+            .trim_start();
+        // Quitar </system> si está al final
+        if let Some(end) = inner.find("</system>") {
+            &inner[..end]
+        } else {
+            inner
+        }
+    } else {
+        content
+    };
+
+    // Primera línea no vacía
+    let first = stripped.lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+
+    first.chars().take(max_chars).collect()
 }
 
 fn build_response_lines(content: &str, width: usize) -> Vec<ResponseLine> {

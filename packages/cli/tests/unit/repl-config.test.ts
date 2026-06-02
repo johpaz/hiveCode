@@ -1,7 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test"
 import { getTestDb, resetTestDb, cleanupTestDb, seedProvider, seedConfig } from "../../../code/tests/helpers/setup-db"
 import { loadInitialState, saveMode } from "../../src/commands-code/repl-state"
-import { fmtTokens } from "@johpaz/hivecode-tui-primitives/utils/fmt-tokens"
 
 // ─── carga de estado inicial ──────────────────────────────────────────────────
 
@@ -170,32 +169,5 @@ describe("repl-config: provider guard", () => {
     const state = loadInitialState()
     // NOTAR
     expect(state.provider).toBe("groq")
-  })
-})
-
-// ─── formatter de tokenCount ──────────────────────────────────────────────────
-
-describe("repl-config: tokenCount formatter", () => {
-  test("< 1000 → sin sufijo", () => {
-    // ARMAR / ACTUAR / NOTAR
-    expect(fmtTokens(0)).toBe("0")
-    expect(fmtTokens(999)).toBe("999")
-    expect(fmtTokens(500)).toBe("500")
-  })
-
-  test("1500 → '1.5k'", () => {
-    expect(fmtTokens(1500)).toBe("1.5k")
-  })
-
-  test("exactamente 1000 → '1.0k'", () => {
-    expect(fmtTokens(1_000)).toBe("1.0k")
-  })
-
-  test("2_000_000 → '2.0M'", () => {
-    expect(fmtTokens(2_000_000)).toBe("2.0M")
-  })
-
-  test("1_500_000 → '1.5M'", () => {
-    expect(fmtTokens(1_500_000)).toBe("1.5M")
   })
 })

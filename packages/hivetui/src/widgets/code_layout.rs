@@ -110,10 +110,29 @@ fn render_filemap_fallback(canvas: &mut Canvas, area: Rect, state: &AppState) {
     let entries = &state.filemap.entries;
 
     if entries.is_empty() {
-        canvas.print(area.x + 2, area.y + 2, "sin cambios en curso", Style::new().fg(DIM));
-        canvas.print(area.x + 2, area.y + 3,
-            "Los diffs aparecerán aquí cuando los workers escriban archivos.",
-            Style::new().fg(DIM));
+        // Si hay workers activos, mostrar spinner de búsqueda en lugar de mensaje vacío
+        let has_active_workers = state.workers.workers.iter().any(|w| w.status == WorkerStatus::Running);
+        if has_active_workers || state.running {
+            let spinner_frames = &["◐", "◓", "◑", "◒"];
+            let spin = spinner_frames[(state.anim_tick as usize) % spinner_frames.len()];
+            let coord = if state.workers.active_coordinator.is_empty() {
+                "bee"
+            } else {
+                &state.workers.active_coordinator
+            };
+            let header = format!("{} {} buscando y analizando código…", spin, coord);
+            let truncated_header = truncate_cells(&header, area.w.saturating_sub(4) as usize);
+            canvas.print(area.x + 2, area.y + 2, &truncated_header, Style::new().fg(AMBER_BRIGHT));
+            if let Some(activity) = state.harness.last_activity.as_deref() {
+                let truncated = truncate_cells(activity, area.w.saturating_sub(4) as usize);
+                canvas.print(area.x + 2, area.y + 3, &truncated, Style::new().fg(DIM));
+            }
+        } else {
+            canvas.print(area.x + 2, area.y + 2, "sin cambios en curso", Style::new().fg(DIM));
+            canvas.print(area.x + 2, area.y + 3,
+                "Los diffs aparecerán aquí cuando los workers escriban archivos.",
+                Style::new().fg(DIM));
+        }
         return;
     }
 

@@ -43,6 +43,8 @@ export const TOOL_NARRATIONS: Record<string, string> = {
   browser_type: "Escribiendo en la página...",
   browser_screenshot: "Tomando captura de pantalla...",
   browser_extract: "Extrayendo información de la página...",
+  browser_script: "Ejecutando JavaScript en la página...",
+  browser_wait: "Esperando elemento en la página...",
   // Canvas
   canvas_add_node: "Actualizando canvas...",
   canvas_update: "Actualizando canvas...",

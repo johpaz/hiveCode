@@ -34,6 +34,9 @@ import * as core from "./core/index.ts";
 // Narrative (6)
 import * as narrative from "./narrative/index.ts";
 
+// API (1) - HTTP client for REST APIs
+import * as api from "./api/index.ts";
+
 /**
  * Creates all tools with proper configuration
  */
@@ -45,7 +48,6 @@ export function createAllTools(config: Config): Tool[] {
     // WEB (9)
     ...web.createTools(),
 
-
     // CRON (7)
     ...cron.createTools(),
 
@@ -55,7 +57,6 @@ export function createAllTools(config: Config): Tool[] {
     // AGENTS (14)
     ...agents.createTools(),
 
-
     // CODE TOOLS (16) - git + code utilities + analysis
     ...code.createTools(),
 
@@ -64,6 +65,9 @@ export function createAllTools(config: Config): Tool[] {
 
     // NARRATIVE (6)
     ...narrative.createTools(),
+
+    // API (1) - HTTP client for REST APIs
+    ...api.createTools(),
   ];
 }
 
@@ -88,6 +92,8 @@ export function createToolsByCategory(category: string, config: Config): Tool[] 
       return core.createTools();
     case "narrative":
       return narrative.createTools();
+    case "api":
+      return api.createTools();
     default:
       return [];
   }
@@ -114,6 +120,12 @@ export {
   browserScreenshotTool,
   browserCaptureClipboardTool,
   browserPreviewHtmlTool,
+  browserNavigateTool,
+  browserClickTool,
+  browserTypeTool,
+  browserExtractTool,
+  browserScriptTool,
+  browserWaitTool,
 } from "./web/index.ts";
 
 export {
@@ -178,6 +190,8 @@ export {
   saveNoteTool,
   reportProgressTool,
 } from "./core/index.ts";
+
+export { apiRequestTool } from "./api/index.ts";
 
 export {
   readNarrativeTool,

@@ -168,6 +168,9 @@ Implemented in this pass:
 - `ui/virtual_list.rs`: visible range and ensure-visible state.
 - `ui/split.rs`: split panes and handle rendering.
 - `ui/pane.rs`: reusable pane shell.
+- `ui/terminal_primitives.rs`: Rust port of the former TypeScript terminal
+  primitives: ANSI palette, symbols, mascot strings, line renderers, prompt
+  renderers, checkpoint rendering, spinner frames, and token formatting.
 
 Migrated screens:
 
@@ -191,6 +194,13 @@ Remaining follow-up, intentionally deferred:
 - full markdown parser dependency such as `pulldown-cmark`;
 - syntax highlighting beyond current lightweight rendering;
 - optional terminal palette probing.
+
+Removed package:
+
+- `packages/tui-primitives` has been deleted after the primitives were moved
+  into `hivetui` Rust modules. The TypeScript CLI keeps only a plain
+  compatibility prompt layer for non-TUI commands; rich TUI primitives now live
+  in Rust.
 
 ## Non-goals
 

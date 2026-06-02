@@ -3,9 +3,9 @@ use crate::{
     term::{Canvas, Rect},
     ui::{split_panes, Axis, Constraint, HitAction, MouseRegion, SplitPane},
     widgets::{
-        checkpoint_bar, code_layout, command_popup, config_modal, conflict_bar,
+        activity_toast, checkpoint_bar, code_layout, command_popup, config_modal, conflict_bar,
         dashboard_layout, header, history, info_modal, input, plan_approval_modal, plan_layout,
-        review_layout, statusbar, tabbar, welcome,
+        review_layout, settings_hub, statusbar, tabbar, welcome,
     },
 };
 
@@ -77,17 +77,21 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
     }
 
     // Popup de comandos: flota justo encima del input
-    if state.input.value().starts_with('/') && !matches!(state.modal, ModalState::Config(_) | ModalState::Info(_) | ModalState::PlanApproval(_)) {
+    if state.input.value().starts_with('/') && !matches!(state.modal, ModalState::Config(_) | ModalState::Info(_) | ModalState::PlanApproval(_) | ModalState::Settings(_)) {
         let history_area = content_area_for_popup(area, state);
         command_popup::render(canvas, history_area, state);
     }
 
     // Modales: overlays sobre todo
     match &state.modal {
-        ModalState::Config(_)       => config_modal::render(canvas, area, state),
-        ModalState::Info(_)         => info_modal::render(canvas, area, state),
+        ModalState::Config(_)    => config_modal::render(canvas, area, state),
+        ModalState::Info(_)      => info_modal::render(canvas, area, state),
+        ModalState::Settings(_)  => settings_hub::render(canvas, area, state, true),
+        // PlanApproval se integra como strip dentro de plan_layout cuando estamos en Plan tab.
+        // Para otros tabs se muestra como overlay centrado (caso raro pero posible).
+        ModalState::PlanApproval(_) if state.active_tab == TabId::Plan => {}
         ModalState::PlanApproval(_) => plan_approval_modal::render(canvas, area, state),
-        ModalState::None            => {}
+        ModalState::None         => {}
     }
 
     cursor_position(state, input_area)
@@ -109,6 +113,19 @@ fn render_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {
 
     canvas.with_clip(areas.checkpoint, |canvas| checkpoint_bar::render(canvas, areas.checkpoint, state));
     canvas.with_clip(areas.conflict, |canvas| conflict_bar::render(canvas, areas.conflict, state));
+
+    // Activity toast flotante justo encima del input mientras responde
+    if state.running {
+        let toast_h = 2u16;
+        let toast_y = areas.input.y.saturating_sub(toast_h);
+        if toast_y < area.bottom() && toast_y < areas.input.y {
+            let toast_w = (areas.input.w * 4 / 5).max(20).min(areas.input.w);
+            let toast_x = areas.input.x + (areas.input.w.saturating_sub(toast_w)) / 2;
+            let toast_area = Rect::new(toast_x, toast_y, toast_w, toast_h);
+            canvas.with_clip(toast_area, |canvas| activity_toast::render(canvas, toast_area, state));
+        }
+    }
+
     canvas.with_clip(areas.input, |canvas| input::render(canvas, areas.input, state));
     canvas.with_clip(areas.status, |canvas| statusbar::render(canvas, areas.status, state));
 

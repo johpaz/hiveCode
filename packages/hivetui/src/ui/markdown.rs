@@ -50,7 +50,28 @@ pub fn render_markdown(canvas: &mut Canvas, area: Rect, content: &str, view: Mar
     }
 }
 
+fn strip_think_blocks(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains("<think>") {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("<think>") {
+        out.push_str(&rest[..start]);
+        rest = &rest[start + 7..];
+        if let Some(end) = rest.find("</think>") {
+            rest = &rest[end + 8..];
+        } else {
+            break;
+        }
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
+}
+
 pub fn build_markdown_lines(content: &str, width: usize) -> Vec<MarkdownLine> {
+    let content = strip_think_blocks(content);
+    let content = content.as_ref();
     let mut out = Vec::new();
     let mut in_code = false;
     let mut table_rows: Vec<Vec<String>> = Vec::new();

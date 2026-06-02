@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod adr;
+mod agent_graph;
 mod checkpoint;
 mod conflicts;
 mod diff;
@@ -19,6 +20,7 @@ mod thought;
 mod workers;
 
 pub use adr::{AdrEntry, AdrState};
+pub use agent_graph::{AgentTier, agent_color, all_edges, display_name as agent_display_name, edges_from, edges_to, tier_for};
 pub use checkpoint::{Checkpoint, CheckpointState};
 pub use conflicts::{AgentConflict, ConflictState};
 pub use diff::DiffState;
@@ -29,7 +31,10 @@ pub use harness::{HarnessHealth, HarnessState};
 pub use history::{HistoryEntry, HistoryState, Role};
 pub use input::InputState;
 pub use logs::{LogEntry, LogState};
-pub use modal::{ConfigModalState, InfoModalState, ModalField, ModalFieldKind, ModalState, PlanApprovalState};
+pub use modal::{
+    ConfigModalState, InfoModalState, ModalField, ModalFieldKind, ModalState,
+    PlanApprovalState, SettingsHubState, SettingsMcp, SettingsProvider, SettingsSkill, SettingsTab,
+};
 pub use panels::PanelLayoutState;
 pub use plan::{PlanEntry, PlanPhase, PlanRisk, PlanState};
 pub use session::{ReplMode, SessionState, TabId};
@@ -124,6 +129,8 @@ fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
         BunMessage::Suspend => "suspend",
         BunMessage::Resume => "resume",
         BunMessage::ContextUpdate { .. } => "context_update",
+        BunMessage::SettingsData { .. } => "settings_data",
+        BunMessage::Unknown => "unknown",
     }
 }
 
@@ -325,7 +332,7 @@ impl AppState {
                         self.active_tab = match self.session.mode {
                             ReplMode::Approval => TabId::Review,
                             ReplMode::Auto     => TabId::Code,
-                            ReplMode::Plan     => unreachable!(),
+                            _ => TabId::Code,
                         };
                         self.dirty.full = true;
                     }
@@ -350,7 +357,7 @@ impl AppState {
                         self.active_tab = match self.session.mode {
                             ReplMode::Approval => TabId::Review,
                             ReplMode::Auto     => TabId::Code,
-                            ReplMode::Plan     => unreachable!(),
+                            _ => TabId::Code,
                         };
                         self.dirty.full = true;
                     }
@@ -437,6 +444,11 @@ impl AppState {
                     self.note_task_worker(task_id, &coordinator, "thinking");
                 }
                 self.dirty.thought = true;
+                self.dirty.thought_header = true;
+                self.dirty.search_results = true;
+            }
+            BunMessage::Unknown => {
+                // Mensaje de tipo desconocido — ignorar silenciosamente
             }
 
             // ── Modales ────────────────────────────────────────────────────────
@@ -485,6 +497,28 @@ impl AppState {
             BunMessage::ShowInfoModal { title, content } => {
                 self.modal = ModalState::Info(InfoModalState { title, content, scroll: 0 });
                 self.dirty.modal = true;
+            }
+
+            // ── Settings Hub ───────────────────────────────────────────────────
+            BunMessage::SettingsData { providers, mcp, skills, github_connected, github_repo, telegram_active } => {
+                if let ModalState::Settings(hub) = &mut self.modal {
+                    hub.providers = providers.into_iter().map(|p| SettingsProvider {
+                        id: p.id, name: p.name, model: p.model,
+                        is_active: p.is_active, has_key: p.has_key,
+                    }).collect();
+                    hub.mcp = mcp.into_iter().map(|m| SettingsMcp {
+                        id: m.id, name: m.name, url: m.url, enabled: m.enabled,
+                    }).collect();
+                    hub.skills = skills.into_iter().map(|s| SettingsSkill {
+                        name: s.name, description: s.description,
+                        category: s.category, active: s.active,
+                    }).collect();
+                    hub.github_connected = github_connected;
+                    hub.github_repo = github_repo;
+                    hub.telegram_active = telegram_active;
+                    hub.loading = false;
+                }
+                self.dirty.full = true;
             }
 
             // ── Logs ───────────────────────────────────────────────────────────
@@ -669,7 +703,10 @@ impl AppState {
                 self.harness.approval_pending = true;
                 self.harness.active_task_status = Some("approval".to_string());
                 self.modal = ModalState::PlanApproval(PlanApprovalState { selected: 0 });
-                if !self.tab_locked { self.active_tab = TabId::Plan; }
+                // Always switch to Plan tab so the approval strip is inline and
+                // the plan content is readable — never show as a floating overlay on Focus.
+                self.active_tab = TabId::Plan;
+                self.tab_locked = false;
                 self.dirty.full = true;
             }
 

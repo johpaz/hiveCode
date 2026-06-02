@@ -214,6 +214,10 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
             infoModalResolve = null
             return
           }
+          if (msg.type === "request_settings") {
+            sendSettingsSnapshot(send)
+            return
+          }
           handleTuiMessage(msg, send, suspendTui, resumeTui, callbacks).catch((err) => {
             logger.error("[tui-ipc] handler error", err)
             send({ type: "history_append", role: "system", content: `(×ᴗ×) ${(err as Error).message}` })
@@ -404,4 +408,73 @@ async function handleTuiMessage(
       break
     }
   }
+}
+
+// ── Settings Snapshot ─────────────────────────────────────────────────────────
+
+function sendSettingsSnapshot(send: (msg: object) => void): void {
+  const db = getDb()
+
+  // Cada sección tiene su propio try-catch para que un error en MCP no borre los providers
+  let providers: any[] = []
+  try {
+    const defaultProvider = (db.query(
+      "SELECT value FROM code_config WHERE key = 'default_provider'"
+    ).get() as any)?.value ?? ""
+
+    providers = (db.query(
+      "SELECT id, name, enabled FROM providers WHERE enabled = 1 ORDER BY id"
+    ).all() as any[]).map(p => ({
+      id: p.id,
+      name: p.name ?? p.id,
+      model: (db.query("SELECT value FROM code_config WHERE key = ?")
+        .get(`provider_model_${p.id}`) as any)?.value ?? "",
+      is_active: p.id === defaultProvider,
+      has_key: true,
+    }))
+  } catch { /* tabla providers no existe aún */ }
+
+  let mcp: any[] = []
+  try {
+    mcp = (db.query(
+      "SELECT id, name, url, enabled FROM mcp_servers ORDER BY name"
+    ).all() as any[]).map(m => ({
+      id: String(m.id),
+      name: m.name ?? "",
+      url: m.url ?? "",
+      enabled: m.enabled === 1,
+    }))
+  } catch { /* mcp_servers puede no existir */ }
+
+  let skills: any[] = []
+  try {
+    skills = (db.query(
+      "SELECT name, description, category, active FROM skills ORDER BY name"
+    ).all() as any[]).map(s => ({
+      name: s.name ?? "",
+      description: s.description ?? "",
+      category: s.category ?? "",
+      active: s.active === 1,
+    }))
+  } catch { /* skills puede no existir */ }
+
+  let github_connected = false
+  let github_repo: string | null = null
+  let telegram_active = false
+  try {
+    const configTable = "agent_config"
+    github_connected = !!(db.query(`SELECT value FROM ${configTable} WHERE key = 'github_token' LIMIT 1`).get() as any)?.value
+    github_repo = (db.query(`SELECT value FROM ${configTable} WHERE key = 'github_repo' LIMIT 1`).get() as any)?.value ?? null
+    telegram_active = !!(db.query(`SELECT value FROM ${configTable} WHERE key = 'telegram_token' LIMIT 1`).get() as any)?.value
+  } catch { /* tabla de config de integraciones puede no existir */ }
+
+  send({
+    type: "settings_data",
+    providers,
+    mcp,
+    skills,
+    github_connected,
+    github_repo,
+    telegram_active,
+  })
 }

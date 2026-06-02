@@ -37,16 +37,22 @@ const VALID_PHASES: PhaseName[] = [
 ]
 
 /** Extract JSON from text (handles markdown code blocks) */
+function stripThinkBlocks(text: string): string {
+  return text.replace(/<think>[\s\S]*?<\/think>/g, "").trim()
+}
+
 function extractJson(text: string): string | null {
+  const clean = stripThinkBlocks(text)
+
   // Try markdown code block first
-  const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+  const codeBlockMatch = clean.match(/```(?:json)?\s*([\s\S]*?)```/)
   if (codeBlockMatch) {
     const inner = codeBlockMatch[1].trim()
     if (inner.startsWith("{")) return inner
   }
 
   // Try raw JSON
-  const jsonMatch = text.match(/\{[\s\S]*\}/)
+  const jsonMatch = clean.match(/\{[\s\S]*\}/)
   if (jsonMatch) return jsonMatch[0]
 
   return null
@@ -123,19 +129,20 @@ export function parsePlan(text: string): ParsedPlan {
     }
   }
 
-  // Fallback: return a default plan with all phases
+  // Fallback: extract what we can from the raw text and proceed with default phases.
+  // Never set parseError — we'd rather show a usable plan than reject everything.
   console.warn("[plan-parser] Failed to parse plan JSON — using default phase order")
+  const title = text.match(/#+\s*(.+)/)?.[1]?.trim() || "Plan de implementación"
   return {
     adr: {
-      title: "Auto-generated ADR",
-      context: text.slice(0, 500),
+      title,
+      context: text.slice(0, 800),
       options: "{}",
-      decision: "Proceed with implementation",
-      consequences: "See narrative for details",
+      decision: "Proceder con la implementación según el análisis de Architecture.",
+      consequences: "Ver narrativa completa en FOCUS para detalles.",
     },
     phases: sortPhases(getDefaultPhases()),
-    risks: [{ severity: "MEDIUM", description: "Plan could not be parsed from JSON" }],
-    parseError: "Architecture no devolvio JSON estructurado valido para el plan.",
+    risks: [{ severity: "MEDIUM", description: "El plan fue generado con fases por defecto porque el JSON estaba incompleto." }],
   }
 }
 

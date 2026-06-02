@@ -81,6 +81,11 @@ impl Canvas {
     pub fn print(&mut self, x: u16, y: u16, text: &str, style: Style) {
         let mut col = 0u16;
         for ch in text.chars() {
+            // Skip control characters (\n, \r, \t, ESC, etc.) — printing them via
+            // crossterm Print() corrupts cursor positioning in the diff renderer.
+            if ch.is_control() {
+                continue;
+            }
             let w = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
             let cx = x.saturating_add(col);
             if self.glyph_fits(cx, y, w) {
@@ -189,8 +194,18 @@ impl Canvas {
                     continue;
                 }
 
-                // Right-half placeholder for wide chars: update front but never render
+                // Right-half placeholder for wide chars:
+                // If this cell previously had real content and is now a placeholder,
+                // emit a space to clear the residual glyph from the terminal.
                 if new.ch == '\0' {
+                    if old.ch != '\0' {
+                        if cur_y != y || cur_x != x {
+                            queue!(out, MoveTo(x, y))?;
+                        }
+                        queue!(out, Print(' '))?;
+                        cur_x = x + 1;
+                        cur_y = y;
+                    }
                     self.front[idx] = new.clone();
                     continue;
                 }

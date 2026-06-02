@@ -21,7 +21,6 @@
   "dependencies": {
     "@johpaz/hivecode-core": "workspace:*",
     "@johpaz/hivecode-code": "workspace:*",
-    "@johpaz/hivecode-tui-primitives": "workspace:*",
     "toon-format-parser": "1.1.3"
   },
   "devDependencies": {

@@ -1,4 +1,6 @@
+pub mod activity_toast;
 pub mod checkpoint_bar;
+pub mod settings_hub;
 pub mod code_layout;
 pub mod command_popup;
 pub mod components;

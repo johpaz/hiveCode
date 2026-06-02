@@ -1,163 +1,29 @@
 #!/usr/bin/env bun
 
-// ─── Hive-Code Commands (SPEC.md) ───────────────────────────────────────────
-
-import { plan } from "./commands-code/plan"
-import { run } from "./commands-code/run"
-import { narrativeShow, narrativeSearch, narrativeExport } from "./commands-code/narrative"
-import { decisionList, decisionShow } from "./commands-code/decisions"
 import { doctor } from "./commands-code/doctor"
-import { dev } from "./commands-code/dev"
-import { providerList, providerAdd, providerEdit, providerRemove, providerSetDefault, providerSetModel, providerTest } from "./commands-code/provider"
-import { mcpList, mcpAdd, mcpRemove, mcpEnable, mcpDisable, mcpTest, mcpInspect } from "./commands-code/mcp"
-import { skillList, skillEnable, skillDisable, skillAdd, skillRemove, skillInspect, skillAssign } from "./commands-code/skill"
-import { agentList, agentInspect, agentEdit, agentReset } from "./commands-code/agent"
-import { modeHistory, taskRollback, taskResume, taskDebug, upgrade } from "./commands-code/extras"
-import { init } from "./commands-code/init"
+import { upgrade } from "./commands-code/extras"
 import { repl } from "./commands-code/repl"
-import { telegramConnect, telegramEdit, telegramDisconnect, telegramStatus } from "./commands-code/telegram"
-import { onboard } from "./commands-code/onboard"
-
-// ─── Hive Base Commands ───────────────────────────────────────────────────────
-
-import { start, stop, status, reload } from "./commands/gateway"
-import { mode } from "./commands/mode"
-import { tasks } from "./commands/tasks"
-import { secrets } from "./commands/secrets"
-import { notes } from "./commands/notes"
-import { ace } from "./commands/ace"
-import { github } from "./commands/github"
-import { coordinator } from "./commands/coordinator"
-
+import { stop } from "./commands/gateway"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
-
 import pkg from "../../../package.json"
 
 const VERSION = pkg.version
 
 const HELP = `
 ╔══════════════════════════════════════════╗
-║     hivecode — Multi-AI Coding Tool     ║
-║     v${VERSION}                             ║
+║     hivecode — Multi-AI Coding Tool      ║
+║     v${VERSION}                              ║
 ╚══════════════════════════════════════════╝
 
-Usage: hivecode <command> [subcommand] [options]
+Uso: hivecode [comando]
 
-Modos de operación:
-  mode get|status            Mostrar modo actual
-  mode set <mode>            plan|approval|auto
-  mode history               Historial de cambios de modo
-  mode cycle                 Ciclar al siguiente modo
+  hivecode           Iniciar el entorno de trabajo
+  hivecode doctor    Diagnóstico del sistema
+  hivecode upgrade   Verificar actualizaciones
+  hivecode exit      Detener el sistema
 
-Gateway:
-  start [--mode <mode>]      Iniciar el gateway (daemon)
-  stop                       Detener el gateway
-  reload                     Recargar config
-  status                     Estado del sistema
-
-Providers LLM:
-  provider list              Listar providers
-  provider add [name]        Añadir provider (wizard)
-  provider edit [name]       Editar API key, URL o modelo
-  provider remove <name>     Eliminar provider
-  provider set-default <n>   Provider por defecto
-  provider set-model <p> <m> Asignar modelo
-  provider test <name>       Ping con latencia
-
-MCP:
-  mcp list                   Listar servidores MCP
-  mcp add <url-or-name>      Añadir MCP server
-  mcp remove <name>          Eliminar MCP
-  mcp enable <name>          Habilitar MCP
-  mcp disable <name>         Deshabilitar MCP
-  mcp test <name>            Verificar conexión
-  mcp inspect <name>         Ver detalles MCP
-
-Skills:
-  skill list                 Listar skills
-  skill enable <name>        Habilitar skill
-  skill disable <name>       Deshabilitar skill
-  skill add <path>           Importar skill .md
-  skill remove <name>        Eliminar skill
-  skill inspect <name>       Ver skill
-  skill assign <sk> <coord>  Asignar a coordinador
-
-Coordinadores y Agentes:
-  coordinator list           Listar coordinadores
-  coordinator status <name>  Estado de un coordinador
-  coordinator restart <name> Reiniciar coordinador
-  coordinator pause <name>   Pausar coordinador
-  coordinator resume <name>  Reanudar coordinador
-
-  agent list                 Listar agentes/subagentes
-  agent inspect <name>       Ver detalles de un agente
-  agent edit <name>          Editar system prompt en $EDITOR
-  agent reset <name>         Restaurar prompt por defecto
-
-Tareas de código:
-  plan "<desc>"              Modo plan: diseña sin tocar código
-  run "<desc>"               Modo auto: ejecuta completo
-  task list                  Listar tareas
-  task status <id>           Estado de tarea
-  task cancel <id>           Cancelar tarea
-  task rollback <id>         Revertir archivos + git
-  task resume <id>           Reanudar tarea pausada
-
-Narrativo y decisiones:
-  narrative show             Mostrar narrativo de tarea
-  narrative search <query>   Buscar en narrativo
-  narrative export           Exportar narrativo
-  decision list              Listar ADRs
-  decision show <id>         Ver ADR
-
-GitHub:
-  github connect             Conectar con GitHub (OAuth)
-  github disconnect          Desconectar
-  github status              Estado de integración
-  github set-repo <repo>     Configurar repositorio
-  github whoami              Ver usuario conectado
-
-Telegram:
-  telegram connect           Conectar bot de Telegram (wizard)
-  telegram edit              Editar configuración del bot
-  telegram disconnect        Desconectar bot
-  telegram status            Estado e info del bot
-
-Secrets:
-  secret list                Listar secrets (solo nombres)
-  secret set <name>          Establecer secret
-  secret delete <name>       Eliminar secret
-  secret rotate <name>       Rotar secret
-
-Notas (scratchpad):
-  note list                  Listar notas
-  note add <key> <val>       Añadir nota
-  note get <key>             Leer nota
-  note delete <key>          Eliminar nota
-
-ACE:
-  ace status                 Estado del ACE
-  ace playbook list          Listar reglas del playbook
-  ace playbook reset         Resetear playbook
-  ace reflector run          Forzar análisis inmediato
-
-Sistema:
-  init [path]                Inicializar proyecto
-  doctor                     Diagnóstico completo
-  doctor --fix               Correcciones automáticas
-  upgrade                    Verificar actualizaciones
-  migrate                    Migrar base de datos
-  onboard                    Configuración inicial
-
-Options:
-  --help, -h                 Mostrar esta ayuda
-  --version, -v              Mostrar versión
-
-Examples:
-  hivecode mode set auto        Modo ejecución automática
-  hivecode plan "añadir auth JWT"  Diseñar sin implementar
-  hivecode run "crear API REST"    Ejecutar tarea completa
-  hivecode doctor               Diagnosticar el sistema
+  --version, -v      Mostrar versión
+  --help, -h         Mostrar esta ayuda
 `
 
 import { bootstrap, registerModule } from "@johpaz/hivecode-core"
@@ -167,16 +33,13 @@ let _dbInitialized = false
 
 function ensureGlobalInit(): void {
   if (_dbInitialized) return
-  
   if (!process.env.HIVE_DEV) logger.setLevel("warn")
-
   try {
     registerModule(HiveCodeModule)
     bootstrap()
     _dbInitialized = true
-    if (process.env.HIVE_DEV) logger.info("[cli] 🚀 Global bootstrap complete — System is ready")
   } catch (err) {
-    logger.error("[cli] ❌ Global init failed:", (err as Error).message)
+    logger.error("[cli] ❌ Error de inicialización:", (err as Error).message)
     process.exit(1)
   }
 }
@@ -186,232 +49,57 @@ async function main(): Promise<void> {
   const args = process.argv.slice(isDev ? 2 : 1)
   const normalizedArgs = args[0]?.includes("\\") || args[0]?.includes("/") ? args.slice(1) : args
   const command = normalizedArgs[0]
-  const subcommand = normalizedArgs[1]
-  const flags = normalizedArgs.filter((a) => a.startsWith("--"))
+  const flags = normalizedArgs.filter(a => a.startsWith("--"))
 
-  // Centralized initialization for all commands except help/version/gateway-only
-  const skipInit = ["--help", "-h", "--version", "-v"].includes(command)
-  if (!skipInit) {
-    ensureGlobalInit()
-  }
+  const skipInit = ["--help", "-h", "--version", "-v", "upgrade", "exit", undefined].includes(command)
+  if (!skipInit) ensureGlobalInit()
 
   switch (command) {
-    // ─── Hive-Code UI Commands ─────────────────────────────────────────────
-    case "plan":
-      await plan(subcommand)
+    case undefined:
+      await repl()
       break
-    case "run":
-      await run(subcommand, flags)
-      break
-    case "dev":
-      await dev(flags)
-      break
+
     case "doctor":
+      ensureGlobalInit()
       await doctor(flags)
       break
-    case "init":
-      await init(subcommand)
-      break
+
     case "upgrade":
       await upgrade()
       break
 
-    // ─── Providers ─────────────────────────────────────────────────────────
-    case "provider":
-    case "providers": {
-      if (subcommand === "list" || subcommand === undefined) await providerList()
-      else if (subcommand === "add") await providerAdd(args[2])
-      else if (subcommand === "edit") await providerEdit(args[2])
-      else if (subcommand === "remove") await providerRemove(args[2])
-      else if (subcommand === "set-default") await providerSetDefault(args[2])
-      else if (subcommand === "set-model") await providerSetModel(args.slice(2))
-      else if (subcommand === "test") await providerTest(args[2])
-      else {
-        console.error(`❌ Subcomando desconocido: "${subcommand}"`)
-        process.exit(1)
-      }
-      break
-    }
-
-    // ─── MCP ───────────────────────────────────────────────────────────────
-    case "mcp": {
-      if (subcommand === "list" || subcommand === undefined) await mcpList()
-      else if (subcommand === "add") await mcpAdd(args[2])
-      else if (subcommand === "remove") await mcpRemove(args[2])
-      else if (subcommand === "enable") await mcpEnable(args[2])
-      else if (subcommand === "disable") await mcpDisable(args[2])
-      else if (subcommand === "test") await mcpTest(args[2])
-      else if (subcommand === "inspect") await mcpInspect(args[2])
-      else {
-        console.error(`❌ Subcomando desconocido: "${subcommand}"`)
-        process.exit(1)
-      }
-      break
-    }
-
-    // ─── Skills ────────────────────────────────────────────────────────────
-    case "skill":
-    case "skills": {
-      if (subcommand === "list" || subcommand === undefined) await skillList()
-      else if (subcommand === "enable") await skillEnable(args[2])
-      else if (subcommand === "disable") await skillDisable(args[2])
-      else if (subcommand === "add") await skillAdd(args[2])
-      else if (subcommand === "remove") await skillRemove(args[2])
-      else if (subcommand === "inspect") await skillInspect(args[2])
-      else if (subcommand === "assign") await skillAssign(args.slice(2))
-      else {
-        console.error(`❌ Subcomando desconocido: "${subcommand}"`)
-        process.exit(1)
-      }
-      break
-    }
-
-    // ─── Agents ────────────────────────────────────────────────────────────
-    case "agent":
-    case "agents": {
-      if (subcommand === "list" || subcommand === undefined) await agentList(args.slice(2))
-      else if (subcommand === "inspect") await agentInspect(args[2])
-      else if (subcommand === "edit") await agentEdit(args[2])
-      else if (subcommand === "reset") await agentReset(args[2])
-      else {
-        console.error(`❌ Subcomando desconocido: "${subcommand}"`)
-        process.exit(1)
-      }
-      break
-    }
-
-    // ─── Narrative & Decisions ─────────────────────────────────────────────
-    case "narrative": {
-      if (subcommand === "search") {
-        await narrativeSearch(args.slice(2))
-      } else if (subcommand === "export") {
-        await narrativeExport(flags)
-      } else {
-        await narrativeShow(flags)
-      }
-      break
-    }
-    case "decision":
-    case "decisions": {
-      if (subcommand === "list" || subcommand === undefined) {
-        await decisionList()
-      } else if (subcommand === "show") {
-        await decisionShow(args.slice(2))
-      } else {
-        console.error(`❌ Subcomando desconocido: "${subcommand}"`)
-        process.exit(1)
-      }
-      break
-    }
-
-    // ─── Hive Base Commands ────────────────────────────────────────────────
-    case "mode": {
-      if (subcommand === "history") {
-        await modeHistory()
-      } else {
-        await mode(subcommand)
-      }
-      break
-    }
-    case "start":
-      await start(flags)
-      break
-    case "stop":
+    case "exit":
       await stop()
       break
-    case "reload":
-      await reload()
-      break
-    case "status":
-      await status(flags)
-      break
-    case "task":
-    case "tasks": {
-      if (subcommand === "rollback") {
-        await taskRollback(args[2])
-      } else if (subcommand === "resume") {
-        await taskResume(args[2])
-      } else if (subcommand === "debug") {
-        await taskDebug(args[2], args.slice(3))
-      } else {
-        await tasks(subcommand, args.slice(2))
-      }
-      break
-    }
-    case "secret":
-    case "secrets":
-      await secrets(subcommand, args.slice(2))
-      break
-    case "note":
-    case "notes":
-      await notes(subcommand, args.slice(2))
-      break
-    case "ace":
-      await ace(subcommand, args.slice(2))
-      break
-    case "github":
-      await github(subcommand, args.slice(2))
-      break
-    case "coordinator":
-      await coordinator(subcommand, args.slice(2))
-      break
-    // ─── Telegram ──────────────────────────────────────────────────────────
-    case "telegram": {
-      if (subcommand === "connect") await telegramConnect()
-      else if (subcommand === "edit") await telegramEdit()
-      else if (subcommand === "disconnect") await telegramDisconnect()
-      else if (subcommand === "status") await telegramStatus()
-      else {
-        console.error(`❌ Subcomando desconocido: "${subcommand}"`)
-        console.log("  telegram connect      Conectar bot")
-        console.log("  telegram disconnect   Desconectar bot")
-        console.log("  telegram status       Ver estado")
-        process.exit(1)
-      }
-      break
-    }
 
-    case "onboard": {
-      await onboard(VERSION)
-      break
-    }
-    case "migrate": {
-      console.log("Database migration — run `bun run migrate` from the project root.")
-      break
-    }
-
-    // ─── Meta ──────────────────────────────────────────────────────────────
     case "--version":
     case "-v":
     case "version":
       console.log(`hivecode v${VERSION}`)
-      process.exit(0)
       break
+
     case "--help":
     case "-h":
     case "help":
       console.log(HELP)
       break
-    case undefined:
-      await repl()
-      break
+
     default:
-      console.error(`❌ Comando desconocido: "${command}"\n`)
+      console.error(`❌ Comando desconocido: "${command}"`)
       console.log(HELP)
       process.exit(1)
   }
 }
 
-// ─── Global Error Handlers (FASE 2) ─────────────────────────────────────────
 process.on("uncaughtException", (err) => {
-  logger.error("[cli] Uncaught exception:", err)
+  logger.error("[cli] Error no capturado:", err)
   process.exit(1)
 })
-process.on("unhandledRejection", (reason, promise) => {
-  logger.error(`[cli] Unhandled rejection at: ${promise}, reason: ${reason}`)
+process.on("unhandledRejection", (reason) => {
+  logger.error("[cli] Promesa rechazada:", reason)
 })
 
-main().catch((error) => {
-  logger.error("[cli] Fatal error:", error.message)
+main().catch(err => {
+  logger.error("[cli] Error fatal:", err.message)
   process.exit(1)
 })

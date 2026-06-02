@@ -15,7 +15,8 @@ use crossterm::{
 
 use crate::{
     ipc::TuiMessage,
-    state::{AppState, HistoryEntry, InfoModalState, ModalFieldKind, ModalState, ReplMode, Role, TabId},
+    state::{AppState, HistoryEntry, InfoModalState, ModalFieldKind, ModalState, ReplMode, Role,
+            SettingsHubState, SettingsTab, TabId},
     renderer::layout_areas,
     term::Rect,
     ui::{split_panes, Axis, Constraint, HitAction, SplitPane},
@@ -58,6 +59,123 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         return false;
     }
 
+    // ── Settings Hub activo ───────────────────────────────────────────────────
+    if let ModalState::Settings(hub) = &mut state.modal {
+        match key.code {
+            KeyCode::Esc => {
+                state.modal = ModalState::None;
+                state.dirty.full = true;
+            }
+            KeyCode::Tab => {
+                hub.active_tab = hub.active_tab.next();
+                hub.selected_row = 0;
+                state.dirty.full = true;
+            }
+            KeyCode::BackTab => {
+                hub.active_tab = hub.active_tab.prev();
+                hub.selected_row = 0;
+                state.dirty.full = true;
+            }
+            KeyCode::Up => {
+                hub.selected_row = hub.selected_row.saturating_sub(1);
+                state.dirty.full = true;
+            }
+            KeyCode::Down => {
+                let max = match hub.active_tab {
+                    SettingsTab::Providers | SettingsTab::Models => hub.providers.len(),
+                    SettingsTab::Mcp       => hub.mcp.len(),
+                    SettingsTab::Skills    => hub.skills.len(),
+                    _                      => 0,
+                }.saturating_sub(1);
+                hub.selected_row = (hub.selected_row + 1).min(max);
+                state.dirty.full = true;
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                let cmd = match hub.active_tab {
+                    SettingsTab::Providers => "/provider add",
+                    SettingsTab::Models    => "/modelo add",
+                    SettingsTab::Mcp       => "/mcp add",
+                    SettingsTab::Skills    => "/skill add",
+                    SettingsTab::Github    => "/github connect",
+                    SettingsTab::Telegram  => "/telegram connect",
+                };
+                state.modal = ModalState::None;
+                state.pending_ipc.push(TuiMessage::Submit { input: cmd.to_string() });
+                state.dirty.full = true;
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                // Delete del item seleccionado — envía el comando de remove al tab activo
+                let cmd = match hub.active_tab {
+                    SettingsTab::Providers => {
+                        hub.providers.get(hub.selected_row)
+                            .map(|p| format!("/provider remove {}", p.id))
+                    }
+                    SettingsTab::Mcp => {
+                        hub.mcp.get(hub.selected_row)
+                            .map(|m| format!("/mcp remove {}", m.id))
+                    }
+                    _ => None,
+                };
+                if let Some(c) = cmd {
+                    state.modal = ModalState::None;
+                    state.pending_ipc.push(TuiMessage::Submit { input: c });
+                    state.dirty.full = true;
+                }
+            }
+            KeyCode::Char(' ') => {
+                // Space: toggle enable/disable para skills y mcp
+                let cmd = match hub.active_tab {
+                    SettingsTab::Skills => {
+                        hub.skills.get(hub.selected_row).map(|s| {
+                            if s.active { format!("/skill disable {}", s.name) }
+                            else        { format!("/skill enable {}",  s.name) }
+                        })
+                    }
+                    SettingsTab::Mcp => {
+                        hub.mcp.get(hub.selected_row).map(|m| {
+                            if m.enabled { format!("/mcp disable {}", m.id) }
+                            else         { format!("/mcp enable {}",  m.id) }
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(c) = cmd {
+                    state.modal = ModalState::None;
+                    state.pending_ipc.push(TuiMessage::Submit { input: c });
+                    state.dirty.full = true;
+                }
+            }
+            KeyCode::Enter => {
+                let cmd = match hub.active_tab {
+                    // Activar el provider seleccionado como default
+                    SettingsTab::Providers => {
+                        hub.providers.get(hub.selected_row)
+                            .map(|p| format!("/provider set {}", p.id))
+                    }
+                    // Cambiar el modelo del provider seleccionado
+                    SettingsTab::Models => {
+                        hub.providers.get(hub.selected_row)
+                            .map(|p| format!("/modelo set {} {}", p.id, p.model))
+                    }
+                    SettingsTab::Mcp => {
+                        hub.mcp.get(hub.selected_row)
+                            .map(|m| format!("/mcp inspect {}", m.id))
+                    }
+                    SettingsTab::Github    => Some("/github status".to_string()),
+                    SettingsTab::Telegram  => Some("/telegram status".to_string()),
+                    _ => None,
+                };
+                if let Some(c) = cmd {
+                    state.modal = ModalState::None;
+                    state.pending_ipc.push(TuiMessage::Submit { input: c });
+                    state.dirty.full = true;
+                }
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     // ── Modal de aprobación del plan ───────────────────────────────────────────
     if let ModalState::PlanApproval(approval) = &mut state.modal {
         match key.code {
@@ -66,11 +184,12 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 // Cancel = send "n" so pendingPlanTask sees it as rejection
                 state.pending_ipc.push(TuiMessage::Submit { input: "n".to_string() });
             }
-            KeyCode::Up => {
+            // Strip horizontal: ←→ navegan las opciones
+            KeyCode::Left | KeyCode::Up => {
                 approval.selected = approval.selected.saturating_sub(1);
                 state.dirty.full = true;
             }
-            KeyCode::Down => {
+            KeyCode::Right | KeyCode::Down => {
                 approval.selected = (approval.selected + 1).min(3);
                 state.dirty.full = true;
             }
@@ -234,6 +353,17 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
     }
 
     match (key.modifiers, key.code) {
+        // F2 o Ctrl+Shift+S → abre el hub de settings
+        (KeyModifiers::NONE, KeyCode::F(2))
+        | (KeyModifiers::CONTROL | KeyModifiers::SHIFT, KeyCode::Char('s'))
+        | (KeyModifiers::CONTROL | KeyModifiers::SHIFT, KeyCode::Char('S')) => {
+            state.modal = ModalState::Settings(SettingsHubState {
+                loading: true,
+                ..Default::default()
+            });
+            state.pending_ipc.push(TuiMessage::RequestSettings);
+            state.dirty.full = true;
+        }
         // Teclas 1-5 cambian de tab (solo cuando no se está escribiendo)
         (KeyModifiers::NONE, KeyCode::Char(n @ '1'..='5')) if state.input.value().is_empty() && !state.history_nav_mode => {
             if let Some(tab) = TabId::from_num(n as u8 - b'0') {
@@ -502,6 +632,43 @@ fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
         HitAction::Command(command) => {
             state.input.set(&command);
             true
+        }
+        HitAction::SelectRow(i) => {
+            if let ModalState::Settings(hub) = &mut state.modal {
+                hub.selected_row = i;
+                state.dirty.full = true;
+                return true;
+            }
+            false
+        }
+        HitAction::Custom(ref id) if id.starts_with("settings:") => {
+            if id == "settings:noop" { return true; }
+            if let Some(tab_name) = id.strip_prefix("settings:tab:") {
+                if let ModalState::Settings(hub) = &mut state.modal {
+                    hub.active_tab = match tab_name {
+                        "Providers" => SettingsTab::Providers,
+                        "Modelos"   => SettingsTab::Models,
+                        "MCP"       => SettingsTab::Mcp,
+                        "Skills"    => SettingsTab::Skills,
+                        "GitHub"    => SettingsTab::Github,
+                        "Telegram"  => SettingsTab::Telegram,
+                        _           => hub.active_tab,
+                    };
+                    hub.selected_row = 0;
+                    state.dirty.full = true;
+                }
+                return true;
+            }
+            if let Some(row_str) = id.strip_prefix("settings:row:") {
+                if let Ok(row) = row_str.parse::<usize>() {
+                    if let ModalState::Settings(hub) = &mut state.modal {
+                        hub.selected_row = row;
+                        state.dirty.full = true;
+                    }
+                }
+                return true;
+            }
+            false
         }
         HitAction::ResizeSplit { id } => {
             state.panels.begin_drag(id);

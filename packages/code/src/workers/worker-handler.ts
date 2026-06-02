@@ -500,7 +500,9 @@ while (this.iterations < MAX_ITERATIONS) {
 
         // No tool calls → final response
         if (!response.tool_calls?.length || response.stop_reason !== "tool_calls") {
-          finalContent = response.content?.trim() || "No output generated"
+          // Strip <think>...</think> blocks so narrativeEntry is always clean JSON/text
+          const rawContent = response.content?.trim() || "No output generated"
+          finalContent = rawContent.replace(/<think>[\s\S]*?<\/think>/g, "").trim() || rawContent
           if (!response.content?.trim()) {
             console.warn(`[worker-handler] ⚠️ ${this.coordinatorName} returned empty content (stop_reason=${response.stop_reason}, tokens_in=${response.usage?.input_tokens}, tokens_out=${response.usage?.output_tokens})`)
           }

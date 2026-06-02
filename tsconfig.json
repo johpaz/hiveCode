@@ -3,101 +3,35 @@
   "compilerOptions": {
     "jsx": "react-jsx",
     "paths": {
-      "@johpaz/hive": [
+      "@johpaz/hivecode": [
         "./packages/core/src/index.ts"
       ],
-      "@johpaz/hive/agent/*": [
+      "@johpaz/hivecode/agent/*": [
         "./packages/core/src/agent/*"
       ],
-      "@johpaz/hive/channels/*": [
+      "@johpaz/hivecode/channels/*": [
         "./packages/core/src/channels/*"
       ],
-      "@johpaz/hive/storage/*": [
+      "@johpaz/hivecode/storage/*": [
         "./packages/core/src/storage/*"
       ],
-      "@johpaz/hive/tools/*": [
+      "@johpaz/hivecode/tools/*": [
         "./packages/core/src/tools/*"
       ],
-      "@johpaz/hive/config/*": [
+      "@johpaz/hivecode/config/*": [
         "./packages/core/src/config/*"
       ],
-      "@johpaz/hive/utils/*": [
+      "@johpaz/hivecode/utils/*": [
         "./packages/core/src/utils/*"
       ],
-      "@johpaz/hive/gateway/*": [
+      "@johpaz/hivecode/gateway/*": [
         "./packages/core/src/gateway/*"
       ],
-      "@johpaz/hive/mcp/*": [
+      "@johpaz/hivecode/mcp/*": [
         "./packages/mcp/src/*"
       ],
-      "@johpaz/hive/skills/*": [
+      "@johpaz/hivecode/skills/*": [
         "./packages/skills/src/*"
-      ],
-      "@johpaz/hive-core": [
-        "./packages/core/src/index.ts"
-      ],
-      "@johpaz/hive-core/*": [
-        "./packages/core/src/*"
-      ],
-      "@johpaz/hive-code-core": [
-        "./packages/core/src"
-      ],
-      "@johpaz/hive-code-core/*": [
-        "./packages/core/src/*"
-      ],
-      "@johpaz/hive-agents-core/*": [
-        "./packages/core/src/*"
-      ],
-      "@johpaz/hive-mcp": [
-        "./packages/mcp/src/index.ts"
-      ],
-      "@johpaz/hive-mcp/*": [
-        "./packages/mcp/src/*"
-      ],
-      "@johpaz/hive-agents-mcp": [
-        "./packages/mcp/src/index.ts"
-      ],
-      "@johpaz/hive-agents-mcp/*": [
-        "./packages/mcp/src/*"
-      ],
-      "@johpaz/hive-skills": [
-        "./packages/skills/src/index.ts"
-      ],
-      "@johpaz/hive-skills/*": [
-        "./packages/skills/src/*"
-      ],
-      "@johpaz/hive-agents-skills": [
-        "./packages/skills/src/index.ts"
-      ],
-      "@johpaz/hive-agents-skills/*": [
-        "./packages/skills/src/*"
-      ],
-      "@johpaz/hive-cli": [
-        "./packages/cli/src/index.ts"
-      ],
-      "@johpaz/hive-code-bridge": [
-        "./packages/code-bridge/src/index.ts"
-      ],
-      "@johpaz/hive-code-bridge/*": [
-        "./packages/code-bridge/src/*"
-      ],
-      "@johpaz/hive-agents-code-bridge": [
-        "./packages/code-bridge/src/index.ts"
-      ],
-      "@johpaz/hive-agents-code-bridge/*": [
-        "./packages/code-bridge/src/*"
-      ],
-      "@johpaz/hive-tools": [
-        "./packages/tools/src/index.ts"
-      ],
-      "@johpaz/hive-tools/*": [
-        "./packages/tools/src/*"
-      ],
-      "@johpaz/hive-code-code": [
-        "./packages/code/src/index.ts"
-      ],
-      "@johpaz/hive-code-code/*": [
-        "./packages/code/src/*"
       ],
       "@johpaz/hivecode-core": [
         "./packages/core/src/index.ts"
@@ -105,20 +39,26 @@
       "@johpaz/hivecode-core/*": [
         "./packages/core/src/*"
       ],
+      "@johpaz/hivecode-mcp": [
+        "./packages/mcp/src/index.ts"
+      ],
+      "@johpaz/hivecode-mcp/*": [
+        "./packages/mcp/src/*"
+      ],
+      "@johpaz/hivecode-skills": [
+        "./packages/skills/src/index.ts"
+      ],
+      "@johpaz/hivecode-skills/*": [
+        "./packages/skills/src/*"
+      ],
+      "@johpaz/hivecode-cli": [
+        "./packages/cli/src/index.ts"
+      ],
       "@johpaz/hivecode-code": [
         "./packages/code/src/index.ts"
       ],
       "@johpaz/hivecode-code/*": [
         "./packages/code/src/*"
-      ],
-      "@johpaz/hive-tts": [
-        "./packages/tts/src/index.ts"
-      ],
-      "@johpaz/hive-tts/client": [
-        "./packages/tts/src/client.ts"
-      ],
-      "@johpaz/hive-tts/server": [
-        "./packages/tts/src/server.ts"
       ]
     }
   },

@@ -2,7 +2,7 @@ import {
   hiveIntro, hiveOutro, hiveModeBar,
   hivePhaseComplete, hiveSpinner, hiveNote,
   hiveText, isCancel,
-} from "@johpaz/hivecode-tui-primitives"
+} from "../cli-ui.ts"
 import { getExecutionMode, setExecutionMode } from "@johpaz/hivecode-core"
 import { CoordinatorManager } from "@johpaz/hivecode-code/workers/coordinator-manager"
 import { listenModeToggle, stopModeToggle } from "@johpaz/hivecode-code/modes/keyboard"

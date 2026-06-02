@@ -10,7 +10,7 @@
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveText, isCancel,
-} from "@johpaz/hivecode-tui-primitives"
+} from "../cli-ui.ts"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
 export async function agentList(args: string[] = []): Promise<void> {

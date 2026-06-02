@@ -260,14 +260,22 @@ CREATE INDEX IF NOT EXISTS idx_lf_agent ON learning_failures(agent, failure_type
 
 -- Learning proposals: improvement suggestions generated from failure patterns.
 -- status='pending' has NO effect on the system — operator must approve manually.
+-- escalate_to_human: written by FailureRecoveryScheduler after 3 failed retries.
 CREATE TABLE IF NOT EXISTS learning_proposals (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   source_agent  TEXT NOT NULL,
-  proposal_type TEXT NOT NULL CHECK(proposal_type IN ('skill_adjust','new_skill','prompt_change','phase_order')),
+  proposal_type TEXT NOT NULL CHECK(proposal_type IN ('skill_adjust','new_skill','prompt_change','phase_order','escalate_to_human')),
   description   TEXT NOT NULL,
   failure_ids   TEXT NOT NULL DEFAULT '[]',
   status        TEXT DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
   created_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+-- Migration: add escalate_to_human to learning_proposals CHECK constraint if not present
+-- This runs as a one-time migration at schema init.
+CREATE TABLE IF NOT EXISTS _schema_migrations (
+  id         TEXT PRIMARY KEY,
+  applied_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_lp_status ON learning_proposals(status);
 `;

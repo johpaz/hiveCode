@@ -35,6 +35,7 @@ import type {
 } from "./types"
 import { CoordinatorBase } from "../coordinator/base.ts"
 import { makeGatewayEmitter } from "../context/ipc-emitter.ts"
+import { SystemError, TimeoutError } from "../errors/hive-errors.ts"
 import {
   parseBeeDecision, formatBeeNarrative, formatToolCallForHuman,
   formatToolResult, parseGitDiffStat, parseUnifiedDiff, repairJson,
@@ -89,7 +90,7 @@ export class CoordinatorManager extends CoordinatorBase {
   private activeTaskId: string | null = null
   private activeSessionId: string | null = null
   private broadcastChannel: BroadcastChannel | null = null
-  private pendingResolvers = new Map<string, (value: CoordinatorResult) => void>()
+  private pendingResolvers = new Map<string, { resolve: (value: CoordinatorResult) => void; reject: (err: Error) => void }>()
   private pendingTimeouts  = new Map<string, ReturnType<typeof setTimeout>>()
   private secrets: Record<string, string> = {}
   private allTools: Tool[] = []
@@ -342,7 +343,19 @@ export class CoordinatorManager extends CoordinatorBase {
             success: false,
             durationNs: 0,
           })
-        } catch { /* ignore trace write failures during crash */ }
+        } catch (traceErr) {
+          log.warn(`[coordinator-manager] Failed to write crash trace: ${(traceErr as Error).message}`)
+        }
+        // Reject any in-flight resolver for this worker so dispatchPhase rejects immediately
+        for (const [key, { reject }] of this.pendingResolvers) {
+          if (key.startsWith(`${this.activeTaskId}:`) && key.includes(name)) {
+            const timeout = this.pendingTimeouts.get(key)
+            if (timeout) clearTimeout(timeout)
+            this.pendingTimeouts.delete(key)
+            this.pendingResolvers.delete(key)
+            reject(new SystemError(`Worker ${name} crashed: ${err.message}`))
+          }
+        }
         this.workers.delete(name)
         // Auto-restart with exponential backoff
         setTimeout(() => {
@@ -515,8 +528,9 @@ export class CoordinatorManager extends CoordinatorBase {
 
     // ── Route based on BEE's decision ─────────────────────────────────────────
 
-    // RESPOND: BEE handled it directly — return the answer to the user
-    if (beeDecision.action === "respond" && mode !== "plan") {
+    // RESPOND: BEE handled it directly — return the answer to the user.
+    // This applies in all modes: a greeting or question never needs an architecture plan.
+    if (beeDecision.action === "respond") {
       const response = beeDecision.content ?? ""
       this.scribe.updateTaskStatus(this.activeTaskId, "completed")
       this.emitTaskUpdate("completed", { title: description, mode })
@@ -862,7 +876,9 @@ export class CoordinatorManager extends CoordinatorBase {
       if (fileChanges.length) {
         this.scribe.writeFileChanges(this.activeTaskId, null, fileChanges)
       }
-    } catch { /* git tools optional */ }
+    } catch (gitErr) {
+      log.debug(`[coordinator-manager] git tools unavailable: ${(gitErr as Error).message}`)
+    }
 
     const linesAdded   = fileChanges.reduce((s, f) => s + f.linesAdded,   0)
     const linesRemoved = fileChanges.reduce((s, f) => s + f.linesRemoved, 0)
@@ -889,7 +905,9 @@ export class CoordinatorManager extends CoordinatorBase {
           })
         }
       }
-    } catch { /* no bloquea el cierre */ }
+    } catch (evalErr) {
+      log.warn(`[coordinator-manager] Learning harness evaluation failed: ${(evalErr as Error).message}`)
+    }
 
     const integrationState = await this.integrateTaskWorkspace(taskId, options.mode, options.onApprovalCheckpoint)
     if (integrationState !== "completed") {
@@ -1233,7 +1251,9 @@ export class CoordinatorManager extends CoordinatorBase {
               failureType: "phase_failure",
               errorMessage: result.blockerDescription ?? "unknown",
             })
-          } catch { /* no bloquea el flujo */ }
+          } catch (writeErr) {
+            log.warn(`[coordinator-manager] Failed to write learning failure: ${(writeErr as Error).message}`)
+          }
           await this.cleanupTaskWorkspaceIfClean(this.activeTaskId!, "failed")
           return false
         }
@@ -1531,13 +1551,13 @@ export class CoordinatorManager extends CoordinatorBase {
       const idx = COORDINATOR_NAMES.indexOf(phase)
       setWorkerBusy(idx, true)
       const resolverKey = `${task.taskId}:${task.phaseId}`
-      this.pendingResolvers.set(resolverKey, resolve)
+      this.pendingResolvers.set(resolverKey, { resolve, reject })
 
       const timeout = setTimeout(() => {
         setWorkerBusy(idx, false)
         this.pendingResolvers.delete(resolverKey)
         this.pendingTimeouts.delete(resolverKey)
-        reject(new Error(`Worker ${phase} timed out after 5 minutes`))
+        reject(new TimeoutError(`Worker ${phase} timed out after 5 minutes`, { phase, durationMs: 300_000 }))
       }, 300_000)
       this.pendingTimeouts.set(resolverKey, timeout)
 
@@ -1690,7 +1710,7 @@ export class CoordinatorManager extends CoordinatorBase {
       this.pendingTimeouts.delete(resolverKey)
       const resolver = this.pendingResolvers.get(resolverKey)
       if (resolver) {
-        resolver(msg.result)
+        resolver.resolve(msg.result)
         this.pendingResolvers.delete(resolverKey)
       }
       const idx = COORDINATOR_NAMES.indexOf(name)
@@ -1946,7 +1966,9 @@ export class CoordinatorManager extends CoordinatorBase {
           errorMessage: outputSummary,
           contextSummary: `tool=${msg.toolName} args=${JSON.stringify(msg.toolArgs ?? {}).slice(0, 200)}`,
         })
-      } catch { /* no bloquea */ }
+      } catch (failureWriteErr) {
+        log.warn(`[coordinator-manager] Failed to write tool failure: ${(failureWriteErr as Error).message}`)
+      }
     }
 
     // Evaluate file risk after a successful write so TUI can show risk badges
@@ -1974,7 +1996,9 @@ export class CoordinatorManager extends CoordinatorBase {
               const removed = chunks.filter(c => c.kind === "remove").length
               this.onIpcEvent("file_diff", { path: logicalRiskPath, stats_added: added, stats_removed: removed, chunks, task_id: taskId })
             }
-          } catch { /* diff is advisory — never block the write flow */ }
+          } catch (diffErr) {
+            log.debug(`[coordinator-manager] git_diff advisory failed: ${(diffErr as Error).message}`)
+          }
         }
       }
     }

@@ -32,8 +32,12 @@ export function parseBeeDecision(raw: string): BeeDecision {
     return { action: "respond", content: "", reason: "Empty response from LLM" }
   }
 
+  // Strip <think>...</think> blocks emitted by reasoning models (e.g. minimax-m3)
+  const cleaned = raw.replace(/<think>[\s\S]*?<\/think>/g, "").trim()
+  const input = cleaned || raw
+
   // Strategy 1: markdown code block
-  const codeBlockMatch = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
+  const codeBlockMatch = input.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
   if (codeBlockMatch) {
     try { return extractDecisionFields(JSON.parse(codeBlockMatch[1])) } catch { /* fallthrough */ }
     const repaired = repairJson(codeBlockMatch[1])
@@ -43,7 +47,7 @@ export function parseBeeDecision(raw: string): BeeDecision {
   }
 
   // Strategy 2: inline JSON object with "action" key
-  const jsonObjMatch = raw.match(/\{[\s\S]*"action"[\s\S]*\}/)
+  const jsonObjMatch = input.match(/\{[\s\S]*"action"[\s\S]*\}/)
   if (jsonObjMatch) {
     try { return extractDecisionFields(JSON.parse(jsonObjMatch[0])) } catch { /* fallthrough */ }
     const repaired = repairJson(jsonObjMatch[0])
@@ -53,10 +57,10 @@ export function parseBeeDecision(raw: string): BeeDecision {
   }
 
   // Strategy 3: entire response as JSON
-  try { return extractDecisionFields(JSON.parse(raw)) } catch { /* fallthrough */ }
+  try { return extractDecisionFields(JSON.parse(input)) } catch { /* fallthrough */ }
 
   // Strategy 4: plain text — treat as direct response
-  return { action: "respond", content: raw.trim(), reason: "BEE returned non-JSON response" }
+  return { action: "respond", content: input, reason: "BEE returned non-JSON response" }
 }
 
 export function formatBeeNarrative(raw: string): string {

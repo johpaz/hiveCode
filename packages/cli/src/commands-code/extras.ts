@@ -11,7 +11,7 @@
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveSpinner, hiveConfirm, isCancel,
-} from "@johpaz/hivecode-tui-primitives"
+} from "../cli-ui.ts"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { executeToolByName } from "@johpaz/hivecode-code/workers/tool-bridge"
 import { createAllTools } from "@johpaz/hivecode-core/tools"

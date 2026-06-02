@@ -27,6 +27,9 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
     "append_narrative", "write_decision",
     // Browser preview — verify generated web output before reporting done
     "browser_screenshot", "browser_preview_html",
+    // agent-browser: accessibility-tree automation (navigate, interact, extract)
+    "browser_navigate", "browser_click", "browser_type",
+    "browser_extract", "browser_script", "browser_wait",
   ],
   architecture: [
     "fs_read",
@@ -87,6 +90,8 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
     "shell_executor",
     "browser_screenshot",
     "browser_preview_html",
+    "browser_navigate", "browser_click", "browser_type",
+    "browser_extract", "browser_script", "browser_wait",
   ],
   security: [
     "fs_read",
@@ -118,6 +123,8 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
     "shell_executor",
     "browser_screenshot",
     "browser_preview_html",
+    "browser_navigate", "browser_click", "browser_type",
+    "browser_extract", "browser_script", "browser_wait",
   ],
   devops: [
     "fs_read",
@@ -220,6 +227,7 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
     "append_narrative",
     "shell_executor",
     "browser_screenshot",
+    "browser_navigate", "browser_extract",
   ],
   data_scientist: [
     "fs_read",

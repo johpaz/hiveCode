@@ -275,6 +275,19 @@ pub enum BunMessage {
     Suspend,
     Resume,
     ContextUpdate { agent: String, key: String, scope: String },
+    /// Datos del hub de settings (respuesta a RequestSettings).
+    SettingsData {
+        providers: Vec<IpcSettingsProvider>,
+        mcp: Vec<IpcSettingsMcp>,
+        skills: Vec<IpcSettingsSkill>,
+        github_connected: bool,
+        github_repo: Option<String>,
+        telegram_active: bool,
+    },
+    /// Captura cualquier tipo de mensaje desconocido — evita que serde falle
+    /// y corrompa el canal IPC cuando TypeScript agrega nuevos tipos.
+    #[serde(other)]
+    Unknown,
 }
 
 // ── Tipos de datos para nuevos mensajes ───────────────────────────────────────
@@ -323,6 +336,33 @@ pub struct PlanRiskIpc {
     pub description: String,
 }
 
+// ── Tipos para el hub de settings ────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpcSettingsProvider {
+    pub id: String,
+    pub name: String,
+    pub model: String,
+    pub is_active: bool,
+    pub has_key: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpcSettingsMcp {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpcSettingsSkill {
+    pub name: String,
+    pub description: String,
+    pub category: String,
+    pub active: bool,
+}
+
 /// Definición de campo de modal que llega del servidor Bun.
 #[derive(Debug, Deserialize)]
 pub struct IpcModalField {
@@ -350,6 +390,8 @@ pub enum TuiMessage {
     ModalSubmit { command: String, values: std::collections::HashMap<String, String> },
     ModalCancel { command: String },
     InfoModalClose,
+    /// Solicita a Bun que envíe un SettingsData con el estado actual de la configuración.
+    RequestSettings,
     Exit,
 }
 

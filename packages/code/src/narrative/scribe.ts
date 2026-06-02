@@ -343,7 +343,7 @@ export class Scribe {
 
   writeProposal(p: {
     sourceAgent: string
-    proposalType: "skill_adjust" | "new_skill" | "prompt_change" | "phase_order"
+    proposalType: "skill_adjust" | "new_skill" | "prompt_change" | "phase_order" | "escalate_to_human"
     description: string
     failureIds: number[]
   }): void {

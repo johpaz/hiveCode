@@ -12,6 +12,7 @@ use crossterm::{
 };
 use futures::StreamExt;
 use tokio::time::{self, Duration};
+use tokio::signal::unix::{signal, SignalKind};
 
 use crate::{
     controller::{handle_key_event, handle_mouse_event, handle_paste_event},
@@ -126,6 +127,9 @@ pub async fn run() -> Result<()> {
 
     session.draw(&mut state)?;
 
+    let mut sigterm = signal(SignalKind::terminate())
+        .unwrap_or_else(|_| signal(SignalKind::hangup()).expect("signal setup failed"));
+
     while !should_quit {
         tokio::select! {
             biased;
@@ -136,9 +140,13 @@ pub async fn run() -> Result<()> {
                 session.draw(&mut state)?;
                 draw_pending = false;
             }
-            // 2. Ctrl-C
+            // 2a. Ctrl-C
             _ = tokio::signal::ctrl_c() => {
                 let _ = ipc_ch.tx.try_send(TuiMessage::Exit);
+                should_quit = true;
+            }
+            // 2b. SIGTERM — Bun sends this when it shuts down the child process
+            _ = sigterm.recv() => {
                 should_quit = true;
             }
             // 3. Eventos de teclado y ratón: latencia interactiva, dibujar ya.
@@ -194,9 +202,8 @@ pub async fn run() -> Result<()> {
                     None => break,
                 }
             }
-            // 4. Tick del cursor, reloj y animación bee
+            // 4. Tick de reloj y animación bee (cursor ya no parpadea)
             _ = anim_tick_timer.tick() => {
-                state.cursor_visible = !state.cursor_visible;
                 state.anim_tick = (state.anim_tick + 1) % 8;
                 state.slow_tick = (state.slow_tick + 1) % 30;
                 state.clock = Local::now().format("%H:%M:%S").to_string();
@@ -210,13 +217,21 @@ pub async fn run() -> Result<()> {
                 }
             }
             // 6. Mensajes normales (Init, WorkerUpdate, CheckpointCreated, AssistantDone)
+            // Patrón "drain inbox" de tuie: procesar todos los mensajes del buffer
+            // antes del siguiente draw para evitar renders intermedios durante búsqueda.
             Some(msg) = ipc_ch.normal.recv() => {
                 state.apply_message(msg);
+                while let Ok(extra) = ipc_ch.normal.try_recv() {
+                    state.apply_message(extra);
+                }
                 draw_pending = true;
             }
             // 7. Mensajes low (ThoughtChunk, FileRiskUpdate, AssistantChunk)
             Some(msg) = ipc_ch.low.recv() => {
                 state.apply_message(msg);
+                while let Ok(extra) = ipc_ch.low.try_recv() {
+                    state.apply_message(extra);
+                }
                 draw_pending = true;
             }
         }

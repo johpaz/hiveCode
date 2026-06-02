@@ -10,3 +10,6 @@ hot = true
 coverage = false
 timeout = 30000
 smol = true
+# Real API integration tests require explicit invocation (use --tsconfig-override tests/tsconfig.json)
+# Excluded here so agent worktrees don't auto-discover and run them without proper module resolution
+exclude = ["tests/agents/*.real.test.ts"]

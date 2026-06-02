@@ -13,7 +13,7 @@ import {
   hiveNote,
   hiveSpinner,
   runTelegramConnectWizard,
-} from "@johpaz/hivecode-tui-primitives"
+} from "../cli-ui.ts"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 
 export async function telegramConnect(): Promise<void> {

@@ -41,6 +41,11 @@ export const SEED_DATA: SeedData = {
     { id: "web_fetch", name: "web_fetch", category: "web", description: "Obtener contenido de texto de una URL (ligero, sin JS). Sinónimos: descargar página, extraer texto, obtener contenido, leer url" },
 
     // ─────────────────────────────────────────
+    // 2b. API — HTTP client para REST APIs (curl-like)
+    // ─────────────────────────────────────────
+    { id: "api_request", name: "api_request", category: "api", description: "Hacer peticiones HTTP a APIs REST (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS) con headers, body y query params. Sinónimos: llamar api, petición http, curl, post a api, consumir servicio rest, endpoint, webhook" },
+
+    // ─────────────────────────────────────────
     // 3. PROJECTS — Proyectos y tareas en BD
     // ─────────────────────────────────────────
     { id: "project_create", name: "project_create", category: "projects", description: "Crear un nuevo proyecto con tareas en la base de datos. Sinónimos: nuevo proyecto, iniciar plan, crear proyecto" },
@@ -160,6 +165,7 @@ export const SEED_DATA: SeedData = {
     { id: "nvidia", name: "NVIDIA NIM", baseUrl: "https://integrate.api.nvidia.com/v1" },
     { id: "codex", name: "OpenAI Codex", baseUrl: "https://api.openai.com/v1" },
     { id: "opencode-go", name: "OpenCode Go", baseUrl: "https://opencode.ai/zen/go/v1" },
+    { id: "minimax", name: "MiniMax", baseUrl: "https://api.minimaxi.com/v1" },
     { id: "piper", name: "Piper (Local TTS)" },
   ],
 
@@ -311,8 +317,9 @@ export const SEED_DATA: SeedData = {
     { id: "o4-mini-codex", providerId: "codex", name: "O4 Mini (Codex)", modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat", "code", "reasoning", "streaming"]) },
 
     // ── OpenCode Go (fuente: opencode.ai/docs/es/go) — OpenAI-compatible endpoint ──
-    { id: "opencode-go/minimax-m2.7",       providerId: "opencode-go", name: "MiniMax M2.7",      modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
-    { id: "opencode-go/minimax-m2.5",       providerId: "opencode-go", name: "MiniMax M2.5",      modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/minimax-m3",         providerId: "opencode-go", name: "MiniMax M3",          modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "vision", "function_calling", "streaming", "reasoning"]) },
+    { id: "opencode-go/minimax-m2.7",       providerId: "opencode-go", name: "MiniMax M2.7",        modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/minimax-m2.5",       providerId: "opencode-go", name: "MiniMax M2.5",        modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
     { id: "opencode-go/kimi-k2.6",          providerId: "opencode-go", name: "Kimi K2.6",         modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
     { id: "opencode-go/kimi-k2.5",          providerId: "opencode-go", name: "Kimi K2.5",         modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
     { id: "opencode-go/glm-5.1",            providerId: "opencode-go", name: "GLM-5.1",            modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
@@ -324,6 +331,13 @@ export const SEED_DATA: SeedData = {
     { id: "opencode-go/mimo-v2.5-pro",      providerId: "opencode-go", name: "MiMo-V2.5 Pro",     modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming", "reasoning"]) },
     { id: "opencode-go/mimo-v2.5",          providerId: "opencode-go", name: "MiMo-V2.5",         modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
     { id: "opencode-go/hy3-preview",        providerId: "opencode-go", name: "Hunyuan 3 Preview", modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+
+    // ── MiniMax (fuente: platform.minimaxi.com) — OpenAI-compatible endpoint ──
+    { id: "MiniMax-M3", providerId: "minimax", name: "MiniMax M3", modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "vision", "function_calling", "streaming", "reasoning"]) },
+    { id: "MiniMax-M2.7", providerId: "minimax", name: "MiniMax M2.7", modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "MiniMax-M2.7-highspeed", providerId: "minimax", name: "MiniMax M2.7 Highspeed", modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "MiniMax-M2.5", providerId: "minimax", name: "MiniMax M2.5", modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "MiniMax-M2.5-highspeed", providerId: "minimax", name: "MiniMax M2.5 Highspeed", modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
   ],
 
 
@@ -729,6 +743,7 @@ export function deactivateElement(
 const PATCH_PROVIDERS: SeedData["providers"] = [
   { id: "codex",       name: "OpenAI Codex",  baseUrl: "https://api.openai.com/v1",          category: "llm" },
   { id: "opencode-go", name: "OpenCode Go",   baseUrl: "https://opencode.ai/zen/go/v1",      category: "llm" },
+  { id: "minimax",     name: "MiniMax",       baseUrl: "https://api.minimaxi.com/v1",        category: "llm" },
 ]
 
 const PATCH_MODELS: SeedData["models"] = [
@@ -737,8 +752,9 @@ const PATCH_MODELS: SeedData["models"] = [
   { id: "o3",                          providerId: "codex",       name: "O3",                    modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat","code","reasoning","streaming"]) },
   { id: "o4-mini-codex",              providerId: "codex",       name: "O4 Mini (Codex)",       modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat","code","reasoning","streaming"]) },
   // OpenCode Go — OpenAI-compatible
-  { id: "opencode-go/minimax-m2.7",      providerId: "opencode-go", name: "MiniMax M2.7",      modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
-  { id: "opencode-go/minimax-m2.5",      providerId: "opencode-go", name: "MiniMax M2.5",      modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
+  { id: "opencode-go/minimax-m3",           providerId: "opencode-go", name: "MiniMax M3",          modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","vision","function_calling","streaming","reasoning"]) },
+  { id: "opencode-go/minimax-m2.7",         providerId: "opencode-go", name: "MiniMax M2.7",        modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
+  { id: "opencode-go/minimax-m2.5",         providerId: "opencode-go", name: "MiniMax M2.5",        modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
   { id: "opencode-go/kimi-k2.6",         providerId: "opencode-go", name: "Kimi K2.6",         modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
   { id: "opencode-go/kimi-k2.5",         providerId: "opencode-go", name: "Kimi K2.5",         modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
   { id: "opencode-go/glm-5.1",           providerId: "opencode-go", name: "GLM-5.1",           modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
@@ -750,6 +766,12 @@ const PATCH_MODELS: SeedData["models"] = [
   { id: "opencode-go/mimo-v2.5-pro",     providerId: "opencode-go", name: "MiMo-V2.5 Pro",     modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat","code","function_calling","streaming","reasoning"]) },
   { id: "opencode-go/mimo-v2.5",         providerId: "opencode-go", name: "MiMo-V2.5",         modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
   { id: "opencode-go/hy3-preview",       providerId: "opencode-go", name: "Hunyuan 3 Preview", modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
+  // MiniMax — OpenAI-compatible (platform.minimaxi.com)
+  { id: "MiniMax-M3",              providerId: "minimax", name: "MiniMax M3",              modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","vision","function_calling","streaming","reasoning"]) },
+  { id: "MiniMax-M2.7",            providerId: "minimax", name: "MiniMax M2.7",            modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
+  { id: "MiniMax-M2.7-highspeed",  providerId: "minimax", name: "MiniMax M2.7 Highspeed",  modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
+  { id: "MiniMax-M2.5",            providerId: "minimax", name: "MiniMax M2.5",            modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
+  { id: "MiniMax-M2.5-highspeed",  providerId: "minimax", name: "MiniMax M2.5 Highspeed",  modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
 ]
 
 const PATCH_CODE_BRIDGE: SeedData["codeBridge"] = [

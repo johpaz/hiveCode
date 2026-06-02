@@ -58,14 +58,19 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     let visible = state.input.visible_segment(available);
     canvas.print(area.x + 5, y, &visible.text, Style::new().fg(WHITE).bg(BG_ELEVATED));
 
-    // Cursor
-    if state.cursor_visible && !state.history_nav_mode {
+    // Cursor — always visible, shows the character underneath (inverted) so the
+    // first typed character is never hidden.
+    if !state.history_nav_mode {
         let cursor_x = area
             .x
             .saturating_add(5)
             .saturating_add(visible.cursor_column as u16)
             .min(badge_x.saturating_sub(2));
-        canvas.put(cursor_x, y, Cell::new(' ', Style::new().fg(Color::Black).bg(AMBER).bold()));
+        let ch_under = visible.text
+            .chars()
+            .nth(visible.cursor_column)
+            .unwrap_or(' ');
+        canvas.put(cursor_x, y, Cell::new(ch_under, Style::new().fg(Color::Black).bg(AMBER).bold()));
     }
 
     // Hint line (row 2)
