@@ -158,6 +158,10 @@ const ALL_COMMANDS = [
   { command: "/task status", category: "task", description: "estado detallado de tarea" },
   { command: "/task cancel", category: "task", description: "cancelar tarea en curso" },
   { command: "/task rollback", category: "task", description: "revertir cambios de tarea" },
+  { command: "/session list", category: "session", description: "listar sesiones recientes" },
+  { command: "/session resume", category: "session", description: "reanudar sesion por id" },
+  { command: "/session new", category: "session", description: "iniciar nueva sesion" },
+  { command: "/session status", category: "session", description: "ver sesion activa" },
   { command: "/telegram status", category: "telegram", description: "estado de telegram" },
   { command: "/telegram connect", category: "telegram", description: "conectar telegram" },
   { command: "/telegram disconnect", category: "telegram", description: "desconectar telegram" },
@@ -1498,22 +1502,125 @@ async function handleSessionCommand(
   db: ReturnType<typeof getDb>,
   ctx: ContextState,
 ): Promise<CommandResult> {
-  const [action] = args
-  if (!action || action === "new") {
-    const projectPath = ctx.projectPath || process.cwd()
-    const newId = Bun.randomUUIDv7()
-    // Close current session if exists
-    if (ctx.sessionId && ctx.sessionId !== "none") {
-      db.query("UPDATE code_sessions SET status = 'closed', last_active = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?").run(ctx.sessionId)
-    }
-    db.query("INSERT INTO code_sessions (id, project_path, status) VALUES (?, ?, 'active')").run(newId, projectPath)
+  const [action, idArg] = args
+
+  if (!action) {
+    const current = ctx.sessionId && ctx.sessionId !== "none" ? ctx.sessionId.slice(0, 8) : "ninguna"
     return {
       handled: true,
-      output: `  \u2713 Nueva sesi\u00f3n: ${newId.slice(0, 8)}...`,
-      newState: { sessionId: newId },
+      output: [
+        "",
+        "  \u00bfQu\u00e9 quieres hacer?",
+        "  \u25b8 list     \u2014 ver sesiones recientes",
+        "  \u00b7 resume   \u2014 reanudar sesi\u00f3n por id",
+        "  \u00b7 new      \u2014 iniciar sesi\u00f3n nueva",
+        "  \u00b7 status   \u2014 ver sesi\u00f3n activa",
+        "",
+        `  Sesi\u00f3n activa: ${current}`,
+        "",
+      ].join("\n"),
+      menu: [
+        { label: "list",   cmd: "/session list",   desc: "ver sesiones recientes" },
+        { label: "resume", cmd: "/session resume",  desc: "reanudar sesi\u00f3n (prefijo de id)" },
+        { label: "new",    cmd: "/session new",     desc: "iniciar sesi\u00f3n nueva" },
+        { label: "status", cmd: "/session status",  desc: "ver sesi\u00f3n activa" },
+      ],
     }
   }
-  return { handled: true, output: "opciones: new\n\nEscribe /session new" }
+
+  switch (action) {
+    case "new": {
+      const projectPath = ctx.projectPath || process.cwd()
+      const newId = Bun.randomUUIDv7()
+      if (ctx.sessionId && ctx.sessionId !== "none") {
+        db.query("UPDATE code_sessions SET status = 'closed', last_active = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?").run(ctx.sessionId)
+      }
+      db.query("INSERT INTO code_sessions (id, project_path, status) VALUES (?, ?, 'active')").run(newId, projectPath)
+      return {
+        handled: true,
+        output: `  \u2713 Nueva sesi\u00f3n: ${newId.slice(0, 8)}...`,
+        newState: { sessionId: newId },
+      }
+    }
+
+    case "list": {
+      const rows = db.query(`
+        SELECT s.id, s.project_path, s.status, s.created_at, s.last_active,
+               COUNT(t.id) AS turns
+        FROM code_sessions s
+        LEFT JOIN code_turns t ON t.session_id = s.id
+        GROUP BY s.id
+        ORDER BY s.last_active DESC
+        LIMIT 15
+      `).all() as { id: string; project_path: string; status: string; created_at: string; last_active: string; turns: number }[]
+
+      if (!rows.length) return { handled: true, output: "  No hay sesiones registradas." }
+
+      const lines = ["", "  Sesiones recientes:", ""]
+      for (const r of rows) {
+        const active = r.id === ctx.sessionId ? " \u25c0 activa" : ""
+        const date = r.last_active.slice(0, 16).replace("T", " ")
+        const project = r.project_path.split("/").pop() ?? r.project_path
+        lines.push(`  ${r.id.slice(0, 8)}  ${r.status.padEnd(6)}  ${String(r.turns).padStart(3)} turnos  ${date}  ${project}${active}`)
+      }
+      lines.push("")
+      lines.push("  Usa /session resume <id> para reanudar")
+      lines.push("")
+      return { handled: true, output: lines.join("\n") }
+    }
+
+    case "resume": {
+      if (!idArg) return { handled: true, output: "  uso: /session resume <id-prefix>" }
+
+      const row = db.query(
+        "SELECT id, project_path, status FROM code_sessions WHERE id LIKE ? ORDER BY last_active DESC LIMIT 1"
+      ).get(`${idArg}%`) as { id: string; project_path: string; status: string } | null
+
+      if (!row) return { handled: true, output: `  \u2717 No se encontr\u00f3 sesi\u00f3n con prefijo: ${idArg}` }
+
+      if (ctx.sessionId && ctx.sessionId !== "none" && ctx.sessionId !== row.id) {
+        db.query("UPDATE code_sessions SET status = 'closed', last_active = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?").run(ctx.sessionId)
+      }
+      db.query("UPDATE code_sessions SET status = 'active', last_active = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?").run(row.id)
+
+      const turns = (db.query("SELECT COUNT(*) AS n FROM code_turns WHERE session_id = ?").get(row.id) as { n: number }).n
+      const project = row.project_path.split("/").pop() ?? row.project_path
+      return {
+        handled: true,
+        output: `  \u2713 Sesi\u00f3n reanudada: ${row.id.slice(0, 8)}  (${project}, ${turns} turnos)`,
+        newState: { sessionId: row.id, projectPath: row.project_path },
+      }
+    }
+
+    case "status": {
+      const sid = ctx.sessionId
+      if (!sid || sid === "none") return { handled: true, output: "  No hay sesi\u00f3n activa." }
+
+      const row = db.query(
+        "SELECT id, project_path, status, created_at, last_active FROM code_sessions WHERE id = ?"
+      ).get(sid) as { id: string; project_path: string; status: string; created_at: string; last_active: string } | null
+
+      if (!row) return { handled: true, output: `  \u2717 Sesi\u00f3n no encontrada en DB: ${sid.slice(0, 8)}` }
+
+      const turns = (db.query("SELECT COUNT(*) AS n FROM code_turns WHERE session_id = ?").get(sid) as { n: number }).n
+      return {
+        handled: true,
+        output: [
+          "",
+          `  ID:       ${row.id.slice(0, 8)}`,
+          `  Proyecto: ${row.project_path}`,
+          `  Estado:   ${row.status}`,
+          `  Creada:   ${row.created_at.slice(0, 16).replace("T", " ")}`,
+          `  Activa:   ${row.last_active.slice(0, 16).replace("T", " ")}`,
+          `  Turnos:   ${turns}`,
+          "",
+        ].join("\n"),
+      }
+    }
+
+    default:
+      return { handled: true, output: "  opciones: list | resume <id> | new | status" }
+  }
 }
 
 async function handleCompactCommand(

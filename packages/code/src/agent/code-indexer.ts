@@ -205,8 +205,8 @@ export async function buildFullIndex(sessionId: string, workspace: string): Prom
   // Build reverse dependency map
   buildExportedByIndex(sessionId)
 
-  // Build global project context summary for Bee
-  buildProjectContext(sessionId, workspace)
+  // Build global project context summary for Bee (async, non-blocking)
+  await buildProjectContext(sessionId, workspace)
 
   const durationMs = Math.round(performance.now() - t0)
   log.info(`[code-indexer] Full index complete: ${indexed} indexed, ${skipped} skipped in ${durationMs}ms`)
@@ -366,13 +366,13 @@ export async function reconcileCodeIndex(sessionId: string, workspace: string): 
     buildExportedByIndex(sessionId)
   }
 
-  // Rebuild project context if anything changed
+  // Rebuild project context if anything changed (async, non-blocking)
   if (reindexed > 0 || removed > 0) {
     const sessionRow = db.query<any, [string]>(
       "SELECT project_path FROM code_sessions WHERE id = ?"
     ).get(sessionId)
     if (sessionRow?.project_path) {
-      buildProjectContext(sessionId, sessionRow.project_path)
+      await buildProjectContext(sessionId, sessionRow.project_path)
     }
   }
 

@@ -15,6 +15,9 @@ const log = logger.child("context-retriever")
 
 const CONTEXT_CACHE_TTL_MS = 1000 * 60 * 60 * 24 // 24 hours
 
+/** In-memory cache for ultra-fast reads (< 0.1ms). Invalidated on rebuild. */
+let _memProjectCtx: { sessionId: string; compiled: string; expiresAt: number } | null = null
+
 export interface CodeSearchResult {
   filePath: string
   snippet: string
@@ -139,10 +142,11 @@ export function getModuleContext(
 }
 
 /**
- * Build a global project context summary and cache it in SQLite.
- * Called after buildFullIndex / reconcileCodeIndex.
+ * Build a global project context summary and cache it in SQLite + memory.
+ * Called after buildFullIndex / reconcileCodeIndex. Runs async — does NOT block startup.
  */
-export function buildProjectContext(sessionId: string, workspace: string): void {
+export async function buildProjectContext(sessionId: string, workspace: string): Promise<void> {
+  const t0 = performance.now()
   try {
     const db = getDb()
 
@@ -232,7 +236,7 @@ export function buildProjectContext(sessionId: string, workspace: string): void 
     ctx += `Para descubrir skills:\n`
     ctx += `search_knowledge(type="skills", query="<tarea>")\n`
 
-    // 6. Cache it
+    // 6. Cache it — SQLite + memory
     const cacheKey = `project_context:${sessionId}`
     const expiresAt = new Date(Date.now() + CONTEXT_CACHE_TTL_MS).toISOString()
     db.query(`
@@ -240,7 +244,10 @@ export function buildProjectContext(sessionId: string, workspace: string): void 
       VALUES (?, ?, ?)
     `).run(cacheKey, ctx, expiresAt)
 
-    log.info(`[context-retriever] Project context built and cached for ${sessionId}`)
+    _memProjectCtx = { sessionId, compiled: ctx, expiresAt: Date.now() + CONTEXT_CACHE_TTL_MS }
+
+    const elapsed = performance.now() - t0
+    log.info(`[context-retriever] Project context built and cached for ${sessionId} in ${elapsed.toFixed(1)}ms`)
   } catch (err) {
     log.warn(`[context-retriever] Failed to build project context: ${(err as Error).message}`)
   }
@@ -248,15 +255,33 @@ export function buildProjectContext(sessionId: string, workspace: string): void 
 
 /**
  * Retrieve cached project context for a session.
+ * Memory-first (< 0.1ms), SQLite fallback.
  * Returns null if not found or expired.
  */
 export function getProjectContext(sessionId: string): string | null {
+  const t0 = performance.now()
+
+  // 1. Memory cache — sub-millisecond
+  if (_memProjectCtx && _memProjectCtx.sessionId === sessionId && Date.now() < _memProjectCtx.expiresAt) {
+    const elapsed = performance.now() - t0
+    if (elapsed > 1) log.debug(`[context-retriever] getProjectContext (memory) took ${elapsed.toFixed(2)}ms`)
+    return _memProjectCtx.compiled
+  }
+
+  // 2. SQLite fallback
   try {
     const db = getDb()
     const row = db.query<{ compiled: string }, [string]>(/* sql */ `
       SELECT compiled FROM code_context_cache
       WHERE cache_key = ? AND expires_at > datetime('now')
     `).get(`project_context:${sessionId}`)
+
+    if (row) {
+      _memProjectCtx = { sessionId, compiled: row.compiled, expiresAt: Date.now() + CONTEXT_CACHE_TTL_MS }
+    }
+
+    const elapsed = performance.now() - t0
+    if (elapsed > 1) log.debug(`[context-retriever] getProjectContext (sqlite) took ${elapsed.toFixed(2)}ms`)
     return row?.compiled ?? null
   } catch {
     return null

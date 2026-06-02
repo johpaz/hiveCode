@@ -12,6 +12,7 @@
 **Documentación técnica:**
 - [`docs/harness.md`](./docs/harness.md) — arquitectura completa del harness, las 4 capas del sistema, Learning Harness y comparación con Google ADK / Antigravity CLI.
 - [`docs/workers.md`](./docs/workers.md) — referencia detallada de los 13 coordinadores, 2 workers on-demand, 18 sub-agentes y tabla completa de herramientas por rol.
+- [`docs/code-context-retrieval.md`](./docs/code-context-retrieval.md) — cómo los workers obtienen contexto del proyecto: resumen precacheado + búsqueda FTS5.
 
 ---
 

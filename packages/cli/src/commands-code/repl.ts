@@ -368,10 +368,12 @@ export async function repl(): Promise<void> {
     logger.debug(`[repl] Code index reconciliation failed: ${(err as Error).message}`)
   })
 
-  // Ensure project context exists for this session
+  // Ensure project context exists for this session (async, non-blocking)
   if (!getProjectContext(sessionId)) {
-    buildProjectContext(sessionId, cwd)
-    logger.info(`[repl] Project context built for session ${sessionId}`)
+    buildProjectContext(sessionId, cwd).catch((err) => {
+      logger.debug(`[repl] Project context build failed: ${(err as Error).message}`)
+    })
+    logger.info(`[repl] Project context build started for session ${sessionId}`)
   }
 
   const activeWorkers: string[] = (getDb()
