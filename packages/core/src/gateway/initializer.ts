@@ -258,6 +258,45 @@ export async function initializeGateway(
     // 3. Cargar configuración del agente desde DB
     const { provider, model } = await loadAgentConfigFromDB(config);
 
+    // 4a. Sincronizar skills externos (Claude Code global + dirs custom via HIVE_SKILL_DIRS)
+    //     Se ejecuta en cada arranque para pickup de skills recién instalados sin reseed.
+    try {
+      const { SkillLoader, getClaudeSkillsDirs } = await import("@johpaz/hivecode-skills")
+      const loader = new SkillLoader({
+        workspacePath: process.cwd(),
+        skills: {
+          extraDirs: [
+            ...getClaudeSkillsDirs(),
+            ...(process.env.HIVE_SKILL_DIRS?.split(path.delimiter).filter(Boolean) ?? []),
+          ],
+        },
+      })
+      const allSkills = loader.loadAllSkills()
+      const db = getDb()
+      for (const s of allSkills) {
+        db.query(`
+          INSERT OR REPLACE INTO skills
+            (id, name, description, version, author, icon, category,
+             permissions, dependencies, tools, triggers, preferred_agents,
+             body, version_num, active, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, (unixepoch()), (unixepoch()))
+        `).run(
+          s.name, s.name, s.description || "", s.version || "0.0.1",
+          s.author || "Anonymous", s.icon || "🧩", s.category || "general",
+          JSON.stringify(s.permissions || []),
+          JSON.stringify(s.dependencies || []),
+          (s.tools || []).join(","),
+          (s.triggers || []).join(","),
+          JSON.stringify(s.preferred_agents || []),
+          s.content || "",
+          1,
+        )
+      }
+      log.info(`[initialize] ✅ ${allSkills.length} skills sincronizados (bundled + externos)`)
+    } catch (err) {
+      log.warn(`[initialize] External skill sync failed: ${(err as Error).message}`)
+    }
+
     // 4. Sync FTS5 indexes (tools + skills + playbook + mcp_tools)
     log.info("[initialize] Syncing FTS5 indexes (asynchronous & transactional)...")
     try {

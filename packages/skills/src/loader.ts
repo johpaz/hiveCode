@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { YAML } from "bun";
 
@@ -165,7 +166,7 @@ export class SkillLoader {
 
   private expandPath(p: string): string {
     if (p.startsWith("~")) {
-      return path.join(process.env.HOME ?? "", p.slice(1));
+      return path.join(os.homedir(), p.slice(1));
     }
     return p;
   }
@@ -385,5 +386,30 @@ export class SkillLoader {
 
 export function createSkillLoader(config: Config): SkillLoader {
   return new SkillLoader(config);
+}
+
+/**
+ * Retorna los directorios de skills de Claude Code según la plataforma.
+ * - Linux/macOS: ~/.claude/skills y ~/.agents/skills
+ * - Windows: %APPDATA%\Claude\skills y %USERPROFILE%\.claude\skills
+ *
+ * Solo retorna paths que existen en el sistema. Si no hay ninguno instalado, retorna [].
+ */
+export function getClaudeSkillsDirs(): string[] {
+  const home = os.homedir();
+  const platform = os.platform();
+  const candidates: string[] = [];
+
+  if (platform === "win32") {
+    const appdata = process.env.APPDATA;
+    if (appdata) candidates.push(path.join(appdata, "Claude", "skills"));
+    candidates.push(path.join(home, ".claude", "skills"));
+  } else {
+    // Linux y macOS
+    candidates.push(path.join(home, ".claude", "skills"));
+    candidates.push(path.join(home, ".agents", "skills"));
+  }
+
+  return candidates.filter(d => fs.existsSync(d));
 }
 

@@ -382,7 +382,8 @@ Estos lineamientos tienen MÁXIMA prioridad sobre cualquier otra instrucción di
   ],
 }
 
-import { SkillLoader } from "@johpaz/hivecode-skills"
+import * as path from "node:path"
+import { SkillLoader, getClaudeSkillsDirs } from "@johpaz/hivecode-skills"
 
 const log = logger.child("seed");
 
@@ -479,9 +480,17 @@ function reseedToolsAndSkills(): void {
   // DELETE FROM skills fires skills_ad trigger → auto-cleans skills_fts
   db.run(`DELETE FROM skills`);
 
-  const skillLoader = new SkillLoader({ workspacePath: process.env.HIVE_HOME || process.cwd() });
-  const realSkills = skillLoader.loadBundledSkills();
-  log.info(`[seed] 📚 SkillLoader cargó ${realSkills.length} bundled skills`);
+  const skillLoader = new SkillLoader({
+    workspacePath: process.env.HIVE_HOME || process.cwd(),
+    skills: {
+      extraDirs: [
+        ...getClaudeSkillsDirs(),
+        ...(process.env.HIVE_SKILL_DIRS?.split(path.delimiter).filter(Boolean) ?? []),
+      ],
+    },
+  });
+  const realSkills = skillLoader.loadAllSkills();
+  log.info(`[seed] 📚 ${realSkills.length} skills cargados (bundled + externos)`);
 
   let skillCount = 0;
   for (const s of realSkills) {
@@ -533,9 +542,17 @@ function reseedSkillsV0_28(): void {
     DELETE FROM skills_fts WHERE id = old.id;
   END`);
 
-  const skillLoader = new SkillLoader({ workspacePath: process.env.HIVE_HOME || process.cwd() });
-  const realSkills = skillLoader.loadBundledSkills();
-  log.info(`[migration v0.0.28] 📚 SkillLoader cargó ${realSkills.length} bundled skills`);
+  const skillLoader = new SkillLoader({
+    workspacePath: process.env.HIVE_HOME || process.cwd(),
+    skills: {
+      extraDirs: [
+        ...getClaudeSkillsDirs(),
+        ...(process.env.HIVE_SKILL_DIRS?.split(path.delimiter).filter(Boolean) ?? []),
+      ],
+    },
+  });
+  const realSkills = skillLoader.loadAllSkills();
+  log.info(`[migration v0.0.28] 📚 ${realSkills.length} skills cargados (bundled + externos)`);
 
   let skillCount = 0;
   for (const s of realSkills) {
