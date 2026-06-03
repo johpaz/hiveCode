@@ -8,7 +8,7 @@ category: codebridge
 permissions:
   - codebridge_execute
 dependencies: []
-tools: [codebridge_launch, codebridge_status, fs_read, canvas_show_card]
+tools: [task_delegate_code, task_status, fs_read]
 
 # Structured skill fields
 triggers:
@@ -38,7 +38,7 @@ steps:
     output: code_content
 
   - step: 2
-    action: codebridge_launch
+    action: task_delegate_code
     instruction: "Launch CLI subagent to perform comprehensive code review"
     params:
       cli: "claude|qwen|gemini"
@@ -46,7 +46,7 @@ steps:
     output: process_id
 
   - step: 3
-    action: codebridge_status
+    action: task_status
     instruction: "Wait for review completion"
     params:
       process_id: "ID from step 2"
@@ -58,7 +58,7 @@ steps:
     output: organized_feedback
 
   - step: 5
-    action: canvas_show_card
+    action: 
     instruction: "Display review results in structured format"
     params:
       title: "Code Review Results"
@@ -86,7 +86,7 @@ output_format:
 
 examples:
   - user_input: "revisá este PR en busca de bugs"
-    expected_behavior: "Read files → codebridge_launch → return bugs with line numbers and fixes"
+    expected_behavior: "Read files → task_delegate_code → return bugs with line numbers and fixes"
 
   - user_input: "hacé un code review buscando problemas de seguridad"
     expected_behavior: "Security-focused review → identify vulnerabilities → suggest mitigations"
@@ -106,9 +106,9 @@ Esta skill se activa cuando el usuario necesita revisión de código: encontrar 
 | Tool | Qué hace | Cuándo usarla |
 |------|----------|---------------|
 | `fs_read` | Lee archivos de código | Cargar código a revisar |
-| `codebridge_launch` | Lanza subagente para review | Análisis profundo |
-| `codebridge_status` | Obtiene resultado del review | Completado del análisis |
-| `canvas_show_card` | Muestra resultados estructurados | Presentar feedback |
+| `task_delegate_code` | Lanza subagente para review | Análisis profundo |
+| `task_status` | Obtiene resultado del review | Completado del análisis |
+| `` | Muestra resultados estructurados | Presentar feedback |
 
 ## Workflow
 
@@ -118,7 +118,7 @@ Esta skill se activa cuando el usuario necesita revisión de código: encontrar 
 const files = fs_read({ path: "src/*.ts" })
 
 // 2. Lanzar review con subagente
-const { process_id } = codebridge_launch({
+const { process_id } = task_delegate_code({
   cli: "claude",
   prompt: `
     Code Review Checklist:
@@ -134,7 +134,7 @@ const { process_id } = codebridge_launch({
 })
 
 // 3. Obtener resultado
-const review = codebridge_status({ process_id })
+const review = task_status({ process_id })
 
 // 4. Organizar por severidad
 // Critical: Bugs, security
@@ -143,7 +143,7 @@ const review = codebridge_status({ process_id })
 // Nitpick: Suggestions
 
 // 5. Mostrar resultados
-canvas_show_card({
+({
   title: "Code Review",
   items: [
     { label: "Critical", value: "2 issues" },
@@ -177,7 +177,7 @@ canvas_show_card({
 
 ### Claude Code (Review Exhaustivo)
 ```typescript
-codebridge_launch({
+task_delegate_code({
   taskId: "review-001",
   config: {
     role: "development",
@@ -211,7 +211,7 @@ codebridge_launch({
 
 ### Qwen CLI (Review Rápido)
 ```typescript
-codebridge_launch({
+task_delegate_code({
   taskId: "review-002",
   config: {
     role: "development",
@@ -239,7 +239,7 @@ codebridge_launch({
 
 ### Gemini CLI (Review + Docs)
 ```typescript
-codebridge_launch({
+task_delegate_code({
   taskId: "review-003",
   config: {
     role: "development",
@@ -282,7 +282,7 @@ codebridge_launch({
 ### Ejemplo 1: Security Review con Claude
 ```typescript
 // Usuario: "revisá este código en busca de vulnerabilidades"
-codebridge_launch({
+task_delegate_code({
   taskId: "security-review-001",
   config: {
     role: "development",
@@ -318,7 +318,7 @@ codebridge_launch({
 ### Ejemplo 2: Quick Review con Qwen
 ```typescript
 // Usuario: "revisá esta función rápida"
-codebridge_launch({
+task_delegate_code({
   taskId: "quick-review-002",
   config: {
     role: "development",
@@ -347,7 +347,7 @@ codebridge_launch({
 ### Ejemplo 3: PR Review con Gemini
 ```typescript
 // Usuario: "revisá este PR antes de merge"
-codebridge_launch({
+task_delegate_code({
   taskId: "pr-review-003",
   config: {
     role: "development",

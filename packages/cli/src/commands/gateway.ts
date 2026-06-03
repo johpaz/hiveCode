@@ -7,7 +7,7 @@
  */
 
 import { loadConfig, startGateway, logger, getHiveDir, initializeDatabase } from "@johpaz/hivecode-core";
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, openSync } from "node:fs";
+import { existsSync, mkdirSync, openSync } from "node:fs";
 import * as path from "node:path";
 import { embeddedUI } from "../ui-bundle.generated";
 
@@ -281,7 +281,7 @@ export async function start(flags: string[]): Promise<void> {
       env: { ...process.env, HIVE_GATEWAY_CHILD: "1" },
     });
     child.unref();
-    writeFileSync(await getPidFile(), child.pid?.toString() || "");
+    await Bun.write(await getPidFile(), child.pid?.toString() || "");
     console.log(`✅ Hive Gateway iniciado en modo daemon (PID: ${child.pid})`);
     console.log(`   Logs: ${logFile}`);
     return;
@@ -464,11 +464,11 @@ export async function stop(): Promise<void> {
   }
 
   const pidFile = await getPidFile();
-  const pid = parseInt(readFileSync(pidFile, "utf-8").trim(), 10);
+  const pid = parseInt((await Bun.file(pidFile).text()).trim(), 10);
 
   try {
     process.kill(pid, "SIGTERM");
-    unlinkSync(pidFile);
+    await Bun.file(pidFile).delete();
     console.log("✅ Hive Gateway detenido");
   } catch (e) {
     console.error("❌ Error deteniendo el Gateway:", e);
@@ -523,7 +523,7 @@ export async function reload(): Promise<void> {
   }
 
   const pidFile = await getPidFile();
-  const pid = parseInt(readFileSync(pidFile, "utf-8").trim(), 10);
+  const pid = parseInt((await Bun.file(pidFile).text()).trim(), 10);
 
   try {
     process.kill(pid, "SIGHUP");

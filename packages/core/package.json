@@ -36,6 +36,7 @@
     ".": "./src/index.ts",
     "./gateway": "./src/gateway/index.ts",
     "./gateway/task-streaming": "./src/gateway/task-streaming.ts",
+    "./gateway/helpers/path": "./src/gateway/helpers/path.ts",
     "./agent/service": "./src/agent/service.ts",
     "./agent/agent-loop": "./src/agent/agent-loop.ts",
     "./agent/context-compiler": "./src/agent/context-compiler.ts",

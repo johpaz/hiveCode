@@ -8,7 +8,7 @@ category: codebridge
 permissions:
   - codebridge_execute
 dependencies: []
-tools: [codebridge_launch, codebridge_status, fs_read, fs_edit, fs_write]
+tools: [task_delegate_code, task_status, fs_read, fs_edit, fs_write]
 
 # Structured skill fields
 triggers:
@@ -43,7 +43,7 @@ steps:
     output: improvement_areas
 
   - step: 3
-    action: codebridge_launch
+    action: task_delegate_code
     instruction: "Launch CLI subagent with refactoring prompt specifying improvements needed"
     params:
       cli: "claude|qwen|gemini|opencode"
@@ -51,7 +51,7 @@ steps:
     output: process_id
 
   - step: 4
-    action: codebridge_status
+    action: task_status
     instruction: "Monitor refactoring progress"
     params:
       process_id: "ID from step 3"
@@ -89,10 +89,10 @@ output_format:
 
 examples:
   - user_input: "refactorizá este archivo para que sea más legible"
-    expected_behavior: "Read → identify complexity → codebridge_launch → return refactored code with summary"
+    expected_behavior: "Read → identify complexity → task_delegate_code → return refactored code with summary"
 
   - user_input: "optimizá la performance de esta función"
-    expected_behavior: "Analyze bottlenecks → codebridge_launch with optimization focus → return optimized code"
+    expected_behavior: "Analyze bottlenecks → task_delegate_code with optimization focus → return optimized code"
 
   - user_input: "hacé el código más limpio y mantenible"
     expected_behavior: "Identify smells → extract functions, rename variables → return cleaner code"
@@ -109,8 +109,8 @@ Esta skill se activa cuando el usuario necesita mejorar código existente: limpi
 | Tool | Qué hace | Cuándo usarla |
 |------|----------|---------------|
 | `fs_read` | Lee código existente | Análisis inicial |
-| `codebridge_launch` | Lanza subagente para refactorizar | Refactorización real |
-| `codebridge_status` | Verifica estado | Monitoreo |
+| `task_delegate_code` | Lanza subagente para refactorizar | Refactorización real |
+| `task_status` | Verifica estado | Monitoreo |
 | `fs_edit` | Aplica cambios específicos | Cambios puntuales |
 | `fs_write` | Guarda código refactorizado | Si hay nuevos archivos |
 
@@ -129,7 +129,7 @@ const code = fs_read({ path: "src/legacy.ts" })
 // - Performance issues
 
 // 3. Lanzar subagente con foco específico
-const { process_id } = codebridge_launch({
+const { process_id } = task_delegate_code({
   cli: "claude",
   prompt: `
     Refactor this TypeScript code:
@@ -161,7 +161,7 @@ const refactored = fs_read({ path: "src/refactored.ts" })
 
 ### Claude Code (Refactorización Compleja)
 ```typescript
-codebridge_launch({
+task_delegate_code({
   taskId: "refactor-001",
   config: {
     role: "development",
@@ -184,7 +184,7 @@ codebridge_launch({
 
 ### Qwen CLI (Limpieza Rápida)
 ```typescript
-codebridge_launch({
+task_delegate_code({
   taskId: "refactor-002",
   config: {
     role: "development",
@@ -206,7 +206,7 @@ codebridge_launch({
 
 ### Gemini CLI (Refactor + Docs)
 ```typescript
-codebridge_launch({
+task_delegate_code({
   taskId: "refactor-003",
   config: {
     role: "development",
@@ -228,7 +228,7 @@ codebridge_launch({
 
 ### OpenCode (Patrones Open Source)
 ```typescript
-codebridge_launch({
+task_delegate_code({
   taskId: "refactor-004",
   config: {
     role: "development",
@@ -262,7 +262,7 @@ codebridge_launch({
 ### Ejemplo 1: Extraer Funciones con Qwen
 ```typescript
 // Usuario: "hacé esta función más legible"
-codebridge_launch({
+task_delegate_code({
   taskId: "refactor-legible-001",
   config: {
     role: "development",
@@ -290,7 +290,7 @@ codebridge_launch({
 ### Ejemplo 2: Separación de Concerns con Claude
 ```typescript
 // Usuario: "separá la lógica de negocio del controller"
-codebridge_launch({
+task_delegate_code({
   taskId: "refactor-soc-002",
   config: {
     role: "development",
@@ -324,7 +324,7 @@ codebridge_launch({
 ### Ejemplo 3: Optimización de Performance con Gemini
 ```typescript
 // Usuario: "optimizá esta función que es lenta"
-codebridge_launch({
+task_delegate_code({
   taskId: "refactor-perf-003",
   config: {
     role: "development",

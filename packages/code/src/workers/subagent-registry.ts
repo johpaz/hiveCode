@@ -15,11 +15,12 @@ import {
   isValidSubAgent as isValidBuiltinSubAgent,
 } from "./subagent-prompts"
 import type { SubAgentDefinition } from "./subagent-prompts"
+import { fileURLToPath } from "@johpaz/hivecode-core/gateway/helpers/path"
 
 export type { SubAgentDefinition }
 
 /** Path to the sub-agent worker file */
-export const SUBAGENT_WORKER_PATH = new URL("./subagent.worker.ts", import.meta.url).pathname
+export const SUBAGENT_WORKER_PATH = fileURLToPath(new URL("./subagent.worker.ts", import.meta.url))
 
 // ─── Dynamic Registry ─────────────────────────────────────────────────────────
 

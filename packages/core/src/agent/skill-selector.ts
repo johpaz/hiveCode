@@ -23,14 +23,12 @@ const log = logger.child("skill-selector")
 // ─── Minimal Skill Set ─────────────────────────────────────────────────────────
 
 /**
- * Skills mínimas que SIEMPRE están disponibles (asociadas a las 4 tools iniciales)
+ * Skills mínimas que SIEMPRE están disponibles (asociadas a las tools iniciales)
  * - memory_manager: usa save_note (notas persistentes)
- * - canvas_report: usa report_progress (reportes de progreso)
  * - task_orchestrator: usa notify (comunicación entre agentes)
  */
 export const MINIMAL_SKILL_NAMES = new Set([
-  "memory_manager",   // Asociada a save_note
-  "canvas_report",    // Asociada a report_progress
+  "memory_manager",    // Asociada a save_note
   "task_orchestrator", // Asociada a notify y agent coordination
 ])
 
@@ -319,7 +317,7 @@ export function selectSkills(userMessage: string): SkillDescriptor[] {
  * Load minimal skills that are ALWAYS available (associated with MINIMAL_TOOLS)
  * These are loaded at startup, not via FTS5 search.
  *
- * @returns Array of minimal skills (memory_manager, canvas_report, task_orchestrator)
+ * @returns Array of minimal skills (memory_manager, task_orchestrator)
  */
 export function getMinimalSkills(): SkillDescriptor[] {
     const db = getDb()

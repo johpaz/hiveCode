@@ -11,7 +11,7 @@
  */
 
 import * as path from "node:path"
-import * as fs from "node:fs"
+
 import { hiveIntro, hiveOutro, hiveNote, hiveSpinner, hiveText, isCancel } from "../cli-ui.ts"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
@@ -24,13 +24,13 @@ interface StackInfo {
   details?: string
 }
 
-function detectStack(cwd: string): StackInfo[] {
+async function detectStack(cwd: string): Promise<StackInfo[]> {
   const stacks: StackInfo[] = []
 
   const pkgPath = path.join(cwd, "package.json")
-  if (fs.existsSync(pkgPath)) {
+  if (await Bun.file(pkgPath).exists()) {
     try {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"))
+      const pkg = JSON.parse(await Bun.file(pkgPath).text())
       const frameworks: string[] = []
       const deps = { ...pkg.dependencies, ...pkg.devDependencies }
       if (deps["next"]) frameworks.push("Next.js")
@@ -47,12 +47,12 @@ function detectStack(cwd: string): StackInfo[] {
     }
   }
 
-  if (fs.existsSync(path.join(cwd, "Cargo.toml"))) stacks.push({ name: "Rust", detected: true })
-  if (fs.existsSync(path.join(cwd, "go.mod"))) stacks.push({ name: "Go", detected: true })
-  if (fs.existsSync(path.join(cwd, "requirements.txt")) || fs.existsSync(path.join(cwd, "pyproject.toml"))) {
+  if (await Bun.file(path.join(cwd, "Cargo.toml")).exists()) stacks.push({ name: "Rust", detected: true })
+  if (await Bun.file(path.join(cwd, "go.mod")).exists()) stacks.push({ name: "Go", detected: true })
+  if (await Bun.file(path.join(cwd, "requirements.txt")).exists() || await Bun.file(path.join(cwd, "pyproject.toml")).exists()) {
     stacks.push({ name: "Python", detected: true })
   }
-  if (fs.existsSync(path.join(cwd, "pom.xml")) || fs.existsSync(path.join(cwd, "build.gradle"))) {
+  if (await Bun.file(path.join(cwd, "pom.xml")).exists() || await Bun.file(path.join(cwd, "build.gradle")).exists()) {
     stacks.push({ name: "JVM", detected: true })
   }
   if (stacks.length === 0) stacks.push({ name: "Desconocido", detected: false })
@@ -73,12 +73,12 @@ function readRecentGitLog(cwd: string): string {
   return ""
 }
 
-function readReadme(cwd: string): string {
+async function readReadme(cwd: string): Promise<string> {
   const candidates = ["README.md", "README.txt", "README"]
   for (const f of candidates) {
     const p = path.join(cwd, f)
-    if (fs.existsSync(p)) {
-      const content = fs.readFileSync(p, "utf-8")
+    if (await Bun.file(p).exists()) {
+      const content = await Bun.file(p).text()
       return content.slice(0, 1500)
     }
   }
@@ -95,7 +95,7 @@ export async function init(pathArg?: string): Promise<void> {
   const stackSpinner = hiveSpinner("default")
   stackSpinner.start("Detectando stack...")
 
-  const stacks = detectStack(cwd)
+  const stacks = await detectStack(cwd)
   const stackStr = stacks.filter(s => s.detected).map(s => s.details ? `${s.name} (${s.details})` : s.name).join(", ")
   stackSpinner.stop(`Stack: ${stackStr || "desconocido"}`)
 
@@ -136,7 +136,7 @@ export async function init(pathArg?: string): Promise<void> {
   ctxSpinner.start("Leyendo contexto existente...")
 
   const gitLog = readRecentGitLog(cwd)
-  const readme = readReadme(cwd)
+  const readme = await readReadme(cwd)
 
   const contextSummary: string[] = []
   if (gitLog) contextSummary.push(`Últimos commits: ${gitLog.split("\n").length} encontrados`)

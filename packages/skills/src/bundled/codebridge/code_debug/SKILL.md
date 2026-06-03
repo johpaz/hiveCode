@@ -8,7 +8,7 @@ category: codebridge
 permissions:
   - codebridge_execute
 dependencies: []
-tools: [codebridge_launch, codebridge_status, fs_read, fs_edit, cli_exec]
+tools: [task_delegate_code, task_status, fs_read, fs_edit, shell_executor]
 
 # Structured skill fields
 triggers:
@@ -44,14 +44,14 @@ steps:
     output: code_files
 
   - step: 3
-    action: cli_exec (optional)
+    action: shell_executor (optional)
     instruction: "Run tests or reproduce error to confirm"
     params:
       command: "test command or reproduction step"
     output: error_reproduction
 
   - step: 4
-    action: codebridge_launch
+    action: task_delegate_code
     instruction: "Launch CLI subagent to analyze error and propose fix"
     params:
       cli: "claude|qwen|gemini"
@@ -59,7 +59,7 @@ steps:
     output: process_id
 
   - step: 5
-    action: codebridge_status
+    action: task_status
     instruction: "Get debugging analysis and proposed fix"
     params:
       process_id: "ID from step 4"
@@ -74,7 +74,7 @@ steps:
     output: fix_applied
 
   - step: 7
-    action: cli_exec
+    action: shell_executor
     instruction: "Verify fix by running tests or reproducing scenario"
     params:
       command: "test command"
@@ -121,9 +121,9 @@ Esta skill se activa cuando hay errores en el código: exceptions, bugs, tests f
 | Tool | Qué hace | Cuándo usarla |
 |------|----------|---------------|
 | `fs_read` | Lee código con errores | Análisis inicial |
-| `cli_exec` | Ejecuta tests, reproduce error | Confirmar bug |
-| `codebridge_launch` | Lanza subagente para debug | Análisis profundo |
-| `codebridge_status` | Obtiene diagnóstico | Resultado del análisis |
+| `shell_executor` | Ejecuta tests, reproduce error | Confirmar bug |
+| `task_delegate_code` | Lanza subagente para debug | Análisis profundo |
+| `task_status` | Obtiene diagnóstico | Resultado del análisis |
 | `fs_edit` | Aplica fix al código | Corrección |
 
 ## Workflow
@@ -140,10 +140,10 @@ Esta skill se activa cuando hay errores en el código: exceptions, bugs, tests f
 const code = fs_read({ path: "src/failing.ts" })
 
 // 3. Reproducir error (opcional)
-const result = cli_exec({ command: "npm test -- failing.test.ts" })
+const result = shell_executor({ command: "npm test -- failing.test.ts" })
 
 // 4. Analizar con subagente
-const { process_id } = codebridge_launch({
+const { process_id } = task_delegate_code({
   cli: "claude",
   prompt: `
     Error: TypeError: Cannot read property 'id' of undefined
@@ -159,7 +159,7 @@ const { process_id } = codebridge_launch({
 })
 
 // 5. Obtener diagnóstico
-const analysis = codebridge_status({ process_id })
+const analysis = task_status({ process_id })
 
 // 6. Aplicar fix
 fs_edit({
@@ -168,7 +168,7 @@ fs_edit({
 })
 
 // 7. Verificar
-cli_exec({ command: "npm test" })
+shell_executor({ command: "npm test" })
 ```
 
 ## Tipos Comunes de Errores
@@ -193,7 +193,7 @@ cli_exec({ command: "npm test" })
 
 ### Qwen CLI (Debug Rápido)
 ```typescript
-codebridge_launch({
+task_delegate_code({
   taskId: "debug-001",
   config: {
     role: "development",
@@ -217,7 +217,7 @@ codebridge_launch({
 
 ### Claude Code (Debug Complejo)
 ```typescript
-codebridge_launch({
+task_delegate_code({
   taskId: "debug-002",
   config: {
     role: "development",
@@ -243,7 +243,7 @@ codebridge_launch({
 
 ### Gemini CLI (Debug + Docs)
 ```typescript
-codebridge_launch({
+task_delegate_code({
   taskId: "debug-003",
   config: {
     role: "development",
@@ -280,7 +280,7 @@ codebridge_launch({
 ### Ejemplo 1: TypeError Simple con Qwen
 ```typescript
 // Usuario: "arreglá este error: Cannot read property 'name' of undefined"
-codebridge_launch({
+task_delegate_code({
   taskId: "typeerror-001",
   config: {
     role: "development",
@@ -302,7 +302,7 @@ codebridge_launch({
 ### Ejemplo 2: Race Condition con Claude
 ```typescript
 // Usuario: "la app crashea intermitentemente en producción"
-codebridge_launch({
+task_delegate_code({
   taskId: "racecondition-002",
   config: {
     role: "development",
@@ -332,7 +332,7 @@ codebridge_launch({
 ### Ejemplo 3: Error de Tipo con Gemini
 ```typescript
 // Usuario: "TypeScript no compila, error de tipos"
-codebridge_launch({
+task_delegate_code({
   taskId: "typeerror-003",
   config: {
     role: "development",

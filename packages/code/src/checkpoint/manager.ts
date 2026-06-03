@@ -31,7 +31,7 @@ export class CheckpointManager {
     createdBy: string = "bee",
   ): Promise<string> {
     const id = `cp_${Date.now()}_${randomBytes(2).toString("hex")}`
-    const entries = snapshotFiles(filePaths, filesToCreate, this.repo)
+    const entries = await snapshotFiles(filePaths, filesToCreate, this.repo)
 
     this.repo.createCheckpoint({
       id,

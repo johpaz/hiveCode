@@ -4,7 +4,7 @@ description: "Security audit for code: detect vulnerabilities, hardcoded secrets
 version: 1.0.0
 icon: "🔒"
 category: code
-tools: [code_search, fs_read, code_lint, cli_exec, web_search]
+tools: [code_search, fs_read, code_lint, shell_executor, web_search]
 triggers:
   - "security"
   - "seguridad"

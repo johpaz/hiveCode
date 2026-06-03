@@ -9,13 +9,17 @@ pub struct Command {
 }
 
 pub const COMMANDS: &[Command] = &[
-    Command { cmd: "/help",        desc: "Mostrar atajos de teclado" },
-    Command { cmd: "/exit",        desc: "Salir de hivecode" },
-    Command { cmd: "/compact",     desc: "Compactar contexto de la sesión" },
-    Command { cmd: "/stop",        desc: "Detener tarea en curso" },
-    Command { cmd: "/session new", desc: "Iniciar nueva sesión" },
-    Command { cmd: "/doctor",      desc: "Diagnóstico del sistema" },
-    Command { cmd: "/version",     desc: "Versión de hivecode" },
+    Command { cmd: "/help",            desc: "Mostrar atajos de teclado" },
+    Command { cmd: "/exit",            desc: "Salir de hivecode" },
+    Command { cmd: "/compact",         desc: "Compactar contexto de la sesión" },
+    Command { cmd: "/stop",            desc: "Detener tarea en curso" },
+    Command { cmd: "/session",         desc: "Gestionar sesiones" },
+    Command { cmd: "/session list",    desc: "Ver sesiones recientes" },
+    Command { cmd: "/session resume",  desc: "Reanudar sesión por id" },
+    Command { cmd: "/session new",     desc: "Iniciar nueva sesión" },
+    Command { cmd: "/session status",  desc: "Ver sesión activa" },
+    Command { cmd: "/doctor",          desc: "Diagnóstico del sistema" },
+    Command { cmd: "/version",         desc: "Versión de hivecode" },
 ];
 
 /// Devuelve los comandos que coinciden con el prefijo actual del input.

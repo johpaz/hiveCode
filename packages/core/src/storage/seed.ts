@@ -32,7 +32,7 @@ export const SEED_DATA: SeedData = {
     { id: "fs_glob", name: "fs_glob", category: "filesystem", description: "Buscar archivos que coincidan con patrones wildcard. Sinónimos: buscar archivos, patrón, encontrar archivos, filtrar por nombre" },
     { id: "fs_exists", name: "fs_exists", category: "filesystem", description: "Verificar si existe un archivo o directorio. Sinónimos: comprobar archivo, existe archivo, verificar existencia, hay archivo" },
     { id: "search_in_files", name: "search_in_files", category: "filesystem", description: "Buscar patrón o texto en archivos o directorios, retorna líneas con número de línea. Sinónimos: grep, buscar en archivos, buscar patrón, encontrar texto, buscar código" },
-    { id: "find_imports", name: "find_imports", category: "filesystem", description: "Encontrar todos los archivos que importan un módulo dado. Usa el grafo de código SQLite. Sinónimos: quién importa, dependientes, dependencias inversas, importadores" },
+    { id: "find_imports", name: "find_imports", category: "code", description: "Encontrar todos los archivos que importan un módulo dado. Usa el grafo de código SQLite. Sinónimos: quién importa, dependientes, dependencias inversas, importadores" },
 
     // ─────────────────────────────────────────
     // 2. WEB — Búsqueda y fetch ligero
@@ -45,29 +45,18 @@ export const SEED_DATA: SeedData = {
     // ─────────────────────────────────────────
     { id: "api_request", name: "api_request", category: "api", description: "Hacer peticiones HTTP a APIs REST (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS) con headers, body y query params. Sinónimos: llamar api, petición http, curl, post a api, consumir servicio rest, endpoint, webhook" },
 
-    // ─────────────────────────────────────────
-    // 3. PROJECTS — Proyectos y tareas en BD
-    // ─────────────────────────────────────────
-    { id: "project_create", name: "project_create", category: "projects", description: "Crear un nuevo proyecto con tareas en la base de datos. Sinónimos: nuevo proyecto, iniciar plan, crear proyecto" },
-    { id: "project_list", name: "project_list", category: "projects", description: "Listar todos los proyectos con su estado. Sinónimos: ver proyectos, historial, listar proyectos, mostrar proyectos" },
-    { id: "project_update", name: "project_update", category: "projects", description: "Actualizar progreso o metadatos del proyecto. Sinónimos: avance, porcentaje, estado, actualizar proyecto" },
-    { id: "project_done", name: "project_done", category: "projects", description: "Marcar proyecto como completado y archivarlo. Sinónimos: proyecto terminado, cerrar proyecto, completado, finalizar" },
-    { id: "project_fail", name: "project_fail", category: "projects", description: "Marcar proyecto como fallido y registrar razón. Sinónimos: proyecto fallido, marcar fracaso, error, falló proyecto" },
-    { id: "task_create", name: "task_create", category: "projects", description: "Agregar una tarea o subtarea a un proyecto existente. Sinónimos: crear tarea, agregar tarea, subtarea, pendiente" },
-    { id: "task_update", name: "task_update", category: "projects", description: "Actualizar estado de tarea (pendiente, en_progreso, hecho). Sinónimos: actualizar tarea, marcar completa, en progreso" },
-    { id: "task_evaluate", name: "task_evaluate", category: "projects", description: "Evaluar resultado de tarea contra criterios de aceptación. Sinónimos: validar resultado, criterios de aceptación, revisar tarea" },
 
     // ─────────────────────────────────────────
     // 4. CRON — Tareas programadas (Croner-based)
     // ─────────────────────────────────────────
-    { id: "cron_create", name: "cron_create", category: "cron", description: "Crear tarea programada: recurrente (expresión cron) o única (fire_at). Requiere campo 'task' con instrucción para el agente. Sinónimos: programar tarea, crear recordatorio, agendar, automatizar horario, tarea recurrente, una vez" },
-    { id: "cron_list", name: "cron_list", category: "cron", description: "Listar todas las tareas programadas con próximos horarios de ejecución. Sinónimos: ver tareas programadas, listar cronograma, próximas ejecuciones" },
-    { id: "cron_update", name: "cron_update", category: "cron", description: "Actualizar tarea programada existente: cambiar expresión, instrucción, canal, ventana temporal. Sinónimos: modificar cron, editar recordatorio, cambiar horario, actualizar tarea" },
-    { id: "cron_pause", name: "cron_pause", category: "cron", description: "Pausar temporalmente una tarea programada sin eliminarla. Sinónimos: pausar tarea programada, detener temporalmente, suspender recordatorio" },
-    { id: "cron_resume", name: "cron_resume", category: "cron", description: "Reanudar una tarea programada previamente pausada. Sinónimos: reanudar tarea, continuar tarea pausada, activar recordatorio" },
-    { id: "cron_delete", name: "cron_delete", category: "cron", description: "Eliminar una tarea programada permanentemente. Sinónimos: eliminar tarea programada, borrar recordatorio, cancelar tarea" },
-    { id: "cron_trigger", name: "cron_trigger", category: "cron", description: "Ejecutar manualmente una tarea programada de forma inmediata. Sinónimos: ejecutar tarea ahora, forzar ejecución, disparar manualmente" },
-    { id: "cron_history", name: "cron_history", category: "cron", description: "Obtener historial de ejecuciones y logs de una tarea programada. Sinónimos: historial ejecuciones, logs tarea, registro ejecuciones" },
+    { id: "cron.create", name: "cron.create", category: "cron", description: "Crear tarea programada: recurrente (expresión cron) o única (fire_at). Requiere campo 'task' con instrucción para el agente. Sinónimos: programar tarea, crear recordatorio, agendar, automatizar horario, tarea recurrente, una vez" },
+    { id: "cron.list", name: "cron.list", category: "cron", description: "Listar todas las tareas programadas con próximos horarios de ejecución. Sinónimos: ver tareas programadas, listar cronograma, próximas ejecuciones" },
+    { id: "cron.update", name: "cron.update", category: "cron", description: "Actualizar tarea programada existente: cambiar expresión, instrucción, canal, ventana temporal. Sinónimos: modificar cron, editar recordatorio, cambiar horario, actualizar tarea" },
+    { id: "cron.pause", name: "cron.pause", category: "cron", description: "Pausar temporalmente una tarea programada sin eliminarla. Sinónimos: pausar tarea programada, detener temporalmente, suspender recordatorio" },
+    { id: "cron.resume", name: "cron.resume", category: "cron", description: "Reanudar una tarea programada previamente pausada. Sinónimos: reanudar tarea, continuar tarea pausada, activar recordatorio" },
+    { id: "cron.delete", name: "cron.delete", category: "cron", description: "Eliminar una tarea programada permanentemente. Sinónimos: eliminar tarea programada, borrar recordatorio, cancelar tarea" },
+    { id: "cron.trigger", name: "cron.trigger", category: "cron", description: "Ejecutar manualmente una tarea programada de forma inmediata. Sinónimos: ejecutar tarea ahora, forzar ejecución, disparar manualmente" },
+    { id: "cron.history", name: "cron.history", category: "cron", description: "Obtener historial de ejecuciones y logs de una tarea programada. Sinónimos: historial ejecuciones, logs tarea, registro ejecuciones" },
 
     // ─────────────────────────────────────────
     // 5. CLI — Ejecución de comandos
@@ -92,35 +81,8 @@ export const SEED_DATA: SeedData = {
     { id: "bus_publish", name: "bus_publish", category: "agents", description: "Publicar mensaje en el Agent Bus para comunicación worker-to-worker. Sinónimos: publicar mensaje, comunicar workers, enviar bus" },
     { id: "bus_read", name: "bus_read", category: "agents", description: "Leer mensajes no leídos del Agent Bus. Sinónimos: leer mensajes bus, recibir mensajes, verificar bus" },
     { id: "project_updates", name: "project_updates", category: "agents", description: "Obtener actualizaciones recientes de workers en el mismo proyecto. Sinónimos: actualizaciones proyecto, estado workers, progreso equipo" },
+    { id: "spawn_agent", name: "spawn_agent", category: "agents", description: "Crear subagente efímero, ejecutar con contexto propio, evaluar resultado y destruir. Incluye reintentos y evaluación semántica. Sinónimos: subagente dinámico, agente temporal, crear y ejecutar agente, efímero, one-shot agent" },
 
-    // ─────────────────────────────────────────
-    // 8. CODEBRIDGE — Subagentes CLI de código externos
-    // Conecta con: Claude Code, Qwen CLI, Gemini CLI, OpenCode CLI
-    // ─────────────────────────────────────────
-    {
-      id: "codebridge_launch",
-      name: "codebridge_launch",
-      category: "codebridge",
-      description: "Lanzar un subagente externo de código (Claude Code, Qwen CLI, Gemini CLI, OpenCode) para ejecutar tarea localmente. Retorna ID de proceso para trackear. Sinónimos: lanzar agente de código, iniciar Claude Code, Qwen CLI, Gemini CLI, OpenCode, subagente externo de programación"
-    },
-    {
-      id: "codebridge_status",
-      name: "codebridge_status",
-      category: "codebridge",
-      description: "Verificar estado y salida de un subagente CodeBridge en ejecución. Sinónimos: estado agente de código, verificar Claude Code, progreso subagente externo"
-    },
-    {
-      id: "codebridge_cancel",
-      name: "codebridge_cancel",
-      category: "codebridge",
-      description: "Cancelar y terminar un proceso de subagente CodeBridge en ejecución. Sinónimos: cancelar agente de código, detener Claude Code, terminar subagente externo"
-    },
-    {
-      id: "codebridge_feedback",
-      name: "codebridge_feedback",
-      category: "codebridge",
-      description: "Enviar feedback o instrucciones adicionales a un subagente CodeBridge en ejecución. Usar para correcciones de rumbo, aclaraciones o mejoras iterativas durante tareas largas de código. Sinónimos: enviar feedback, corregir rumbo, aclaraciones, mejoras iterativas"
-    },
     // ─────────────────────────────────────────
     // 9. VOICE — Voz
     // ─────────────────────────────────────────
@@ -128,12 +90,41 @@ export const SEED_DATA: SeedData = {
     { id: "voice_speak", name: "voice_speak", category: "voice", description: "Convertir texto a voz sintetizada. Sinónimos: texto a voz, sintetizar, hablar, leer en voz alta" },
 
     // 10. SEARCH-KNOWLEDGE
-    { id: "search_knowledge", name: "search_knowledge", category: "search-knowledge", description: "Buscar en la base de conocimientos. Sinónimos: buscar conocimiento, buscar en la base" },
+    { id: "search_knowledge", name: "search_knowledge", category: "core", description: "Buscar herramientas nativas, MCP, skills, reglas de playbook o código fuente en la base de conocimientos FTS5. Sinónimos: buscar herramienta, encontrar skill, buscar capacidad, qué herramienta usar, descubrir herramienta, buscar conocimiento" },
 
-    // 11. CORE — Notificaciones y notas
+    // 11. CORE — Notificaciones, notas y contexto
     { id: "notify", name: "notify", category: "core", description: "Enviar notificación al usuario. Sinónimos: notificar, enviar notificación, alertar, aviso" },
     { id: "save_note", name: "save_note", category: "core", description: "Guardar nota persistente en el scratchpad. Sinónimos: guardar nota, escribir nota, recordatorio rápido, apuntar" },
     { id: "report_progress", name: "report_progress", category: "core", description: "Reportar progreso actual al usuario. Sinónimos: reportar progreso, informar estado, actualizar progreso, porcentaje" },
+    { id: "get_project_context", name: "get_project_context", category: "core", description: "Obtener resumen cacheado de la estructura del proyecto: módulos clave, archivos críticos, ADRs activos. Más rápido que fs_list recursivo. Sinónimos: contexto del proyecto, estructura del proyecto, resumen del proyecto, qué hay en el proyecto" },
+
+    // ─────────────────────────────────────────
+    // 13. CODE ANALYSIS — Análisis de código y control de versiones avanzado
+    // ─────────────────────────────────────────
+    { id: "parse_ast", name: "parse_ast", category: "code", description: "Analizar AST de TypeScript/JavaScript: imports, exports, funciones, complejidad ciclomática. Sinónimos: analizar código, árbol sintáctico, AST, estructura de código, imports de archivo, funciones en archivo" },
+    { id: "check_types", name: "check_types", category: "code", description: "Ejecutar typechecking de TypeScript (bun tsc --noEmit). Retorna errores de tipo, warnings y duración. Sinónimos: verificar tipos, typecheck, tsc, errores typescript, validar tipos, errores de compilación" },
+    { id: "run_script", name: "run_script", category: "code", description: "Ejecutar archivo TypeScript/JavaScript en subproceso aislado (timeout 60s). Para scripts de utilidad, migrations, seeders. Sinónimos: ejecutar script, correr archivo ts, run script, ejecutar archivo" },
+    { id: "code_test_parallel", name: "code_test_parallel", category: "code", description: "Ejecutar múltiples suites de tests concurrentemente y agregar resultados pass/fail. Más rápido que code_test secuencial. Sinónimos: tests paralelos, suites paralelas, ejecutar tests en paralelo" },
+    { id: "code_diff_create", name: "code_diff_create", category: "code", description: "Generar diff unificado entre dos archivos o versiones para code review. Sinónimos: crear diff, generar parche, comparar archivos, diferencia entre versiones" },
+    { id: "git_blame", name: "git_blame", category: "git", description: "Ver autoría por línea de código (git blame). Útil para entender quién escribió qué. Sinónimos: git blame, autoría, quién escribió, historial de línea, responsable de código" },
+    { id: "git_create_pr", name: "git_create_pr", category: "git", description: "Crear Pull Request en GitHub via API. Auto-detecta rama base y cambios. Sinónimos: crear PR, abrir pull request, crear pull request, github PR" },
+    { id: "git_rollback", name: "git_rollback", category: "git", description: "Revertir archivos a estado previo a la tarea usando snapshots. Sinónimos: revertir cambios, rollback, deshacer cambios, volver al estado anterior, restaurar archivos" },
+
+    // ─────────────────────────────────────────
+    // 14. NARRATIVE — Historia de trabajo y decisiones arquitecturales
+    // ─────────────────────────────────────────
+    { id: "read_narrative", name: "read_narrative", category: "narrative", description: "Leer entradas narrativas de la sesión/tarea en orden cronológico. Historia de qué pasó y qué se decidió. Sinónimos: leer narrativa, historial de tarea, log de trabajo, qué se hizo" },
+    { id: "append_narrative", name: "append_narrative", category: "narrative", description: "Agregar entrada al log narrativo. Documenta en markdown el progreso de la tarea. Sinónimos: agregar narrativa, escribir log, documentar progreso, guardar log" },
+    { id: "search_narrative", name: "search_narrative", category: "narrative", description: "Búsqueda FTS5 sobre todas las entradas narrativas con scores de relevancia. Sinónimos: buscar en narrativa, buscar en historial, encontrar en log de trabajo" },
+    { id: "read_decisions", name: "read_decisions", category: "narrative", description: "Listar ADRs (Architecture Decision Records) por estado o tarea. Registra decisiones arquitecturales importantes. Sinónimos: leer decisiones, ver ADRs, decisiones arquitecturales, historial de decisiones" },
+    { id: "write_decision", name: "write_decision", category: "narrative", description: "Guardar ADR con contexto, opciones evaluadas, decisión y consecuencias. Sinónimos: guardar decisión, crear ADR, documentar decisión arquitectural, registrar decisión" },
+    { id: "get_task_context", name: "get_task_context", category: "narrative", description: "Obtener contexto completo de tarea: narrativa + decisiones + snapshots de archivos. Sinónimos: contexto de tarea, todo sobre la tarea, estado completo de la tarea" },
+
+    // ─────────────────────────────────────────
+    // 15. BROWSER (adicionales — los básicos ya están en web_search/web_fetch)
+    // ─────────────────────────────────────────
+    { id: "browser_capture_clipboard", name: "browser_capture_clipboard", category: "browser", description: "Leer imagen del portapapeles del sistema y retornar base64 WebP para el contexto del agente. Sinónimos: capturar portapapeles, leer clipboard, imagen del clipboard, capturar imagen copiada" },
+    { id: "browser_preview_html", name: "browser_preview_html", category: "browser", description: "Servir HTML en servidor local temporal y capturar screenshot headless (Bun.WebView). Para verificar UI generada. Sinónimos: preview HTML, renderizar HTML, ver HTML, screenshot de HTML" },
 
     // ─────────────────────────────────────────
     // 12. OFFICE — Archivos Office (PDF, DOCX, XLSX, PPTX)

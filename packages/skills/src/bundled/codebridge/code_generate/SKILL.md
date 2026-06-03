@@ -8,7 +8,7 @@ category: codebridge
 permissions:
   - codebridge_execute
 dependencies: []
-tools: [codebridge_launch, codebridge_status, fs_write, fs_read]
+tools: [task_delegate_code, task_status, fs_write, fs_read]
 
 # Structured skill fields
 triggers:
@@ -36,7 +36,7 @@ steps:
     output: requirements
 
   - step: 2
-    action: codebridge_launch
+    action: task_delegate_code
     instruction: "Launch CLI subagent with detailed code generation prompt"
     params:
       cli: "qwen|claude|gemini|opencode"
@@ -44,7 +44,7 @@ steps:
     output: process_id
 
   - step: 3
-    action: codebridge_status
+    action: task_status
     instruction: "Monitor code generation progress"
     params:
       process_id: "ID from step 2"
@@ -64,7 +64,7 @@ steps:
 
 rules:
   - "Always clarify language, framework, and specific requirements before generating"
-  - "Use codebridge_launch with detailed, specific prompts for best results"
+  - "Use task_delegate_code with detailed, specific prompts for best results"
   - "Verify generated code compiles/passes lint if applicable"
   - "Read generated files to ensure they match requirements"
   - "Provide clear summary of what was created and how to use it"
@@ -82,13 +82,13 @@ output_format:
 
 examples:
   - user_input: "generá un endpoint REST en Express"
-    expected_behavior: "codebridge_launch({ cli: 'qwen', prompt: 'Generate Express.js REST endpoint' }) → verify → return file paths"
+    expected_behavior: "task_delegate_code({ cli: 'qwen', prompt: 'Generate Express.js REST endpoint' }) → verify → return file paths"
 
   - user_input: "creá el código para un componente React con TypeScript"
-    expected_behavior: "Clarify props → codebridge_launch → generate .tsx file → return component with usage example"
+    expected_behavior: "Clarify props → task_delegate_code → generate .tsx file → return component with usage example"
 
   - user_input: "implementá una función que valide emails"
-    expected_behavior: "codebridge_launch → generate validation function with regex → return code with test examples"
+    expected_behavior: "task_delegate_code → generate validation function with regex → return code with test examples"
 ---
 
 # Code Generate Skill
@@ -101,8 +101,8 @@ Esta skill se activa cuando el usuario necesita crear código nuevo desde cero: 
 
 | Tool | Qué hace | Cuándo usarla |
 |------|----------|---------------|
-| `codebridge_launch` | Lanza subagente CLI para generar código | Generación de código nuevo |
-| `codebridge_status` | Verifica estado de generación | Monitoreo de progreso |
+| `task_delegate_code` | Lanza subagente CLI para generar código | Generación de código nuevo |
+| `task_status` | Verifica estado de generación | Monitoreo de progreso |
 | `fs_read` | Lee archivos generados | Verificación de calidad |
 | `fs_write` | Guarda código en workspace | Si el subagente no lo hace automáticamente |
 
@@ -117,7 +117,7 @@ Esta skill se activa cuando el usuario necesita crear código nuevo desde cero: 
 // - Constraints: estilo, patrones, etc.
 
 // 2. Lanzar subagente
-const { process_id } = codebridge_launch({
+const { process_id } = task_delegate_code({
   cli: "qwen",
   prompt: `
     Generate TypeScript function for email validation:
@@ -129,7 +129,7 @@ const { process_id } = codebridge_launch({
 })
 
 // 3. Monitorear
-const status = codebridge_status({ process_id })
+const status = task_status({ process_id })
 
 // 4. Verificar código generado
 const code = fs_read({ path: "src/utils/validateEmail.ts" })
@@ -141,7 +141,7 @@ const code = fs_read({ path: "src/utils/validateEmail.ts" })
 
 ### Qwen CLI (Rápido)
 ```typescript
-codebridge_launch({
+task_delegate_code({
   taskId: "gen-001",
   config: {
     role: "development",
@@ -157,7 +157,7 @@ codebridge_launch({
 
 ### Claude Code (Complejo)
 ```typescript
-codebridge_launch({
+task_delegate_code({
   taskId: "gen-002",
   config: {
     role: "development",
@@ -173,7 +173,7 @@ codebridge_launch({
 
 ### Gemini CLI (Docs + Código)
 ```typescript
-codebridge_launch({
+task_delegate_code({
   taskId: "gen-003",
   config: {
     role: "development",
@@ -189,7 +189,7 @@ codebridge_launch({
 
 ### OpenCode (Open Source)
 ```typescript
-codebridge_launch({
+task_delegate_code({
   taskId: "gen-004",
   config: {
     role: "development",
@@ -217,7 +217,7 @@ codebridge_launch({
 ### Ejemplo 1: Función Utilitaria con Qwen
 ```typescript
 // Usuario: "generá una función para validar emails"
-codebridge_launch({
+task_delegate_code({
   taskId: "validate-email-001",
   config: {
     role: "development",
@@ -244,7 +244,7 @@ codebridge_launch({
 ### Ejemplo 2: Componente React con Claude
 ```typescript
 // Usuario: "creá un componente Button con TypeScript"
-codebridge_launch({
+task_delegate_code({
   taskId: "button-component-002",
   config: {
     role: "development",
@@ -270,7 +270,7 @@ codebridge_launch({
 ### Ejemplo 3: API Endpoint con Gemini
 ```typescript
 // Usuario: "creá un endpoint de registro de usuarios"
-codebridge_launch({
+task_delegate_code({
   taskId: "register-endpoint-003",
   config: {
     role: "development",

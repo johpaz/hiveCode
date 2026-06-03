@@ -73,7 +73,7 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
   ],
   librarian: [
     ...MINIMAL_TOOLSET,
-    "write_memory",
+    "memory_write",
   ],
   forensic: [
     ...MINIMAL_TOOLSET,

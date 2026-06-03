@@ -27,6 +27,7 @@ import { updateFileIndex } from "../agent/code-indexer"
 import { getProjectContext } from "../agent/context-retriever"
 import { existsSync } from "node:fs"
 import { isAbsolute, relative, resolve } from "node:path"
+import { fileURLToPath } from "@johpaz/hivecode-core/gateway/helpers/path"
 import { TaskSupervisor } from "../runtime/task-supervisor"
 import { WorkspaceLeaseManager, type WorkspaceLease, type WorkspaceLeaseOperation } from "../workspace/leases"
 import { WorkspaceManager, type WorkspaceAssignment } from "../workspace/manager"
@@ -69,21 +70,21 @@ type NarrativeChunkCallback = (chunk: {
 const WORKER_EXT = import.meta.url.endsWith(".ts") ? ".worker.ts" : ".worker.js"
 
 const COORDINATOR_FILES: Record<PhaseName, string> = {
-  bee: new URL(`./bee${WORKER_EXT}`, import.meta.url).pathname,
-  architecture: new URL(`./architecture${WORKER_EXT}`, import.meta.url).pathname,
-  product_manager: new URL(`./product-manager${WORKER_EXT}`, import.meta.url).pathname,
-  backend: new URL(`./backend${WORKER_EXT}`, import.meta.url).pathname,
-  frontend: new URL(`./frontend${WORKER_EXT}`, import.meta.url).pathname,
-  mobile: new URL(`./mobile${WORKER_EXT}`, import.meta.url).pathname,
-  data_scientist: new URL(`./data-scientist${WORKER_EXT}`, import.meta.url).pathname,
-  security: new URL(`./security${WORKER_EXT}`, import.meta.url).pathname,
-  test: new URL(`./test${WORKER_EXT}`, import.meta.url).pathname,
-  devops: new URL(`./devops${WORKER_EXT}`, import.meta.url).pathname,
-  dba: new URL(`./dba${WORKER_EXT}`, import.meta.url).pathname,
-  integration: new URL(`./integration${WORKER_EXT}`, import.meta.url).pathname,
-  reviewer: new URL(`./reviewer${WORKER_EXT}`, import.meta.url).pathname,
-  librarian: new URL(`./librarian${WORKER_EXT}`, import.meta.url).pathname,
-  forensic: new URL(`./forensic${WORKER_EXT}`, import.meta.url).pathname,
+  bee: fileURLToPath(new URL(`./bee${WORKER_EXT}`, import.meta.url)),
+  architecture: fileURLToPath(new URL(`./architecture${WORKER_EXT}`, import.meta.url)),
+  product_manager: fileURLToPath(new URL(`./product-manager${WORKER_EXT}`, import.meta.url)),
+  backend: fileURLToPath(new URL(`./backend${WORKER_EXT}`, import.meta.url)),
+  frontend: fileURLToPath(new URL(`./frontend${WORKER_EXT}`, import.meta.url)),
+  mobile: fileURLToPath(new URL(`./mobile${WORKER_EXT}`, import.meta.url)),
+  data_scientist: fileURLToPath(new URL(`./data-scientist${WORKER_EXT}`, import.meta.url)),
+  security: fileURLToPath(new URL(`./security${WORKER_EXT}`, import.meta.url)),
+  test: fileURLToPath(new URL(`./test${WORKER_EXT}`, import.meta.url)),
+  devops: fileURLToPath(new URL(`./devops${WORKER_EXT}`, import.meta.url)),
+  dba: fileURLToPath(new URL(`./dba${WORKER_EXT}`, import.meta.url)),
+  integration: fileURLToPath(new URL(`./integration${WORKER_EXT}`, import.meta.url)),
+  reviewer: fileURLToPath(new URL(`./reviewer${WORKER_EXT}`, import.meta.url)),
+  librarian: fileURLToPath(new URL(`./librarian${WORKER_EXT}`, import.meta.url)),
+  forensic: fileURLToPath(new URL(`./forensic${WORKER_EXT}`, import.meta.url)),
 }
 
 export class CoordinatorManager extends CoordinatorBase {
@@ -156,7 +157,7 @@ export class CoordinatorManager extends CoordinatorBase {
   }
 
   private initToolPool(size: number): void {
-    const workerPath = new URL("./tool.worker.ts", import.meta.url).pathname
+    const workerPath = fileURLToPath(new URL("./tool.worker.ts", import.meta.url))
     for (let i = 0; i < size; i++) {
       const worker = new (Worker as any)(workerPath, { smol: true }) as Bun.Worker
       worker.onmessage = (msg: MessageEvent) => {

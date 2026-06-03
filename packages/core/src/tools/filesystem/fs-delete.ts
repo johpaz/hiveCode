@@ -55,23 +55,29 @@ export const fsDeleteTool: Tool = {
     log.debug(`Deleting: ${targetPath}`);
 
     try {
-      if (!fs.existsSync(targetPath)) {
-        return {
-          ok: false,
-          error: `Path not found: ${targetPath}`,
-        };
-      }
-
-      const stats = fs.statSync(targetPath);
-
-      if (stats.isDirectory()) {
-        if (recursive) {
-          fs.rmSync(targetPath, { recursive: true });
-        } else {
-          fs.rmdirSync(targetPath);
-        }
+      const isFile = await Bun.file(targetPath).exists();
+      if (isFile) {
+        await Bun.file(targetPath).delete();
       } else {
-        fs.unlinkSync(targetPath);
+        let stats: fs.Stats;
+        try {
+          stats = fs.statSync(targetPath);
+        } catch {
+          return {
+            ok: false,
+            error: `Path not found: ${targetPath}`,
+          };
+        }
+
+        if (stats.isDirectory()) {
+          if (recursive) {
+            fs.rmSync(targetPath, { recursive: true });
+          } else {
+            fs.rmdirSync(targetPath);
+          }
+        } else {
+          fs.unlinkSync(targetPath);
+        }
       }
 
       return {

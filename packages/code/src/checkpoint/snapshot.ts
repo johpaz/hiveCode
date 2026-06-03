@@ -1,4 +1,3 @@
-import { existsSync, readFileSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { CheckpointsRepo } from "@johpaz/hivecode-core/db/repos/checkpoints"
 import type { CheckpointOperation } from "@johpaz/hivecode-core/db/repos/checkpoints"
@@ -19,17 +18,17 @@ export interface FileEntry {
  * Bug-E fix: dos loops separados — el continue en el loop de existentes nunca
  * llegaba al branch 'created', haciendo imposible registrar archivos nuevos.
  */
-export function snapshotFiles(
+export async function snapshotFiles(
   filePaths: string[],
   filesToCreate: string[],
   repo: CheckpointsRepo,
-): FileEntry[] {
+): Promise<FileEntry[]> {
   const entries: FileEntry[] = []
 
   // Loop 1: archivos existentes → snapshot del contenido previo (modified)
   for (const path of filePaths) {
-    if (!existsSync(path)) continue
-    const content = readFileSync(path)
+    if (!await Bun.file(path).exists()) continue
+    const content = await Bun.file(path).bytes()
     const hash = createHash("sha256").update(content).digest("hex")
     const prevHash = repo.lastHash(path)
     if (prevHash === hash) continue  // sin cambios — no guardar
@@ -45,9 +44,9 @@ export function snapshotFiles(
   // Loop 2: archivos que el agente va a crear (aún no existen) → 'created'
   // Rollback = eliminar el archivo. No hay contenido previo.
   for (const path of filesToCreate) {
-    if (existsSync(path)) {
+    if (await Bun.file(path).exists()) {
       // Ya existe → tratarlo como modified
-      const content = readFileSync(path)
+      const content = await Bun.file(path).bytes()
       const hash = createHash("sha256").update(content).digest("hex")
       entries.push({
         path,

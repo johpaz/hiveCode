@@ -8,7 +8,7 @@ category: agents
 permissions:
   - codebridge_manage
 dependencies: []
-tools: [task_delegate_code, task_status, codebridge_launch, codebridge_status]
+tools: [task_delegate_code, task_status]
 
 # Structured skill fields
 triggers:

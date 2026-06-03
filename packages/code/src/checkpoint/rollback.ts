@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs"
+import { mkdirSync } from "node:fs"
 import * as path from "node:path"
 import type { CheckpointFile } from "@johpaz/hivecode-core/db/repos/checkpoints"
 
@@ -17,8 +17,8 @@ export async function restoreFiles(files: CheckpointFile[]): Promise<string[]> {
     switch (file.operation) {
       case "created":
         // El archivo no existía antes — rollback = eliminarlo
-        if (existsSync(file.file_path)) {
-          unlinkSync(file.file_path)
+        if (await Bun.file(file.file_path).exists()) {
+          await Bun.file(file.file_path).delete()
           restored.push(file.file_path)
         }
         break
@@ -27,13 +27,16 @@ export async function restoreFiles(files: CheckpointFile[]): Promise<string[]> {
       case "deleted": {
         // Contenido previo guardado comprimido — restaurar
         const dir = path.dirname(file.file_path)
-        if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+        // Bun has no native directory API; use node:fs for mkdir
+        try {
+          mkdirSync(dir, { recursive: true })
+        } catch { /* directory may already exist */ }
         // Bug-B fix: Bun.zstdDecompressSync en lugar de Bun.zstd.decompress
         const content =
           file.content.length > 0
             ? Buffer.from(Bun.zstdDecompressSync(file.content))
             : Buffer.alloc(0)
-        writeFileSync(file.file_path, content)
+        await Bun.write(file.file_path, content)
         restored.push(file.file_path)
         break
       }

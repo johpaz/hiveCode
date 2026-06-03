@@ -9,7 +9,7 @@ permissions:
   - shell_exec
   - filesystem_write
 dependencies: []
-tools: [exec, terminal, project_write]
+tools: [shell_executor, fs_write]
 
 # Structured skill fields
 triggers:

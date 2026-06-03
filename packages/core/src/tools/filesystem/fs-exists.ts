@@ -38,12 +38,22 @@ export const fsExistsTool: Tool = {
     log.debug(`Checking existence: ${filePath}`);
 
     try {
-      const exists = fs.existsSync(filePath);
+      const isFile = await Bun.file(filePath).exists();
       let type: "file" | "directory" | "none" = "none";
+      let exists = isFile;
 
-      if (exists) {
-        const stats = fs.statSync(filePath);
-        type = stats.isDirectory() ? "directory" : "file";
+      if (isFile) {
+        type = "file";
+      } else {
+        try {
+          const stats = fs.statSync(filePath);
+          if (stats.isDirectory()) {
+            type = "directory";
+            exists = true;
+          }
+        } catch {
+          // Not a directory either
+        }
       }
 
       return {

@@ -88,10 +88,10 @@ export function searchCode(
  * Get rich context for a single module: its content, deps, dependents, and metadata.
  * Content is truncated to ~8KB to avoid blowing context windows.
  */
-export function getModuleContext(
+export async function getModuleContext(
   sessionId: string,
   filePath: string,
-): ModuleContext | null {
+): Promise<ModuleContext | null> {
   const db = getDb()
 
   const row = db.query<
@@ -115,7 +115,7 @@ export function getModuleContext(
   let content = ""
   let contentTruncated = false
   try {
-    const raw = fs.readFileSync(filePath, "utf-8")
+    const raw = await Bun.file(filePath).text()
     const MAX_LEN = 8192
     if (raw.length > MAX_LEN) {
       content = raw.slice(0, MAX_LEN) + "\n\n... [truncated]"
@@ -158,9 +158,9 @@ export async function buildProjectContext(sessionId: string, workspace: string):
         if (entry.isDirectory()) {
           const pkgJson = path.join(packagesDir, entry.name, "package.json")
           let desc = entry.name
-          if (fs.existsSync(pkgJson)) {
+          if (await Bun.file(pkgJson).exists()) {
             try {
-              const pkg = JSON.parse(fs.readFileSync(pkgJson, "utf-8"))
+              const pkg = JSON.parse(await Bun.file(pkgJson).text())
               if (pkg.description) desc = `${entry.name} — ${pkg.description}`
             } catch { /* ignore */ }
           }
@@ -170,10 +170,13 @@ export async function buildProjectContext(sessionId: string, workspace: string):
     }
 
     // 2. Key files
-    const keyFiles = ["package.json", "README.md", "tsconfig.json", ".env.example"]
-      .map(f => path.join(workspace, f))
-      .filter(f => fs.existsSync(f))
-      .map(f => path.relative(workspace, f))
+    const keyFiles: string[] = []
+    for (const f of ["package.json", "README.md", "tsconfig.json", ".env.example"]) {
+      const fullPath = path.join(workspace, f)
+      if (await Bun.file(fullPath).exists()) {
+        keyFiles.push(path.relative(workspace, fullPath))
+      }
+    }
 
     // 3. Most critical files (highest exported_by count)
     const criticalRows = db.query<

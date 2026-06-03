@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs"
+import { existsSync, mkdirSync, statSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -151,7 +151,7 @@ export class WorkspaceManager {
         : { status: "failed", diff, error }
     } finally {
       try {
-        rmSync(patchPath, { force: true })
+        await Bun.file(patchPath).delete()
       } catch {
         // best effort
       }
@@ -192,7 +192,7 @@ export class WorkspaceManager {
         }
       } finally {
         try {
-          rmSync(patchPath, { force: true })
+          await Bun.file(patchPath).delete()
         } catch {
           // best effort
         }
@@ -210,9 +210,9 @@ export class WorkspaceManager {
       const source = join(assignment.projectPath, file)
       const target = join(assignment.worktreePath, file)
       try {
-        if (!statSync(source).isFile()) continue
+        if (!await Bun.file(source).exists()) continue
         mkdirSync(dirname(target), { recursive: true })
-        copyFileSync(source, target)
+        await Bun.write(target, Bun.file(source))
       } catch {
         // The file may have disappeared between ls-files and copy; ignore it.
       }

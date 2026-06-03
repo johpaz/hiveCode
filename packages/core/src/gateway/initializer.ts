@@ -8,7 +8,7 @@ import { ChannelManager } from "../channels/manager";
 import { syncToolsToFTS, syncSkillsToFTS, syncPlaybookToFTS } from "../agent/context-compiler";
 import { syncMCPToolsToFTS } from "../mcp/tool-sync";
 import { AgentService, createAgentService } from "../agent/service";
-import { mkdirSync, existsSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import * as path from "node:path";
 import { createMCPManager, type MCPClientManager } from "@johpaz/hivecode-mcp";
 import { setMCPManager } from "../mcp/singleton";
@@ -24,7 +24,7 @@ const log = logger.child("gateway:init");
  */
 export async function verifyDatabaseUsers(): Promise<void> {
   // Setup mode: no DB yet — skip verification, gateway starts to serve the web setup
-  if (!existsSync(getDbPathLazy())) {
+  if (!(await Bun.file(getDbPathLazy()).exists())) {
     log.info("Setup mode: no database found — gateway will serve web setup at /setup");
     return;
   }

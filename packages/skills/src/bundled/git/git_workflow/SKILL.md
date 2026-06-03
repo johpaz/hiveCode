@@ -4,7 +4,7 @@ description: "Complete git workflow: status, diff, commit, push, branch manageme
 version: 1.0.0
 icon: "🔀"
 category: git
-tools: [git_status, git_diff, git_log, git_branch, git_commit, cli_exec]
+tools: [git_status, git_diff, git_log, git_branch, git_commit, git_blame, git_create_pr, git_rollback, shell_executor]
 triggers:
   - "git"
   - "commit"

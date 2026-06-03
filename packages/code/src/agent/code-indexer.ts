@@ -49,21 +49,21 @@ async function indexFile(filePath: string, workspace: string): Promise<FileIndex
     try {
       const scan = transpiler.scan(source)
       // Resolve relative imports to absolute paths
-      imports = (scan.imports ?? [])
+      const importPromises = (scan.imports ?? [])
         .map((i: any) => i.path)
         .filter((p: string) => p.startsWith("."))
-        .map((rel: string) => {
+        .map(async (rel: string) => {
           const resolved = path.resolve(path.dirname(filePath), rel)
           // Try with extensions
           for (const ext of CODE_EXTENSIONS) {
             const candidate = `${resolved}.${ext}`
-            if (fs.existsSync(candidate)) return candidate
+            if (await Bun.file(candidate).exists()) return candidate
             const indexCandidate = path.join(resolved, `index.${ext}`)
-            if (fs.existsSync(indexCandidate)) return indexCandidate
+            if (await Bun.file(indexCandidate).exists()) return indexCandidate
           }
           return resolved
         })
-        .filter(Boolean)
+      imports = (await Promise.all(importPromises)).filter(Boolean)
 
       exports = (scan.exports ?? []).map((e: any) => e.original ?? e).filter(Boolean)
     } catch {
@@ -305,7 +305,7 @@ export async function reconcileCodeIndex(sessionId: string, workspace: string): 
 
   let removed = 0
   for (const { file_path } of dbFiles) {
-    if (!fs.existsSync(file_path)) {
+    if (!await Bun.file(file_path).exists()) {
       db.query("DELETE FROM code_graph WHERE session_id = ? AND file_path = ?")
         .run(sessionId, file_path)
       db.query("DELETE FROM code_fts WHERE session_id = ? AND file_path = ?")

@@ -10,16 +10,15 @@ import type { Tool } from "../types.ts";
 import { logger } from "../../utils/logger.ts";
 import { resolveInWorkspace, getWorkspace } from "./workspace-guard.ts";
 import * as path from "node:path";
-import * as fs from "node:fs";
 
 const log = logger.child("fs-write");
 
-function backupIfExists(filePath: string): string | null {
+async function backupIfExists(filePath: string): Promise<string | null> {
   try {
-    if (!fs.existsSync(filePath)) return null
+    if (!await Bun.file(filePath).exists()) return null
     const ts = Date.now()
     const bak = `${filePath}.hive-bak.${ts}`
-    fs.copyFileSync(filePath, bak)
+    await Bun.write(bak, Bun.file(filePath))
     log.debug(`Backup created: ${bak}`)
     return bak
   } catch {
@@ -58,12 +57,8 @@ export const fsWriteTool: Tool = {
     log.debug(`Writing file: ${filePath}`);
 
     try {
-      const dir = path.dirname(filePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-
-      const backup = backupIfExists(filePath);
+      // Bun.write automatically creates parent directories if they don't exist
+      const backup = await backupIfExists(filePath);
 
       await Bun.write(filePath, content);
 

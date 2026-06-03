@@ -8,7 +8,7 @@ category: filesystem
 permissions:
   - filesystem_read
 dependencies: []
-tools: [project_read]
+tools: [fs_read, fs_exists]
 
 # Structured skill fields
 triggers:

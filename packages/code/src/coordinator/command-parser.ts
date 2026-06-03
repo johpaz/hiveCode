@@ -1501,6 +1501,7 @@ async function handleSessionCommand(
   args: string[],
   db: ReturnType<typeof getDb>,
   ctx: ContextState,
+  ui?: UiCallbacks,
 ): Promise<CommandResult> {
   const [action, idArg] = args
 
@@ -1570,7 +1571,37 @@ async function handleSessionCommand(
     }
 
     case "resume": {
-      if (!idArg) return { handled: true, output: "  uso: /session resume <id-prefix>" }
+      const sessions = db.query(`
+        SELECT s.id, s.project_path, s.status, s.last_active,
+               COUNT(t.id) AS turns
+        FROM code_sessions s
+        LEFT JOIN code_turns t ON t.session_id = s.id
+        GROUP BY s.id
+        ORDER BY s.last_active DESC
+        LIMIT 15
+      `).all() as { id: string; project_path: string; status: string; last_active: string; turns: number }[]
+
+      // Sin argumento: abrir modal de selecci\u00f3n si la TUI lo soporta
+      if (!idArg) {
+        if (ui?.showConfigModal && sessions.length > 0) {
+          const options = sessions.map(s => {
+            const date = s.last_active.slice(0, 16).replace("T", " ")
+            const project = s.project_path.split("/").pop() ?? s.project_path
+            const mark = s.id === ctx.sessionId ? " \u25c0" : ""
+            return `${s.id.slice(0, 8)}  ${date}  ${project} (${s.turns} turnos)${mark}`
+          })
+          const values = await ui.showConfigModal("session_resume", "Reanudar Sesi\u00f3n", [
+            { key: "session", label: "Sesi\u00f3n", placeholder: "", required: true, secret: false, field_type: "select", options },
+          ])
+          if (!values) return { handled: true, output: "  Cancelado." }
+          // El valor seleccionado empieza con el id de 8 chars
+          const selectedId = values["session"]?.slice(0, 8)
+          if (!selectedId) return { handled: true, output: "  \u2717 Selecci\u00f3n inv\u00e1lida." }
+          // Re-invocar con el id como argumento
+          return handleSessionCommand(["resume", selectedId], db, ctx, ui)
+        }
+        return { handled: true, output: "  uso: /session resume <id-prefix>" }
+      }
 
       const row = db.query(
         "SELECT id, project_path, status FROM code_sessions WHERE id LIKE ? ORDER BY last_active DESC LIMIT 1"
@@ -1984,7 +2015,7 @@ export async function parseInternalCommand(
     case "logs":
       return handleLogsCommand(args)
     case "session":
-      return handleSessionCommand(args, db, ctxState)
+      return handleSessionCommand(args, db, ctxState, ui)
     case "compact":
       return handleCompactCommand(db, ctxState)
     case "note":

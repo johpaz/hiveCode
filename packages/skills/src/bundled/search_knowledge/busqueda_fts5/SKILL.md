@@ -1,7 +1,7 @@
 ---
 name: busqueda_fts5
 description: "Core discovery skill - learn how to find any capability using search_knowledge"
-version: 1.0.0
+version: 1.1.0
 author: Hive Team
 icon: "🔍"
 category: core
@@ -23,68 +23,85 @@ triggers:
 
 # busqueda_fts5 — Discovery System
 
-This skill teaches you how to find any capability in Hive using **search_knowledge**.
+Tienes 4 herramientas al arrancar. Todo lo demás se descubre con **search_knowledge**.
 
-## Por qué Discovery?
+## Regla de Oro: UNA SOLA PALABRA
 
-You start with only 4 basic tools. All other capabilities (tools, skills, MCP tools, playbook rules) must be discovered dynamically.
-
-## Cómo Buscar
-
-`search_knowledge(type, query)`
-
-### Type Options:
-
-| type | What it finds | Example |
-|------|---------------|---------|
-| **tools** | Native Hive tools | `search_knowledge(type="tools", query="leer archivo")` |
-| **skills** | Task instructions | `search_knowledge(type="skills", query="generar código")` |
-| **mcp** | External MCP tools (Airtable, GitHub) | `search_knowledge(type="mcp", query="crear registro")` |
-| **playbook** | Best practices rules | `search_knowledge(type="playbook", query="seguridad")` |
-| **all** | Everything | `search_knowledge(type="all", query="buscar web")` |
-
-## Query Tips
-
-- **Be specific**: `search_knowledge(type="tools", query="leer archivo markdown")` not just "file"
-- **Bilingual**: Search in Spanish, the system retries in English if few results
-- **Use task context**: "debuggear código" finds code_debug skill
-- **Tool format**: MCP tools are `{serverName}__{toolName}` (e.g., `airtable_crm_datos___AIRTABLE_LIST_BASES`)
-
-## Discovery Flow
-
-1. User asks for something you don't have → `search_knowledge(query, type)`
-2. Results come back with tool names and descriptions
-3. Tools are automatically injected into your context
-4. Use the injected tools immediately
-
-## Examples
-
-**Find a tool to read files:**
 ```
-search_knowledge({type: "tools", query: "leer archivo", limit: 5})
-→ Returns fs_read, fs_list, etc.
+search_knowledge(type="all", query="web")
 ```
 
-**Find Airtable tools:**
+**Por qué una sola palabra?**
+El motor FTS5 usa OR para una palabra → retorna TODOS los resultados relacionados.
+Con múltiples palabras usa AND → requiere que TODAS aparezcan → pocos o ningún resultado.
+
+| Query | Resultado |
+|-------|-----------|
+| `"web"` ✅ | web_search + web_fetch + web_research (skill) + MCP web tools |
+| `"buscar en internet"` ❌ | Requiere AND de 3 palabras → probablemente 0 resultados |
+
+## Vocabulario de Dominio (una palabra cada uno)
+
+| Dominio | Query | Herramientas que retorna |
+|---------|-------|--------------------------|
+| Web | `"web"` | web_search, web_fetch |
+| Archivos | `"file"` o `"archivo"` | fs_read, fs_write, fs_edit, fs_list, fs_glob |
+| Memoria | `"memory"` o `"memoria"` | memory_write, memory_read, memory_search |
+| Cron/Agenda | `"cron"` o `"schedule"` | cron.create, cron.list, cron.update... |
+| Git | `"git"` | git_status, git_diff, git_commit, git_log |
+| Agentes | `"agent"` o `"agente"` | agent_create, agent_find, task_delegate |
+| Proyectos | `"project"` o `"proyecto"` | project_create, task_create, project_list |
+| Browser | `"browser"` | browser_navigate, browser_click, browser_type |
+| Canvas/UI | `"canvas"` | , ,  |
+| Código | `"code"` o `"código"` | code_search, code_test, code_build |
+| Notificar | `"notify"` | notify, report_progress |
+| Shell | `"shell"` o `"bash"` | shell_executor |
+
+## Tipos de Búsqueda
+
 ```
-search_knowledge({type: "mcp", query: "crear registro airtable", limit: 5})
-→ Returns AIRTABLE_CREATE_RECORD, etc.
+type="tools"    → Herramientas nativas de Hive
+type="skills"   → Skills con instrucciones de tareas
+type="mcp"      → Herramientas externas (Airtable, GitHub, Slack...)
+type="playbook" → Reglas y mejores prácticas
+type="all"      → Todo a la vez (recomendado para exploración)
 ```
 
-**Find skill to generate code:**
+## Flujo Correcto para un Worker
+
 ```
-search_knowledge({type: "skills", query: "generar código", limit: 3})
-→ Returns code_generate, code_delegator, etc.
+1. Recibo tarea: "buscar noticias sobre IA y guardar en archivo"
+2. search_knowledge(type="all", query="web")    → web_search, web_fetch
+3. search_knowledge(type="all", query="file")   → fs_write, fs_read
+4. Herramientas se inyectan automáticamente en mi contexto
+5. Ejecuto: web_search(...) → fs_write(...)
 ```
 
-## Priority Rule
+## Ejemplos Concretos
 
-**ALWAYS prefer native tools over MCP tools** when both do the task.
-- Native tools: faster, no network, always available
-- MCP tools: fallback when no native tool exists
+```
+// Encontrar todo lo relacionado con web
+search_knowledge({type: "all", query: "web"})
+→ tools: [web_search, web_fetch]
+→ skills: [web_research, browser_automation]
 
-## Remember
+// Encontrar tools de sistema de archivos
+search_knowledge({type: "tools", query: "file"})
+→ tools: [fs_read, fs_write, fs_edit, fs_list, fs_glob, fs_exists]
 
-- No tool in your startup context? → **search_knowledge**
-- Don't know how to do something? → **search_knowledge**
-- Need external capabilities (Airtable, GitHub)? → **search_knowledge(type="mcp")**
+// Encontrar tools MCP de un servidor externo
+search_knowledge({type: "mcp", query: "airtable"})
+→ toolsmcp: [AIRTABLE_LIST_BASES, AIRTABLE_CREATE_RECORD, ...]
+
+// Explorar todo lo disponible para tareas de código
+search_knowledge({type: "all", query: "code"})
+→ tools: [code_search, code_test, code_build, shell_executor]
+→ skills: [git_workflow, code_review, ...]
+```
+
+## Reglas
+
+1. **Siempre una sola palabra** como query — es más efectivo
+2. `type="all"` para explorar — `type="tools"` para ser específico
+3. Herramientas nativas tienen prioridad sobre MCP cuando hacen lo mismo
+4. Si no encuentras con una palabra → prueba el equivalente en inglés/español

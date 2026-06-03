@@ -177,6 +177,7 @@ export {
   codeLintTool,
   codeDiffCreateTool,
   parseAstTool,
+  findImportsTool,
   checkTypesTool,
   runScriptTool,
   gitBlameTool,

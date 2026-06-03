@@ -9,7 +9,7 @@ permissions:
   - filesystem_read
   - filesystem_write
 dependencies: []
-tools: [project_read, project_write, project_edit, project_exists]
+tools: [fs_read, fs_write, fs_edit, fs_exists, fs_delete]
 
 # Structured skill fields
 triggers:
@@ -47,7 +47,7 @@ steps:
     output: operation_type
 
   - step: 4
-    action: canvas_confirm (if large changes)
+    action:  (if large changes)
     instruction: "Confirm with user before overwriting files with >50 lines of changes"
     output: user_approval
 
@@ -60,7 +60,7 @@ rules:
   - "Always read file before editing to understand structure"
   - "Use project_edit for small, targeted changes (find/replace)"
   - "Use project_write for new files or complete rewrites"
-  - "Confirm with canvas_confirm before changes >50 lines"
+  - "Confirm with  before changes >50 lines"
   - "Verify file path is within workspace unless explicitly requested otherwise"
   - "For delete operations, confirm explicitly with user"
 
@@ -81,7 +81,7 @@ examples:
     expected_behavior: "project_read → project_edit with old_string/new_string for dependencies → confirm"
 
   - user_input: "eliminá el archivo temporal.log"
-    expected_behavior: "project_exists → canvas_confirm('¿Eliminar archivo?') → if approved, delete operation"
+    expected_behavior: "project_exists → ('¿Eliminar archivo?') → if approved, delete operation"
 ---
 
 # File Writer Skill
@@ -113,11 +113,11 @@ Esta skill se activa cuando el usuario necesita:
 1. `project_exists({ path })` → verificar existe
 2. `project_read({ path })` → entender estructura
 3. `project_edit({ path, old_string, new_string })` → modificar
-4. `canvas_confirm()` si cambios >50 líneas
+4. `()` si cambios >50 líneas
 
 ### Eliminar Archivo
 1. `project_exists({ path })` → verificar existe
-2. `canvas_confirm({ message: '¿Eliminar archivo?' })` → confirmar
+2. `({ message: '¿Eliminar archivo?' })` → confirmar
 3. Operación de delete
 
 ## Mejores Prácticas

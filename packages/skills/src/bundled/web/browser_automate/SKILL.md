@@ -8,7 +8,7 @@ category: web
 permissions:
   - browser_control
 dependencies: []
-tools: [browser_navigate, browser_click, browser_type, browser_screenshot]
+tools: [browser_navigate, browser_click, browser_type, browser_screenshot, browser_extract, browser_script, browser_wait, browser_capture_clipboard, browser_preview_html]
 
 # Structured skill fields
 triggers:

@@ -4,7 +4,7 @@ description: "Test-Driven Development workflow: red-green-refactor cycle with te
 version: 1.0.0
 icon: "🧪"
 category: code
-tools: [code_test, code_search, fs_read, fs_write, fs_edit]
+tools: [code_test, code_build, code_search, fs_read, fs_write, fs_edit]
 triggers:
   - "tdd"
   - "test first"

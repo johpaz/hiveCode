@@ -19,13 +19,6 @@ export const TOOL_NARRATIONS: Record<string, string> = {
   "cron.resume": "Reanudando tarea programada...",
   "cron.trigger": "Ejecutando tarea ahora...",
   "cron.history": "Consultando historial...",
-  // Projects
-  project_create: "Creando proyecto...",
-  project_update: "Actualizando proyecto...",
-  project_done: "Marcando proyecto como completado...",
-  project_fail: "Registrando falla en el proyecto...",
-  task_create: "Creando tarea...",
-  task_update: "Actualizando tarea...",
   // Agents
   create_agent: "Creando agente worker...",
   find_agent: "Buscando agente disponible...",
@@ -45,15 +38,33 @@ export const TOOL_NARRATIONS: Record<string, string> = {
   browser_extract: "Extrayendo información de la página...",
   browser_script: "Ejecutando JavaScript en la página...",
   browser_wait: "Esperando elemento en la página...",
-  // Canvas
-  canvas_add_node: "Actualizando canvas...",
-  canvas_update: "Actualizando canvas...",
-  // Code Bridge
-  bridge_send: "Enviando tarea al CLI...",
-  bridge_exec: "Ejecutando en el Code Bridge...",
-  // Notify
+  // Notify / Core
   notify: "Enviando notificación...",
   report_progress: "Reportando progreso...",
+  get_project_context: "Cargando contexto del proyecto...",
+  search_knowledge: "Buscando en la base de conocimientos...",
+  // Code analysis
+  parse_ast: "Analizando AST del archivo...",
+  find_imports: "Buscando importadores del módulo...",
+  check_types: "Verificando tipos TypeScript...",
+  run_script: "Ejecutando script...",
+  code_test_parallel: "Ejecutando tests en paralelo...",
+  code_diff_create: "Generando diff...",
+  git_blame: "Consultando autoría del código...",
+  git_create_pr: "Creando Pull Request...",
+  git_rollback: "Revirtiendo cambios...",
+  // Narrative
+  read_narrative: "Leyendo narrativa de la tarea...",
+  append_narrative: "Documentando progreso...",
+  search_narrative: "Buscando en historial...",
+  read_decisions: "Consultando decisiones arquitecturales...",
+  write_decision: "Guardando decisión arquitectural...",
+  get_task_context: "Cargando contexto de la tarea...",
+  // Agents
+  spawn_agent: "Creando subagente...",
+  get_available_models: "Consultando modelos disponibles...",
+  // API
+  api_request: "Realizando petición HTTP...",
 }
 
 export function getNarration(toolName: string): string {

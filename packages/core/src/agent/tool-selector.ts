@@ -35,7 +35,6 @@
  *    - browser (browser automation)
  *    - memory (notes, memory operations)
  *    - code (exec, terminal)
- *    - canvas (UI rendering)
  *    - agents (agent creation/management)
  *    - core (notify, report_progress, save_note)
  */
@@ -111,7 +110,7 @@ const CONVERSATIONAL_PATTERNS = [
 
 // ─── Tool Catalog ───────────────────────────────────────────────────────────
 //
-// These 47 tools are the core toolset. Each has:
+// These tools cover the full native toolset. Each has:
 // - name: unique identifier
 // - description: what the tool does (used for FTS5 matching)
 // - category: semantic domain for grouping
@@ -130,17 +129,6 @@ export const CORE_TOOL_CATALOG: ToolDescriptor[] = [
     { name: "cron.trigger", description: "Manually trigger immediate execution of a cron job now. Spanish keywords: ejecutar tarea ahora, forzar ejecución, disparar manualmente", category: "scheduling", abstractionLevel: "atomic" },
     { name: "cron.history", description: "Get execution history and run logs for a cron job. Spanish keywords: historial ejecuciones, logs tarea, cuándo corrió, registro de ejecuciones", category: "scheduling", abstractionLevel: "atomic" },
 
-    // Project management tools (high-level orchestration)
-    { name: "project_create", description: "Create project with tasks, start new project for complex multi-step work. Spanish keywords: crear proyecto, nuevo proyecto, iniciar trabajo, proyecto nuevo, comenzar proyecto", category: "projects", abstractionLevel: "orchestration" },
-    { name: "project_list", description: "List all projects with their status. Spanish keywords: listar proyectos, ver proyectos, historial proyectos, todos los proyectos", category: "projects", abstractionLevel: "atomic" },
-    { name: "project_update", description: "Update project progress, mark progress percentage and status changes. Spanish keywords: actualizar progreso, marcar avance, estado del proyecto, porcentaje completado", category: "projects", abstractionLevel: "atomic" },
-    { name: "project_done", description: "Mark project complete, close finished projects and archive results. Spanish keywords: proyecto terminado, cerrar proyecto, finalizar, proyecto completado, marcar como hecho", category: "projects", abstractionLevel: "atomic" },
-    { name: "project_fail", description: "Mark project failed, record failure reason and lessons learned. Spanish keywords: proyecto fallido, error, marcar como fallido, proyecto fracasado, fracaso", category: "projects", abstractionLevel: "atomic" },
-
-    // Task management (atomic)
-    { name: "task_create", description: "Add task to project, create subtasks and action items within projects. Spanish keywords: crear tarea, nueva tarea, agregar pendiente, agregar tarea, crear subtarea", category: "projects", abstractionLevel: "atomic" },
-    { name: "task_update", description: "Update task status, mark tasks as complete or in progress. Spanish keywords: actualizar tarea, cambiar estado, marcar completa, tarea completada, tarea en progreso", category: "projects", abstractionLevel: "atomic" },
-    { name: "task_evaluate", description: "Evaluate task result against acceptance criteria. Spanish keywords: evaluar tarea, validar resultado, criterios aceptación, verificar calidad", category: "projects", abstractionLevel: "atomic" },
 
     // Code execution
     { name: "shell_executor", description: "Execute shell commands, run bash scripts and system commands. Spanish keywords: ejecutar comando, terminal, línea de comandos, bash, script, comando del sistema", category: "cli", abstractionLevel: "atomic" },
@@ -177,25 +165,6 @@ export const CORE_TOOL_CATALOG: ToolDescriptor[] = [
     { name: "browser_script", description: "Execute arbitrary JavaScript in the browser page context and return the result. Requires active session from browser_navigate. Spanish keywords: ejecutar javascript, script, código, función, evaluar, js en página, ejecutar código", category: "browser", abstractionLevel: "atomic" },
     { name: "browser_wait", description: "Wait for a CSS selector or ARIA element to appear on the page. Requires active session from browser_navigate. Spanish keywords: esperar, wait, condición, elemento, selector, aguardar carga, elemento presente", category: "browser", abstractionLevel: "atomic" },
 
-    // Canvas/UI rendering tools
-    { name: "canvas_render", description: "Render component on canvas, display UI components and data visualizations. Spanish keywords: renderizar, mostrar en canvas, visualizar, mostrar componente, dibujar", category: "canvas", abstractionLevel: "atomic" },
-    { name: "canvas_ask", description: "Display form and wait for response, show interactive form and collect user input. Spanish keywords: mostrar formulario, pedir datos, solicitar información, formulario interactivo", category: "canvas", abstractionLevel: "atomic" },
-    { name: "canvas_clear", description: "Clear canvas for session, reset canvas display and start fresh. Spanish keywords: limpiar canvas, borrar pantalla, reiniciar, limpiar, borrar", category: "canvas", abstractionLevel: "atomic" },
-    { name: "canvas_show_card", description: "Display card with labeled items, show structured data in card format. Spanish keywords: mostrar tarjeta, visualizar datos, tarjeta de información, mostrar datos", category: "canvas", abstractionLevel: "atomic" },
-    { name: "canvas_show_progress", description: "Display progress bars, show progress indicators and completion status. Spanish keywords: mostrar progreso, barra de progreso, indicador de progreso, avance", category: "canvas", abstractionLevel: "atomic" },
-    { name: "canvas_show_list", description: "Display key-value list, show information in structured list format. Spanish keywords: mostrar lista, listar elementos, lista de valores, mostrar elementos", category: "canvas", abstractionLevel: "atomic" },
-    { name: "canvas_confirm", description: "Show confirmation dialog, request user confirmation for actions. Spanish keywords: confirmar, diálogo de confirmación, confirmar acción, validación", category: "canvas", abstractionLevel: "atomic" },
-
-    // A2UI v0.9 rich interactive surfaces
-    { name: "a2ui_create_surface", description: "Create A2UI v0.9 surface for rich interactive UIs with forms, dashboards, and workflows. Spanish keywords: crear superficie A2UI, iniciar UI interactiva, crear formulario rico, interfaz A2UI, crear surface", category: "a2ui", abstractionLevel: "orchestration" },
-    { name: "a2ui_update_components", description: "Send A2UI v0.9 components to an existing surface (Text, Button, TextField, Row, Column, Card, etc.). Spanish keywords: enviar componentes A2UI, actualizar UI, renderizar componentes, A2UI componentes, update components", category: "a2ui", abstractionLevel: "atomic" },
-    { name: "a2ui_update_data_model", description: "Update A2UI v0.9 surface data model with JSON Pointer for dynamic data binding. Spanish keywords: actualizar datos A2UI, poblar formulario, cambiar valores, data model A2UI, actualizar modelo de datos", category: "a2ui", abstractionLevel: "atomic" },
-    { name: "a2ui_delete_surface", description: "Delete A2UI v0.9 surface and remove it from the user's canvas. Spanish keywords: eliminar superficie A2UI, borrar UI, limpiar superficie A2UI, cerrar formulario, delete surface", category: "a2ui", abstractionLevel: "atomic" },
-
-    // CodeBridge (subagent process management)
-    { name: "codebridge_launch", description: "Launch subagent process, spawn new code bridge agent process. Spanish keywords: lanzar proceso, iniciar subagente, ejecutar código, nuevo proceso", category: "code", abstractionLevel: "orchestration" },
-    { name: "codebridge_status", description: "Get status of running subagents, check code bridge agent status. Spanish keywords: estado del proceso, verificar subagente, estado del worker, estado", category: "code", abstractionLevel: "atomic" },
-    { name: "codebridge_cancel", description: "Cancel running subagent, terminate code bridge agent process. Spanish keywords: cancelar proceso, terminar subagente, detener proceso, parar", category: "code", abstractionLevel: "atomic" },
 
     // Git tools
     { name: "git_status", description: "Show working tree status (git status), view changed staged and untracked files. Spanish keywords: estado git, cambios, staged, repositorio", category: "git", abstractionLevel: "atomic" },
@@ -227,6 +196,42 @@ export const CORE_TOOL_CATALOG: ToolDescriptor[] = [
     { name: "bus_publish", description: "Publish message to Agent Bus for worker-to-worker communication. Spanish keywords: publicar mensaje, comunicar workers, enviar bus, mensaje bus", category: "agents", abstractionLevel: "atomic" },
     { name: "bus_read", description: "Read unread messages from Agent Bus. Spanish keywords: leer mensajes bus, recibir mensajes, verificar bus, mensajes workers", category: "agents", abstractionLevel: "atomic" },
     { name: "project_updates", description: "Get recent status updates from workers in project. Spanish keywords: actualizaciones proyecto, estado workers, progreso equipo, noticias proyecto", category: "agents", abstractionLevel: "atomic" },
+    { name: "get_available_models", description: "List active LLM providers and models from DB. Required before agent_create to select provider+model. Spanish keywords: ver modelos, listar providers, modelos disponibles, consultar modelos, qué modelos tengo", category: "agents", abstractionLevel: "atomic" },
+    { name: "spawn_agent", description: "Create ephemeral subagent, execute with own context, evaluate result and destroy — with retries. Spanish keywords: subagente efímero, agente temporal, crear y ejecutar agente, one-shot agent", category: "agents", abstractionLevel: "orchestration" },
+
+    // Filesystem (extra)
+    { name: "search_in_files", description: "Search for string or regex pattern in files using ripgrep/grep, returns matching lines with numbers. Spanish keywords: buscar en archivos, grep, buscar patrón, encontrar texto en código, buscar código", category: "filesystem", abstractionLevel: "atomic" },
+
+    // Core discovery and context
+    { name: "search_knowledge", description: "FTS5 search over native tools, MCP tools, skills, playbook rules, and project code. The primary discovery mechanism. Spanish keywords: buscar herramienta, encontrar skill, qué herramienta usar, descubrir capacidad, buscar conocimiento", category: "core", abstractionLevel: "atomic" },
+    { name: "get_project_context", description: "Get cached project structure summary: key files, modules, active ADRs. Faster than recursive fs_list. Spanish keywords: contexto del proyecto, estructura del proyecto, resumen del proyecto", category: "core", abstractionLevel: "atomic" },
+
+    // Git (advanced)
+    { name: "git_blame", description: "Show line-by-line authorship (git blame). Spanish keywords: git blame, autoría, quién escribió, historial de línea", category: "git", abstractionLevel: "atomic" },
+    { name: "git_create_pr", description: "Create GitHub Pull Request via API. Auto-detects base branch and changes. Spanish keywords: crear PR, pull request, github PR, abrir pull request", category: "git", abstractionLevel: "orchestration" },
+    { name: "git_rollback", description: "Restore files from pre-task snapshots. Spanish keywords: revertir, rollback, deshacer cambios, restaurar archivos, volver al estado anterior", category: "git", abstractionLevel: "atomic" },
+
+    // Code analysis (advanced)
+    { name: "parse_ast", description: "Analyze TypeScript/JavaScript AST: imports, exports, functions, cyclomatic complexity. Spanish keywords: analizar código, AST, árbol sintáctico, estructura de código, imports del archivo", category: "code", abstractionLevel: "atomic" },
+    { name: "find_imports", description: "Find all files importing a given module via the code_graph SQLite table. Spanish keywords: quién importa, dependencias inversas, importadores, dependientes del módulo", category: "code", abstractionLevel: "atomic" },
+    { name: "check_types", description: "Run TypeScript type checking (bun tsc --noEmit). Returns errors, warnings, duration. Spanish keywords: typecheck, verificar tipos, tsc, errores typescript, validar tipos", category: "code", abstractionLevel: "atomic" },
+    { name: "run_script", description: "Execute TypeScript/JavaScript file in isolated subprocess (60s timeout). Spanish keywords: ejecutar script, correr archivo, run script, ejecutar código aislado", category: "code", abstractionLevel: "atomic" },
+    { name: "code_test_parallel", description: "Run multiple test suites concurrently and aggregate pass/fail results. Spanish keywords: tests paralelos, suites en paralelo, ejecutar tests múltiples", category: "code", abstractionLevel: "atomic" },
+
+    // Browser (extras not in basic set)
+    { name: "browser_capture_clipboard", description: "Read image from system clipboard, return as base64 WebP for agent context. Spanish keywords: capturar portapapeles, leer clipboard, imagen copiada", category: "browser", abstractionLevel: "atomic" },
+    { name: "browser_preview_html", description: "Serve HTML on temp local server and capture headless screenshot. Spanish keywords: preview HTML, renderizar HTML, ver HTML generado, screenshot de HTML", category: "browser", abstractionLevel: "atomic" },
+
+    // Narrative — story log and architectural decisions
+    { name: "read_narrative", description: "Read narrative entries for session/task in chronological order. Spanish keywords: leer narrativa, historial de tarea, log de trabajo, qué se hizo, historia del proyecto", category: "narrative", abstractionLevel: "atomic" },
+    { name: "append_narrative", description: "Append entry to the narrative log (markdown). Spanish keywords: agregar narrativa, escribir log, documentar progreso, guardar avance", category: "narrative", abstractionLevel: "atomic" },
+    { name: "search_narrative", description: "FTS5 full-text search over narrative entries with relevance scores. Spanish keywords: buscar en narrativa, buscar en historial, encontrar en log", category: "narrative", abstractionLevel: "atomic" },
+    { name: "read_decisions", description: "List Architecture Decision Records (ADRs) by status or task. Spanish keywords: leer decisiones, ver ADRs, decisiones arquitecturales, historial de decisiones", category: "narrative", abstractionLevel: "atomic" },
+    { name: "write_decision", description: "Save ADR with context, options, decision and consequences. Spanish keywords: guardar decisión, crear ADR, documentar decisión, registrar ADR", category: "narrative", abstractionLevel: "atomic" },
+    { name: "get_task_context", description: "Full context for a task: narrative + decisions + file snapshots. Spanish keywords: contexto completo de tarea, todo sobre la tarea, estado completo", category: "narrative", abstractionLevel: "atomic" },
+
+    // API
+    { name: "api_request", description: "HTTP client for REST APIs: full control over method, headers, body, auth. Spanish keywords: llamar API, petición HTTP, curl, REST, endpoint, webhook, consumir servicio", category: "api", abstractionLevel: "atomic" },
 ]
 
 // ─── Helper Functions ───────────────────────────────────────────────────────-
@@ -528,7 +533,6 @@ function enrichToolDescription(tool: ToolDescriptor): string {
         browser: "navegador browser click screenshot form automation web page UI",
         memory: "recordar nota guardar memory store remember persist knowledge",
         code: "code ejecutar run script bash shell terminal command devops",
-        canvas: "canvas diagram visualization graph node edge flow chart",
         agents: "agente worker specialist create delegate hire team manager",
         core: "notificar message alert notify communicate progress status",
         voice: "voz audio transcribir speech speak sintetizar audio voice transcription",

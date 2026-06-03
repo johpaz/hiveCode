@@ -9,7 +9,7 @@ permissions:
   - agent_manage
   - agent_bus
 dependencies: []
-tools: [get_available_models, task_delegate, task_status, agent_find, agent_create, bus_publish, bus_read]
+tools: [get_available_models, task_delegate, task_status, agent_find, agent_create, bus_publish, bus_read, project_updates]
 
 # Structured skill fields
 triggers:

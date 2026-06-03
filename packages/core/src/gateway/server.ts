@@ -308,6 +308,61 @@ export async function startGateway(config: Config): Promise<void> {
     return undefined;
   }
 
+  // ── BunCronScheduler — Native Bun.cron scheduler ───────────────────────────
+  if (!gatewaySetupMode) {
+    const { BunCronScheduler } = await import("../scheduler/BunCronScheduler");
+    const cronScheduler = new BunCronScheduler(async (task) => {
+      const channel = task.channel || "webchat";
+      const sessionId = `cron-${task.id}`;
+      const { userId } = resolveContext({ channel, channelUserId: sessionId });
+      const now = new Date();
+      let userTimezone = "UTC";
+      try {
+        const userRow = getDb().query<any, [string]>(
+          "SELECT timezone FROM users WHERE id = ?"
+        ).get(userId);
+        if (userRow?.timezone) userTimezone = userRow.timezone;
+      } catch { /* use UTC */ }
+      const exactTime = now.toLocaleString("es-ES", {
+        timeZone: userTimezone, dateStyle: "full", timeStyle: "long",
+      });
+      const messageContent = `[Cron task triggered at: ${exactTime}]\n${task.task}`;
+
+      try {
+        const response = await runner.generate({
+          provider: dbProvider as any,
+          messages: [{ role: "user" as const, content: messageContent }],
+          rawUserMessage: task.task,
+          maxTokens: 4096,
+          tools: prepareTools(agent, sessionId),
+          maxSteps: 15,
+          threadId: sessionId,
+          userId,
+          channel,
+          onStep: async (step) => {
+            if (step.type === "text" && step.message?.trim() && channel !== "system") {
+              await channelManager.send(channel, sessionId, {
+                content: step.message.trim(), type: "progress",
+              }).catch(() => {});
+            }
+          },
+        });
+        const content = response.content?.trim() ?? "";
+        if (content && channel !== "system") {
+          await channelManager.send(channel, sessionId, { content });
+        }
+        log.info(`[cron] Task "${task.name}" (${task.id}) executed — ${content.length} chars`);
+      } catch (err) {
+        log.error(`[cron] Task "${task.name}" (${task.id}) error:`, err);
+        throw err;
+      }
+    });
+    await cronScheduler.startup();
+    setScheduleToolsInstance(cronScheduler);
+    setCronApiInstance(cronScheduler);
+    log.info("[cron] BunCronScheduler started");
+  }
+
   // Set up hot reload watchers
   const watchers: Array<() => void> = [];
 

@@ -9,16 +9,14 @@
 import type { Tool } from "../types.ts";
 import { logger } from "../../utils/logger.ts";
 import { resolveInWorkspace, getWorkspace } from "./workspace-guard.ts";
-import * as fs from "node:fs";
-
 const log = logger.child("fs-edit");
 
-function backupIfExists(filePath: string): string | null {
+async function backupIfExists(filePath: string): Promise<string | null> {
   try {
-    if (!fs.existsSync(filePath)) return null
+    if (!await Bun.file(filePath).exists()) return null
     const ts = Date.now()
     const bak = `${filePath}.hive-bak.${ts}`
-    fs.copyFileSync(filePath, bak)
+    await Bun.write(bak, Bun.file(filePath))
     log.debug(`Backup created: ${bak}`)
     return bak
   } catch {
@@ -67,14 +65,14 @@ export const fsEditTool: Tool = {
     log.debug(`Editing file: ${filePath}`);
 
     try {
-      if (!fs.existsSync(filePath)) {
+      if (!await Bun.file(filePath).exists()) {
         return {
           ok: false,
           error: `File not found: ${filePath}`,
         };
       }
 
-    const content = fs.readFileSync(filePath, "utf-8");
+    const content = await Bun.file(filePath).text();
 
     if (!content.includes(oldString)) {
       return {
@@ -83,7 +81,7 @@ export const fsEditTool: Tool = {
       };
     }
 
-    const backup = backupIfExists(filePath);
+    const backup = await backupIfExists(filePath);
 
     let newContent: string;
       let occurrences = 0;
@@ -104,7 +102,7 @@ export const fsEditTool: Tool = {
         newContent = content.replace(oldString, newString);
       }
 
-      fs.writeFileSync(filePath, newContent, "utf-8");
+      await Bun.write(filePath, newContent);
 
     return {
       ok: true,

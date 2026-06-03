@@ -80,9 +80,9 @@ describe("code-indexer + code_fts", () => {
     expect(results.some(r => r.filePath.includes("utils.ts"))).toBe(true)
   })
 
-  test("getModuleContext returns rich context", () => {
+  test("getModuleContext returns rich context", async () => {
     const utilsPath = path.join(tmpWorkspace, "src", "utils.ts")
-    const ctx = getModuleContext(sessionId, utilsPath)
+    const ctx = await getModuleContext(sessionId, utilsPath)
     expect(ctx).not.toBeNull()
     expect(ctx!.filePath).toBe(utilsPath)
     expect(ctx!.functions).toContain("greet")

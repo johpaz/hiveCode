@@ -639,6 +639,44 @@ const parseAstTool: Tool = {
   },
 }
 
+// ─── Find Imports ─────────────────────────────────────────────────────────────
+
+const findImportsTool: Tool = {
+  name: "find_imports",
+  description: "Find all files that import a given module path. Queries the code_graph SQLite table. Spanish: encontrar importadores, quién importa, dependencias inversas",
+  parameters: {
+    type: "object",
+    properties: {
+      path: {
+        type: "string",
+        description: "Module path to find importers for (e.g. 'src/auth/jwt.ts' or './jwt')",
+      },
+    },
+    required: ["path"],
+  },
+  async execute(params) {
+    const targetPath = params.path as string
+    if (!targetPath) return { ok: false, error: "path is required" }
+    try {
+      const { getDb } = await import("../../storage/sqlite.ts")
+      const db = getDb()
+      const basename = targetPath.split("/").pop()?.replace(/\.(ts|tsx|js|jsx)$/, "") ?? targetPath
+      const rows = db.query(
+        `SELECT DISTINCT importer FROM code_graph
+         WHERE importee = ? OR importee LIKE ? OR importee LIKE ?`
+      ).all(targetPath, `%/${basename}`, `%/${basename}.%`) as { importer: string }[]
+      return {
+        ok: true,
+        path: targetPath,
+        importers: rows.map(r => r.importer),
+        count: rows.length,
+      }
+    } catch (err) {
+      return { ok: false, error: `find_imports failed: ${(err as Error).message}` }
+    }
+  },
+}
+
 // ─── Check Types ──────────────────────────────────────────────────────────────
 
 const checkTypesTool: Tool = {
@@ -1270,6 +1308,7 @@ export function createTools(): Tool[] {
     codeLintTool,
     codeDiffCreateTool,
     parseAstTool,
+    findImportsTool,
     checkTypesTool,
     runScriptTool,
     gitBlameTool,
@@ -1291,6 +1330,7 @@ export {
   codeLintTool,
   codeDiffCreateTool,
   parseAstTool,
+  findImportsTool,
   checkTypesTool,
   runScriptTool,
   gitBlameTool,
