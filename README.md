@@ -20,13 +20,13 @@
 
 ```bash
 # Clonar e instalar
-git clone https://github.com/johpaz/hive-code.git hivecode
+git clone https://github.com/johpaz/hiveCode.git hivecode
 cd hivecode
 bun install
 
-# Arrancar (gateway + TUI)
+# Arrancar (gateway + TUI en el mismo proceso)
 bun run dev
-# o bien: hivecode repl
+# o bien: hivecode
 
 # Primera vez: configurar un provider
 /provider add anthropic
@@ -90,7 +90,7 @@ La tab activa se enruta automáticamente según el estado de Bun (PLAN → Focus
 
 ### IPC con Bun
 
-El TUI se conecta a un Unix socket (`~/.hivecode/tui.sock`) al arrancar. Los mensajes entrantes se procesan por prioridad:
+El TUI es un binario Rust que se conecta al proceso Bun vía IPC local (Unix socket o TCP loopback en Windows). El gateway HTTP/WebSocket arranca dentro del mismo proceso Bun que el REPL/TUI. Los mensajes entrantes se procesan por prioridad:
 
 - **CRITICAL** — `forensic_alert`, `approval_required`: se procesan antes que cualquier otra cosa
 - **NORMAL** — `worker_update`, `history_append`, `diff_update`, `task_status`, `status`
@@ -120,7 +120,7 @@ cd packages/hivetui && cargo build --release
 
 ### BEE — El Senior Dev orquestador
 
-**BEE** es el único punto de entrada para todas las solicitudes. Clasifica cada mensaje en 4 acciones:
+**BEE** es el único punto de entrada para todas las solicitudes. Clasifica cada mensaje en una de estas acciones:
 
 | Acción BEE | Cuándo | Ejemplo |
 |------------|--------|---------|
@@ -148,26 +148,19 @@ Usuario escribe cualquier mensaje
   ▼                                              Nivel 0: ProductManager
 BEE responde o aplica                            PRD + historias de usuario
 el fix directamente.                             + criterios de aceptación
-SIN activar ningún worker.                       (siempre, antes de todo diseño)
+SIN activar ningún worker.                       (solo cuando BEE decide architecture)
                                                          │
                                                 Nivel 1: Architecture
                                                 ADR + contratos TypeScript
-                                                Plan de fases por tipo de proyecto
+                                                Plan de fases dinámico
                                                          │
-                                         Nivel 2 (paralelo — según tipo):
-                                         Backend + Frontend        (web fullstack)
-                                         Backend + Mobile          (app móvil)
-                                         Backend + DataScientist   (ML/IA)
-                                         los tres juntos           (fullstack ML)
-                                         Security (transversal — siempre)
+                                         Niveles siguientes (paralelo por dependencias):
+                                         Los coordinadores reales se determinan
+                                         dinámicamente según el plan.
+                                         Security se inyecta transversalmente
+                                         en niveles con engineers.
                                                          │
-                                         Nivel 3 (paralelo):
-                                         QAEngineer + DBA
-                                                         │
-                                         Nivel 4 (paralelo):
-                                         Integration + DevOps
-                                                         │
-                                         Nivel 5: CodeReviewer
+                                         CodeReviewer
                                            (modelo máximo, veredicto final)
                                                          │
                                   ┌──────────────────────┴──────────────────┐
@@ -181,7 +174,7 @@ SIN activar ningún worker.                       (siempre, antes de todo diseñ
 
 Si un worker agota sus iteraciones sin completar, **ForensicAgent** se activa automáticamente antes de cualquier relanzamiento — analiza la causa raíz y recomienda `relanzar_con_constraint`, `reasignar` o `escalar_al_humano`.
 
-### Los 12 workers del enjambre
+### Los 13 coordinadores del enjambre
 
 Cada worker es un **Bun Worker independiente** (proceso JS separado con su propio heap). Se comunican exclusivamente por paso de mensajes — nunca entre sí directamente. El blackboard en SQLite es el único medio de coordinación.
 
@@ -307,33 +300,28 @@ Se activa solo cuando CodeReviewer emitió `APROBADO` o `APROBADO_CON_OBSERVACIO
 El `CoordinatorManager` agrupa las fases definidas por Architecture en niveles de dependencia. Todos los workers de un nivel se inician **en el mismo tick** con `Promise.all()`. El siguiente nivel solo comienza cuando todos los del nivel anterior reportaron `done`.
 
 ```
-Nivel 0  ─► product_manager             (siempre — sin PRD no hay arquitectura posible)
-              │
-Nivel 1  ─► architecture                (diseño, ADR, plan de fases, contratos)
-              │
-              ├─ Tipo web fullstack:
-              │   backend ──┐
-Nivel 2  ─►  │   frontend  ├─ Promise.all()  +  security (transversal)
-              │
-              ├─ Tipo mobile:
-              │   backend ──┐
-Nivel 2  ─►  │   mobile    ├─ Promise.all()  +  security (transversal)
-              │
-              └─ Tipo ML:
-                  backend ──────┐
-Nivel 2  ─►      data_scientist ├─ Promise.all()  +  security (transversal)
-                  frontend ─────┘ (si hay UI)
-              │
-Nivel 3  ─► test + dba                  (paralelo — QA conoce la implementación real)
-              │
-Nivel 4  ─► integration + devops        (paralelo — valida contratos y genera PR)
-              │
-Nivel 5  ─► reviewer                    (modelo máximo, veredicto final)
-              │
-Post-sesión ► librarian                 (solo si APROBADO)
+BEE (siempre primero)
+  │
+  ├─ respond / fix ───────► respuesta directa o fix aplicado por BEE
+  │
+  └─ architecture ────────► ProductManager ──► Architecture
+                                                  │
+                                                  ▼
+                                        Plan de fases dinámico
+                                                  │
+                              Nivel 0 ──► Engineers según el plan
+                                        (backend, frontend, mobile,
+                                         data_scientist, dba, integration...)
+                                        + SecurityAuditor transversal
+                                                  │
+                              Nivel 1 ──► QA / DevOps / otros según dependencias
+                                                  │
+                              Nivel N ──► CodeReviewer (modelo máximo)
+                                                  │
+                              Post-sesión ► Librarian (solo si APROBADO)
 ```
 
-La tabla `worker_activity` registra `started_at` y `completed_at` con `level`. Métrica de aceptación: `started_at` de workers en el mismo nivel no deben diferir en más de 500ms.
+La tabla `worker_activity` registra `started_at` y `completed_at` con `level`. Todos los coordinadores de un mismo nivel se lanzan en paralelo con `Promise.all()`.
 
 ---
 
@@ -401,21 +389,29 @@ hivecode agent edit <name>
 ## Comandos CLI externos
 
 ```bash
-hivecode repl                          # Iniciar TUI interactivo
-hivecode start [--daemon]              # Iniciar gateway en background
-hivecode stop                          # Detener gateway
-hivecode status                        # Estado del sistema
+hivecode                               # Iniciar REPL/TUI interactivo
 hivecode doctor                        # Diagnóstico completo
-hivecode doctor --fix                  # Correcciones automáticas
+hivecode doctor --fix                  # (reservado) correcciones automáticas — aún no implementado
 
-hivecode agent list                    # Listar agentes
+hivecode agent list [--role=<rol>]     # Listar agentes
 hivecode agent inspect <name>          # Ver detalles de un agente
+hivecode agent edit <name>             # Editar system prompt de un agente
+hivecode agent reset <name>            # Restaurar system prompt de un agente
 
 hivecode provider list                 # Listar providers configurados
-hivecode provider add <name>           # Añadir provider
-hivecode provider test <name>          # Ping con latencia
+hivecode provider add [name]           # Añadir provider de IA
+hivecode provider remove <name>        # Eliminar provider
+hivecode provider edit [name]          # Editar provider
+hivecode provider set-default <name>   # Establecer provider por defecto
+hivecode provider set-model <provider> <model>  # Asignar modelo a provider
+hivecode provider test [name]          # Ping con latencia
 
-hivecode task debug <id>               # Inspeccionar tarea con fases, trazas y narrativo
+hivecode login                         # Autenticarse vía Firebase (hivecode-free)
+hivecode logout                        # Cerrar sesión
+hivecode whoami                        # Mostrar sesión actual
+hivecode free                          # Modelos hivecode-free (requiere login)
+hivecode upgrade                       # Verificar actualizaciones
+hivecode exit                          # Detener el sistema
 ```
 
 ---
@@ -424,12 +420,22 @@ hivecode task debug <id>               # Inspeccionar tarea con fases, trazas y 
 
 ```
 /provider list|add|set|test|status    Configurar providers de IA
-/modelo   list|set|info               Seleccionar modelo
+/modelo   list|set|info|add|delete    Seleccionar y gestionar modelos
 /mode     get|set|history             Cambiar modo Plan/Approval/Auto
-/mcp      list|add|enable|disable     Integrar servidores MCP
-/skill    list|enable|disable|info    Cargar y activar skills
+/mcp      list|add|connect|load|enable|disable|test  Integrar servidores MCP
+/skill    list|enable|disable|info|add Cargar y activar skills
 /task     list|status|cancel|rollback Gestionar tareas
 /narrative show|search|export         Buscar en el historial
+/ace      status|playbook|reflector   Aprendizaje adaptativo
+/github   status|whoami|set-repo|connect|disconnect  Vincular GitHub
+/telegram status|connect|disconnect|edit  Integrar Telegram
+/session  list|resume|new|status      Gestionar sesiones
+/plan                                 Diseñar tarea sin ejecutar
+/run                                  Ejecutar tarea en modo actual
+/logs     list|follow                 Ver logs del sistema
+/note                                 Guardar nota en scratchpad
+/env                                  Variables de entorno no sensibles
+/version                              Versión de hivecode
 /doctor                               Diagnóstico del sistema
 /help [comando]                       Ayuda detallada
 ```
@@ -438,7 +444,7 @@ hivecode task debug <id>               # Inspeccionar tarea con fases, trazas y 
 
 ## Configuración de providers
 
-Las API keys se almacenan **cifradas en SQLite** (`providers.api_key_encrypted`). No se usan `.env`.
+Las API keys se almacenan en **Bun.secrets** (gestión segura del runtime), no en `.env` ni en `providers.api_key_encrypted` (este campo legacy se considera obsoleto). El comando `/provider add` las guarda de forma segura y las distribuye a los workers en runtime.
 
 ```bash
 # Dentro del TUI:
@@ -459,14 +465,13 @@ packages/
 ├── code/       Motor: CoordinatorManager, workers, plan-parser
 ├── core/       Gateway HTTP/WS, SQLite, agent loop, tools, context compiler
 ├── hivetui/    TUI Rust/crossterm — renderer custom, sin dependencias de Ratatui
-├── ui/         Componentes CLI (@clack)
 ├── mcp/        Cliente Model Context Protocol
 └── skills/     Skills empaquetadas
 ```
 
-### Base de datos — dos databases SQLite
+### Base de datos — SQLite
 
-**`~/.hivecode/data/hivecode.db`** — Global (providers, agents, config):
+**`~/.hivecode/data/hivecode.db`** — Global (providers, agents, config, narrativo de código):
 
 ```sql
 PRAGMA journal_mode = WAL;
@@ -475,26 +480,11 @@ PRAGMA cache_size   = -64000;     -- 64 MB
 PRAGMA mmap_size    = 268435456;  -- 256 MB
 ```
 
-**`~/.hivecode/memory.db`** — Memoria cross-sesión:
-
 | Tabla | Contenido |
 |-------|-----------|
-| `agent_memory` | Conocimiento destilado por el Librarian con FTS5 |
-
-**`~/.hivecode/sessions/<id>.db`** — Por sesión:
-
-| Tabla | Contenido |
-|-------|-----------|
-| `agent_context` | Blackboard: decisiones, constraints, observaciones (FTS5) |
-| `agent_conflicts` | Conflictos detectados y sus resoluciones |
-| `worker_activity` | Actividad por worker con `level` y timestamps |
-| `checkpoints` | Snapshots de archivos para rollback por nivel |
-| `adrs` | Architecture Decision Records (FTS5) |
-
-**`~/.hivecode/data/code.db`** — Narrativo de código:
-
-| Tabla | Contenido |
-|-------|-----------|
+| `providers` | Providers configurados (la API key real se guarda en `Bun.secrets`) |
+| `models` | Modelos disponibles por provider |
+| `agents` | Agente/coordinadores y sus prompts |
 | `code_sessions` | Sesiones de trabajo |
 | `code_tasks` | Tareas con modo, status, tokens |
 | `code_task_phases` | Fases por coordinador |
@@ -506,16 +496,36 @@ PRAGMA mmap_size    = 268435456;  -- 256 MB
 | `learning_failures` | Log append-only de fallos (tool_error, phase_failure, timeout…) |
 | `learning_proposals` | Propuestas de mejora generadas por BEE y Architecture (pending → aprobación manual) |
 
+**`~/.hivecode/memory.db`** — Memoria cross-sesión:
+
+| Tabla | Contenido |
+|-------|-----------|
+| `agent_memory` | Conocimiento destilado por el Librarian con FTS5 |
+
+**`~/.hivecode/sessions/<id>.db`** — Por sesión:
+
+| Tabla | Contenido |
+|-------|-----------|
+| `sessions` | Metadata de la sesión |
+| `messages` | Historial de mensajes |
+| `agent_context` | Blackboard: decisiones, constraints, observaciones (FTS5) |
+| `agent_conflicts` | Conflictos detectados y sus resoluciones |
+| `worker_activity` | Actividad por worker con `level` y timestamps |
+| `checkpoints` | Snapshots de archivos para rollback por nivel |
+| `adrs` | Architecture Decision Records (FTS5) |
+| `file_risks` | Mapa de riesgo de archivos |
+
 ---
 
 ## Build y distribución
 
 ```bash
-bun run build          # Bundle + workers
-bun run build:binary   # Binario standalone
+bun run build          # Bundle + workers + TUI
+bun run build:binary   # Binario standalone (Linux)
+bun run build:binary:all  # Binarios Linux, macOS y Windows
 bun run lint           # Type check
 bun test               # Tests unitarios
-bun run test:integration  # 68 tests de integración
+bun run test:integration  # Tests de integración
 ```
 
 Artefactos del build:
@@ -523,7 +533,7 @@ Artefactos del build:
 ```
 dist/
 ├── hivecode.js               # Entry point
-├── bee.worker.js
+├── bee.worker.js             # Coordinador principal
 ├── architecture.worker.js
 ├── product-manager.worker.js
 ├── backend.worker.js
@@ -537,7 +547,9 @@ dist/
 ├── integration.worker.js
 ├── reviewer.worker.js
 ├── librarian.worker.js       # On-demand: post-sesión aprobada
-└── forensic.worker.js        # On-demand: análisis de fallos
+├── forensic.worker.js        # On-demand: análisis de fallos
+├── tool.worker.js            # Pool de herramientas pesadas
+└── subagent.worker.js        # Sub-agentes especializados
 ```
 
 ---

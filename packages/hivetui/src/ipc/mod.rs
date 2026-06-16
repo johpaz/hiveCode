@@ -131,6 +131,20 @@ pub enum BunMessage {
         status: String,
         display_name: Option<String>,
         activity: Option<String>,
+        #[serde(default)]
+        token_count: Option<u64>,
+        #[serde(default)]
+        level: Option<u32>,
+        #[serde(default)]
+        current_action: Option<String>,
+        #[serde(default)]
+        current_file: Option<String>,
+        #[serde(default)]
+        iteration_current: Option<u32>,
+        #[serde(default)]
+        iteration_total: Option<u32>,
+        #[serde(default)]
+        transversal: Option<bool>,
     },
     /// Legado: mismos campos que WorkerUpdate pero nombre diferente.
     ActivityUpdate {
@@ -140,6 +154,74 @@ pub enum BunMessage {
         status: String,
         display_name: Option<String>,
         activity: Option<String>,
+        #[serde(default)]
+        token_count: Option<u64>,
+        #[serde(default)]
+        level: Option<u32>,
+        #[serde(default)]
+        current_action: Option<String>,
+        #[serde(default)]
+        current_file: Option<String>,
+        #[serde(default)]
+        iteration_current: Option<u32>,
+        #[serde(default)]
+        iteration_total: Option<u32>,
+        #[serde(default)]
+        transversal: Option<bool>,
+    },
+
+    DashboardSnapshot {
+        #[serde(default)]
+        workers: Vec<WorkerSnapshotEntry>,
+        #[serde(default)]
+        blackboard_events: Vec<BlackboardEventIpc>,
+        #[serde(default)]
+        conflicts: Vec<AgentConflictIpc>,
+        #[serde(default)]
+        levels: Vec<DashboardLevelIpc>,
+        #[serde(default)]
+        checkpoints: Vec<CheckpointIpc>,
+        #[serde(default)]
+        metrics: Option<DashboardMetricsIpc>,
+        #[serde(default)]
+        security: Option<SecurityStatusIpc>,
+        #[serde(default)]
+        halt: Option<HaltStateIpc>,
+    },
+    BlackboardEvent {
+        timestamp: String,
+        agent: String,
+        #[serde(rename = "event_type")]
+        event_type: String,
+        content: String,
+    },
+    ConflictResolved {
+        agent_a: Option<String>,
+        agent_b: Option<String>,
+        file: Option<String>,
+    },
+    ForensicAlert {
+        worker: String,
+        analysis: String,
+        recommendation: String,
+    },
+    SecurityStatusUpdate {
+        status: String,
+        #[serde(default)]
+        findings: Option<u32>,
+    },
+    HaltState {
+        active: bool,
+        reason: Option<String>,
+        checkpoint_id: Option<String>,
+    },
+    MetricsUpdate {
+        #[serde(default)]
+        token_count: Option<u64>,
+        #[serde(default)]
+        cost: Option<String>,
+        #[serde(default)]
+        elapsed_secs: Option<u64>,
     },
 
     // ── Checkpoints ────────────────────────────────────────────────────────────
@@ -247,8 +329,33 @@ pub enum BunMessage {
         status: String,
         phases: Vec<PlanPhaseIpc>,
         risks: Vec<PlanRiskIpc>,
+        #[serde(default)]
+        api_contracts: Vec<ApiContractIpc>,
+    },
+    PlanDraftUpdate {
+        task_id: Option<String>,
+        adr_title: Option<String>,
+        adr_content: Option<String>,
+        #[serde(default)]
+        phases: Vec<PlanPhaseIpc>,
+        #[serde(default)]
+        risks: Vec<PlanRiskIpc>,
+        #[serde(default)]
+        api_contracts: Vec<ApiContractIpc>,
     },
     PlanApprovalRequest,
+
+    ReviewVerdictUpdate {
+        reviewer: Option<String>,
+        status: String,
+        summary: String,
+        #[serde(default)]
+        observations: Vec<String>,
+        #[serde(default)]
+        requested_changes: Vec<String>,
+        #[serde(default)]
+        affected_files: Vec<String>,
+    },
 
     // ── Proyección de tareas concurrentes ─────────────────────────────────────
     TaskUpdate {
@@ -307,6 +414,91 @@ pub struct WorkerSnapshotEntry {
     pub detail: Option<String>,
     pub display_name: Option<String>,
     pub activity: Option<String>,
+    #[serde(default)]
+    pub token_count: Option<u64>,
+    #[serde(default)]
+    pub level: Option<u32>,
+    #[serde(default)]
+    pub current_action: Option<String>,
+    #[serde(default)]
+    pub current_file: Option<String>,
+    #[serde(default)]
+    pub iteration_current: Option<u32>,
+    #[serde(default)]
+    pub iteration_total: Option<u32>,
+    #[serde(default)]
+    pub transversal: Option<bool>,
+    #[serde(default)]
+    pub replaces_worker: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlackboardEventIpc {
+    pub timestamp: String,
+    pub agent: String,
+    #[serde(rename = "event_type")]
+    pub event_type: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentConflictIpc {
+    pub agent_a: String,
+    pub agent_b: String,
+    pub file: Option<String>,
+    pub reason: String,
+    pub severity: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DashboardLevelIpc {
+    pub level: u32,
+    pub label: String,
+    #[serde(default)]
+    pub agents: Vec<String>,
+    #[serde(default)]
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CheckpointIpc {
+    #[serde(rename = "checkpoint_id")]
+    pub id: String,
+    pub description: String,
+    #[serde(default)]
+    pub file_count: u32,
+    pub agent: String,
+    #[serde(default)]
+    pub time: Option<String>,
+    #[serde(default)]
+    pub tests_passed: Option<u32>,
+    #[serde(default)]
+    pub tests_total: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DashboardMetricsIpc {
+    #[serde(default)]
+    pub token_count: Option<u64>,
+    #[serde(default)]
+    pub cost: Option<String>,
+    #[serde(default)]
+    pub elapsed_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecurityStatusIpc {
+    pub status: String,
+    #[serde(default)]
+    pub findings: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HaltStateIpc {
+    pub active: bool,
+    pub reason: Option<String>,
+    pub checkpoint_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,6 +528,23 @@ pub struct PlanRiskIpc {
     pub description: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiContractIpc {
+    pub name: String,
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub method: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub request: String,
+    #[serde(default)]
+    pub response: String,
+    #[serde(default)]
+    pub status: String,
+}
+
 // ── Tipos para el hub de settings ────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
@@ -353,6 +562,7 @@ pub struct IpcSettingsMcp {
     pub name: String,
     pub url: String,
     pub enabled: bool,
+    pub has_headers: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -556,6 +766,110 @@ mod tests {
                 assert_eq!(task_id, "payload-task");
             }
             _ => panic!("expected task_update"),
+        }
+    }
+
+    #[test]
+    fn worker_update_keeps_new_dashboard_fields_optional() {
+        let raw = r#"{"type":"worker_update","worker":"backend","phase":"editing","status":"running"}"#;
+        let msg = sonic_rs::from_str::<BunMessage>(raw).unwrap();
+
+        match msg {
+            BunMessage::WorkerUpdate {
+                worker,
+                level,
+                current_action,
+                current_file,
+                iteration_current,
+                iteration_total,
+                transversal,
+                ..
+            } => {
+                assert_eq!(worker, "backend");
+                assert_eq!(level, None);
+                assert_eq!(current_action, None);
+                assert_eq!(current_file, None);
+                assert_eq!(iteration_current, None);
+                assert_eq!(iteration_total, None);
+                assert_eq!(transversal, None);
+            }
+            _ => panic!("expected worker_update"),
+        }
+    }
+
+    #[test]
+    fn dashboard_snapshot_deserializes_full_payload() {
+        let raw = r#"{
+            "type":"dashboard_snapshot",
+            "workers":[{
+                "name":"backend",
+                "status":"running",
+                "detail":"editing",
+                "display_name":"BackendEngineer",
+                "activity":"implementando refresh token",
+                "token_count":12000,
+                "level":2,
+                "current_action":"escribiendo handler",
+                "current_file":"src/auth.ts",
+                "iteration_current":2,
+                "iteration_total":5,
+                "transversal":false
+            }],
+            "blackboard_events":[{
+                "timestamp":"12:00:00",
+                "agent":"architecture",
+                "event_type":"DECISION",
+                "content":"mantener contrato"
+            }],
+            "conflicts":[{
+                "agent_a":"backend",
+                "agent_b":"frontend",
+                "file":"src/auth.ts",
+                "reason":"edicion simultanea",
+                "severity":"high"
+            }],
+            "levels":[{
+                "level":2,
+                "label":"ENG",
+                "agents":["backend"],
+                "status":"active"
+            }],
+            "checkpoints":[{
+                "checkpoint_id":"cp_1",
+                "description":"antes de editar auth",
+                "file_count":2,
+                "agent":"backend",
+                "time":"12:00:01"
+            }],
+            "metrics":{"token_count":12000,"cost":"$0.04","elapsed_secs":61},
+            "security":{"status":"WATCHING","findings":0},
+            "halt":{"active":false}
+        }"#;
+        let msg = sonic_rs::from_str::<BunMessage>(raw).unwrap();
+
+        match msg {
+            BunMessage::DashboardSnapshot {
+                workers,
+                blackboard_events,
+                conflicts,
+                levels,
+                checkpoints,
+                metrics,
+                security,
+                halt,
+            } => {
+                assert_eq!(workers.len(), 1);
+                assert_eq!(workers[0].current_action.as_deref(), Some("escribiendo handler"));
+                assert_eq!(workers[0].iteration_total, Some(5));
+                assert_eq!(blackboard_events[0].event_type, "DECISION");
+                assert_eq!(conflicts[0].file.as_deref(), Some("src/auth.ts"));
+                assert_eq!(levels[0].level, 2);
+                assert_eq!(checkpoints[0].id, "cp_1");
+                assert_eq!(metrics.unwrap().elapsed_secs, Some(61));
+                assert_eq!(security.unwrap().status, "WATCHING");
+                assert!(!halt.unwrap().active);
+            }
+            _ => panic!("expected dashboard_snapshot"),
         }
     }
 }

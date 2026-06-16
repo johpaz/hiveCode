@@ -3,6 +3,10 @@
 import { doctor } from "./commands-code/doctor"
 import { upgrade } from "./commands-code/extras"
 import { repl } from "./commands-code/repl"
+import { freeDispatch } from "./commands-code/free"
+import { login, logout, whoami } from "./commands-code/auth"
+import { agentList, agentInspect, agentEdit, agentReset } from "./commands-code/agent"
+import { providerList, providerAdd, providerRemove, providerEdit, providerSetDefault, providerSetModel, providerTest } from "./commands-code/provider"
 import { stop } from "./commands/gateway"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import pkg from "../../../package.json"
@@ -15,15 +19,30 @@ const HELP = `
 ║     v${VERSION}                              ║
 ╚══════════════════════════════════════════╝
 
-Uso: hivecode [comando]
+  Uso: hivecode [comando]
 
-  hivecode           Iniciar el entorno de trabajo
-  hivecode doctor    Diagnóstico del sistema
-  hivecode upgrade   Verificar actualizaciones
-  hivecode exit      Detener el sistema
+  hivecode                     Iniciar el entorno de trabajo (REPL/TUI)
+  hivecode login               Autenticarse vía Firebase (browser) para hivecode-free
+  hivecode logout              Cerrar sesión hivecode-free
+  hivecode whoami              Mostrar sesión actual
+  hivecode doctor              Diagnóstico del sistema
+  hivecode agent list          Listar agentes
+  hivecode agent inspect <name> Ver detalles de un agente
+  hivecode agent edit <name>   Editar system prompt de un agente
+  hivecode agent reset <name>  Restaurar system prompt de un agente
+  hivecode provider list       Listar providers configurados
+  hivecode provider add [name] Añadir provider de IA
+  hivecode provider remove <name>  Eliminar provider
+  hivecode provider edit [name]    Editar provider
+  hivecode provider set-default <name>  Establecer provider por defecto
+  hivecode provider set-model <provider> <model>  Asignar modelo a provider
+  hivecode provider test [name]    Probar conexión a provider
+  hivecode upgrade             Verificar actualizaciones
+  hivecode exit                Detener el sistema
+  hivecode free                Modelos hivecode-free (requiere login)
 
-  --version, -v      Mostrar versión
-  --help, -h         Mostrar esta ayuda
+  --version, -v                Mostrar versión
+  --help, -h                   Mostrar esta ayuda
 `
 
 import { bootstrap, registerModule } from "@johpaz/hivecode-core"
@@ -51,11 +70,12 @@ async function main(): Promise<void> {
   const command = normalizedArgs[0]
   const flags = normalizedArgs.filter(a => a.startsWith("--"))
 
-  const skipInit = ["--help", "-h", "--version", "-v", "upgrade", "exit", undefined].includes(command)
+  const skipInit = command !== undefined && ["--help", "-h", "--version", "-v", "upgrade", "exit"].includes(command)
   if (!skipInit) ensureGlobalInit()
 
   switch (command) {
     case undefined:
+      ensureGlobalInit()
       await repl()
       break
 
@@ -64,12 +84,91 @@ async function main(): Promise<void> {
       await doctor(flags)
       break
 
+    case "agent": {
+      ensureGlobalInit()
+      const sub = normalizedArgs[1]
+      const rest = normalizedArgs.slice(2)
+      switch (sub) {
+        case "list":
+          await agentList(rest)
+          break
+        case "inspect":
+          await agentInspect(rest[0])
+          break
+        case "edit":
+          await agentEdit(rest[0])
+          break
+        case "reset":
+          await agentReset(rest[0])
+          break
+        default:
+          console.error(`❌ Subcomando de agent desconocido: "${sub}"`)
+          console.log(HELP)
+          process.exit(1)
+      }
+      break
+    }
+
+    case "provider": {
+      ensureGlobalInit()
+      const sub = normalizedArgs[1]
+      const rest = normalizedArgs.slice(2)
+      switch (sub) {
+        case "list":
+          await providerList()
+          break
+        case "add":
+          await providerAdd(rest[0])
+          break
+        case "remove":
+          await providerRemove(rest[0])
+          break
+        case "edit":
+          await providerEdit(rest[0])
+          break
+        case "set-default":
+          await providerSetDefault(rest[0])
+          break
+        case "set-model":
+          await providerSetModel(rest)
+          break
+        case "test":
+          await providerTest(rest[0])
+          break
+        default:
+          console.error(`❌ Subcomando de provider desconocido: "${sub}"`)
+          console.log(HELP)
+          process.exit(1)
+      }
+      break
+    }
+
     case "upgrade":
       await upgrade()
       break
 
     case "exit":
       await stop()
+      break
+
+    case "free":
+      ensureGlobalInit()
+      await freeDispatch(normalizedArgs.slice(1))
+      break
+
+    case "login":
+      ensureGlobalInit()
+      await login()
+      break
+
+    case "logout":
+      ensureGlobalInit()
+      await logout()
+      break
+
+    case "whoami":
+      ensureGlobalInit()
+      await whoami()
       break
 
     case "--version":

@@ -7,6 +7,8 @@ pub struct PanelLayoutState {
     pub code_workers_percent: u16,
     pub plan_main_percent: u16,
     pub plan_right_percent: u16,
+    pub review_main_percent: u16,
+    pub review_right_percent: u16,
     pub active_drag: Option<String>,
 }
 
@@ -20,6 +22,8 @@ impl Default for PanelLayoutState {
             code_workers_percent: 68,
             plan_main_percent: 60,
             plan_right_percent: 65,
+            review_main_percent: 62,
+            review_right_percent: 62,
             active_drag: None,
         }
     }
@@ -41,6 +45,8 @@ impl PanelLayoutState {
             "code:workers" => self.code_workers_percent = percent,
             "plan:main" => self.plan_main_percent = percent,
             "plan:right" => self.plan_right_percent = percent,
+            "review:main" => self.review_main_percent = percent,
+            "review:right" => self.review_right_percent = percent,
             _ => {}
         }
     }

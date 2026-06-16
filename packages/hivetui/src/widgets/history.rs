@@ -293,7 +293,17 @@ fn render_live_activity(canvas: &mut Canvas, area: Rect, state: &AppState, start
     // Show thought stream or worker details
     if !state.thought.chunks.is_empty() {
         let avail_h = area.bottom().saturating_sub(y + 1) as usize;
-        let chunks = &state.thought.chunks;
+        let bee_chunks: Vec<_> = state
+            .thought
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.coordinator == "bee")
+            .collect();
+        let chunks: Vec<_> = if bee_chunks.is_empty() {
+            state.thought.chunks.iter().collect()
+        } else {
+            bee_chunks
+        };
         let start = chunks.len().saturating_sub(avail_h);
         for chunk in chunks.iter().skip(start) {
             if y >= area.bottom().saturating_sub(1) { break; }

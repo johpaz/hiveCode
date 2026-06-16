@@ -276,7 +276,7 @@ export function getUsageStats(hours: number = 24): UsageSummary {
 }
 
 export function getProviderPricing(provider: string, model: string): { inputPer1M: number; outputPer1M: number } {
-  return MODEL_PRICING[model] || { inputPer1M: 0, outputPer1M: 0 };
+  return MODEL_PRICING[model] || { inputPer1M: 0, outputPer1M: 0 }
 }
 
 export function estimateCostForTokens(model: string, tokens: number): number {

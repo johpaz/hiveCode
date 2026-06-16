@@ -136,6 +136,13 @@ async function connectMcpServer(
   });
 }
 
+let _channelManager: ChannelManager | undefined;
+
+/** Returns the active ChannelManager once the gateway has started. */
+export function getChannelManager(): ChannelManager | undefined {
+  return _channelManager;
+}
+
 export async function startGateway(config: Config): Promise<void> {
   // Stubs for removed non-essential services — Hive-Code is terminal-only
   const voiceService: any = {};
@@ -248,6 +255,7 @@ export async function startGateway(config: Config): Promise<void> {
     agent = init.agent;
     runner = init.runner;
     channelManager = init.channelManager;
+    _channelManager = channelManager;
     dbProvider = init.provider;
     dbModel = init.model;
 
@@ -264,12 +272,12 @@ export async function startGateway(config: Config): Promise<void> {
         try {
           if (event.type === "task_end") {
             if (event.status === "completed") {
-              await telegram.sendNotification(`✅ *Tarea completada* (${Math.round(event.durationMs / 1000)}s)`);
+              await telegram.sendNotification(`✅ <b>Tarea completada</b> (${Math.round(event.durationMs / 1000)}s)`);
             } else {
-              await telegram.sendNotification(`❌ *Tarea ${event.status}*`);
+              await telegram.sendNotification(`❌ <b>Tarea ${event.status}</b>`);
             }
           } else if (event.type === "error") {
-            await telegram.sendNotification(`🚨 *Error*: ${event.message}`);
+            await telegram.sendNotification(`🚨 <b>Error:</b> ${event.message}`);
           } else if (event.type === "phase_end") {
             const { getExecutionMode } = await import("../agent/execution-mode");
             const mode = getExecutionMode();

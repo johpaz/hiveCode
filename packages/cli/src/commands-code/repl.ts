@@ -2,7 +2,7 @@ import * as path from "node:path"
 import fs, { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { getHiveDir } from "@johpaz/hivecode-core/config/loader"
-import { loadConfig, startGateway } from "@johpaz/hivecode-core/gateway"
+import { loadConfig, startGateway, getChannelManager } from "@johpaz/hivecode-core/gateway"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
 import {
@@ -17,6 +17,7 @@ import type { MenuItem } from "@johpaz/hivecode-code/coordinator/command-parser"
 import { plan as runPlan } from "./plan"
 import { run as runTask } from "./run"
 import { launchTui, tuiAvailable } from "./tui-launcher"
+import { extractHivetui } from "../embedded-hivetui"
 import { CoordinatorManager } from "@johpaz/hivecode-code/workers/coordinator-manager"
 import { reconcileCodeIndex } from "@johpaz/hivecode-code/agent/code-indexer"
 import { buildProjectContext, getProjectContext } from "@johpaz/hivecode-code/agent/context-retriever"
@@ -62,10 +63,17 @@ function isGatewayRunning(): boolean {
 async function waitForGateway(port = 16120, timeout = 10000): Promise<boolean> {
   const start = Date.now()
   while (Date.now() - start < timeout) {
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) })
-      if (r.ok) return true
-    } catch { /* not ready yet */ }
+    // Try HTTPS first (production mode uses TLS), fall back to HTTP (dev mode)
+    for (const scheme of ["https", "http"]) {
+      try {
+        const r = await fetch(`${scheme}://127.0.0.1:${port}/health`, {
+          signal: AbortSignal.timeout(500),
+          // @ts-ignore — Bun-specific: skip self-signed cert verification
+          tls: { rejectUnauthorized: false },
+        })
+        if (r.ok) return true
+      } catch { /* not ready yet */ }
+    }
     await Bun.sleep(200)
   }
   return false
@@ -303,6 +311,7 @@ export async function repl(): Promise<void> {
   process.env.HIVE_LOG_CONSOLE = "false"
   logger.setConsole(false)
 
+  await extractHivetui()   // extrae hivetui embebido al primer arranque
   await ensureGateway()
   await ensureTuiBinary()
 
@@ -336,7 +345,7 @@ export async function repl(): Promise<void> {
       if (
         activeTaskId
         && message.task_id === undefined
-        && ["activity_update", "narrative_chunk", "history_append", "file_risk_update", "file_diff", "plan_update", "task_update"].includes(message.type)
+        && ["activity_update", "worker_update", "narrative_chunk", "history_append", "file_risk_update", "file_diff", "plan_update", "task_update", "blackboard_event", "metrics_update"].includes(message.type)
       ) {
         message.task_id = activeTaskId
       }
@@ -380,7 +389,8 @@ export async function repl(): Promise<void> {
     .query("SELECT name FROM agents WHERE role='coordinator' AND enabled=1")
     .all() as any[]).map(r => r.name as string)
 
-  // ── Ratatui TUI (preferred) ────────────────────────────────────────────────
+  // ── Rust/crossterm TUI (preferred) ─────────────────────────────────────────
+  process.stderr.write(`[repl] tuiAvailable=${tuiAvailable()}\n`)
   if (tuiAvailable()) {
     // Keep track of current state for IPC callbacks
     let currentMode:     ReplMode = init.mode
@@ -611,6 +621,10 @@ export async function repl(): Promise<void> {
               runTelegramConnectWizard,
               showConfigModal: tuiControl.showConfigModal ?? undefined,
               showInfoModal: tuiControl.showInfoModal ?? undefined,
+              startChannel: async (type: string, accountId: string, config: Record<string, unknown>) => {
+                const cm = getChannelManager()
+                if (cm) await cm.addChannel(type, accountId, config)
+              },
               executeTask: async (task: string, mode: string) => {
                 return executeTask(task, mode as ReplMode, {
                   suspend: tuiControl.suspend ?? undefined,

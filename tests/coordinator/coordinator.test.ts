@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test"
-import { parseBeeDecision, repairJson, formatBeeNarrative, parseGitDiffStat, formatToolResult } from "@johpaz/hivecode-code/coordinator/utils"
+import { parseBeeDecision, normalizeBeeDecision, formatBeeNarrative, parseGitDiffStat, formatToolResult } from "@johpaz/hivecode-code/coordinator/utils"
 
 // ─── parseBeeDecision ─────────────────────────────────────────────────────────
 
@@ -36,32 +36,10 @@ describe("parseBeeDecision", () => {
     expect(d.content).toBe("Lo siento, no puedo hacer eso.")
   })
 
-  it("JSON roto en bloque markdown → repara y parsea", () => {
-    // trailing comma before closing brace (a common LLM output artifact)
+  it("JSON roto en bloque markdown → fallback a respond", () => {
     const raw = '```json\n{"action":"architecture","reason":"needs design",}\n```'
     const d = parseBeeDecision(raw)
     expect(d.action).toBe("architecture")
-  })
-})
-
-// ─── repairJson ───────────────────────────────────────────────────────────────
-
-describe("repairJson", () => {
-  it("elimina trailing commas", () => {
-    const repaired = repairJson('{"a":1,}')
-    expect(repaired).toBe('{"a":1}')
-  })
-
-  it("agrega llaves de cierre faltantes", () => {
-    const repaired = repairJson('{"a":{"b":1}')
-    expect(repaired).not.toBeNull()
-    expect(JSON.parse(repaired!).a.b).toBe(1)
-  })
-
-  it("agrega corchetes de cierre faltantes", () => {
-    const repaired = repairJson('[1,2,3')
-    expect(repaired).not.toBeNull()
-    expect(JSON.parse(repaired!)).toEqual([1, 2, 3])
   })
 })
 
@@ -69,24 +47,24 @@ describe("repairJson", () => {
 
 describe("formatBeeNarrative", () => {
   it("respond → devuelve content", () => {
-    const raw = JSON.stringify({ action: "respond", content: "Aquí está la respuesta.", reason: "" })
-    expect(formatBeeNarrative(raw)).toBe("Aquí está la respuesta.")
+    const decision = normalizeBeeDecision({ action: "respond", content: "Aquí está la respuesta.", reason: "" })
+    expect(formatBeeNarrative(decision)).toBe("Aquí está la respuesta.")
   })
 
   it("dispatch → lista coordinadores", () => {
-    const raw = JSON.stringify({
+    const decision = normalizeBeeDecision({
       action: "dispatch",
       reason: "needs work",
       phases: [{ coordinator: "backend", description: "API" }, { coordinator: "test", description: "Tests" }],
     })
-    const out = formatBeeNarrative(raw)
+    const out = formatBeeNarrative(decision)
     expect(out).toContain("backend")
     expect(out).toContain("test")
   })
 
   it("architecture → menciona diseño arquitectónico", () => {
-    const raw = JSON.stringify({ action: "architecture", reason: "new system" })
-    const out = formatBeeNarrative(raw)
+    const decision = normalizeBeeDecision({ action: "architecture", reason: "new system" })
+    const out = formatBeeNarrative(decision)
     expect(out).toContain("diseño arquitectónico")
   })
 })

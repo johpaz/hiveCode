@@ -40,18 +40,6 @@ fn canvas_contains<F: Fn(char) -> bool>(canvas: &Canvas, f: F) -> bool {
     false
 }
 
-/// True if any cell in the rectangular region matches predicate.
-fn region_contains<F: Fn(char) -> bool>(canvas: &Canvas, x0: u16, y0: u16, x1: u16, y1: u16, f: F) -> bool {
-    for y in y0..y1 {
-        for x in x0..x1 {
-            if let Some(c) = canvas.cell_at(x, y) {
-                if f(c.ch) { return true; }
-            }
-        }
-    }
-    false
-}
-
 fn base_state() -> AppState {
     let mut s = AppState::default();
     s.apply_message(BunMessage::Init {
@@ -127,6 +115,13 @@ fn focus_shows_workers_while_running_auto_mode() {
         status: "running".into(),
         display_name: None,
         activity: None,
+        token_count: None,
+        level: None,
+        current_action: None,
+        current_file: None,
+        iteration_current: None,
+        iteration_total: None,
+        transversal: None,
     });
     state.apply_message(BunMessage::WorkerUpdate {
         task_id: None,
@@ -135,6 +130,13 @@ fn focus_shows_workers_while_running_auto_mode() {
         status: "running".into(),
         display_name: None,
         activity: None,
+        token_count: None,
+        level: None,
+        current_action: None,
+        current_file: None,
+        iteration_current: None,
+        iteration_total: None,
+        transversal: None,
     });
     state.history.entries.push(HistoryEntry {
         role: Role::User,
@@ -244,6 +246,13 @@ fn routing_auto_mode_code_then_focus() {
         status: "running".into(),
         display_name: None,
         activity: None,
+        token_count: None,
+        level: None,
+        current_action: None,
+        current_file: None,
+        iteration_current: None,
+        iteration_total: None,
+        transversal: None,
     });
     assert_eq!(state.active_tab, TabId::Code,
         "AUTO mode + worker running debe navegar a Code tab");
@@ -273,6 +282,13 @@ fn manual_tab_lock_overrides_auto_routing() {
         status: "running".into(),
         display_name: None,
         activity: None,
+        token_count: None,
+        level: None,
+        current_action: None,
+        current_file: None,
+        iteration_current: None,
+        iteration_total: None,
+        transversal: None,
     });
     assert_eq!(state.active_tab, TabId::Review,
         "tab_locked=true debe impedir el auto-routing");
@@ -326,6 +342,13 @@ fn welcome_screen_exposes_harness_status() {
         status: "running".into(),
         display_name: None,
         activity: Some("editando auth".into()),
+        token_count: None,
+        level: None,
+        current_action: None,
+        current_file: None,
+        iteration_current: None,
+        iteration_total: None,
+        transversal: None,
     });
 
     let mut canvas = make_canvas(140, 34);
@@ -340,21 +363,21 @@ fn welcome_screen_exposes_harness_status() {
 }
 
 #[test]
-fn renderer_registers_badged_tab_hit_regions() {
+fn renderer_uses_immersive_layout_without_tab_hit_regions() {
     let mut state = base_state();
     state.harness.approval_pending = true;
 
     let mut canvas = make_canvas(120, 30);
     renderer::render(&mut canvas, &mut state);
 
-    let plan_region = state
+    let frame = canvas.to_text_rows().join("\n");
+    assert!(frame.contains("⬡ hiveCode"));
+    assert!(frame.contains("CHECKPOINTS"));
+    assert!(state
         .hit_map
         .regions()
         .iter()
-        .find(|region| region.id == "tab:plan")
-        .expect("plan tab hit region");
-
-    assert!(plan_region.rect.w > "⬡ PLAN[2]  ".chars().count() as u16);
+        .all(|region| !region.id.starts_with("tab:")));
 }
 
 #[test]
@@ -370,10 +393,24 @@ fn renderer_registers_split_handle_hit_regions() {
         .regions()
         .iter()
         .any(|region| region.id == "split:code:main"));
+
+    state.active_tab = TabId::Review;
+    renderer::render(&mut canvas, &mut state);
+
+    assert!(state
+        .hit_map
+        .regions()
+        .iter()
+        .any(|region| region.id == "split:review:main"));
+    assert!(state
+        .hit_map
+        .regions()
+        .iter()
+        .any(|region| region.id == "split:review:right"));
 }
 
 #[test]
-fn renderer_registers_chrome_resize_hit_regions() {
+fn renderer_does_not_register_legacy_chrome_resize_regions_in_immersive_layout() {
     let mut state = base_state();
 
     let mut canvas = make_canvas(120, 30);
@@ -383,23 +420,13 @@ fn renderer_registers_chrome_resize_hit_regions() {
         .hit_map
         .regions()
         .iter()
-        .any(|region| region.id == "chrome:header"));
-    assert!(state
-        .hit_map
-        .regions()
-        .iter()
-        .any(|region| region.id == "chrome:input"));
-    assert!(state
-        .hit_map
-        .regions()
-        .iter()
-        .any(|region| region.id == "chrome:footer"));
+        .all(|region| !region.id.starts_with("chrome:")));
 }
 
 // ── 9. Code layout: split dinámico con 3+ workers activos ────────────────────
 
 #[test]
-fn code_layout_renders_all_workers() {
+fn code_layout_renders_focused_worker_detail() {
     let mut state = base_state();
     // Activar 3 workers simultáneos (Bee puede llamar hasta 6 en paralelo)
     for (name, phase) in [
@@ -414,20 +441,24 @@ fn code_layout_renders_all_workers() {
             status: "running".into(),
             display_name: None,
             activity: None,
+            token_count: None,
+            level: None,
+            current_action: None,
+            current_file: None,
+            iteration_current: None,
+            iteration_total: None,
+            transversal: None,
         });
     }
 
     let mut canvas = make_canvas(160, 30);
     let area = Rect::new(0, 0, 160, 30);
     code_layout::render(&mut canvas, area, &state);
+    let frame = canvas.to_text_rows().join("\n");
 
-    // Con 3+ workers activos el layout da 40/60 → panel de workers desde col 64.
-    // Los workers se renderizan en area.x+5 = 69. Buscar en la mitad derecha del canvas.
-    let right_x = 64u16;
-    let found_backend  = region_contains(&canvas, right_x, 0, 160, 30, |c| c == 'b');
-    let found_frontend = region_contains(&canvas, right_x, 0, 160, 30, |c| c == 'f');
-    assert!(found_backend,  "Code layout debe mostrar worker 'backend'");
-    assert!(found_frontend, "Code layout debe mostrar worker 'frontend'");
+    assert!(frame.contains("@BACKENDENGINEER"), "Code layout debe mostrar worker enfocado");
+    assert!(frame.contains("THOUGHT STREAM"), "Code layout debe reservar thought stream");
+    assert!(frame.contains("BLACKBOARD RELEVANTE"), "Code layout debe reservar blackboard relevante");
 }
 
 // ── 10. Plan layout: panel derecho muestra ADRs en modo PLAN ─────────────────
@@ -459,11 +490,10 @@ fn plan_layout_shows_adrs_in_plan_mode() {
     let area = Rect::new(0, 0, 160, 30);
     plan_layout::render(&mut canvas, area, &state);
 
-    // Panel derecho (x > 96 en split 60/40) debe contener texto del ADR
-    let found_adr_title = (0..30u16).any(|y| {
-        row_text(&canvas, 96, y, 64).contains('J')  // "JWT" del título
-    });
-    assert!(found_adr_title, "Plan layout debe mostrar el título del ADR en el panel derecho");
+    let frame = canvas.to_text_rows().join("\n");
+    assert!(frame.contains("PRD / TAREA"));
+    assert!(frame.contains("PLAN EN CONSTRUCCIÓN"));
+    assert!(frame.contains("Usar JWT para sesiones"), "Plan layout debe mostrar el título del ADR en contexto");
 }
 
 // ── 11. Review layout: approval strip más prominente en modo APPROVAL ─────────
@@ -582,6 +612,13 @@ fn full_sequence_init_task_streaming_response() {
         status: "running".into(),
         display_name: None,
         activity: None,
+        token_count: None,
+        level: None,
+        current_action: None,
+        current_file: None,
+        iteration_current: None,
+        iteration_total: None,
+        transversal: None,
     });
     assert_eq!(state.active_tab, TabId::Code);
 

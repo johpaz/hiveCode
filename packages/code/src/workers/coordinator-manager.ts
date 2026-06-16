@@ -40,8 +40,8 @@ import { CoordinatorBase } from "../coordinator/base.ts"
 import { makeGatewayEmitter } from "../context/ipc-emitter.ts"
 import { SystemError, TimeoutError } from "../errors/hive-errors.ts"
 import {
-  parseBeeDecision, formatBeeNarrative, formatToolCallForHuman,
-  formatToolResult, parseGitDiffStat, parseUnifiedDiff, repairJson,
+  parseBeeDecision, normalizeBeeDecision, formatBeeNarrative, formatToolCallForHuman,
+  formatToolResult, parseGitDiffStat, parseUnifiedDiff,
   smartTruncate, smartTruncateLines,
 } from "../coordinator/utils.ts"
 
@@ -67,24 +67,29 @@ type NarrativeChunkCallback = (chunk: {
   sessionId?: string
 }) => void
 
-const WORKER_EXT = import.meta.url.endsWith(".ts") ? ".worker.ts" : ".worker.js"
-
-const COORDINATOR_FILES: Record<PhaseName, string> = {
-  bee: fileURLToPath(new URL(`./bee${WORKER_EXT}`, import.meta.url)),
-  architecture: fileURLToPath(new URL(`./architecture${WORKER_EXT}`, import.meta.url)),
-  product_manager: fileURLToPath(new URL(`./product-manager${WORKER_EXT}`, import.meta.url)),
-  backend: fileURLToPath(new URL(`./backend${WORKER_EXT}`, import.meta.url)),
-  frontend: fileURLToPath(new URL(`./frontend${WORKER_EXT}`, import.meta.url)),
-  mobile: fileURLToPath(new URL(`./mobile${WORKER_EXT}`, import.meta.url)),
-  data_scientist: fileURLToPath(new URL(`./data-scientist${WORKER_EXT}`, import.meta.url)),
-  security: fileURLToPath(new URL(`./security${WORKER_EXT}`, import.meta.url)),
-  test: fileURLToPath(new URL(`./test${WORKER_EXT}`, import.meta.url)),
-  devops: fileURLToPath(new URL(`./devops${WORKER_EXT}`, import.meta.url)),
-  dba: fileURLToPath(new URL(`./dba${WORKER_EXT}`, import.meta.url)),
-  integration: fileURLToPath(new URL(`./integration${WORKER_EXT}`, import.meta.url)),
-  reviewer: fileURLToPath(new URL(`./reviewer${WORKER_EXT}`, import.meta.url)),
-  librarian: fileURLToPath(new URL(`./librarian${WORKER_EXT}`, import.meta.url)),
-  forensic: fileURLToPath(new URL(`./forensic${WORKER_EXT}`, import.meta.url)),
+// Bun --compile only embeds workers when new Worker(new URL(...)) is a LITERAL call.
+// Variables or map lookups are not statically detected. The switch below ensures
+// every worker URL is visible to the bundler at compile time.
+function spawnCoordinatorWorker(name: PhaseName): Bun.Worker {
+  const smol = name === "security" || name === "devops"
+  switch (name) {
+    case "bee":             return new (Worker as any)(new URL("./bee.worker.ts",             import.meta.url), { smol }) as Bun.Worker
+    case "architecture":    return new (Worker as any)(new URL("./architecture.worker.ts",    import.meta.url), { smol }) as Bun.Worker
+    case "product_manager": return new (Worker as any)(new URL("./product-manager.worker.ts", import.meta.url), { smol }) as Bun.Worker
+    case "backend":         return new (Worker as any)(new URL("./backend.worker.ts",         import.meta.url), { smol }) as Bun.Worker
+    case "frontend":        return new (Worker as any)(new URL("./frontend.worker.ts",        import.meta.url), { smol }) as Bun.Worker
+    case "mobile":          return new (Worker as any)(new URL("./mobile.worker.ts",          import.meta.url), { smol }) as Bun.Worker
+    case "data_scientist":  return new (Worker as any)(new URL("./data-scientist.worker.ts",  import.meta.url), { smol }) as Bun.Worker
+    case "security":        return new (Worker as any)(new URL("./security.worker.ts",        import.meta.url), { smol }) as Bun.Worker
+    case "test":            return new (Worker as any)(new URL("./test.worker.ts",            import.meta.url), { smol }) as Bun.Worker
+    case "devops":          return new (Worker as any)(new URL("./devops.worker.ts",          import.meta.url), { smol }) as Bun.Worker
+    case "dba":             return new (Worker as any)(new URL("./dba.worker.ts",             import.meta.url), { smol }) as Bun.Worker
+    case "integration":     return new (Worker as any)(new URL("./integration.worker.ts",     import.meta.url), { smol }) as Bun.Worker
+    case "reviewer":        return new (Worker as any)(new URL("./reviewer.worker.ts",        import.meta.url), { smol }) as Bun.Worker
+    case "librarian":       return new (Worker as any)(new URL("./librarian.worker.ts",       import.meta.url), { smol }) as Bun.Worker
+    case "forensic":        return new (Worker as any)(new URL("./forensic.worker.ts",        import.meta.url), { smol }) as Bun.Worker
+    default:                throw new Error(`Unknown coordinator: ${name}`)
+  }
 }
 
 export class CoordinatorManager extends CoordinatorBase {
@@ -157,9 +162,9 @@ export class CoordinatorManager extends CoordinatorBase {
   }
 
   private initToolPool(size: number): void {
-    const workerPath = fileURLToPath(new URL("./tool.worker.ts", import.meta.url))
+    // URL embebida estáticamente por Bun --compile
     for (let i = 0; i < size; i++) {
-      const worker = new (Worker as any)(workerPath, { smol: true }) as Bun.Worker
+      const worker = new (Worker as any)(new URL("./tool.worker.ts", import.meta.url), { smol: true }) as Bun.Worker
       worker.onmessage = (msg: MessageEvent) => {
         const data = typeof msg.data === "string" ? JSON.parse(msg.data) : msg.data
         if (data.type === "TOOL_RESULT") {
@@ -331,7 +336,7 @@ export class CoordinatorManager extends CoordinatorBase {
 
   private createWorker(name: PhaseName): void {
     try {
-      const worker = new (Worker as any)(COORDINATOR_FILES[name], { smol: name === "security" || name === "devops" }) as Bun.Worker
+      const worker = spawnCoordinatorWorker(name)
       worker.onmessage = (msg: MessageEvent) => this.handleWorkerMessage(name, msg.data as WorkerToManagerMessage)
       worker.onerror = (err: ErrorEvent) => {
         log.error(`[${name}] Worker crashed: ${err.message}. Restarting...`)
@@ -460,11 +465,13 @@ export class CoordinatorManager extends CoordinatorBase {
     }
     const beeResult = await this.dispatchPhase("bee", beeTask)
 
-    // Parse BEE's decision early so we store a human-readable narrative
-    const beeDecision = parseBeeDecision(beeResult.narrativeEntry)
+    // Parse BEE's decision — prefer structured decision from native tool call, fallback to legacy text parsing
+    const beeDecision = beeResult.structuredDecision
+      ? normalizeBeeDecision(beeResult.structuredDecision)
+      : parseBeeDecision(beeResult.narrativeEntry)
     const beeNarrative = beeResult.status === "failed" || beeResult.status === "blocked"
       ? (beeResult.blockerDescription || beeResult.narrativeEntry || "")
-      : formatBeeNarrative(beeResult.narrativeEntry)
+      : formatBeeNarrative(beeDecision)
 
     if (beeResult.status === "failed" || beeResult.status === "blocked") {
       this.scribe.appendNarrative({
@@ -718,8 +725,10 @@ export class CoordinatorManager extends CoordinatorBase {
     })
     this.scribe.updatePhaseStatus(archPhaseId, "completed", archResult.narrativeEntry)
 
-    // Parse the architecture output into a structured plan
-    const plan = parsePlan(archResult.narrativeEntry)
+    // Parse the architecture output into a structured plan — prefer structured decision from native tool call
+    const plan = archResult.structuredDecision
+      ? parsePlan(archResult.structuredDecision)
+      : parsePlan(archResult.narrativeEntry)
     if (mode === "plan") {
       const incompleteReason = plan.parseError
         ?? (!plan.adr.title.trim() || plan.adr.title === "Untitled ADR"
@@ -1352,6 +1361,15 @@ export class CoordinatorManager extends CoordinatorBase {
         `INSERT INTO worker_activity (session_id, worker, phase, level, status, input_tokens, output_tokens, started_at, completed_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(this.activeSessionId, phase, phase, level, status, tokensIn, tokensOut, startedAt, completedAt)
+      this.onIpcEvent?.("worker_update", {
+        worker: phase,
+        phase,
+        level,
+        status,
+        current_action: status === "running" ? `ejecutando ${phase}` : phase,
+        token_count: tokensIn + tokensOut,
+        transversal: phase === "security",
+      })
     } catch {
       // worker_activity is non-critical — never block on write failure
     }
@@ -1397,8 +1415,7 @@ export class CoordinatorManager extends CoordinatorBase {
       model: originalTask.model,
     }
 
-    const workerPath = COORDINATOR_FILES["forensic"]
-    const forensicWorker = new (Worker as any)(workerPath, { smol: true }) as Bun.Worker
+    const forensicWorker = new (Worker as any)(new URL("./forensic.worker.ts", import.meta.url), { smol: true }) as Bun.Worker
 
     return new Promise((resolve) => {
       const resolverKey = `${taskId}:${phaseId}`
@@ -1502,8 +1519,7 @@ export class CoordinatorManager extends CoordinatorBase {
       model: model || undefined,
     }
 
-    const workerPath = COORDINATOR_FILES["librarian"]
-    const libWorker = new (Worker as any)(workerPath, { smol: true }) as Bun.Worker
+    const libWorker = new (Worker as any)(new URL("./librarian.worker.ts", import.meta.url), { smol: true }) as Bun.Worker
 
     return new Promise((resolve) => {
       const tools = getToolsForCoordinator("librarian" as PhaseName, this.allTools)
@@ -1708,10 +1724,13 @@ export class CoordinatorManager extends CoordinatorBase {
       // would duplicate the message. Tool calls still stream in real-time
       // via handleToolCall → onNarrativeChunk.
 
-      // Format BEE's JSON output for WebSocket subscribers
+      // Format BEE's decision output for WebSocket subscribers
       let displayContent = msg.result.narrativeEntry
       if (name === "bee" && msg.result.narrativeEntry) {
-        displayContent = formatBeeNarrative(msg.result.narrativeEntry)
+        const decision = msg.result.structuredDecision
+          ? normalizeBeeDecision(msg.result.structuredDecision)
+          : parseBeeDecision(msg.result.narrativeEntry)
+        displayContent = formatBeeNarrative(decision)
       }
 
       // Stream to WebSocket subscribers (persisted narrative is written by runTask/executePhaseLoop)

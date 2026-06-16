@@ -39,6 +39,36 @@ pub struct PlanApprovalState {
     pub selected: usize,  // 0=auto, 1=approval, 2=suggest, 3=cancel
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewAction {
+    Approve,
+    Reject,
+    Modify,
+}
+
+impl ReviewAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            ReviewAction::Approve => "aprobar",
+            ReviewAction::Reject => "rechazar",
+            ReviewAction::Modify => "pedir modificación",
+        }
+    }
+
+    pub fn command(self) -> &'static str {
+        match self {
+            ReviewAction::Approve => "/approve",
+            ReviewAction::Reject => "/reject necesita ajustes",
+            ReviewAction::Modify => "/reject pedir modificación",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReviewConfirmState {
+    pub action: ReviewAction,
+}
+
 // ── Settings Hub ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -99,6 +129,7 @@ pub struct SettingsMcp {
     pub name: String,
     pub url: String,
     pub enabled: bool,
+    pub has_headers: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -113,6 +144,7 @@ pub struct SettingsSkill {
 pub struct SettingsHubState {
     pub active_tab: SettingsTab,
     pub selected_row: usize,
+    pub scroll_offset: usize,
     pub providers: Vec<SettingsProvider>,
     pub mcp: Vec<SettingsMcp>,
     pub skills: Vec<SettingsSkill>,
@@ -132,5 +164,6 @@ pub enum ModalState {
     Config(ConfigModalState),
     Info(InfoModalState),
     PlanApproval(PlanApprovalState),
+    ReviewConfirm(ReviewConfirmState),
     Settings(SettingsHubState),
 }

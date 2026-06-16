@@ -153,6 +153,46 @@ impl Canvas {
         }
     }
 
+    /// Returns a mutable reference to the cell at (x, y) in the back buffer.
+    pub fn cell_mut(&mut self, x: u16, y: u16) -> Option<&mut Cell> {
+        if x < self.w && y < self.h {
+            Some(&mut self.back[y as usize * self.w as usize + x as usize])
+        } else {
+            None
+        }
+    }
+
+    /// Extracts plain text from a rectangular range of cells in the back buffer.
+    pub fn extract_text_range(&self, x0: u16, y0: u16, x1: u16, y1: u16) -> String {
+        let (start_x, start_y, end_x, end_y) = if y0 < y1 || (y0 == y1 && x0 <= x1) {
+            (x0, y0, x1, y1)
+        } else {
+            (x1, y1, x0, y0)
+        };
+        let mut lines = Vec::new();
+        for y in start_y..=end_y {
+            if y >= self.h { break; }
+            let row_start = if y == start_y { start_x } else { 0 };
+            let row_end = if y == end_y {
+                end_x.min(self.w.saturating_sub(1))
+            } else {
+                self.w.saturating_sub(1)
+            };
+            let mut line = String::new();
+            for x in row_start..=row_end {
+                if let Some(cell) = self.cell_at(x, y) {
+                    if cell.ch != '\0' && cell.ch != ' ' {
+                        line.push(cell.ch);
+                    } else if cell.ch == ' ' {
+                        line.push(' ');
+                    }
+                }
+            }
+            lines.push(line);
+        }
+        lines.join("\n")
+    }
+
     pub fn draw_border(&mut self, r: Rect, style: Style) {
         if r.w < 2 || r.h < 2 {
             return;

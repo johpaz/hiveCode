@@ -78,3 +78,17 @@ export async function rotateProviderApiKey(providerId: string, apiKey: string): 
 export async function deleteProviderApiKey(providerId: string): Promise<void> {
   await Bun.secrets.delete({ service: SERVICE, name: `provider.${providerId}` });
 }
+
+// ── hivecode-free (user-token-based, server proxies NVIDIA) ────────────────
+
+/**
+ * Check whether a provider is configured as free tier.
+ *
+ * In this architecture, "free tier" means the client uses a personal
+ * `hivecode_token` (issued by the operator's backend after Firebase Auth)
+ * stored in Bun.secrets — NOT a server-side env var key. The actual NVIDIA
+ * API key lives in the operator's backend, which is what the client talks to.
+ */
+export function isFreeProvider(providerId: string): boolean {
+  return providerId === "hivecode-free" || providerId.endsWith("-free")
+}

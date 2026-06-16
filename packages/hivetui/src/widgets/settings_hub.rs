@@ -62,7 +62,24 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &mut AppState, regist
     if hub.loading {
         canvas.print(content_area.x + 2, content_area.y + 2, "Cargando…", Style::new().fg(DIM));
     } else {
-        // Re-borrow immutably for rendering content
+        // Ajustar scroll_offset para mantener selected_row visible
+        let visible_rows = content_area.h.saturating_sub(1) as usize;
+        if let ModalState::Settings(hub) = &mut state.modal {
+            let total = match hub.active_tab {
+                SettingsTab::Providers | SettingsTab::Models => hub.providers.len(),
+                SettingsTab::Mcp       => hub.mcp.len(),
+                SettingsTab::Skills    => hub.skills.len(),
+                _ => 0,
+            };
+            let max_offset = total.saturating_sub(visible_rows);
+            hub.scroll_offset = hub.scroll_offset.min(max_offset);
+            if hub.selected_row < hub.scroll_offset {
+                hub.scroll_offset = hub.selected_row;
+            }
+            if hub.selected_row >= hub.scroll_offset + visible_rows && visible_rows > 0 {
+                hub.scroll_offset = hub.selected_row.saturating_sub(visible_rows - 1);
+            }
+        }
         let ModalState::Settings(hub) = &state.modal else { return };
         match hub.active_tab {
             SettingsTab::Providers => render_providers(canvas, content_area, state, register_hits),
@@ -106,9 +123,10 @@ fn render_providers(canvas: &mut Canvas, area: Rect, state: &mut AppState, regis
     }
 
     let selected = hub.selected_row;
-    for (i, p) in hub.providers.iter().enumerate() {
-        let y = area.y + 1 + i as u16;
-        if y >= area.bottom() { break; }
+    let offset = hub.scroll_offset;
+    let visible = (area.h.saturating_sub(1)) as usize;
+    for (i, p) in hub.providers.iter().enumerate().skip(offset).take(visible) {
+        let y = area.y + 1 + (i - offset) as u16;
 
         let is_sel = selected == i;
         if is_sel {
@@ -135,14 +153,15 @@ fn render_providers(canvas: &mut Canvas, area: Rect, state: &mut AppState, regis
             ));
         }
     }
+    draw_scrollbar(canvas, area, offset, hub.providers.len(), visible);
 }
 
 fn render_mcp(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hits: bool) {
     let ModalState::Settings(hub) = &state.modal else { return };
 
-    canvas.print(area.x,      area.y, "Nombre", Style::new().fg(DIM));
-    canvas.print(area.x + 20, area.y, "URL",    Style::new().fg(DIM));
-    canvas.print(area.x + 50, area.y, "Estado", Style::new().fg(DIM));
+    canvas.print(area.x,      area.y, "Nombre",   Style::new().fg(DIM));
+    canvas.print(area.x + 18, area.y, "Endpoint", Style::new().fg(DIM));
+    canvas.print(area.x + 42, area.y, "Estado",   Style::new().fg(DIM));
 
     if hub.mcp.is_empty() {
         canvas.print(area.x + 2, area.y + 2,
@@ -151,9 +170,10 @@ fn render_mcp(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hi
     }
 
     let selected = hub.selected_row;
-    for (i, m) in hub.mcp.iter().enumerate() {
-        let y = area.y + 1 + i as u16;
-        if y >= area.bottom() { break; }
+    let offset = hub.scroll_offset;
+    let visible = (area.h.saturating_sub(1)) as usize;
+    for (i, m) in hub.mcp.iter().enumerate().skip(offset).take(visible) {
+        let y = area.y + 1 + (i - offset) as u16;
 
         let is_sel = selected == i;
         if is_sel {
@@ -161,11 +181,16 @@ fn render_mcp(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hi
             canvas.print(area.x, y, "▶ ", Style::new().fg(AMBER).bold());
         }
         let style = if is_sel { Style::new().fg(WHITE).bold() } else { Style::new().fg(SECONDARY) };
-        canvas.print(area.x + 2,  y, &truncate(&m.name, 18), style);
-        canvas.print(area.x + 20, y, &truncate(&m.url, 28),  style);
-        canvas.print(area.x + 50, y,
-            if m.enabled { "● activo" } else { "○ off" },
+        let endpoint = if m.url.is_empty() { &m.id } else { &m.url };
+        canvas.print(area.x + 2,  y, &truncate(&m.name, 16),    style);
+        canvas.print(area.x + 18, y, &truncate(endpoint, 22),   style);
+        let status_text = if m.enabled { "● activo" } else { "○ off" };
+        let status_label = if m.has_headers { format!("[H] {}", status_text) } else { status_text.to_string() };
+        canvas.print(area.x + 42, y, &status_label,
             if m.enabled { Style::new().fg(GREEN) } else { Style::new().fg(DIM) });
+        if is_sel {
+            canvas.print(area.x + 52, y, "[D]elim [S]toggle [E]info", Style::new().fg(DIM));
+        }
 
         if register_hits {
             state.hit_map.push(MouseRegion::new(
@@ -176,6 +201,7 @@ fn render_mcp(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hi
             ));
         }
     }
+    draw_scrollbar(canvas, area, offset, hub.mcp.len(), visible);
 }
 
 fn render_skills(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hits: bool) {
@@ -191,9 +217,10 @@ fn render_skills(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
     }
 
     let selected = hub.selected_row;
-    for (i, s) in hub.skills.iter().enumerate() {
-        let y = area.y + 1 + i as u16;
-        if y >= area.bottom() { break; }
+    let offset = hub.scroll_offset;
+    let visible = (area.h.saturating_sub(1)) as usize;
+    for (i, s) in hub.skills.iter().enumerate().skip(offset).take(visible) {
+        let y = area.y + 1 + (i - offset) as u16;
 
         let is_sel = selected == i;
         if is_sel {
@@ -217,6 +244,7 @@ fn render_skills(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
             ));
         }
     }
+    draw_scrollbar(canvas, area, offset, hub.skills.len(), visible);
 }
 
 fn render_models(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hits: bool) {
@@ -233,9 +261,10 @@ fn render_models(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
     }
 
     let selected = hub.selected_row;
-    for (i, p) in hub.providers.iter().enumerate() {
-        let y = area.y + 1 + i as u16;
-        if y >= area.bottom() { break; }
+    let offset = hub.scroll_offset;
+    let visible = (area.h.saturating_sub(1)) as usize;
+    for (i, p) in hub.providers.iter().enumerate().skip(offset).take(visible) {
+        let y = area.y + 1 + (i - offset) as u16;
 
         let is_sel = selected == i;
         if is_sel {
@@ -258,6 +287,7 @@ fn render_models(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
             ));
         }
     }
+    draw_scrollbar(canvas, area, offset, hub.providers.len(), visible);
     // Hint: Enter para cambiar el modelo de un provider
     let hint_y = area.bottom().saturating_sub(1);
     canvas.print(area.x + 2, hint_y,
@@ -298,6 +328,21 @@ fn render_telegram(canvas: &mut Canvas, area: Rect, state: &mut AppState) {
         canvas.print(area.x + 2, area.y + 3, "Enter → gestionar bot", Style::new().fg(DIM));
     } else {
         canvas.print(area.x + 2, area.y + 3, "A → Conectar Telegram", Style::new().fg(AMBER));
+    }
+}
+
+fn draw_scrollbar(canvas: &mut Canvas, area: Rect, offset: usize, total: usize, visible: usize) {
+    if total <= visible { return; }
+    let track_top = area.y + 1;
+    let track_bottom = area.bottom().saturating_sub(1);
+    let track_h = track_bottom.saturating_sub(track_top) as usize;
+    if track_h == 0 { return; }
+    let max_scroll = total.saturating_sub(visible);
+    let thumb_y = track_top + (offset.saturating_mul(track_h) / max_scroll.max(1)) as u16;
+    let thumb_y = thumb_y.min(track_bottom);
+    for y in track_top..=track_bottom {
+        let s = if y == thumb_y { "█" } else { "│" };
+        canvas.print(area.right().saturating_sub(1), y, s, Style::new().fg(DIM));
     }
 }
 

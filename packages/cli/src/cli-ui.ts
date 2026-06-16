@@ -283,6 +283,20 @@ export async function runProviderSetupWizard(
     provider = input
   }
 
+  // hivecode-free no requiere API key — lanza el flujo de login con Firebase
+  if (provider === "hivecode-free") {
+    const { runAuthCli } = await import("@johpaz/hivecode-core/auth/auth-cli")
+    hiveNote("Abriendo el navegador para autenticarte con Firebase...", ["hivecode-free"])
+    const result = await runAuthCli()
+    if (!result) {
+      hiveOutro("Autenticación cancelada", "error")
+      return null
+    }
+    hiveNote(`Sesión iniciada como ${result.email ?? "usuario"}`, ["hivecode-free ✓"])
+    // El token ya fue guardado en Bun.secrets por runAuthCli
+    return { provider, apiKey: "", baseUrl: "", model: "moonshotai/kimi-k2.6" }
+  }
+
   const apiKey = await hiveText({
     message: `API Key para ${provider}`,
     placeholder: "sk-...",

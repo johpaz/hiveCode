@@ -34,6 +34,8 @@ export class ChannelManager {
   private async initializeFromDB(): Promise<void> {
     try {
       const db = getDb();
+      // Migrate: channels that were marked connected but lack active=1 (saved by old code)
+      db.query("UPDATE channels SET active = 1 WHERE enabled = 1 AND status = 'connected' AND active = 0").run();
       // Load all active channels - config may be empty for webchat
       const rows = db.query(`
         SELECT id, type, config_encrypted, config_iv, enabled, active
@@ -51,12 +53,12 @@ export class ChannelManager {
       for (const row of rows) {
         let config: Record<string, unknown> = {};
 
-        if (row.config_encrypted && row.config_iv) {
+        if (row.config_encrypted) {
           try {
-            config = await decryptConfig(row.config_encrypted, row.config_iv);
-            this.log.debug(`Decrypted config for ${row.type}:${row.id}:`, Object.keys(config));
+            config = decryptConfig(row.config_encrypted, row.config_iv);
+            this.log.debug(`Loaded config for ${row.type}:${row.id}:`, Object.keys(config));
           } catch (error) {
-            this.log.warn(`Failed to decrypt config for channel ${row.id}:`, (error as Error).message);
+            this.log.warn(`Failed to load config for channel ${row.id}:`, (error as Error).message);
           }
         }
 
@@ -102,15 +104,28 @@ export class ChannelManager {
 
     try {
       switch (channelName) {
-        case "telegram":
+        case "telegram": {
+          let botToken = (config.botToken as string) || "";
+          if (!botToken) {
+            try {
+              botToken = await (Bun as any).secrets?.get?.({ service: "hive-code", name: "telegram.bot_token" }) ?? "";
+            } catch { /* Bun.secrets not available */ }
+          }
+          const rawPolicy = (config.dmPolicy as string) ?? "open";
+          const dmPolicy: "open" | "allowlist" | "pairing" =
+            rawPolicy === "allowAll" || rawPolicy === "open" ? "open"
+            : rawPolicy === "allowList" || rawPolicy === "allowlist" ? "allowlist"
+            : rawPolicy === "pairing" ? "pairing"
+            : "open";
           channel = createTelegramChannel(accountId, {
             enabled: true,
-            botToken: config.botToken as string,
-            dmPolicy: (config.dmPolicy as "open" | "pairing" | "allowlist") ?? "open",
+            botToken,
+            dmPolicy,
             allowFrom: (config.allowFrom as string[]) ?? [],
             groups: (config.groups as boolean) ?? false,
           } as TelegramConfig);
           break;
+        }
 
         case "discord":
         case "webchat":

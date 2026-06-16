@@ -154,6 +154,12 @@ export const SEED_DATA: SeedData = {
     { id: "elevenlabs", name: "ElevenLabs", baseUrl: "https://api.elevenlabs.io/v1" },
     { id: "qwen", name: "Qwen (Alibaba)", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", category: "llm" },
     { id: "nvidia", name: "NVIDIA NIM", baseUrl: "https://integrate.api.nvidia.com/v1" },
+    {
+      id: "hivecode-free",
+      name: "hivecode-free (tu API · Firebase Auth)",
+      baseUrl: process.env.HIVE_FREE_API_URL || "https://api.hivecode.local/v1",
+      category: "llm",
+    },
     { id: "codex", name: "OpenAI Codex", baseUrl: "https://api.openai.com/v1" },
     { id: "opencode-go", name: "OpenCode Go", baseUrl: "https://opencode.ai/zen/go/v1" },
     { id: "minimax", name: "MiniMax", baseUrl: "https://api.minimaxi.com/v1" },
@@ -301,6 +307,17 @@ export const SEED_DATA: SeedData = {
     { id: "google/gemma-4-31b-it", providerId: "nvidia", name: "Gemma 4 31B (NVIDIA)", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming"]) },
     { id: "google/gemma-3-27b-it", providerId: "nvidia", name: "Gemma 3 27B (NVIDIA)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming"]) },
     { id: "z-ai/glm-5.1", providerId: "nvidia", name: "GLM 5.1 (NVIDIA)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming"]) },
+
+    // ── hivecode-free (NVIDIA NIM free endpoint — server key, no user key required) ──
+    // 5 modelos verificados en build.nvidia.com con "Free Endpoint: Available"
+    // Backend key se inyecta vía env HIVE_FREE_HIVECODE_KEY al boot (ver crypto.ts:getFreeProviderKey)
+    { id: "moonshotai/kimi-k2.6", providerId: "hivecode-free", name: "Kimi K2.6 (free)", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
+    { id: "qwen/qwen3-coder-480b-a35b-instruct", providerId: "hivecode-free", name: "Qwen3 Coder 480B (free)", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code"]) },
+    { id: "minimaxai/minimax-m2.7", providerId: "hivecode-free", name: "minimax M2.7 (free)", modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "google/gemma-4-31b-it", providerId: "hivecode-free", name: "Gemma 4 31B (free)", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
+    { id: "z-ai/glm-5.1", providerId: "hivecode-free", name: "GLM 5.1 (free)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
+    { id: "deepseek-ai/deepseek-v4-flash", providerId: "hivecode-free", name: "DeepSeek V4 Flash (free)", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
+    { id: "mistralai/mistral-medium-3.5-128b", providerId: "hivecode-free", name: "Mistral Medium 3.5 128B (free)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
 
     // ── OpenAI Codex (fuente: platform.openai.com/docs/models) ──
     { id: "codex-mini-latest", providerId: "codex", name: "Codex Mini (latest)", modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming", "reasoning"]) },

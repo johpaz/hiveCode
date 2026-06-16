@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::term::{Color, AMBER_BRIGHT, BLUE, CYAN, GREEN, LAVENDER, PINK, PURPLE, RED, SECONDARY, YELLOW};
+use crate::term::{Color, AMBER, AMBER_BRIGHT, BLUE, CYAN, GREEN, LAVENDER, PINK, PURPLE, RED, SECONDARY, YELLOW};
 
 /// Niveles jerárquicos de agentes, ordenados de arriba (orquestador) a abajo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -10,6 +10,7 @@ pub enum AgentTier {
     Engineering  = 2, // backend, frontend, mobile, data_scientist, dba, integration
     Quality      = 3, // security, test, devops
     Gate         = 4, // reviewer
+    OnDemand     = 5, // forensic, librarian
 }
 
 impl AgentTier {
@@ -20,6 +21,7 @@ impl AgentTier {
             AgentTier::Engineering  => "ENGINEERING",
             AgentTier::Quality      => "QUALITY",
             AgentTier::Gate         => "GATE",
+            AgentTier::OnDemand     => "ON-DEMAND",
         }
     }
 
@@ -30,6 +32,7 @@ impl AgentTier {
             AgentTier::Engineering,
             AgentTier::Quality,
             AgentTier::Gate,
+            AgentTier::OnDemand,
         ]
     }
 }
@@ -43,6 +46,7 @@ pub fn tier_for(name: &str) -> AgentTier {
         "backend" | "frontend" | "mobile" | "data_scientist" | "dba" | "integration" => AgentTier::Engineering,
         "security" | "test" | "devops" => AgentTier::Quality,
         "reviewer" => AgentTier::Gate,
+        "forensic" | "forensic_agent" | "librarian" => AgentTier::OnDemand,
         _ => AgentTier::Engineering, // fallback para agentes custom
     }
 }
@@ -62,7 +66,9 @@ pub fn display_name(name: &str) -> String {
         "data_scientist" => "DataScientist".to_string(),
         "dba" => "DBA".to_string(),
         "integration" => "IntegrationEngineer".to_string(),
-        "reviewer" => "Reviewer".to_string(),
+        "reviewer" => "CodeReviewer".to_string(),
+        "forensic" | "forensic_agent" => "ForensicAgent".to_string(),
+        "librarian" => "Librarian".to_string(),
         _ => {
             let mut s = name.to_string();
             if let Some(first) = s.get_mut(0..1) {
@@ -89,6 +95,8 @@ pub fn agent_color(name: &str) -> Color {
         ("dba", SECONDARY),
         ("integration", SECONDARY),
         ("reviewer", AMBER_BRIGHT),
+        ("forensic", SECONDARY),
+        ("librarian", AMBER),
     ];
     ROLES
         .iter()
@@ -123,6 +131,10 @@ const EDGES: &[(&str, &str)] = &[
     ("devops", "reviewer"),
     ("test", "reviewer"),
     ("reviewer", "bee"),
+    ("reviewer", "librarian"),
+    ("backend", "forensic"),
+    ("frontend", "forensic"),
+    ("test", "forensic"),
 ];
 
 /// Devuelve los destinos conectados desde un agente.
@@ -159,6 +171,7 @@ mod tests {
         assert_eq!(tier_for("backend"), AgentTier::Engineering);
         assert_eq!(tier_for("test"), AgentTier::Quality);
         assert_eq!(tier_for("reviewer"), AgentTier::Gate);
+        assert_eq!(tier_for("librarian"), AgentTier::OnDemand);
     }
 
     #[test]

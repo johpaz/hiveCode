@@ -92,6 +92,7 @@
     "./ipc/protocol": "./src/ipc/protocol.ts",
     "./ipc/envelope": "./src/ipc/envelope.ts",
     "./ipc/server": "./src/ipc/server.ts",
-    "./ipc/ui-broadcast": "./src/ipc/ui-broadcast.ts"
+    "./ipc/ui-broadcast": "./src/ipc/ui-broadcast.ts",
+    "./auth/auth-cli": "./src/auth/auth-cli.ts"
   }
 }

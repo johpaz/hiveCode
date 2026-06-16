@@ -15,6 +15,17 @@ pub struct PlanRisk {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct ApiContract {
+    pub name: String,
+    pub owner: String,
+    pub method: String,
+    pub path: String,
+    pub request: String,
+    pub response: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct PlanEntry {
     pub task_id: String,
     pub adr_title: String,
@@ -22,6 +33,7 @@ pub struct PlanEntry {
     pub status: String,
     pub phases: Vec<PlanPhase>,
     pub risks: Vec<PlanRisk>,
+    pub api_contracts: Vec<ApiContract>,
 }
 
 #[derive(Debug, Clone, Default)]

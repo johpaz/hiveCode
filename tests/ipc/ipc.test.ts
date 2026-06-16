@@ -66,6 +66,16 @@ describe("messagePriority", () => {
     }
     expect(messagePriority(msg)).toBe("low")
   })
+
+  it("dashboard control messages use their expected priorities", () => {
+    expect(messagePriority({ type: "conflict_resolved", agent_a: "backend", agent_b: "frontend" })).toBe("critical")
+    expect(messagePriority({ type: "forensic_alert", worker: "backend", analysis: "panic", recommendation: "rollback" })).toBe("critical")
+    expect(messagePriority({ type: "security_status_update", status: "VETO ACTIVO", findings: 2 })).toBe("critical")
+    expect(messagePriority({ type: "halt_state", active: true, checkpoint_id: "cp_1" })).toBe("critical")
+    expect(messagePriority({ type: "blackboard_event", timestamp: "12:00:00", agent: "security", event_type: "VETO", content: "blocked" })).toBe("normal")
+    expect(messagePriority({ type: "dashboard_snapshot" })).toBe("low")
+    expect(messagePriority({ type: "metrics_update", token_count: 12_000, elapsed_secs: 61 })).toBe("low")
+  })
 })
 
 // ─── envelope wrap/unwrap ─────────────────────────────────────────────────────
@@ -133,6 +143,59 @@ describe("envelope wrap/serialize/unwrap", () => {
     const flat = unwrap(env)
     expect(flat.type).toBe("activity_update")
     expect((flat as any).coordinator).toBe("bee")
+  })
+
+  it("roundtrips dashboard_snapshot with optional worker dashboard fields", () => {
+    const msg: BunMessage = {
+      type: "dashboard_snapshot",
+      workers: [{
+        name: "backend",
+        status: "running",
+        detail: "editing",
+        display_name: "BackendEngineer",
+        activity: "implementando refresh token",
+        token_count: 12_000,
+        level: 2,
+        current_action: "escribiendo handler",
+        current_file: "src/auth.ts",
+        iteration_current: 2,
+        iteration_total: 5,
+        transversal: false,
+      }],
+      blackboard_events: [{
+        timestamp: "12:00:00",
+        agent: "architecture",
+        event_type: "DECISION",
+        content: "mantener contrato actual",
+      }],
+      conflicts: [{
+        agent_a: "backend",
+        agent_b: "frontend",
+        file: "src/auth.ts",
+        reason: "edición simultánea",
+        severity: "high",
+      }],
+      levels: [{ level: 2, label: "Engineering", agents: ["backend"], status: "active" }],
+      checkpoints: [{
+        checkpoint_id: "cp_1",
+        description: "antes de editar auth",
+        file_count: 2,
+        agent: "backend",
+        time: "12:00:01",
+      }],
+      metrics: { token_count: 12_000, cost: "$0.04", elapsed_secs: 61 },
+      security: { status: "WATCHING", findings: 0 },
+      halt: { active: false },
+    }
+    const line = serialize(wrap(messagePriority(msg), msg as any))
+    const flat = unwrap(JSON.parse(line.trim()))
+
+    expect(flat.type).toBe("dashboard_snapshot")
+    expect((flat as any).workers[0].current_action).toBe("escribiendo handler")
+    expect((flat as any).workers[0].iteration_total).toBe(5)
+    expect((flat as any).blackboard_events[0].event_type).toBe("DECISION")
+    expect((flat as any).levels[0].level).toBe(2)
+    expect((flat as any).metrics.elapsed_secs).toBe(61)
   })
 })
 

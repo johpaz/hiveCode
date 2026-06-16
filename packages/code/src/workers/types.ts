@@ -93,6 +93,8 @@ export interface CoordinatorResult {
   tokensOut?: number
   /** True when the worker exhausted its MAX_ITERATIONS without completing the task */
   iterationLimitReached?: boolean
+  /** Structured decision object when the coordinator used a native decision tool call (e.g. bee_make_decision or create_architecture_plan) */
+  structuredDecision?: Record<string, unknown>
 }
 
 /** Messages sent FROM workers TO the manager */

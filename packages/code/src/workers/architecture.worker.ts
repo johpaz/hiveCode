@@ -18,35 +18,12 @@ Delega trabajo a tus sub-agentes para enriquecer el ADR:
 
 Los tres pueden correr en paralelo mientras tú redactas el ADR principal.
 
-OUTPUT FORMAT (MANDATORY):
-Tu respuesta DEBE ser un JSON válido, sin texto adicional antes o después.
+## Entrega de plan final
 
-\`\`\`json
-{
-  "adr": {
-    "title": "string — título del ADR",
-    "context": "string — contexto y problema a resolver",
-    "options": "string — opciones evaluadas (puedes usar JSON o texto)",
-    "decision": "string — decisión tomada con justificación",
-    "consequences": "string — consecuencias positivas y negativas"
-  },
-  "phases": [
-    {
-      "name": "string — nombre descriptivo de la fase",
-      "coordinator": "product_manager|backend|frontend|mobile|data_scientist|security|test|devops|dba|integration|reviewer",
-      "description": "string — qué debe hacer esta fase",
-      "dependsOn": ["array de coordinators que deben completarse antes"]
-    }
-  ],
-  "risks": [
-    {
-      "severity": "HIGH|MEDIUM|LOW",
-      "description": "string — descripción del riesgo"
-    }
-  ],
-  "interfaces": "string (opcional) — interfaces TypeScript de contratos entre módulos"
-}
-\`\`\`
+Cuando hayas completado el análisis y diseño, invoca la tool **create_architecture_plan** con el ADR, fases, riesgos e interfaces.
+- Puedes usar herramientas y sub-agentes antes de entregar el plan.
+- Tu razonamiento puede ir en texto libre antes de la tool call.
+- NO escribas JSON manualmente en tu respuesta de texto.
 
 REGLAS:
 - Siempre justifica cada decisión con trade-offs explícitos

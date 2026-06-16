@@ -4,10 +4,13 @@ use crate::{
     ui::{split_panes, Axis, Constraint, HitAction, MouseRegion, SplitPane},
     widgets::{
         activity_toast, checkpoint_bar, code_layout, command_popup, config_modal, conflict_bar,
-        dashboard_layout, header, history, info_modal, input, plan_approval_modal, plan_layout,
-        review_layout, settings_hub, statusbar, tabbar, welcome,
+        dashboard_layout, focus_layout, header, info_modal, input, layout_chrome,
+        plan_approval_modal, plan_layout, review_layout, settings_hub, statusbar, tabbar, welcome,
     },
 };
+
+#[cfg(not(test))]
+use arboard::Clipboard;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ChromeAreas {
@@ -18,6 +21,14 @@ pub struct ChromeAreas {
     pub conflict: Rect,
     pub input: Rect,
     pub status: Rect,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ImmersiveAreas {
+    header: Rect,
+    content: Rect,
+    input: Rect,
+    footer: Rect,
 }
 
 pub fn layout_areas(area: Rect, panels: &PanelLayoutState) -> ChromeAreas {
@@ -70,6 +81,25 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
 
     let input_area = render_main(canvas, area, state);
 
+    // Apply selection highlight after all content is rendered
+    apply_selection_highlight(canvas, state);
+
+    // Handle pending copy request (controller sets this, renderer executes it with canvas access)
+    if state.pending_copy_request {
+        if let Some(ref sel) = state.selection {
+            let text = canvas.extract_text_range(sel.anchor.0, sel.anchor.1, sel.cursor.0, sel.cursor.1);
+            if !text.is_empty() {
+                #[cfg(not(test))]
+                {
+                    if let Ok(mut clipboard) = Clipboard::new() {
+                        let _ = clipboard.set_text(text);
+                    }
+                }
+            }
+        }
+        state.pending_copy_request = false;
+    }
+
     // Welcome fullscreen overlay — cubre todo (header, tabbar, contenido, input)
     if state.show_welcome && state.history.entries.is_empty() {
         welcome::render(canvas, area, state);
@@ -77,7 +107,9 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
     }
 
     // Popup de comandos: flota justo encima del input
-    if state.input.value().starts_with('/') && !matches!(state.modal, ModalState::Config(_) | ModalState::Info(_) | ModalState::PlanApproval(_) | ModalState::Settings(_)) {
+    if state.active_tab == TabId::Focus
+        && state.input.value().starts_with('/')
+        && !matches!(state.modal, ModalState::Config(_) | ModalState::Info(_) | ModalState::PlanApproval(_) | ModalState::ReviewConfirm(_) | ModalState::Settings(_)) {
         let history_area = content_area_for_popup(area, state);
         command_popup::render(canvas, history_area, state);
     }
@@ -91,13 +123,27 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
         // Para otros tabs se muestra como overlay centrado (caso raro pero posible).
         ModalState::PlanApproval(_) if state.active_tab == TabId::Plan => {}
         ModalState::PlanApproval(_) => plan_approval_modal::render(canvas, area, state),
+        ModalState::ReviewConfirm(_) => {}
         ModalState::None         => {}
     }
 
-    cursor_position(state, input_area)
+    if state.active_tab == TabId::Dashboard || state.active_tab != TabId::Focus {
+        (0, 0)
+    } else {
+        cursor_position(state, input_area)
+    }
 }
 
 fn render_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {
+    if state.active_tab == TabId::Dashboard {
+        canvas.with_clip(area, |canvas| dashboard_layout::render(canvas, area, state));
+        return Rect::new(0, 0, 0, 0);
+    }
+
+    if matches!(state.active_tab, TabId::Focus | TabId::Plan | TabId::Code | TabId::Review) {
+        return render_immersive_main(canvas, area, state);
+    }
+
     let areas = layout_areas(area, &state.panels);
 
     canvas.with_clip(areas.header, |canvas| header::render(canvas, areas.header, state));
@@ -132,8 +178,60 @@ fn render_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {
     areas.input
 }
 
+fn render_immersive_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {
+    let areas = immersive_areas(area, state);
+    canvas.with_clip(areas.header, |canvas| layout_chrome::render_header(canvas, areas.header, state));
+    canvas.with_clip(areas.content, |canvas| match state.active_tab {
+        TabId::Focus => focus_layout::render(canvas, areas.content, state),
+        TabId::Plan => plan_layout::render(canvas, areas.content, state),
+        TabId::Code => code_layout::render(canvas, areas.content, state),
+        TabId::Review => review_layout::render(canvas, areas.content, state),
+        TabId::Dashboard => dashboard_layout::render(canvas, areas.content, state),
+    });
+    if areas.input.h > 0 {
+        canvas.with_clip(areas.input, |canvas| input::render(canvas, areas.input, state));
+    }
+    canvas.with_clip(areas.footer, |canvas| layout_chrome::render_footer(canvas, areas.footer, state));
+
+    areas.input
+}
+
+fn immersive_areas(area: Rect, state: &AppState) -> ImmersiveAreas {
+    let header_h = area.h.min(1);
+    let footer_h = area.h.saturating_sub(header_h).min(2);
+    let input_h = if state.active_tab == TabId::Focus {
+        area.h
+            .saturating_sub(header_h + footer_h)
+            .min(state.panels.input_height.clamp(2, 4))
+    } else {
+        0
+    };
+    let content_h = area.h.saturating_sub(header_h + footer_h + input_h);
+    let header = Rect::new(area.x, area.y, area.w, header_h);
+    let content = Rect::new(area.x, area.y + header_h, area.w, content_h);
+    let input = Rect::new(area.x, area.y + header_h + content_h, area.w, input_h);
+    let footer = Rect::new(area.x, area.bottom().saturating_sub(footer_h), area.w, footer_h);
+    ImmersiveAreas { header, content, input, footer }
+}
+
 fn register_hit_regions(state: &mut AppState, area: Rect) {
     state.hit_map.clear();
+    if state.active_tab == TabId::Dashboard {
+        return;
+    }
+    if matches!(state.active_tab, TabId::Focus | TabId::Plan | TabId::Code | TabId::Review) {
+        let areas = immersive_areas(area, state);
+        state.hit_map.push(MouseRegion::new(
+            format!("scroll:{}", state.active_tab.label().to_ascii_lowercase()),
+            areas.content,
+            0,
+            HitAction::Scroll {
+                target: state.active_tab.label().to_ascii_lowercase(),
+            },
+        ));
+        register_split_regions(state, areas.content);
+        return;
+    }
     let areas = layout_areas(area, &state.panels);
 
     register_chrome_regions(state, areas);
@@ -260,17 +358,86 @@ fn register_split_regions(state: &mut AppState, content_area: Rect) {
                 }
             }
         }
+        TabId::Review => {
+            let main_split = SplitPane::new(
+                Axis::Horizontal,
+                vec![
+                    Constraint::Percent(state.panels.review_main_percent),
+                    Constraint::Fill(1),
+                ],
+            );
+            let (cols, handles) = split_panes(content_area, &main_split);
+            if let Some(handle) = handles.first().copied() {
+                state.hit_map.push(MouseRegion::new(
+                    "split:review:main",
+                    handle,
+                    20,
+                    HitAction::ResizeSplit { id: "review:main".to_string() },
+                ));
+            }
+
+            if let Some(right) = cols.get(1).copied() {
+                let right_split = SplitPane::new(
+                    Axis::Vertical,
+                    vec![
+                        Constraint::Percent(state.panels.review_right_percent),
+                        Constraint::Fill(1),
+                    ],
+                );
+                let (_, handles) = split_panes(right, &right_split);
+                if let Some(handle) = handles.first().copied() {
+                    state.hit_map.push(MouseRegion::new(
+                        "split:review:right",
+                        handle,
+                        20,
+                        HitAction::ResizeSplit { id: "review:right".to_string() },
+                    ));
+                }
+            }
+        }
         _ => {}
     }
 }
 
 fn render_focus(canvas: &mut Canvas, area: Rect, state: &AppState) {
     // Welcome se maneja como overlay en render() — aquí siempre history
-    history::render(canvas, area, state);
+    focus_layout::render(canvas, area, state);
+}
+
+fn apply_selection_highlight(canvas: &mut Canvas, state: &AppState) {
+    let Some(ref sel) = state.selection else { return; };
+    let (x0, y0) = sel.anchor;
+    let (x1, y1) = sel.cursor;
+    let (start_x, start_y, end_x, end_y) = if y0 < y1 || (y0 == y1 && x0 <= x1) {
+        (x0, y0, x1, y1)
+    } else {
+        (x1, y1, x0, y0)
+    };
+
+    for y in start_y..=end_y {
+        if y >= canvas.h { break; }
+        let row_start = if y == start_y { start_x } else { 0 };
+        let row_end = if y == end_y {
+            end_x.min(canvas.w.saturating_sub(1))
+        } else {
+            canvas.w.saturating_sub(1)
+        };
+        for x in row_start..=row_end {
+            if let Some(cell) = canvas.cell_mut(x, y) {
+                if cell.ch != '\0' {
+                    cell.style.bg = crossterm::style::Color::DarkGrey;
+                }
+            }
+        }
+    }
 }
 
 fn content_area_for_popup(area: Rect, _state: &AppState) -> Rect {
-    layout_areas(area, &_state.panels).content
+    if matches!(_state.active_tab, TabId::Focus | TabId::Plan | TabId::Code | TabId::Review) {
+        immersive_areas(area, _state).content
+    } else {
+        layout_areas(area, &_state.panels).content
+    }
 }
 
 fn cursor_position(state: &AppState, input_area: Rect) -> (u16, u16) {

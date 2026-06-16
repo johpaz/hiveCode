@@ -1,8 +1,21 @@
 import type { BeeDecision } from "../workers/types"
 
-// ── JSON repair ───────────────────────────────────────────────────────────────
+// ── BEE decision helpers ──────────────────────────────────────────────────────
 
-export function repairJson(input: string): string | null {
+/** Normalize a structured decision object into a typed BeeDecision */
+export function normalizeBeeDecision(data: Record<string, unknown>): BeeDecision {
+  return {
+    action: (data.action as BeeDecision["action"]) || "architecture",
+    content: data.content as string | undefined,
+    reason: (data.reason as string) || "",
+    phases: data.phases as BeeDecision["phases"],
+    filesModified: data.filesModified as string[] | undefined,
+    harness: data.harness as string | undefined,
+  }
+}
+
+/** Minimal JSON repair for legacy fallback parser */
+function repairJson(input: string): string | null {
   let s = input.trim()
   s = s.replace(/,\s*([}\]])/g, "$1")
   const opens = (s.match(/{/g) || []).length
@@ -14,57 +27,38 @@ export function repairJson(input: string): string | null {
   return s
 }
 
-// ── BEE decision parser ───────────────────────────────────────────────────────
-
-function extractDecisionFields(data: Record<string, unknown>): BeeDecision {
-  return {
-    action: (data.action as BeeDecision["action"]) || "architecture",
-    content: data.content as string | undefined,
-    reason: (data.reason as string) || "",
-    phases: data.phases as BeeDecision["phases"],
-    filesModified: data.filesModified as string[] | undefined,
-    harness: data.harness as string | undefined,
-  }
-}
-
+/** Legacy text parser — kept as fallback for edge cases but should rarely be used */
 export function parseBeeDecision(raw: string): BeeDecision {
   if (!raw || !raw.trim()) {
     return { action: "respond", content: "", reason: "Empty response from LLM" }
   }
-
-  // Strip <think>...</think> blocks emitted by reasoning models (e.g. minimax-m3)
   const cleaned = raw.replace(/<think>[\s\S]*?<\/think>/g, "").trim()
   const input = cleaned || raw
-
-  // Strategy 1: markdown code block
+  // Try markdown code block
   const codeBlockMatch = input.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
   if (codeBlockMatch) {
-    try { return extractDecisionFields(JSON.parse(codeBlockMatch[1])) } catch { /* fallthrough */ }
-    const repaired = repairJson(codeBlockMatch[1])
-    if (repaired) {
-      try { return extractDecisionFields(JSON.parse(repaired)) } catch { /* fallthrough */ }
+    try { return normalizeBeeDecision(JSON.parse(codeBlockMatch[1])) } catch {
+      const repaired = repairJson(codeBlockMatch[1])
+      if (repaired) {
+        try { return normalizeBeeDecision(JSON.parse(repaired)) } catch { /* fallthrough */ }
+      }
     }
   }
-
-  // Strategy 2: inline JSON object with "action" key
+  // Try inline JSON object
   const jsonObjMatch = input.match(/\{[\s\S]*"action"[\s\S]*\}/)
   if (jsonObjMatch) {
-    try { return extractDecisionFields(JSON.parse(jsonObjMatch[0])) } catch { /* fallthrough */ }
-    const repaired = repairJson(jsonObjMatch[0])
-    if (repaired) {
-      try { return extractDecisionFields(JSON.parse(repaired)) } catch { /* fallthrough */ }
+    try { return normalizeBeeDecision(JSON.parse(jsonObjMatch[0])) } catch {
+      const repaired = repairJson(jsonObjMatch[0])
+      if (repaired) {
+        try { return normalizeBeeDecision(JSON.parse(repaired)) } catch { /* fallthrough */ }
+      }
     }
   }
-
-  // Strategy 3: entire response as JSON
-  try { return extractDecisionFields(JSON.parse(input)) } catch { /* fallthrough */ }
-
-  // Strategy 4: plain text — treat as direct response
+  // Plain text fallback
   return { action: "respond", content: input, reason: "BEE returned non-JSON response" }
 }
 
-export function formatBeeNarrative(raw: string): string {
-  const decision = parseBeeDecision(raw)
+export function formatBeeNarrative(decision: BeeDecision): string {
   switch (decision.action) {
     case "respond":    return decision.content || "BEE respondió directamente."
     case "fix":        return decision.content || "BEE aplicó un fix directo."
@@ -73,7 +67,7 @@ export function formatBeeNarrative(raw: string): string {
       return `BEE delegó a: ${coords}\n${decision.reason}`
     }
     case "architecture": return `BEE decidió diseño arquitectónico\n${decision.reason}`
-    default:             return raw
+    default:             return decision.reason || "BEE respondió."
   }
 }
 

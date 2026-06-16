@@ -15,12 +15,12 @@ use crossterm::{
 
 use crate::{
     ipc::TuiMessage,
-    state::{AppState, HistoryEntry, InfoModalState, ModalFieldKind, ModalState, ReplMode, Role,
-            SettingsHubState, SettingsTab, TabId},
+    state::{AppState, HistoryEntry, InfoModalState, ModalFieldKind, ModalState, ReplMode,
+            ReviewAction, ReviewConfirmState, Role, Selection, SettingsHubState, SettingsTab, TabId},
     renderer::layout_areas,
     term::Rect,
     ui::{split_panes, Axis, Constraint, HitAction, SplitPane},
-    widgets::{command_popup, history, tabbar},
+    widgets::{command_popup, dashboard_layout, history, tabbar},
 };
 
 pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
@@ -69,11 +69,13 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
             KeyCode::Tab => {
                 hub.active_tab = hub.active_tab.next();
                 hub.selected_row = 0;
+                hub.scroll_offset = 0;
                 state.dirty.full = true;
             }
             KeyCode::BackTab => {
                 hub.active_tab = hub.active_tab.prev();
                 hub.selected_row = 0;
+                hub.scroll_offset = 0;
                 state.dirty.full = true;
             }
             KeyCode::Up => {
@@ -101,6 +103,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 };
                 state.modal = ModalState::None;
                 state.pending_ipc.push(TuiMessage::Submit { input: cmd.to_string() });
+                state.pending_ipc.push(TuiMessage::RequestSettings);
                 state.dirty.full = true;
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
@@ -119,6 +122,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 if let Some(c) = cmd {
                     state.modal = ModalState::None;
                     state.pending_ipc.push(TuiMessage::Submit { input: c });
+                    state.pending_ipc.push(TuiMessage::RequestSettings);
                     state.dirty.full = true;
                 }
             }
@@ -142,6 +146,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 if let Some(c) = cmd {
                     state.modal = ModalState::None;
                     state.pending_ipc.push(TuiMessage::Submit { input: c });
+                    state.pending_ipc.push(TuiMessage::RequestSettings);
                     state.dirty.full = true;
                 }
             }
@@ -168,6 +173,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 if let Some(c) = cmd {
                     state.modal = ModalState::None;
                     state.pending_ipc.push(TuiMessage::Submit { input: c });
+                    state.pending_ipc.push(TuiMessage::RequestSettings);
                     state.dirty.full = true;
                 }
             }
@@ -211,6 +217,34 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
             }
             _ => {}
         }
+        return false;
+    }
+
+    // ── Confirmación de Review en dos pasos ───────────────────────────────────
+    if let ModalState::ReviewConfirm(confirm) = &state.modal {
+        let action = confirm.action;
+        match key.code {
+            KeyCode::Esc => {
+                state.modal = ModalState::None;
+                state.dirty.full = true;
+            }
+            KeyCode::Enter => {
+                state.modal = ModalState::None;
+                state.pending_ipc.push(TuiMessage::Submit {
+                    input: action.command().to_string(),
+                });
+                state.dirty.full = true;
+            }
+            _ => {}
+        }
+        return false;
+    }
+
+    if state.active_tab == TabId::Dashboard && handle_dashboard_key(state, key.code, key.modifiers) {
+        return false;
+    }
+
+    if state.active_tab != TabId::Dashboard && handle_immersive_layout_key(state, key.code, key.modifiers) {
         return false;
     }
 
@@ -352,6 +386,24 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         }
     }
 
+    if state.active_tab == TabId::Review
+        && state.session.mode == ReplMode::Approval
+        && state.input.value().is_empty()
+        && !state.history_nav_mode
+    {
+        let action = match key.code {
+            KeyCode::Enter | KeyCode::Char('a') | KeyCode::Char('A') => Some(ReviewAction::Approve),
+            KeyCode::Char('r') | KeyCode::Char('R') => Some(ReviewAction::Reject),
+            KeyCode::Char('m') | KeyCode::Char('M') => Some(ReviewAction::Modify),
+            _ => None,
+        };
+        if let Some(action) = action {
+            state.modal = ModalState::ReviewConfirm(ReviewConfirmState { action });
+            state.dirty.full = true;
+            return false;
+        }
+    }
+
     match (key.modifiers, key.code) {
         // F2 o Ctrl+Shift+S → abre el hub de settings
         (KeyModifiers::NONE, KeyCode::F(2))
@@ -374,6 +426,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         (_, KeyCode::Esc) => {
             state.history_nav_mode = false;
             state.history_hscroll = 0;
+            state.selection = None;
         }
         (_, KeyCode::Home) if state.history_nav_mode => {
             if !state.history.entries.is_empty() {
@@ -430,6 +483,12 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         (_, KeyCode::PageDown) if state.active_tab == TabId::Plan => {
             state.plan.scroll = state.plan.scroll.saturating_add(5);
         }
+        (_, KeyCode::PageUp) if state.active_tab == TabId::Dashboard => {
+            state.dashboard_scroll = state.dashboard_scroll.saturating_sub(8);
+        }
+        (_, KeyCode::PageDown) if state.active_tab == TabId::Dashboard => {
+            state.dashboard_scroll = state.dashboard_scroll.saturating_add(8);
+        }
         (_, KeyCode::PageUp) => {
             move_history_selection(state, -5);
         }
@@ -451,6 +510,9 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         (m, KeyCode::Char('y')) if m.contains(KeyModifiers::CONTROL) => {
             copy_selected_entry_to_clipboard(state);
         }
+        (m, KeyCode::Char('c')) if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) => {
+            state.pending_copy_request = true;
+        }
         (m, KeyCode::Up) if m.contains(KeyModifiers::CONTROL) => {
             move_history_selection(state, -1);
         }
@@ -465,6 +527,30 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         (_, KeyCode::End) if !state.history_nav_mode => state.input.move_end(),
         (_, KeyCode::Backspace) if !state.history_nav_mode => state.input.backspace(),
         (_, KeyCode::Delete) if !state.history_nav_mode => state.input.delete_forward(),
+        (_, KeyCode::Up) if state.active_tab == TabId::Code && state.input.value().is_empty() => {
+            state.diff.scroll = state.diff.scroll.saturating_sub(1);
+        }
+        (_, KeyCode::Down) if state.active_tab == TabId::Code && state.input.value().is_empty() => {
+            state.diff.scroll += 1;
+        }
+        (_, KeyCode::Up) if state.active_tab == TabId::Review && state.input.value().is_empty() => {
+            state.adrs.scroll = state.adrs.scroll.saturating_sub(1);
+        }
+        (_, KeyCode::Down) if state.active_tab == TabId::Review && state.input.value().is_empty() => {
+            state.adrs.scroll += 1;
+        }
+        (_, KeyCode::Up) if state.active_tab == TabId::Plan && state.input.value().is_empty() => {
+            state.plan.scroll = state.plan.scroll.saturating_sub(1);
+        }
+        (_, KeyCode::Down) if state.active_tab == TabId::Plan && state.input.value().is_empty() => {
+            state.plan.scroll += 1;
+        }
+        (_, KeyCode::Up) if state.active_tab == TabId::Dashboard && state.input.value().is_empty() => {
+            state.dashboard_scroll = state.dashboard_scroll.saturating_sub(1);
+        }
+        (_, KeyCode::Down) if state.active_tab == TabId::Dashboard && state.input.value().is_empty() => {
+            state.dashboard_scroll += 1;
+        }
         (_, KeyCode::Up) if !state.history_nav_mode => state.input.history_up(),
         (_, KeyCode::Down) if !state.history_nav_mode => state.input.history_down(),
         (_, KeyCode::Enter) => {
@@ -485,6 +571,8 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     if state.session.mode == ReplMode::Plan {
                         state.plan.current = None;
                         state.plan.scroll = 0;
+                        state.filemap.scroll = 0;
+                        state.adrs.scroll = 0;
                     }
                     state.history.entries.push(HistoryEntry {
                         role: Role::User,
@@ -497,13 +585,6 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     restore_hscroll_for_selected(state);
                 }
             }
-        }
-        // Scroll ADR en Review tab (↑↓ cuando input vacío y en Review)
-        (_, KeyCode::Up) if state.active_tab == TabId::Review && state.input.value().is_empty() => {
-            state.adrs.scroll = state.adrs.scroll.saturating_sub(1);
-        }
-        (_, KeyCode::Down) if state.active_tab == TabId::Review && state.input.value().is_empty() => {
-            state.adrs.scroll += 1;
         }
         // Navegar entre ADRs en Review tab ([ y ])
         (_, KeyCode::Char('[')) if state.active_tab == TabId::Review => {
@@ -530,6 +611,144 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
     false
 }
 
+fn handle_dashboard_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    match code {
+        KeyCode::Esc => {
+            state.dashboard.rollback_confirm_checkpoint = None;
+            state.selection = None;
+            state.dirty.full = true;
+            true
+        }
+        KeyCode::Left => {
+            move_checkpoint_selection(state, -1);
+            true
+        }
+        KeyCode::Right => {
+            move_checkpoint_selection(state, 1);
+            true
+        }
+        KeyCode::Enter => {
+            if state.session.mode == ReplMode::Plan
+                && state.checkpoints.selected.is_none()
+                && !state.dashboard.halt.active
+            {
+                state.pending_ipc.push(TuiMessage::Submit { input: "/approve auto".to_string() });
+                state.dirty.full = true;
+                return true;
+            }
+            confirm_or_send_dashboard_rollback(state);
+            true
+        }
+        KeyCode::Char('a') | KeyCode::Char('A') if state.session.mode == ReplMode::Approval && !state.dashboard.halt.active => {
+            state.modal = ModalState::ReviewConfirm(ReviewConfirmState { action: ReviewAction::Approve });
+            state.dirty.full = true;
+            true
+        }
+        KeyCode::Char('r') | KeyCode::Char('R') if state.session.mode == ReplMode::Approval && !state.dashboard.halt.active => {
+            state.modal = ModalState::ReviewConfirm(ReviewConfirmState { action: ReviewAction::Reject });
+            state.dirty.full = true;
+            true
+        }
+        KeyCode::Char('m') | KeyCode::Char('M') if state.session.mode == ReplMode::Approval && !state.dashboard.halt.active => {
+            state.modal = ModalState::ReviewConfirm(ReviewConfirmState { action: ReviewAction::Modify });
+            state.dirty.full = true;
+            true
+        }
+        KeyCode::Char('h') | KeyCode::Char('H') if state.session.mode == ReplMode::Auto => {
+            state.pending_ipc.push(TuiMessage::Submit { input: "/halt".to_string() });
+            state.dirty.full = true;
+            true
+        }
+        KeyCode::BackTab if modifiers.is_empty() => false,
+        _ => false,
+    }
+}
+
+fn handle_immersive_layout_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    if modifiers != KeyModifiers::NONE {
+        return false;
+    }
+    let focus_accepts_text = state.active_tab == TabId::Focus
+        && (!state.input.value().is_empty() || state.history_nav_mode);
+    match code {
+        KeyCode::Esc if state.dashboard.rollback_confirm_checkpoint.is_some() => {
+            state.dashboard.rollback_confirm_checkpoint = None;
+            state.dirty.full = true;
+            true
+        }
+        KeyCode::Left if !focus_accepts_text => {
+            move_checkpoint_selection(state, -1);
+            true
+        }
+        KeyCode::Right if !focus_accepts_text => {
+            move_checkpoint_selection(state, 1);
+            true
+        }
+        KeyCode::Enter if !focus_accepts_text && state.checkpoints.selected.is_some() => {
+            confirm_or_send_dashboard_rollback(state);
+            true
+        }
+        KeyCode::Enter if state.active_tab == TabId::Plan && state.session.mode == ReplMode::Plan => {
+            state.pending_ipc.push(TuiMessage::Submit { input: "/approve auto".to_string() });
+            state.dirty.full = true;
+            true
+        }
+        KeyCode::Char('h') | KeyCode::Char('H') if state.session.mode == ReplMode::Auto => {
+            state.pending_ipc.push(TuiMessage::Submit { input: "/halt".to_string() });
+            state.dirty.full = true;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn move_checkpoint_selection(state: &mut AppState, delta: isize) {
+    if state.checkpoints.entries.is_empty() {
+        return;
+    }
+    let len = state.checkpoints.entries.len();
+    let current = state.checkpoints.selected.unwrap_or_else(|| len.saturating_sub(1));
+    let next = if delta.is_negative() {
+        current.saturating_sub(delta.unsigned_abs())
+    } else {
+        current.saturating_add(delta as usize).min(len.saturating_sub(1))
+    };
+    state.checkpoints.selected = Some(next);
+    state.dashboard.rollback_confirm_checkpoint = None;
+    state.dirty.full = true;
+}
+
+fn confirm_or_send_dashboard_rollback(state: &mut AppState) {
+    if state.checkpoints.entries.is_empty() {
+        return;
+    }
+    if state.checkpoints.selected.is_none() {
+        if let Some(halt_checkpoint) = state.dashboard.halt.checkpoint_id.as_deref() {
+            state.checkpoints.selected = state
+                .checkpoints
+                .entries
+                .iter()
+                .position(|checkpoint| checkpoint.id == halt_checkpoint);
+        }
+    }
+    let idx = state
+        .checkpoints
+        .selected
+        .unwrap_or_else(|| state.checkpoints.entries.len().saturating_sub(1));
+    let Some(checkpoint) = state.checkpoints.entries.get(idx) else {
+        return;
+    };
+    let checkpoint_id = checkpoint.id.clone();
+    if state.dashboard.rollback_confirm_checkpoint.as_deref() == Some(checkpoint_id.as_str()) {
+        state.pending_ipc.push(TuiMessage::Rollback { checkpoint_id });
+        state.dashboard.rollback_confirm_checkpoint = None;
+    } else {
+        state.checkpoints.selected = Some(idx);
+        state.dashboard.rollback_confirm_checkpoint = Some(checkpoint_id);
+    }
+    state.dirty.full = true;
+}
+
 pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
     match mouse.kind {
         MouseEventKind::ScrollUp if state.active_tab == TabId::Focus && !state.history_nav_mode => {
@@ -539,10 +758,36 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
             state.history.scroll = state.history.scroll.saturating_add(3);
         }
         MouseEventKind::ScrollUp if state.active_tab == TabId::Plan => {
-            state.plan.scroll = state.plan.scroll.saturating_sub(3);
+            match plan_scroll_target(state, mouse.column, mouse.row) {
+                PlanScrollTarget::Stream => state.plan.scroll = state.plan.scroll.saturating_sub(3),
+                PlanScrollTarget::FileMap => state.filemap.scroll = state.filemap.scroll.saturating_sub(3),
+                PlanScrollTarget::Adr => state.adrs.scroll = state.adrs.scroll.saturating_sub(3),
+            }
         }
         MouseEventKind::ScrollDown if state.active_tab == TabId::Plan => {
-            state.plan.scroll = state.plan.scroll.saturating_add(3);
+            match plan_scroll_target(state, mouse.column, mouse.row) {
+                PlanScrollTarget::Stream => state.plan.scroll = state.plan.scroll.saturating_add(3),
+                PlanScrollTarget::FileMap => state.filemap.scroll = state.filemap.scroll.saturating_add(3),
+                PlanScrollTarget::Adr => state.adrs.scroll = state.adrs.scroll.saturating_add(3),
+            }
+        }
+        MouseEventKind::ScrollUp if state.active_tab == TabId::Code => {
+            state.diff.scroll = state.diff.scroll.saturating_sub(3);
+        }
+        MouseEventKind::ScrollDown if state.active_tab == TabId::Code => {
+            state.diff.scroll = state.diff.scroll.saturating_add(3);
+        }
+        MouseEventKind::ScrollUp if state.active_tab == TabId::Review => {
+            state.adrs.scroll = state.adrs.scroll.saturating_sub(3);
+        }
+        MouseEventKind::ScrollDown if state.active_tab == TabId::Review => {
+            state.adrs.scroll = state.adrs.scroll.saturating_add(3);
+        }
+        MouseEventKind::ScrollUp if state.active_tab == TabId::Dashboard => {
+            state.dashboard_scroll = state.dashboard_scroll.saturating_sub(3);
+        }
+        MouseEventKind::ScrollDown if state.active_tab == TabId::Dashboard => {
+            state.dashboard_scroll = state.dashboard_scroll.saturating_add(3);
         }
         MouseEventKind::ScrollUp => {
             state.history_nav_mode = true;
@@ -555,11 +800,34 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
         MouseEventKind::Down(MouseButton::Left) => {
             if let Some(action) = state.hit_map.hit(mouse.column, mouse.row).map(|r| r.action.clone()) {
                 if handle_hit_action(state, action) {
+                    state.selection = None;
                     return;
                 }
             }
+            if state.active_tab == TabId::Dashboard {
+                if let Some(area) = screen_rect_from_size(terminal::size().ok()) {
+                    if let Some(checkpoint_idx) = dashboard_layout::checkpoint_at(state, area, mouse.column, mouse.row) {
+                        state.checkpoints.selected = Some(checkpoint_idx);
+                        state.dashboard.rollback_confirm_checkpoint = None;
+                        state.selection = None;
+                        state.dirty.full = true;
+                        return;
+                    }
+                    if let Some(worker) = dashboard_layout::worker_at(state, area, mouse.column, mouse.row) {
+                        state.focused_worker = Some(worker);
+                        state.active_tab = TabId::Code;
+                        state.tab_locked = true;
+                        state.history_nav_mode = false;
+                        state.history_hscroll = 0;
+                        state.show_welcome = false;
+                        state.selection = None;
+                        state.dirty.full = true;
+                        return;
+                    }
+                }
+            }
             // Click en la fila del tabbar (fila 2 — header ocupa 2 filas)
-            if mouse.row == 2 {
+            if state.active_tab != TabId::Dashboard && mouse.row == 2 {
                 if let Some((w, _h)) = terminal::size().ok() {
                     let tabbar_area = crate::term::Rect::new(0, 2, w, 1);
                     if let Some(tab) = tabbar::tab_at_col(tabbar_area, mouse.column, state) {
@@ -569,6 +837,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                             state.history_hscroll = 0;
                         }
                         state.show_welcome = false;
+                        state.selection = None;
                         return;
                     }
                 }
@@ -582,17 +851,44 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                         state.history.selected = Some(entry_idx);
                         state.history.scroll = 0;
                         restore_hscroll_for_selected(state);
+                        state.selection = None;
+                        return;
                     }
+                }
+            }
+            // Iniciar selección de texto si el click está en el área de contenido
+            if let Some(area) = content_rect_from_size(state, terminal::size().ok()) {
+                if rect_contains(area, mouse.column, mouse.row) {
+                    state.selection = Some(Selection {
+                        anchor: (mouse.column, mouse.row),
+                        cursor: (mouse.column, mouse.row),
+                        active: true,
+                    });
+                    state.dirty.full = true;
                 }
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(ref mut sel) = state.selection {
+                if sel.active {
+                    sel.cursor = (mouse.column, mouse.row);
+                    state.dirty.full = true;
+                    return;
+                }
+            }
             if update_active_split_drag(state, mouse.column, mouse.row) {
                 return;
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
             state.panels.end_drag();
+            if let Some(ref mut sel) = state.selection {
+                if sel.active {
+                    sel.active = false;
+                    state.pending_copy_request = true;
+                    state.dirty.full = true;
+                }
+            }
         }
         MouseEventKind::Down(MouseButton::Right) => {
             let history_area = content_rect_from_size(state, terminal::size().ok());
@@ -710,7 +1006,7 @@ fn update_active_split_drag(state: &mut AppState, col: u16, row: u16) -> bool {
             state.dirty.full = true;
             return true;
         }
-        "code:main" | "plan:main" => percent_from_x(content_area, col),
+        "code:main" | "plan:main" | "review:main" => percent_from_x(content_area, col),
         "code:workers" => {
             let right = right_split_area(
                 content_area,
@@ -722,6 +1018,13 @@ fn update_active_split_drag(state: &mut AppState, col: u16, row: u16) -> bool {
             let right = right_split_area(
                 content_area,
                 state.panels.plan_main_percent,
+            );
+            percent_from_y(right, row)
+        }
+        "review:right" => {
+            let right = right_split_area(
+                content_area,
+                state.panels.review_main_percent,
             );
             percent_from_y(right, row)
         }
@@ -756,6 +1059,55 @@ fn right_split_area(content_area: Rect, left_percent: u16) -> Rect {
     );
     let (cols, _) = split_panes(content_area, &split);
     cols.get(1).copied().unwrap_or(content_area)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlanScrollTarget {
+    Stream,
+    FileMap,
+    Adr,
+}
+
+fn plan_scroll_target(state: &AppState, col: u16, row: u16) -> PlanScrollTarget {
+    let Some(content_area) = content_rect_from_size(state, terminal::size().ok()) else {
+        return PlanScrollTarget::Stream;
+    };
+    let main_split = SplitPane::new(
+        Axis::Horizontal,
+        vec![
+            Constraint::Percent(state.panels.plan_main_percent),
+            Constraint::Fill(1),
+        ],
+    );
+    let (cols, _) = split_panes(content_area, &main_split);
+
+    if cols.first().copied().is_some_and(|rect| rect_contains(rect, col, row)) {
+        return PlanScrollTarget::Stream;
+    }
+
+    let Some(right) = cols.get(1).copied() else {
+        return PlanScrollTarget::Stream;
+    };
+    let right_split = SplitPane::new(
+        Axis::Vertical,
+        vec![
+            Constraint::Percent(state.panels.plan_right_percent),
+            Constraint::Fill(1),
+        ],
+    );
+    let (rows, _) = split_panes(right, &right_split);
+    if rows.first().copied().is_some_and(|rect| rect_contains(rect, col, row)) {
+        return PlanScrollTarget::FileMap;
+    }
+    if rows.get(1).copied().is_some_and(|rect| rect_contains(rect, col, row)) {
+        return PlanScrollTarget::Adr;
+    }
+
+    PlanScrollTarget::Stream
+}
+
+fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
+    col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom()
 }
 
 fn screen_rect_from_size(size: Option<(u16, u16)>) -> Option<crate::term::Rect> {
@@ -845,6 +1197,7 @@ fn copy_selected_entry_to_clipboard(state: &AppState) {
         let _ = out.flush();
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -1046,6 +1399,130 @@ mod tests {
         let key = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
         let _ = handle_key_event(&mut state, key);
         assert_eq!(state.plan.scroll, 8);
+    }
+
+    #[test]
+    fn plan_scroll_uses_arrow_keys_when_input_is_empty() {
+        let mut state = mk_state_with_entries(3);
+        state.active_tab = TabId::Plan;
+
+        let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(state.plan.scroll, 1);
+
+        let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(state.plan.scroll, 0);
+    }
+
+    #[test]
+    fn plan_mouse_scroll_targets_right_side_panels() {
+        let mut state = mk_state_with_entries(3);
+        state.active_tab = TabId::Plan;
+
+        handle_mouse_event(&mut state, MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 70,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(state.filemap.scroll, 3);
+        assert_eq!(state.plan.scroll, 0);
+
+        handle_mouse_event(&mut state, MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 70,
+            row: 14,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(state.adrs.scroll, 3);
+        assert_eq!(state.filemap.scroll, 3);
+    }
+
+    #[test]
+    fn code_scroll_uses_wheel_without_entering_history_navigation() {
+        let mut state = mk_state_with_entries(3);
+        state.active_tab = TabId::Code;
+        state.history_nav_mode = true;
+        state.history.selected = Some(1);
+
+        handle_mouse_event(&mut state, MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(state.diff.scroll, 3);
+        assert_eq!(state.history.selected, Some(1));
+    }
+
+    #[test]
+    fn code_scroll_uses_arrow_keys_when_input_is_empty() {
+        let mut state = mk_state_with_entries(3);
+        state.active_tab = TabId::Code;
+
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let _ = handle_key_event(&mut state, key);
+
+        assert_eq!(state.diff.scroll, 1);
+    }
+
+    #[test]
+    fn review_scroll_uses_wheel_without_entering_history_navigation() {
+        let mut state = mk_state_with_entries(3);
+        state.active_tab = TabId::Review;
+        state.history_nav_mode = true;
+        state.history.selected = Some(1);
+
+        handle_mouse_event(&mut state, MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(state.adrs.scroll, 3);
+        assert_eq!(state.history.selected, Some(1));
+    }
+
+    #[test]
+    fn dashboard_scroll_uses_wheel_without_entering_history_navigation() {
+        let mut state = mk_state_with_entries(3);
+        state.active_tab = TabId::Dashboard;
+        state.history_nav_mode = true;
+        state.history.selected = Some(1);
+
+        handle_mouse_event(&mut state, MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(state.dashboard_scroll, 3);
+        assert_eq!(state.history.selected, Some(1));
+    }
+
+    #[test]
+    fn review_action_requires_second_confirmation() {
+        let mut state = mk_state_with_entries(1);
+        state.active_tab = TabId::Review;
+        state.session.mode = ReplMode::Approval;
+
+        let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(matches!(
+            state.modal,
+            ModalState::ReviewConfirm(ReviewConfirmState {
+                action: ReviewAction::Approve
+            })
+        ));
+        assert!(state.pending_ipc.is_empty());
+
+        let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(state.modal, ModalState::None));
+        assert!(matches!(
+            state.pending_ipc.last(),
+            Some(TuiMessage::Submit { input }) if input == "/approve"
+        ));
     }
 
     #[test]

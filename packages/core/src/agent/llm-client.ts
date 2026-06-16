@@ -10,7 +10,7 @@
  */
 
 import { logger } from "../utils/logger"
-import { getProviderApiKey } from "../storage/crypto"
+import { getProviderApiKey, isFreeProvider } from "../storage/crypto"
 import { GeminiProvider } from "./llm-providers/gemini"
 import { AnthropicProvider } from "./llm-providers/anthropic"
 import { OllamaProvider } from "./llm-providers/ollama"
@@ -26,6 +26,7 @@ import { QwenProvider } from "./llm-providers/qwen"
 import { CodexProvider } from "./llm-providers/codex"
 import { OpenCodeGoProvider } from "./llm-providers/opencode-go"
 import { MiniMaxProvider } from "./llm-providers/minimax"
+import { HivecodeFreeProvider } from "./llm-providers/hivecode-free"
 import type { LLMProvider } from "./llm-providers/interface"
 
 const log = logger.child("llm-client")
@@ -80,6 +81,8 @@ export interface LLMCallOptions {
   signal?: AbortSignal
   /** Enable extended thinking for supported models (Anthropic Claude 3.7+). */
   thinking?: { enabled: boolean; budget_tokens?: number }
+  /** User ID for free-tier cap enforcement. Defaults to "default" if absent. */
+  userId?: string
 }
 
 export interface LLMResponse {
@@ -97,7 +100,7 @@ export interface LLMResponse {
 
 const GEMINI_PROVIDERS = new Set(["gemini", "google"])
 
-const KNOWN_PROVIDERS = new Set(["anthropic", "gemini", "google", "ollama", "openai", "groq", "mistral", "openrouter", "deepseek", "kimi", "local-llama", "nvidia", "codex", "opencode-go", "minimax"])
+const KNOWN_PROVIDERS = new Set(["anthropic", "gemini", "google", "ollama", "openai", "groq", "mistral", "openrouter", "deepseek", "kimi", "local-llama", "nvidia", "codex", "opencode-go", "minimax", "hivecode-free"])
 
 function getProvider(provider: string): LLMProvider {
   if (GEMINI_PROVIDERS.has(provider)) return new GeminiProvider()
@@ -120,6 +123,7 @@ function getProvider(provider: string): LLMProvider {
     case "codex":        return new CodexProvider()
     case "opencode-go":  return new OpenCodeGoProvider()
     case "minimax":      return new MiniMaxProvider()
+    case "hivecode-free": return new HivecodeFreeProvider()
     default:
       log.warn(`[llm-client] Unhandled provider "${provider}" — falling back to OpenAI-compatible endpoint`)
       return new OpenAIProvider()
@@ -130,6 +134,12 @@ function getProvider(provider: string): LLMProvider {
 
 /**
  * Call any LLM provider. Returns a canonical LLMResponse regardless of provider.
+ *
+ * For free-tier providers (`hivecode-free`), the daily cap is enforced by the
+ * operator's backend — this client just trusts the upstream response. If the
+ * backend returns 429 `free_tier_cap_exceeded`, the error surfaces as a
+ * user-friendly LLMResponse with a hint pointing to `/auth refresh` or a
+ * paid plan.
  */
 export async function callLLM(options: LLMCallOptions): Promise<LLMResponse> {
   try {
@@ -138,12 +148,28 @@ export async function callLLM(options: LLMCallOptions): Promise<LLMResponse> {
     const msg = (err as Error).message
     const cleanModel = options.model.replace(new RegExp(`^${options.provider}\\/`), "")
     log.error(`[llm-client] Error calling ${options.provider}/${cleanModel}: ${msg}`, err)
+    if (isFreeProvider(options.provider) && /429|free_tier_cap_exceeded|cap_exceeded/i.test(msg)) {
+      return {
+        content:
+          `⛔ **Free tier agotado** — el servidor reportó cap excedido.\n\n` +
+          `Esto puede pasar cuando:\n` +
+          `  · superaste el límite diario (típicamente 50K tokens)\n` +
+          `  · tu token expiró — refresca con /auth\n` +
+          `  · el servicio está en mantenimiento\n\n` +
+          `Más info: hivecode free`,
+        stop_reason: "error",
+      }
+    }
     return { content: `[LLM Error] ${msg}`, stop_reason: "error" }
   }
 }
 
 /**
  * Resolve provider config from DB (decrypts API key).
+ *
+ * For free-tier providers (`hivecode-free`), the key is the user's
+ * `hivecode_token` stored in Bun.secrets via `/auth` (browser-based Firebase
+ * Auth flow). No env var is required on the client.
  */
 export async function resolveProviderConfig(
   providerId: string,
@@ -155,8 +181,17 @@ export async function resolveProviderConfig(
     .query<any, [string]>("SELECT * FROM providers WHERE id = ? AND enabled = 1")
     .get(providerId)
 
-  // TDD §38.12: API keys stored exclusively in Bun.secrets
-  let apiKey = await getProviderApiKey(providerId) || ""
+  // TDD §38.12: API keys / auth tokens stored exclusively in Bun.secrets.
+  // For `hivecode-free` the secret is the personal hivecode_token issued by
+  // the operator's backend (see docs/API_CONTRACT.md). For other providers
+  // it's the user's own provider API key.
+  const apiKey = await getProviderApiKey(providerId) || ""
+  if (isFreeProvider(providerId) && !apiKey) {
+    log.warn(
+      `[llm-client] free-tier provider "${providerId}" requested but no hivecode_token stored. ` +
+        `Run /auth to authenticate.`
+    )
+  }
 
   return {
     provider: providerId,

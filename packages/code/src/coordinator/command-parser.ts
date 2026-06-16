@@ -3,7 +3,7 @@ import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { runReflector } from "../agent/reflector"
 import { callLLM, resolveProviderConfig } from "@johpaz/hivecode-core/agent/llm-client"
 import { saveScratchpadNote, getScratchpad, deleteScratchpadNote } from "@johpaz/hivecode-core/agent/conversation-store"
-import { hasProviderApiKey, storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
+import { hasProviderApiKey, storeProviderApiKey, encryptConfig, isFreeProvider } from "@johpaz/hivecode-core/storage/crypto"
 
 export interface ContextState {
   sessionId: string
@@ -40,6 +40,8 @@ export interface UiCallbacks {
   showConfigModal?: (command: string, title: string, fields: ModalField[]) => Promise<Record<string, string> | null>
   showInfoModal?: (title: string, content: string) => Promise<void>
   executeTask?: (task: string, mode: string) => Promise<string>
+  /** Start or restart a channel in the running gateway (called after saving channel config to DB) */
+  startChannel?: (type: string, accountId: string, config: Record<string, unknown>) => Promise<void>
 }
 
 export interface CommandResult {
@@ -206,6 +208,136 @@ function renderSuggestions(input: string): string[] {
   const match = ALL_COMMANDS.filter(c => c.command.startsWith("/" + prefix))
   console.error(`[suggestions] prefix fallback for "${prefix}": ${match.length} results`)
   return match.slice(0, 20).map(c => c.command)
+}
+
+async function handleFreeCommand(
+  args: string[],
+  db: ReturnType<typeof getDb>,
+  ctxState: ContextState,
+  ui?: UiCallbacks
+): Promise<CommandResult> {
+  const sub = args[0]?.toLowerCase()
+  const FREE = "hivecode-free"
+
+  // /free set  — activate as default provider
+  if (sub === "set" || sub === "set-default" || sub === "default") {
+    const rows = db.query("SELECT 1 FROM providers WHERE id = ?").all(FREE) as unknown[]
+    if (rows.length === 0) {
+      return { handled: true, output: `  ✗ provider '${FREE}' no existe. Ejecuta la migración inicial.` }
+    }
+    db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(FREE)
+    return {
+      handled: true,
+      output: `  ✓ ${FREE} es ahora el provider por defecto`,
+      newState: { activeProvider: FREE, activeModel: ctxState.activeModel },
+    }
+  }
+
+  // /free cap  — DEPRECATED: cap is now server-side. Point user to backend.
+  if (sub === "cap") {
+    return {
+      handled: true,
+      output:
+        "  El cap diario lo aplica tu API backend, no el cliente.\n" +
+        "  Si ves 'Free tier agotado', el servidor rechazó la request.\n" +
+        "  Configura el cap en tu backend (default recomendado: 50K tokens/día).",
+    }
+  }
+
+  // /free (default)  — show available models + status
+  let authStatus = "✗ sin autenticación (corre /auth login)"
+  try {
+    const { hasStoredAuth } = await import("@johpaz/hivecode-core/auth/auth-cli")
+    const status = await hasStoredAuth()
+    if (status.hasToken && !status.expired) {
+      const exp = status.expiresAt ? new Date(status.expiresAt * 1000).toISOString() : "—"
+      authStatus = `✓ autenticado como ${status.email || "—"}  ·  expira ${exp}`
+    } else if (status.expired) {
+      authStatus = `⚠ token expirado (corre /auth login)`
+    }
+  } catch { /* ignore */ }
+
+  const models = db
+    .query<{ id: string; name: string; context_window: number; capabilities: string }, [string]>(
+      `SELECT id, name, context_window, capabilities FROM models
+       WHERE provider_id = ? AND model_type = 'llm' AND enabled = 1
+       ORDER BY name`
+    )
+    .all(FREE) as Array<{ id: string; name: string; context_window: number; capabilities: string }>
+
+  const lines: string[] = [
+    "  hivecode-free — modelos vía tu API (Firebase Auth)",
+    "",
+    `  Estado: ${isFreeProvider(FREE) ? "free tier" : "configurado"}`,
+    `  Auth:   ${authStatus}`,
+    "",
+    `  ${models.length} modelos disponibles:`,
+    ...models.map((m) => {
+      const caps = (() => { try { return (JSON.parse(m.capabilities) as string[]).join(", ") } catch { return "" } })()
+      return `    · ${m.id.padEnd(50)} ctx=${m.context_window.toString().padStart(8)}  ${caps}`
+    }),
+    "",
+    "  Comandos:",
+    "    /auth login       abrir navegador y autenticarse (Firebase)",
+    "    /free             mostrar este panel",
+    "    /free set         activar como provider por defecto",
+    "    /modelo set hivecode-free <modelo>",
+    "",
+    "  El cap diario lo aplica tu API backend (default 50K tokens/día).",
+  ]
+  return { handled: true, output: "\n" + lines.join("\n") + "\n" }
+}
+
+async function handleAuthCommand(
+  args: string[],
+  db: ReturnType<typeof getDb>,
+  ctxState: ContextState,
+  ui?: UiCallbacks
+): Promise<CommandResult> {
+  const sub = (args[0] || "login").toLowerCase()
+  try {
+    const { runAuthCli, hasStoredAuth, clearAuth } = await import(
+      "@johpaz/hivecode-core/auth/auth-cli"
+    )
+
+    if (sub === "logout" || sub === "off") {
+      await clearAuth()
+      return { handled: true, output: "  ✓ Sesión hivecode-free cerrada" }
+    }
+
+    if (sub === "status" || sub === "whoami") {
+      const status = await hasStoredAuth()
+      if (!status.hasToken) {
+        return { handled: true, output: "  ✗ No autenticado.  /auth login" }
+      }
+      if (status.expired) {
+        return { handled: true, output: `  ⚠ Token expirado${status.email ? ` (${status.email})` : ""}.  /auth login` }
+      }
+      const exp = status.expiresAt ? new Date(status.expiresAt * 1000).toISOString() : "—"
+      return { handled: true, output: `  ✓ Autenticado como ${status.email || "—"}  ·  expira ${exp}` }
+    }
+
+    // /auth login  (default)  — open browser, capture token
+    const apiBase =
+      process.env.HIVE_FREE_API_URL || "https://api.hivecode.local/v1"
+    const result = await runAuthCli({ apiBase })
+    if (!result) {
+      return { handled: true, output: "  ✗ Auth cancelada o fallida. Intenta de nuevo." }
+    }
+    const exp = result.expiresAt
+      ? new Date(result.expiresAt * 1000).toISOString()
+      : "—"
+    return {
+      handled: true,
+      output:
+        `  ✓ Token guardado\n` +
+        `    email:  ${result.email || "—"}\n` +
+        `    expira: ${exp}\n\n` +
+        `  Ahora puedes usar /free set y los modelos hivecode-free.`,
+    }
+  } catch (err) {
+    return { handled: true, output: `  ✗ Error: ${(err as Error).message}` }
+  }
 }
 
 function runDoctor(db: ReturnType<typeof getDb>): string {
@@ -907,16 +1039,29 @@ async function handleMcpCommand(
           { key: "transport", label: "Transporte", placeholder: "", required: true, secret: false, field_type: "select", options: ["sse", "stdio", "http"] },
           { key: "url", label: "URL (SSE/HTTP)", placeholder: "http://localhost:3000/sse", required: false, secret: false, field_type: "text" },
           { key: "command", label: "Comando (STDIO)", placeholder: "npx -y @modelcontextprotocol/server-filesystem", required: false, secret: false, field_type: "text" },
+          { key: "headers", label: "Headers JSON (opcional)", placeholder: '{"Authorization":"Bearer token"}', required: false, secret: true, field_type: "text" },
         ])
         if (!values) return { handled: true, output: "  Configuraci\u00f3n cancelada" }
         const id = values.id.trim().toLowerCase().replace(/[^a-zA-Z0-9_-]/g, "_")
         const transport = values.transport || "sse"
         const url = values.url || null
         const command = values.command || null
+        let headersEncrypted: string | null = null
+        let headersIv: string | null = null
+        if (values.headers && values.headers.trim()) {
+          try {
+            const headersObj = JSON.parse(values.headers.trim())
+            const enc = encryptConfig(headersObj)
+            headersEncrypted = enc.encrypted
+            headersIv = enc.iv
+          } catch {
+            return { handled: true, output: "  Headers inv\u00e1lidos: debe ser JSON v\u00e1lido" }
+          }
+        }
         db.query(`
-          INSERT OR REPLACE INTO mcp_servers (id, name, transport, url, command, enabled, active, builtin, status)
-          VALUES (?, ?, ?, ?, ?, 1, 0, 0, 'disconnected')
-        `).run(id, values.name || id, transport, url, command)
+          INSERT OR REPLACE INTO mcp_servers (id, name, transport, url, command, headers_encrypted, headers_iv, enabled, active, builtin, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, 0, 'disconnected')
+        `).run(id, values.name || id, transport, url, command, headersEncrypted, headersIv)
         return { handled: true, output: `  \u2713 MCP ${id} a\u00f1adido (${transport})\n  El hot-reload lo conectar\u00e1 autom\u00e1ticamente.` }
       }
       const input = rest[0]
@@ -941,6 +1086,32 @@ async function handleMcpCommand(
       if (!name) return { handled: true, output: "uso: /mcp disable <nombre>" }
       db.query("UPDATE mcp_servers SET enabled = 0 WHERE id = ?").run(name)
       return { handled: true, output: `  \u2713 MCP ${name} deshabilitado` }
+    }
+    case "remove": {
+      const name = rest[0]
+      if (!name) return { handled: true, output: "uso: /mcp remove <nombre>" }
+      const row = db.query("SELECT id FROM mcp_servers WHERE id = ?").get(name) as any
+      if (!row) return { handled: true, output: `  MCP no encontrado: ${name}` }
+      db.query("DELETE FROM mcp_servers WHERE id = ?").run(name)
+      return { handled: true, output: `  \u2713 MCP ${name} eliminado` }
+    }
+    case "inspect": {
+      const name = rest[0]
+      if (!name) return { handled: true, output: "uso: /mcp inspect <nombre>" }
+      const row = db.query("SELECT id, name, transport, url, command, args, enabled, status, tools_count FROM mcp_servers WHERE id = ?").get(name) as any
+      if (!row) return { handled: true, output: `  MCP no encontrado: ${name}` }
+      const lines = [
+        ``,
+        `  \u26a1 ${row.name} (${row.id})`,
+        `  Transporte: ${row.transport}`,
+        row.url     ? `  URL: ${row.url}` : null,
+        row.command ? `  Comando: ${row.command}` : null,
+        row.args    ? `  Args: ${row.args}` : null,
+        `  Estado: ${row.status || "unknown"}`,
+        `  Habilitado: ${row.enabled ? "s\u00ed" : "no"}`,
+        row.tools_count ? `  Tools: ${row.tools_count}` : null,
+      ].filter(Boolean)
+      return { handled: true, output: lines.join("\n") }
     }
     case "test": {
       const name = rest[0]
@@ -987,7 +1158,7 @@ async function handleMcpCommand(
       }
     }
     default:
-      return { handled: true, output: "opciones: list | add | enable | disable | test\n\nEscribe /help /mcp" }
+      return { handled: true, output: "opciones: list | add | remove | inspect | enable | disable | test\n\nEscribe /help /mcp" }
   }
 }
 
@@ -1818,29 +1989,28 @@ async function handleTelegramCommand(
 
   if (!action || action === "status") {
     const row = db.query("SELECT * FROM channels WHERE id = 'telegram'").get() as any
-    if (!row) {
+    if (!row || !row.active) {
       return {
         handled: true,
         output: [
           "",
           "  Telegram no configurado.",
           "",
-          "  Ejecuta en terminal:",
-          "    hivecode telegram connect",
+          "  Abre ⚙ Settings → pestaña Telegram → presiona A para conectar.",
           "",
         ].join("\n"),
       }
     }
     let config: Record<string, any> = {}
-    try { config = JSON.parse(Buffer.from(row.config_encrypted as string, "base64").toString()) } catch {}
+    try { config = JSON.parse(row.config_encrypted as string) } catch {}
     return {
       handled: true,
       output: [
         "",
         `  Estado:      ${row.status ?? "desconocido"}`,
-        `  Activo:      ${row.enabled ? "sí" : "no"}`,
-        `  DM Policy:   ${config.dmPolicy ?? "—"}`,
-        `  Grupos:      ${config.groups ? "sí" : "no"}`,
+        `  Activo:      ${row.enabled ? "s\u00ed" : "no"}`,
+        `  DM Policy:   ${config.dmPolicy ?? "\u2014"}`,
+        `  Grupos:      ${config.groups ? "s\u00ed" : "no"}`,
         config.allowFrom?.length ? `  Lista blanca: ${(config.allowFrom as string[]).join(", ")}` : "",
         "",
       ].filter(Boolean).join("\n"),
@@ -1848,75 +2018,46 @@ async function handleTelegramCommand(
   }
 
   if (action === "disconnect") {
-    db.query("UPDATE channels SET enabled = 0, status = 'disconnected' WHERE id = 'telegram'").run()
-    return { handled: true, output: "  ✓ Telegram desconectado" }
+    try { await (Bun as any).secrets?.delete?.({ service: "hive-code", name: "telegram.bot_token" }) } catch {}
+    db.query("UPDATE channels SET enabled = 0, active = 0, status = 'disconnected' WHERE id = 'telegram'").run()
+    return { handled: true, output: "  \u2713 Telegram desconectado" }
   }
 
   if (action === "connect" || action === "edit") {
-    // Inline modal if available
     if (ui?.showConfigModal) {
-      const existing = db.query("SELECT config_encrypted FROM channels WHERE id = 'telegram'").get() as any
-      let existingConfig: Record<string, any> = {}
-      if (existing?.config_encrypted) {
-        try { existingConfig = JSON.parse(Buffer.from(existing.config_encrypted, "base64").toString()) } catch {}
-      }
       const values = await ui.showConfigModal(`telegram_${action}`, `Telegram \u2014 ${action === "connect" ? "Conectar" : "Editar"}`, [
         { key: "bot_token", label: "Bot Token",    placeholder: "123456:ABC-DEF\u2026", required: true,  secret: true,  field_type: "text" },
-        { key: "dm_policy", label: "DM Policy",    placeholder: "",                required: false, secret: false, field_type: "select", options: ["allowAll", "allowList", "denyAll"] },
+        { key: "dm_policy", label: "DM Policy",    placeholder: "",                required: false, secret: false, field_type: "select", options: ["open", "allowlist"] },
         { key: "groups",    label: "Grupos",        placeholder: "",                required: false, secret: false, field_type: "select", options: ["no", "s\u00ed"] },
         { key: "allow_from",label: "Lista blanca",  placeholder: "@usuario1,@usuario2", required: false, secret: false, field_type: "text" },
       ])
       if (!values) return { handled: true, output: "  Configuraci\u00f3n cancelada" }
+      try {
+        await (Bun as any).secrets?.set?.({ service: "hive-code", name: "telegram.bot_token", value: values.bot_token })
+      } catch {}
       const configJson = JSON.stringify({
-        botToken: values.bot_token,
-        dmPolicy: values.dm_policy || "allowAll",
+        dmPolicy: values.dm_policy || "open",
         groups: values.groups === "s\u00ed",
         allowFrom: values.allow_from ? values.allow_from.split(",").map((s: string) => s.trim()).filter(Boolean) : [],
         enabled: true,
       })
       db.query(`
-        INSERT OR REPLACE INTO channels (id, type, config_encrypted, enabled, status)
-        VALUES ('telegram', 'telegram', ?, 1, 'connected')
-      `).run(Buffer.from(configJson).toString("base64"))
+        INSERT OR REPLACE INTO channels (id, type, config_encrypted, active, enabled, status)
+        VALUES ('telegram', 'telegram', ?, 1, 1, 'connected')
+      `).run(configJson)
+      try {
+        await ui.startChannel?.("telegram", "telegram", JSON.parse(configJson))
+      } catch { /* channel start is best-effort */ }
       return {
         handled: true,
         output: `  \u2713 Telegram ${action === "connect" ? "conectado" : "actualizado"}`,
-      }
-    }
-    // Fallback wizard
-    if (ui?.suspendTui && ui?.resumeTui && ui?.runTelegramConnectWizard) {
-      await ui.suspendTui()
-      try {
-        const result = await ui.runTelegramConnectWizard()
-        if (result) {
-          const configJson = JSON.stringify({
-            dmPolicy: result.dmPolicy,
-            allowFrom: result.allowFrom,
-            groups: result.groups,
-            enabled: true,
-          })
-          db.query(`
-            INSERT OR REPLACE INTO channels (id, type, config_encrypted, enabled, status)
-            VALUES ('telegram', 'telegram', ?, 1, 'connected')
-          `).run(Buffer.from(configJson).toString("base64"))
-          return {
-            handled: true,
-            output: `  \u2713 Telegram ${action === "connect" ? "conectado" : "actualizado"}`,
-          }
-        }
-        return { handled: true, output: "  Configuraci\u00f3n cancelada" }
-      } finally {
-        ui.resumeTui()
       }
     }
     return {
       handled: true,
       output: [
         "",
-        `  /telegram ${action} requiere wizard interactivo.`,
-        "",
-        "  Ejecuta en terminal:",
-        `    hivecode telegram ${action}`,
+        "  Abre \u2699 Settings \u2192 pesta\u00f1a Telegram \u2192 presiona A para configurar.",
         "",
       ].join("\n"),
     }
@@ -1946,6 +2087,11 @@ export async function parseInternalCommand(
   switch (cmd) {
     case "provider":
       return handleProviderCommand(args, db, ctxState, ui)
+    case "auth":
+    case "login":
+      return await handleAuthCommand(args, db, ctxState, ui)
+    case "free":
+      return await handleFreeCommand(args, db, ctxState, ui)
     case "modelo":
       return handleModelCommand(args, db, ctxState, ui)
     case "mcp":

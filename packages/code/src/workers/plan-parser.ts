@@ -97,52 +97,66 @@ function sortPhases(phases: ParsedPhase[]): ParsedPhase[] {
 
 /**
  * Parse Architecture Coordinator output into structured plan.
+ * Accepts either a pre-parsed object (from native tool call) or raw text (legacy fallback).
  */
-export function parsePlan(text: string): ParsedPlan {
-  const jsonStr = extractJson(text)
+export function parsePlan(input: string | Record<string, unknown>): ParsedPlan {
+  let parsed: Record<string, unknown> | null = null
 
-  if (jsonStr) {
-    try {
-      const parsed = JSON.parse(jsonStr)
-
-      const phases = ((parsed.phases || []) as any[])
-        .map(normalizePhase)
-        .filter((p): p is ParsedPhase => p !== null)
-
+  if (typeof input === "object" && input !== null) {
+    parsed = input
+  } else if (typeof input === "string") {
+    const jsonStr = extractJson(input)
+    if (jsonStr) {
+      try {
+        parsed = JSON.parse(jsonStr)
+      } catch (err) {
+        console.warn(`[plan-parser] JSON parse failed: ${(err as Error).message}`)
+      }
+    }
+    if (!parsed) {
+      console.warn("[plan-parser] Failed to parse plan JSON — using default phase order")
+      const title = input.match(/#+\s*(.+)/)?.[1]?.trim() || "Plan de implementación"
       return {
         adr: {
-          title: String(parsed.adr?.title || "Untitled ADR"),
-          context: String(parsed.adr?.context || ""),
-          options: typeof parsed.adr?.options === "object" ? JSON.stringify(parsed.adr.options) : String(parsed.adr?.options || ""),
-          decision: String(parsed.adr?.decision || ""),
-          consequences: String(parsed.adr?.consequences || ""),
+          title,
+          context: input.slice(0, 800),
+          options: "{}",
+          decision: "Proceder con la implementación según el análisis de Architecture.",
+          consequences: "Ver narrativa completa en FOCUS para detalles.",
         },
-        phases: sortPhases(phases),
-        risks: (parsed.risks || []).map((r: any) => ({
-          severity: ["HIGH", "MEDIUM", "LOW"].includes(r?.severity) ? r.severity : "MEDIUM",
-          description: String(r?.description || ""),
-        })),
-        interfaces: Array.isArray(parsed.interfaces) ? JSON.stringify(parsed.interfaces) : (parsed.interfaces ? String(parsed.interfaces) : undefined),
+        phases: sortPhases(getDefaultPhases()),
+        risks: [{ severity: "MEDIUM", description: "El plan fue generado con fases por defecto porque el JSON estaba incompleto." }],
       }
-    } catch (err) {
-      console.warn(`[plan-parser] JSON parse failed: ${(err as Error).message}`)
     }
   }
 
-  // Fallback: extract what we can from the raw text and proceed with default phases.
-  // Never set parseError — we'd rather show a usable plan than reject everything.
-  console.warn("[plan-parser] Failed to parse plan JSON — using default phase order")
-  const title = text.match(/#+\s*(.+)/)?.[1]?.trim() || "Plan de implementación"
+  if (!parsed) {
+    return {
+      adr: { title: "Plan de implementación", context: "", options: "{}", decision: "", consequences: "" },
+      phases: sortPhases(getDefaultPhases()),
+      risks: [{ severity: "MEDIUM", description: "No se pudo parsear el plan." }],
+    }
+  }
+
+  const parsedAny = parsed as any
+  const phases = ((parsedAny.phases || []) as any[])
+    .map(normalizePhase)
+    .filter((p): p is ParsedPhase => p !== null)
+
   return {
     adr: {
-      title,
-      context: text.slice(0, 800),
-      options: "{}",
-      decision: "Proceder con la implementación según el análisis de Architecture.",
-      consequences: "Ver narrativa completa en FOCUS para detalles.",
+      title: String(parsedAny.adr?.title || "Untitled ADR"),
+      context: String(parsedAny.adr?.context || ""),
+      options: typeof parsedAny.adr?.options === "object" ? JSON.stringify(parsedAny.adr.options) : String(parsedAny.adr?.options || ""),
+      decision: String(parsedAny.adr?.decision || ""),
+      consequences: String(parsedAny.adr?.consequences || ""),
     },
-    phases: sortPhases(getDefaultPhases()),
-    risks: [{ severity: "MEDIUM", description: "El plan fue generado con fases por defecto porque el JSON estaba incompleto." }],
+    phases: sortPhases(phases),
+    risks: (parsedAny.risks || []).map((r: any) => ({
+      severity: ["HIGH", "MEDIUM", "LOW"].includes(r?.severity) ? r.severity : "MEDIUM",
+      description: String(r?.description || ""),
+    })),
+    interfaces: Array.isArray(parsedAny.interfaces) ? JSON.stringify(parsedAny.interfaces) : (parsedAny.interfaces ? String(parsedAny.interfaces) : undefined),
   }
 }
 

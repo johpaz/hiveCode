@@ -31,6 +31,7 @@ export const OPENAI_COMPAT_BASE_URLS: Record<string, string> = {
   codex: "https://api.openai.com/v1",
   "opencode-go": "https://opencode.ai/zen/go/v1",
   minimax: "https://api.minimaxi.com/v1",
+  "hivecode-free": `${(process.env.HIVE_FREE_API_URL || "http://localhost:4000").replace(/\/+$/, "")}/v1`,
 }
 
 // ─── Provider profiles ────────────────────────────────────────────────────────
@@ -72,6 +73,7 @@ export const PROVIDER_PROFILES: Record<string, ProviderProfile> = {
   codex: { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
   "opencode-go": { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
   minimax: { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
+  "hivecode-free": { ...DEFAULT_PROFILE, normalizeToolNames: true },
 }
 
 export function getProviderProfile(provider: string): ProviderProfile {

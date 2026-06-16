@@ -1,7 +1,7 @@
 use crate::{
-    state::{AppState, WorkerStatus},
-    term::{Canvas, Rect, Style, AMBER, AMBER_BRIGHT, BG_ELEVATED, BG_PANEL, BLUE, CYAN, DIM, GREEN, PURPLE, RED, SECONDARY, WHITE, YELLOW},
-    ui::{cell_width, render_split_handles, split_panes, truncate_cells, Axis, Constraint, SplitPane},
+    state::{AgentTier, AppState, WorkerStatus, tier_for},
+    term::{Canvas, Rect, Style, AMBER, AMBER_BRIGHT, AMBER_DIM, BG_ELEVATED, BG_PANEL, BLUE, CYAN, DIM, GREEN, PURPLE, RED, SECONDARY, WHITE, YELLOW},
+    ui::{cell_width, fmt_tokens, render_split_handles, split_panes, truncate_cells, Axis, Constraint, SplitPane},
     widgets::components::{agent_display_name, worker_color},
 };
 
@@ -43,20 +43,25 @@ fn render_diff_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
 
     let header_left = format!("⬡ {}", path);
     let header_right = format!("{} {}", stats, branch);
+    let backend_tag = active_worker_tag(state);
+    let backend_w = cell_width(backend_tag) as u16;
+    let backend_x = area.right().saturating_sub(backend_w + 1);
 
     let hl_shown = truncate_cells(&header_left, area.w.saturating_sub(3) as usize);
     canvas.print(area.x + 1, area.y, &hl_shown, Style::new().fg(AMBER).bold());
 
     if !header_right.is_empty() {
-        let hr_x = area.right().saturating_sub(header_right.chars().count() as u16 + 1);
+        let right_limit = backend_x.saturating_sub(2);
+        let left_limit = area.x + 1 + cell_width(&hl_shown) as u16 + 2;
+        let available = right_limit.saturating_sub(left_limit) as usize;
+        let header_right = truncate_cells(&header_right, available);
+        let hr_x = right_limit.saturating_sub(cell_width(&header_right) as u16);
         if hr_x > area.x + 1 + cell_width(&hl_shown) as u16 {
             canvas.print(hr_x, area.y, &header_right, Style::new().fg(DIM));
         }
     }
 
     // Backend indicator top-right
-    let backend_tag = "○ backend";
-    let backend_x = area.right().saturating_sub(backend_tag.chars().count() as u16 + 1);
     canvas.print(backend_x, area.y, backend_tag, Style::new().fg(BLUE));
 
     let avail_h = area.h.saturating_sub(3) as usize;
@@ -93,14 +98,29 @@ fn render_diff_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
         y += 1;
     }
 
-    // Scroll indicator
-    if state.diff.lines.len() > avail_h {
-        let total = state.diff.lines.len();
-        let pct = (start * 100) / total.max(1);
-        let hint = format!("{}% · ↑↓", pct);
-        canvas.print(area.right().saturating_sub(cell_width(&hint) as u16 + 1),
-                     area.bottom().saturating_sub(1), &hint, Style::new().fg(DIM));
+    render_diff_footer(canvas, area, state, start, avail_h);
+}
+
+fn render_diff_footer(canvas: &mut Canvas, area: Rect, state: &AppState, start: usize, visible: usize) {
+    if area.h < 3 || state.diff.lines.is_empty() {
+        return;
     }
+
+    let total = state.diff.lines.len();
+    let shown_end = start.saturating_add(visible).min(total);
+    let hint = if total > visible {
+        let pct = (start * 100) / total.max(1);
+        format!("{}% · líneas {}-{} de {} · ↑↓/rueda", pct, start + 1, shown_end, total)
+    } else {
+        format!("líneas 1-{} de {} · diff completo", shown_end, total)
+    };
+    let hint = truncate_cells(&hint, area.w.saturating_sub(2) as usize);
+    canvas.print(
+        area.right().saturating_sub(cell_width(&hint) as u16 + 1),
+        area.bottom().saturating_sub(1),
+        &hint,
+        Style::new().fg(DIM),
+    );
 }
 
 fn render_filemap_fallback(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -166,153 +186,207 @@ fn render_filemap_fallback(canvas: &mut Canvas, area: Rect, state: &AppState) {
 fn render_workers_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
     canvas.fill_rect(area, ' ', Style::new().bg(BG_ELEVATED));
 
-    let workers_h = if area.h > 10 {
-        area.h * state.panels.code_workers_percent / 100
-    } else {
-        area.h
-    };
+    if area.h < 8 {
+        render_worker_identity(canvas, area, state);
+        return;
+    }
+
     let split = SplitPane::new(
         Axis::Vertical,
         vec![
-            Constraint::Fixed(workers_h),
+            Constraint::Percent(28),
+            Constraint::Percent(42),
             Constraint::Fill(1),
         ],
     );
     let (panels, handles) = split_panes(area, &split);
-    canvas.with_clip(panels[0], |canvas| render_all_workers(canvas, panels[0], state));
+    canvas.with_clip(panels[0], |canvas| render_worker_identity(canvas, panels[0], state));
     render_split_handles(canvas, &handles, Axis::Vertical);
-    if area.h > 10 {
-        canvas.with_clip(panels[1], |canvas| render_checkpoint_card(canvas, panels[1], state));
-    }
+    canvas.with_clip(panels[1], |canvas| render_worker_thought(canvas, panels[1], state));
+    canvas.with_clip(panels[2], |canvas| render_worker_blackboard(canvas, panels[2], state));
 }
 
-fn render_all_workers(canvas: &mut Canvas, area: Rect, state: &AppState) {
-    canvas.print(area.x + 1, area.y, "⬡ WORKERS · ESTADO LIVE", Style::new().fg(CYAN).bold());
-
-    if state.workers.workers.is_empty() {
-        canvas.print(area.x + 2, area.y + 1, "sin workers activos", Style::new().fg(DIM));
-        return;
-    }
-
-    let mut y = area.y + 2;
-    let mut idle_count = 0;
-
-    for w in state.workers.workers.iter() {
-        if y >= area.bottom().saturating_sub(2) { break; }
-
-        let (dot, dot_color) = match w.status {
-            WorkerStatus::Running => ("●", GREEN),
-            WorkerStatus::Done    => ("○", DIM),
-            WorkerStatus::Failed  => ("✗", RED),
-            WorkerStatus::Warn    => ("●", YELLOW),
-            WorkerStatus::Waiting => ("○", DIM),
-        };
-
-        let status_label = match w.status {
-            WorkerStatus::Running => "RUNNING",
-            WorkerStatus::Done    => "DONE",
-            WorkerStatus::Failed  => "FAILED",
-            WorkerStatus::Warn    => "WARN",
-            WorkerStatus::Waiting => "WAITING",
-        };
-
-        let status_color = match w.status {
-            WorkerStatus::Running => GREEN,
-            WorkerStatus::Done    => DIM,
-            WorkerStatus::Failed  => RED,
-            WorkerStatus::Warn    => YELLOW,
-            WorkerStatus::Waiting => DIM,
-        };
-
-        let display = if w.display_name.is_empty() {
-            agent_display_name(&w.name)
-        } else {
-            w.display_name.clone()
-        };
-
-        let wcolor = worker_color(&w.name);
-
-        // Dot
-        canvas.print(area.x + 1, y, dot, Style::new().fg(dot_color).bold());
-
-        // Name
-        let name_x = area.x + 3;
-        canvas.print(name_x, y, "⬡", Style::new().fg(wcolor));
-        canvas.print(name_x + 2, y, &display, Style::new().fg(wcolor).bold());
-
-        // Status label
-        let status_x = name_x + 2 + cell_width(&display) as u16 + 2;
-        canvas.print(status_x, y, status_label, Style::new().fg(status_color));
-
-        // Activity description
-        let activity_text = w.activity.as_deref().or(w.detail.as_deref()).unwrap_or("");
-        if !activity_text.is_empty() {
-            let act_x = status_x + status_label.len() as u16 + 2;
-            let avail = area.right().saturating_sub(act_x + 1) as usize;
-            if avail > 3 {
-                let shown = truncate_cells(activity_text, avail);
-                canvas.print(act_x, y, &shown, Style::new().fg(SECONDARY));
-            }
-        }
-
-        if w.status == WorkerStatus::Waiting {
-            idle_count += 1;
-        }
-
-        y += 1;
-    }
-
-    // Idle agents footer
-    if idle_count > 0 && y < area.bottom().saturating_sub(1) {
-        let idle_names: Vec<_> = state.workers.workers.iter()
-            .filter(|w| w.status == WorkerStatus::Waiting)
-            .map(|w| if w.display_name.is_empty() { agent_display_name(&w.name) } else { w.display_name.clone() })
-            .collect();
-        if !idle_names.is_empty() {
-            let footer = format!("○ ---- {} agents idle ({}) ---- ○", idle_count, idle_names.join(" · "));
-            let shown = truncate_cells(&footer, area.w.saturating_sub(2) as usize);
-            canvas.print(area.x + 1, y, &shown, Style::new().fg(DIM));
-        }
-    }
-}
-
-fn render_checkpoint_card(canvas: &mut Canvas, area: Rect, state: &AppState) {
-    if area.h < 4 { return; }
-
-    let Some(cp) = state.checkpoints.entries.last() else {
-        canvas.print(area.x + 1, area.y + 1, "sin checkpoints", Style::new().fg(DIM));
+fn render_worker_identity(canvas: &mut Canvas, area: Rect, state: &AppState) {
+    canvas.fill_rect(area, ' ', Style::new().bg(BG_ELEVATED));
+    let Some(name) = active_worker_name(state) else {
+        canvas.print(area.x + 1, area.y, "⬡ WORKER", Style::new().fg(CYAN).bold().bg(BG_ELEVATED));
+        canvas.print(area.x + 2, area.y + 2, "sin worker enfocado", Style::new().fg(DIM).bg(BG_ELEVATED));
         return;
     };
-
-    canvas.fill_rect(
-        crate::term::Rect::new(area.x, area.y, area.w, area.h.min(6)),
-        ' ',
-        Style::new().bg(crate::term::BG_ELEVATED),
-    );
-
-    let time_part = if cp.time.is_empty() { String::new() } else { format!(" · {}", cp.time) };
-    let header = format!("⬡ CHECKPOINT{time_part} ●");
-    canvas.print(area.x + 1, area.y, &header, Style::new().fg(AMBER_BRIGHT).bold());
-
-    // Test stats
-    let mut y = area.y + 1;
-    if cp.tests_total > 0 {
-        let test_color = if cp.tests_passed == cp.tests_total { GREEN } else { YELLOW };
-        let test_text = format!("tests verdes {}/{}", cp.tests_passed, cp.tests_total);
-        canvas.print(area.x + 1, y, &test_text, Style::new().fg(test_color));
-        y += 1;
+    let worker = state.workers.workers.iter().find(|worker| worker.name == name);
+    let display = worker
+        .map(|worker| {
+            if worker.display_name.is_empty() || worker.display_name == worker.name {
+                agent_display_name(&worker.name)
+            } else {
+                worker.display_name.clone()
+            }
+        })
+        .unwrap_or_else(|| agent_display_name(name));
+    let status = worker.map(|worker| worker.status).unwrap_or(WorkerStatus::Running);
+    let status_color = match status {
+        WorkerStatus::Running => BLUE,
+        WorkerStatus::Done => GREEN,
+        WorkerStatus::Failed => RED,
+        WorkerStatus::Warn => YELLOW,
+        WorkerStatus::Waiting => DIM,
+    };
+    let title = format!("⬡ @{}", display.to_ascii_uppercase());
+    canvas.print(area.x + 1, area.y, &truncate_cells(&title, area.w.saturating_sub(2) as usize), Style::new().fg(worker_color(name)).bold().bg(BG_ELEVATED));
+    let status_label = format!("{:?}", status).to_ascii_uppercase();
+    let status_x = area.right().saturating_sub(cell_width(&status_label) as u16 + 1);
+    if status_x > area.x + 2 {
+        canvas.print(status_x, area.y, &status_label, Style::new().fg(status_color).bold().bg(BG_ELEVATED));
     }
 
-    let desc = truncate_cells(&cp.description, area.w.saturating_sub(3) as usize);
-    canvas.print(area.x + 1, y, &desc, Style::new().fg(SECONDARY));
-    y += 1;
-
-    let files = format!("{} archivos  ⬡ {}", cp.file_count, cp.agent);
-    canvas.print(area.x + 1, y, &files, Style::new().fg(DIM));
-    y += 1;
-
+    let model = if state.session.model.is_empty() { "modelo activo" } else { state.session.model.as_str() };
+    let elapsed = state
+        .dashboard
+        .metrics
+        .elapsed_secs
+        .map(|seconds| format!("{:02}:{:02}", seconds / 60, seconds % 60))
+        .unwrap_or_else(|| "--:--".to_string());
+    let tokens = fmt_tokens(worker.map(|worker| worker.token_count).unwrap_or(0));
+    let iteration = worker
+        .and_then(|worker| worker.iteration_current.zip(worker.iteration_total))
+        .map(|(current, total)| format!("iter {current}/{total}"))
+        .unwrap_or_else(|| "iter --".to_string());
+    let meta = format!("{model} · {iteration} · tok {tokens} · {elapsed}");
+    if area.h > 2 {
+        canvas.print(area.x + 2, area.y + 2, &truncate_cells(&meta, area.w.saturating_sub(4) as usize), Style::new().fg(SECONDARY).bg(BG_ELEVATED));
+    }
     if area.h > 4 {
-        canvas.print(area.x + 1, y, "[↩ r] rollback · o presiona r", Style::new().fg(RED));
+        let intent = worker
+            .and_then(|worker| worker.current_action.as_deref().or(worker.activity.as_deref()).or(worker.detail.as_deref()))
+            .unwrap_or("esperando acción del worker");
+        canvas.print(area.x + 2, area.y + 4, &truncate_cells(intent, area.w.saturating_sub(4) as usize), Style::new().fg(WHITE).bg(BG_ELEVATED));
+    }
+    if area.h > 5 {
+        let file = worker
+            .and_then(|worker| worker.current_file.as_deref())
+            .or_else(|| (!state.diff.path.is_empty()).then_some(state.diff.path.as_str()))
+            .unwrap_or("sin archivo activo");
+        canvas.print(area.x + 2, area.y + 5, &truncate_cells(file, area.w.saturating_sub(4) as usize), Style::new().fg(DIM).bg(BG_ELEVATED));
+    }
+}
+
+fn render_worker_thought(canvas: &mut Canvas, area: Rect, state: &AppState) {
+    canvas.fill_rect(area, ' ', Style::new().bg(BG_PANEL));
+    canvas.print(area.x + 1, area.y, "⬡ THOUGHT STREAM", Style::new().fg(AMBER).bold().bg(BG_PANEL));
+    let Some(name) = active_worker_name(state) else {
+        canvas.print(area.x + 2, area.y + 2, "sin razonamiento activo", Style::new().fg(DIM).bg(BG_PANEL));
+        return;
+    };
+    let chunks: Vec<_> = state
+        .thought
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.coordinator == name)
+        .collect();
+    if chunks.is_empty() {
+        canvas.print(area.x + 2, area.y + 2, "esperando reasoning por IPC", Style::new().fg(DIM).bg(BG_PANEL));
+        return;
+    }
+    let body_h = area.h.saturating_sub(2) as usize;
+    let start = chunks.len().saturating_sub(body_h);
+    let mut y = area.y + 2;
+    for chunk in chunks.iter().skip(start) {
+        if y >= area.bottom() {
+            break;
+        }
+        let text = clean_thought(&chunk.content);
+        if text.trim().is_empty() {
+            continue;
+        }
+        canvas.print(area.x + 2, y, "↳", Style::new().fg(AMBER_DIM).bg(BG_PANEL));
+        canvas.print(area.x + 4, y, &truncate_cells(&text, area.w.saturating_sub(6) as usize), Style::new().fg(SECONDARY).bg(BG_PANEL));
+        y += 1;
+    }
+}
+
+fn render_worker_blackboard(canvas: &mut Canvas, area: Rect, state: &AppState) {
+    canvas.fill_rect(area, ' ', Style::new().bg(BG_ELEVATED));
+    canvas.print(area.x + 1, area.y, "⬡ BLACKBOARD RELEVANTE", Style::new().fg(AMBER_BRIGHT).bold().bg(BG_ELEVATED));
+    let Some(name) = active_worker_name(state) else {
+        canvas.print(area.x + 2, area.y + 2, "sin worker enfocado", Style::new().fg(DIM).bg(BG_ELEVATED));
+        return;
+    };
+    let active_file = state
+        .workers
+        .workers
+        .iter()
+        .find(|worker| worker.name == name)
+        .and_then(|worker| worker.current_file.as_deref())
+        .or_else(|| (!state.diff.path.is_empty()).then_some(state.diff.path.as_str()));
+    let relevant: Vec<_> = state
+        .dashboard
+        .blackboard_events
+        .iter()
+        .filter(|event| {
+            event.agent == name
+                || event.agent == "architecture"
+                || event.event_type.eq_ignore_ascii_case("constraint")
+                || active_file.is_some_and(|file| event.content.contains(file))
+        })
+        .collect();
+    if relevant.is_empty() {
+        canvas.print(area.x + 2, area.y + 2, "sin constraints visibles para este worker", Style::new().fg(DIM).bg(BG_ELEVATED));
+        return;
+    }
+    let body_h = area.h.saturating_sub(2) as usize;
+    let start = relevant.len().saturating_sub(body_h);
+    let mut y = area.y + 2;
+    for event in relevant.iter().skip(start) {
+        if y >= area.bottom() {
+            break;
+        }
+        let line = format!("[{}] {}", event.event_type.to_ascii_uppercase(), event.content);
+        canvas.print(area.x + 2, y, &truncate_cells(&line, area.w.saturating_sub(4) as usize), Style::new().fg(SECONDARY).bg(BG_ELEVATED));
+        y += 1;
+    }
+}
+
+fn active_worker_name(state: &AppState) -> Option<&str> {
+    state
+        .focused_worker
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            if state.workers.active_coordinator.trim().is_empty() {
+                None
+            } else {
+                Some(state.workers.active_coordinator.as_str())
+            }
+        })
+        .or_else(|| {
+            state
+                .filemap
+                .entries
+                .iter()
+                .find(|entry| entry.path == state.diff.path && !entry.agent.trim().is_empty())
+                .map(|entry| entry.agent.as_str())
+        })
+        .or_else(|| {
+            state
+                .workers
+                .workers
+                .iter()
+                .find(|worker| worker.status == WorkerStatus::Running)
+                .map(|worker| worker.name.as_str())
+        })
+}
+
+fn active_worker_tag(state: &AppState) -> &'static str {
+    let Some(name) = active_worker_name(state) else {
+        return "○ worker";
+    };
+    match tier_for(name) {
+        AgentTier::Engineering => "● L2 worker",
+        AgentTier::Planning => "● architect",
+        AgentTier::Quality => "● quality",
+        AgentTier::Gate => "● reviewer",
+        AgentTier::Orchestrator => "● bee",
+        AgentTier::OnDemand => "● ondemand",
     }
 }
 
@@ -441,9 +515,18 @@ fn is_ts_type(word: &str) -> bool {
     TYPES.contains(&word)
 }
 
+fn clean_thought(content: &str) -> String {
+    content
+        .replace("<think>", "")
+        .replace("</think>", "")
+        .trim()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::DiffLine;
 
     #[test]
     fn code_line_renderer_respects_cell_width_for_long_tokens() {
@@ -472,5 +555,31 @@ mod tests {
 
         assert!(row.contains("abc"));
         assert!(!row.contains("TAIL"));
+    }
+
+    #[test]
+    fn diff_footer_renders_line_count_when_diff_fits() {
+        let mut state = AppState::default();
+        state.diff.path = "src/auth/middleware.ts".to_string();
+        state.diff.lines = vec![
+            DiffLine {
+                kind: "context".to_string(),
+                text: "export async function authGuard() {".to_string(),
+                old_line_no: Some(1),
+                new_line_no: Some(1),
+            },
+            DiffLine {
+                kind: "add".to_string(),
+                text: "  await rateLimit.tap(payload.sub);".to_string(),
+                old_line_no: None,
+                new_line_no: Some(2),
+            },
+        ];
+
+        let mut canvas = Canvas::new(100, 16);
+        render(&mut canvas, Rect::new(0, 0, 100, 16), &state);
+        let rows = canvas.to_text_rows().join("\n");
+
+        assert!(rows.contains("diff completo"));
     }
 }

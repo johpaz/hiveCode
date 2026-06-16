@@ -566,7 +566,8 @@ export class TelegramChannel extends BaseChannel {
   async sendNotification(text: string): Promise<void> {
     if (!this.bot || !this.notifyChatId) return;
     try {
-      await this.bot.api.sendMessage(this.notifyChatId, text, { parse_mode: "HTML" });
+      const html = this.markdownToHTML(text);
+      await this.bot.api.sendMessage(this.notifyChatId, html, { parse_mode: "HTML" });
     } catch (e) {
       this.log.warn(`sendNotification failed: ${(e as Error).message}`);
     }

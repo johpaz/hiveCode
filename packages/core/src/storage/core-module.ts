@@ -49,6 +49,30 @@ function ensureSchemaSync(db: Database): void {
   ensureColumnExists(db, "providers", "api_key_encrypted", "TEXT");
   ensureColumnExists(db, "providers", "api_key_iv", "TEXT");
   ensureColumnExists(db, "providers", "num_ctx", "INTEGER");
+  ensureColumnExists(db, "providers", "is_free_tier", "INTEGER NOT NULL DEFAULT 0");
+
+  // provider_free_overrides: created on-the-fly in ensureSchemaSync if missing
+  try {
+    const exists = db.query(
+      `SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_free_overrides'`
+    ).get();
+    if (!exists) {
+      log.info("🛠️  Creando tabla 'provider_free_overrides'");
+      db.run(`
+        CREATE TABLE provider_free_overrides (
+          provider_id            TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
+          is_free_tier           INTEGER NOT NULL DEFAULT 0,
+          daily_token_cap        INTEGER NOT NULL DEFAULT 50000,
+          global_daily_token_cap INTEGER NOT NULL DEFAULT 0,
+          enabled                INTEGER NOT NULL DEFAULT 1,
+          notes                  TEXT,
+          updated_at             INTEGER NOT NULL DEFAULT (unixepoch())
+        )
+      `);
+    }
+  } catch (err) {
+    log.warn(`⚠️  No se pudo asegurar tabla 'provider_free_overrides':`, (err as Error).message);
+  }
 
   // Sync agents
   ensureColumnExists(db, "agents", "role", "TEXT NOT NULL DEFAULT 'coordinator'");

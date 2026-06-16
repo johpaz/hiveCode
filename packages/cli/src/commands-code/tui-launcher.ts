@@ -1,5 +1,5 @@
 /**
- * Launch the Ratatui TUI binary and handle IPC with the Bun process.
+ * Launch the Rust/crossterm TUI binary and handle IPC with the Bun process.
  *
  * Architecture:
  *   Bun (this file) ←→ local IPC (Unix socket or Windows loopback TCP) ←→ hivecode-tui (Rust)
@@ -8,6 +8,7 @@
 
 import * as path from "node:path"
 import * as fs from "node:fs"
+import { extractHivetui, cachedHivetuiPath } from "../embedded-hivetui"
 import { logger, onLogEntry, removeLogListener, type LogEntry } from "@johpaz/hivecode-core/utils/logger"
 import { createIpcServer } from "@johpaz/hivecode-core/ipc/server"
 import type { BunMessage as CoreBunMessage, TuiMessage as CoreTuiMessage } from "@johpaz/hivecode-core/ipc/protocol"
@@ -16,6 +17,7 @@ import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { MessagesRepo } from "@johpaz/hivecode-core/db/repos/messages"
 import { CheckpointsRepo } from "@johpaz/hivecode-core/db/repos/checkpoints"
 import { FileRisksRepo } from "@johpaz/hivecode-core/db/repos/file-risks"
+import { restoreFiles } from "@johpaz/hivecode-code/checkpoint/rollback"
 
 function isLikelyMarkdown(content: string): boolean {
   if (content.includes("```")) return true
@@ -42,15 +44,14 @@ function isLikelyMarkdown(content: string): boolean {
 function tuiBinPath(): string {
   const executableSuffix = process.platform === "win32" ? ".exe" : ""
   const candidates = [
-    // Running from dist/ bundle — binary sits next to hivecode.js
+    // Extracted from embedded binary (compiled single-binary mode)
+    cachedHivetuiPath(),
+    // Running from dist/ bundle — binary sits next to hivecode
     path.join(path.dirname(process.argv[1] || ""), `hivetui${executableSuffix}`),
     path.join(path.dirname(process.argv[1] || ""), `hivecode-tui${executableSuffix}`),
-    // Dev mode: hivetui (ratatui-free, preferred)
+    // Dev mode
     path.join(import.meta.dir, `../../../hivetui/target/release/hivetui${executableSuffix}`),
     path.join(import.meta.dir, `../../../hivetui/target/debug/hivetui${executableSuffix}`),
-    // Dev mode: legacy packages/tui
-    path.join(import.meta.dir, `../../../tui/target/release/hivecode-tui${executableSuffix}`),
-    path.join(import.meta.dir, `../../../tui/target/debug/hivecode-tui${executableSuffix}`),
   ]
 
   const existing = candidates.filter(p => fs.existsSync(p))
@@ -234,23 +235,18 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
     }
 
     // ── Launch TUI binary (Bun.listen is synchronous — socket ready now) ───
+    process.stderr.write(`[tui] launching: ${binPath}\n`)
+    process.stderr.write(`[tui] IPC: ${ipcServer.endpoint}\n`)
     const proc = Bun.spawn([binPath], {
-      stdin:  "inherit",
-      stdout: "inherit",
-      stderr: "pipe",
+      stdin:  0,
+      stdout: 1,
+      stderr: 2,
       env:    { ...process.env, HIVECODE_IPC: ipcServer.endpoint },
     })
+    process.stderr.write(`[tui] PID: ${proc.pid}\n`)
 
-    if (proc.stderr) {
-      const reader = proc.stderr.getReader()
-      ;(async () => {
-        for await (const chunk of { [Symbol.asyncIterator]: () => ({ next: () => reader.read() }) }) {
-          if (process.env.HIVE_DEV) process.stderr.write(chunk)
-        }
-      })().catch(() => {})
-    }
-
-    proc.exited.then(() => {
+    proc.exited.then((code) => {
+      process.stderr.write(`[tui] hivetui exited with code: ${code}\n`)
       removeLogListener(logCb)
       callbacks.onExit?.()
       ipcServer?.stop()
@@ -327,6 +323,8 @@ async function handleTuiMessage(
           send({ type: "adr_update", path: adr.file_path, title: adr.title,
                  content: adr.content, status: adr.status ?? "accepted" })
         }
+
+        sendDashboardSnapshot(send, db, callbacks.sessionId, cps)
       } catch (e) {
         logger.warn("[tui-ipc] init snapshot failed:", (e as Error).message)
       }
@@ -358,6 +356,9 @@ async function handleTuiMessage(
             new_model:    result.newModel,
             new_token_count: result.newTokenCount,
           })
+        }
+        if (input.startsWith("/telegram")) {
+          sendSettingsSnapshot(send)
         }
       } catch (err) {
         send({
@@ -403,11 +404,179 @@ async function handleTuiMessage(
       break
 
     case "rollback": {
-      // hivetui sends rollback requests — forward as system message for now
-      send({ type: "history_append", role: "system", content: `↩ Rollback solicitado: ${(msg as { type: string; checkpoint_id?: string }).checkpoint_id ?? "—"}` })
+      const checkpointId = (msg as { type: string; checkpoint_id?: string }).checkpoint_id
+      if (!checkpointId) {
+        send({ type: "history_append", role: "system", content: "↩ Rollback sin checkpoint_id" })
+        break
+      }
+      try {
+        const db = getDb()
+        const repo = new CheckpointsRepo(db)
+        const files = repo.getFiles(checkpointId)
+        const restored = await restoreFiles(files)
+        repo.markRestored(checkpointId)
+        send({ type: "checkpoint_rollback", checkpoint_id: checkpointId, files_restored: restored.length })
+        send({ type: "blackboard_event", timestamp: currentTime(), agent: "bee", event_type: "RESOLVED", content: `rollback ${checkpointId}: ${restored.length} archivo(s)` })
+      } catch (err) {
+        send({ type: "history_append", role: "system", content: `(×ᴗ×) rollback falló: ${(err as Error).message}` })
+        send({ type: "status", running: false, msg: "Rollback falló" })
+      }
       break
     }
   }
+}
+
+function currentTime(): string {
+  return new Date().toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+}
+
+function hhmmss(value: number): string {
+  return new Date(value).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+}
+
+function sendDashboardSnapshot(
+  send: (m: BunMessage) => void,
+  db: ReturnType<typeof getDb>,
+  sessionId: string,
+  checkpoints: Array<{ id: string; description: string; file_count: number; created_by?: string; created_at: number }>,
+): void {
+  const workers: any[] = []
+  try {
+    const rows = db.query(
+      `SELECT worker, phase, level, status, current_action, input_tokens, output_tokens, started_at, completed_at
+       FROM worker_activity
+       WHERE session_id = ?
+       ORDER BY id DESC
+       LIMIT 100`,
+    ).all(sessionId) as any[]
+    const seen = new Set<string>()
+    for (const row of rows) {
+      if (seen.has(row.worker)) continue
+      seen.add(row.worker)
+      workers.push({
+        name: row.worker,
+        status: row.status ?? "waiting",
+        detail: row.phase ?? "",
+        activity: row.current_action ?? row.phase ?? "",
+        current_action: row.current_action ?? row.phase ?? "",
+        level: Number(row.level ?? 0),
+        token_count: Number(row.input_tokens ?? 0) + Number(row.output_tokens ?? 0),
+      })
+    }
+  } catch { /* session may predate worker_activity */ }
+
+  const blackboard_events: any[] = []
+  try {
+    const rows = db.query(
+      `SELECT agent, type, content, created_at
+       FROM agent_context
+       WHERE session_id = ?
+       ORDER BY created_at DESC
+       LIMIT 60`,
+    ).all(sessionId) as any[]
+    for (const row of rows.reverse()) {
+      blackboard_events.push({
+        timestamp: hhmmss(Number(row.created_at ?? Date.now())),
+        agent: row.agent ?? "agent",
+        event_type: String(row.type ?? "observation").toUpperCase(),
+        content: row.content ?? "",
+      })
+    }
+  } catch { /* agent_context may be absent in older DBs */ }
+
+  const conflicts: any[] = []
+  try {
+    const rows = db.query(
+      `SELECT agent_a, agent_b, file_path, description, severity
+       FROM agent_conflicts
+       WHERE session_id = ? AND resolved = 0
+       ORDER BY created_at DESC
+       LIMIT 20`,
+    ).all(sessionId) as any[]
+    for (const row of rows) {
+      conflicts.push({
+        agent_a: row.agent_a,
+        agent_b: row.agent_b,
+        file: row.file_path ?? "",
+        reason: row.description ?? "conflicto activo",
+        severity: row.severity ?? "medium",
+      })
+    }
+  } catch { /* no conflicts table */ }
+
+  const levels = buildDashboardLevels(workers)
+  let metrics: { token_count?: number; cost?: string; elapsed_secs?: number } = {}
+  try {
+    const session = db.query(
+      "SELECT token_count, cost_usd, started_at FROM sessions WHERE id = ? LIMIT 1",
+    ).get(sessionId) as any
+    if (session) {
+      metrics = {
+        token_count: Number(session.token_count ?? 0),
+        cost: `$${Number(session.cost_usd ?? 0).toFixed(2)}`,
+        elapsed_secs: Math.max(0, Math.floor((Date.now() - Number(session.started_at ?? Date.now())) / 1000)),
+      }
+    }
+  } catch { /* sessions snapshot unavailable */ }
+
+  const securityWorker = workers.find(w => w.name === "security")
+  const haltCheckpoint = checkpoints.find(cp => cp.created_by === "halt")
+
+  send({
+    type: "dashboard_snapshot",
+    workers,
+    blackboard_events,
+    conflicts,
+    levels,
+    checkpoints: checkpoints.map(cp => ({
+      checkpoint_id: cp.id,
+      description: cp.description,
+      file_count: cp.file_count,
+      agent: cp.created_by ?? "system",
+      time: hhmmss(cp.created_at),
+    })),
+    metrics,
+    security: {
+      status: securityWorker?.status === "running" ? "WATCHING" : (securityWorker ? String(securityWorker.status).toUpperCase() : "OFFLINE"),
+      findings: conflicts.filter(c => c.agent_a === "security" || c.agent_b === "security").length,
+    },
+    halt: haltCheckpoint ? { active: false, checkpoint_id: haltCheckpoint.id } : { active: false },
+  })
+}
+
+function buildDashboardLevels(workers: any[]): Array<{ level: number; label: string; agents: string[]; status: string }> {
+  const byLevel = new Map<number, any[]>()
+  for (const worker of workers) {
+    const level = Number(worker.level ?? fallbackWorkerLevel(worker.name))
+    const list = byLevel.get(level) ?? []
+    list.push(worker)
+    byLevel.set(level, list)
+  }
+  return [0, 1, 2, 3, 4, 5, 6].map(level => {
+    const list = byLevel.get(level) ?? []
+    const status = list.some(w => w.status === "running")
+      ? "active"
+      : list.length > 0 && list.every(w => w.status === "done")
+        ? "done"
+        : "pending"
+    return {
+      level,
+      label: ["PM", "ARC", "ENG", "QA+SEC", "OPS", "REV", "LIB"][level] ?? `L${level}`,
+      agents: list.map(w => w.name),
+      status,
+    }
+  })
+}
+
+function fallbackWorkerLevel(name: string): number {
+  if (name === "product_manager") return 0
+  if (name === "architecture" || name === "architect") return 1
+  if (["backend", "frontend", "mobile", "data_scientist", "dba", "integration"].includes(name)) return 2
+  if (name === "security" || name === "test") return 3
+  if (name === "devops") return 4
+  if (name === "reviewer") return 5
+  if (name === "librarian" || name.startsWith("forensic")) return 6
+  return 2
 }
 
 // ── Settings Snapshot ─────────────────────────────────────────────────────────
@@ -437,12 +606,13 @@ function sendSettingsSnapshot(send: (msg: object) => void): void {
   let mcp: any[] = []
   try {
     mcp = (db.query(
-      "SELECT id, name, url, enabled FROM mcp_servers ORDER BY name"
+      "SELECT id, name, url, enabled, headers_encrypted FROM mcp_servers ORDER BY name"
     ).all() as any[]).map(m => ({
       id: String(m.id),
       name: m.name ?? "",
       url: m.url ?? "",
       enabled: m.enabled === 1,
+      has_headers: !!m.headers_encrypted,
     }))
   } catch { /* mcp_servers puede no existir */ }
 
@@ -465,8 +635,10 @@ function sendSettingsSnapshot(send: (msg: object) => void): void {
     const configTable = "agent_config"
     github_connected = !!(db.query(`SELECT value FROM ${configTable} WHERE key = 'github_token' LIMIT 1`).get() as any)?.value
     github_repo = (db.query(`SELECT value FROM ${configTable} WHERE key = 'github_repo' LIMIT 1`).get() as any)?.value ?? null
-    telegram_active = !!(db.query(`SELECT value FROM ${configTable} WHERE key = 'telegram_token' LIMIT 1`).get() as any)?.value
-  } catch { /* tabla de config de integraciones puede no existir */ }
+  } catch { /* agent_config puede no existir */ }
+  try {
+    telegram_active = !!(db.query(`SELECT id FROM channels WHERE id = 'telegram' AND enabled = 1 AND status = 'connected' LIMIT 1`).get())
+  } catch { /* channels puede no existir */ }
 
   send({
     type: "settings_data",

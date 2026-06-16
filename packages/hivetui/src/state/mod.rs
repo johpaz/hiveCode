@@ -4,6 +4,7 @@ mod adr;
 mod agent_graph;
 mod checkpoint;
 mod conflicts;
+mod dashboard;
 mod diff;
 mod dirty;
 mod filemap;
@@ -14,6 +15,7 @@ mod logs;
 mod modal;
 mod panels;
 mod plan;
+mod review;
 mod session;
 mod tasks;
 mod thought;
@@ -23,6 +25,9 @@ pub use adr::{AdrEntry, AdrState};
 pub use agent_graph::{AgentTier, agent_color, all_edges, display_name as agent_display_name, edges_from, edges_to, tier_for};
 pub use checkpoint::{Checkpoint, CheckpointState};
 pub use conflicts::{AgentConflict, ConflictState};
+pub use dashboard::{
+    BlackboardEvent, DashboardLevel, DashboardLevelStatus, DashboardState, HaltState, SecurityState,
+};
 pub use diff::DiffState;
 pub use crate::ipc::DiffLine;
 pub use dirty::DirtyFlags;
@@ -33,14 +38,33 @@ pub use input::InputState;
 pub use logs::{LogEntry, LogState};
 pub use modal::{
     ConfigModalState, InfoModalState, ModalField, ModalFieldKind, ModalState,
-    PlanApprovalState, SettingsHubState, SettingsMcp, SettingsProvider, SettingsSkill, SettingsTab,
+    PlanApprovalState, ReviewAction, ReviewConfirmState, SettingsHubState, SettingsMcp,
+    SettingsProvider, SettingsSkill, SettingsTab,
 };
 pub use panels::PanelLayoutState;
-pub use plan::{PlanEntry, PlanPhase, PlanRisk, PlanState};
+pub use plan::{ApiContract, PlanEntry, PlanPhase, PlanRisk, PlanState};
+pub use review::{ReviewState, ReviewVerdict};
 pub use session::{ReplMode, SessionState, TabId};
 pub use tasks::{TaskProjection, TaskProjectionState};
 pub use thought::{ThoughtChunk, ThoughtStreamState};
 pub use workers::{Worker, WorkerState, WorkerStatus};
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Selection {
+    pub anchor: (u16, u16),
+    pub cursor: (u16, u16),
+    pub active: bool,
+}
+
+impl Default for Selection {
+    fn default() -> Self {
+        Self {
+            anchor: (0, 0),
+            cursor: (0, 0),
+            active: false,
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct AppState {
@@ -49,12 +73,14 @@ pub struct AppState {
     pub history: HistoryState,
     pub checkpoints: CheckpointState,
     pub workers: WorkerState,
+    pub dashboard: DashboardState,
     pub filemap: FileMapState,
     pub thought: ThoughtStreamState,
     pub conflicts: ConflictState,
     pub adrs: AdrState,
     pub diff: DiffState,
     pub plan: PlanState,
+    pub review: ReviewState,
     pub tasks: TaskProjectionState,
     pub harness: HarnessState,
     pub modal: ModalState,
@@ -67,6 +93,10 @@ pub struct AppState {
     pub history_nav_mode: bool,
     pub history_hscroll: usize,
     pub history_hscroll_per_entry: std::collections::HashMap<usize, usize>,
+    /// Scroll vertical de la vista Dashboard.
+    pub dashboard_scroll: usize,
+    /// Worker enfocado desde Dashboard/Code.
+    pub focused_worker: Option<String>,
     /// Mensaje de la barra de estado inferior (viene de Status.msg de Bun).
     pub status_msg: String,
     /// true mientras Bun está procesando una petición.
@@ -93,6 +123,11 @@ pub struct AppState {
     pub slow_tick: u16,
     /// true cuando el usuario navegó manualmente (1-5), inhibe auto-routing hasta AssistantDone.
     pub tab_locked: bool,
+    /// Text selection state for mouse drag-to-select copying.
+    pub selection: Option<Selection>,
+    /// Set by controller when user releases mouse after selection or presses Ctrl+Shift+C.
+    /// The renderer reads this, extracts text from the canvas, copies to clipboard, and clears it.
+    pub pending_copy_request: bool,
 }
 
 fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
@@ -106,6 +141,13 @@ fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
         BunMessage::StateUpdate { .. } => "state_update",
         BunMessage::WorkerUpdate { .. } => "worker_update",
         BunMessage::ActivityUpdate { .. } => "activity_update",
+        BunMessage::DashboardSnapshot { .. } => "dashboard_snapshot",
+        BunMessage::BlackboardEvent { .. } => "blackboard_event",
+        BunMessage::ConflictResolved { .. } => "conflict_resolved",
+        BunMessage::ForensicAlert { .. } => "forensic_alert",
+        BunMessage::SecurityStatusUpdate { .. } => "security_status_update",
+        BunMessage::HaltState { .. } => "halt_state",
+        BunMessage::MetricsUpdate { .. } => "metrics_update",
         BunMessage::CheckpointCreated { .. } => "checkpoint_created",
         BunMessage::FileRiskUpdate { .. } => "file_risk_update",
         BunMessage::ThoughtChunk { .. } => "thought_chunk",
@@ -119,7 +161,9 @@ fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
         BunMessage::AdrUpdate { .. } => "adr_update",
         BunMessage::FileDiff { .. } => "file_diff",
         BunMessage::PlanUpdate { .. } => "plan_update",
+        BunMessage::PlanDraftUpdate { .. } => "plan_draft_update",
         BunMessage::PlanApprovalRequest => "plan_approval_request",
+        BunMessage::ReviewVerdictUpdate { .. } => "review_verdict_update",
         BunMessage::TaskUpdate { .. } => "task_update",
         BunMessage::WorkersSnapshot { .. } => "workers_snapshot",
         BunMessage::FilesSnapshot { .. } => "files_snapshot",
@@ -138,7 +182,187 @@ fn short_event_text(text: &str) -> String {
     crate::ui::text::ellipsize_cells(text.trim(), 80)
 }
 
+fn is_architect(name: &str) -> bool {
+    matches!(name, "architecture" | "architect" | "arch") || name.contains("architect")
+}
+
+fn is_reviewer(name: &str) -> bool {
+    matches!(name, "reviewer" | "code_reviewer") || name.contains("review")
+}
+
+fn is_bee(name: &str) -> bool {
+    name == "bee"
+}
+
+fn is_focus_phase(phase: &str, activity: Option<&str>) -> bool {
+    let phase = phase.to_ascii_lowercase();
+    let activity = activity.unwrap_or("").to_ascii_lowercase();
+    ["respond", "response", "fix", "idle", "answer"]
+        .iter()
+        .any(|needle| phase.contains(needle) || activity.contains(needle))
+}
+
+fn is_l2_worker(name: &str) -> bool {
+    matches!(tier_for(name), AgentTier::Engineering)
+}
+
+fn status_to_worker_status(status: &str) -> WorkerStatus {
+    match status {
+        "running" | "thinking" | "draft" | "planning" => WorkerStatus::Running,
+        "done"    => WorkerStatus::Done,
+        "failed"  => WorkerStatus::Failed,
+        "warn"    => WorkerStatus::Warn,
+        _         => WorkerStatus::Waiting,
+    }
+}
+
+fn map_api_contract(contract: crate::ipc::ApiContractIpc) -> ApiContract {
+    ApiContract {
+        name: contract.name,
+        owner: contract.owner,
+        method: contract.method,
+        path: contract.path,
+        request: contract.request,
+        response: contract.response,
+        status: contract.status,
+    }
+}
+
+fn map_blackboard_event(event: crate::ipc::BlackboardEventIpc) -> BlackboardEvent {
+    BlackboardEvent {
+        timestamp: event.timestamp,
+        agent: event.agent,
+        event_type: event.event_type,
+        content: event.content,
+    }
+}
+
+fn map_dashboard_level(level: crate::ipc::DashboardLevelIpc) -> DashboardLevel {
+    DashboardLevel {
+        level: level.level,
+        label: level.label,
+        agents: level.agents,
+        status: DashboardLevelStatus::from_str(&level.status),
+    }
+}
+
+fn map_checkpoint(checkpoint: crate::ipc::CheckpointIpc) -> Checkpoint {
+    Checkpoint {
+        id: checkpoint.id,
+        description: checkpoint.description,
+        file_count: checkpoint.file_count,
+        agent: checkpoint.agent,
+        time: checkpoint.time.unwrap_or_default(),
+        tests_passed: checkpoint.tests_passed.unwrap_or(0),
+        tests_total: checkpoint.tests_total.unwrap_or(0),
+    }
+}
+
+fn map_conflict(conflict: crate::ipc::AgentConflictIpc) -> AgentConflict {
+    AgentConflict {
+        agent_a: conflict.agent_a,
+        agent_b: conflict.agent_b,
+        path: conflict.file.unwrap_or_default(),
+        reason: conflict.reason,
+        severity: conflict.severity,
+        detail: conflict.detail,
+    }
+}
+
+fn dashboard_levels_from_phases(phases: &[PlanPhase]) -> Vec<DashboardLevel> {
+    let mut levels: Vec<DashboardLevel> = Vec::new();
+    for phase in phases {
+        if let Some(existing) = levels.iter_mut().find(|level| level.level == phase.level) {
+            existing.agents.push(phase.coordinator.clone());
+            if phase.status == "running" {
+                existing.status = DashboardLevelStatus::Active;
+            } else if phase.status == "completed" && existing.status != DashboardLevelStatus::Active {
+                existing.status = DashboardLevelStatus::Done;
+            }
+            continue;
+        }
+        levels.push(DashboardLevel {
+            level: phase.level,
+            label: phase.name.clone(),
+            agents: vec![phase.coordinator.clone()],
+            status: DashboardLevelStatus::from_str(&phase.status),
+        });
+    }
+    levels.sort_by_key(|level| level.level);
+    levels
+}
+
 impl AppState {
+    fn running_worker_count(&self) -> usize {
+        self.workers
+            .workers
+            .iter()
+            .filter(|worker| matches!(worker.status, WorkerStatus::Running))
+            .count()
+    }
+
+    fn route_to(&mut self, tab: TabId) {
+        if self.tab_locked {
+            return;
+        }
+        if self.active_tab != tab {
+            self.active_tab = tab;
+            self.history_nav_mode = false;
+            self.history_hscroll = 0;
+            self.dirty.full = true;
+        }
+    }
+
+    fn route_after_worker_activity(&mut self, worker: &str, phase: &str, status: &str, activity: Option<&str>) {
+        if self.tab_locked {
+            return;
+        }
+
+        if is_bee(worker) && is_focus_phase(phase, activity) {
+            self.route_to(TabId::Focus);
+            return;
+        }
+
+        if is_architect(worker) && matches!(status, "running" | "thinking" | "draft" | "planning") {
+            self.route_to(TabId::Plan);
+            return;
+        }
+
+        if is_reviewer(worker) && (self.session.mode == ReplMode::Approval || status == "done") {
+            self.route_to(TabId::Review);
+            return;
+        }
+
+        if self.running_worker_count() >= 2 {
+            self.route_to(TabId::Dashboard);
+            return;
+        }
+
+        if status == "running" && is_l2_worker(worker) {
+            self.route_to(TabId::Code);
+            return;
+        }
+
+        if status == "running" && worker != "bee" && self.session.mode != ReplMode::Plan {
+            self.route_to(match self.session.mode {
+                ReplMode::Approval => TabId::Review,
+                ReplMode::Auto => TabId::Code,
+                ReplMode::Plan => TabId::Plan,
+            });
+        }
+    }
+
+    fn route_after_diff(&mut self) {
+        if self.tab_locked || self.session.mode == ReplMode::Plan {
+            return;
+        }
+        if self.running_worker_count() >= 2 {
+            self.route_to(TabId::Dashboard);
+        } else {
+            self.route_to(TabId::Code);
+        }
+    }
+
     fn note_task_worker(&mut self, task_id: Option<String>, worker: &str, status: &str) {
         let Some(task_id) = task_id.filter(|task_id| !task_id.trim().is_empty()) else {
             return;
@@ -147,6 +371,79 @@ impl AppState {
         self.session.task_count = self.session.task_count.max(self.tasks.tasks.len() as u32);
         self.dirty.session = true;
         self.dirty.full = true;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn upsert_worker(
+        &mut self,
+        name: String,
+        phase: Option<String>,
+        status: WorkerStatus,
+        display_name: Option<String>,
+        activity: Option<String>,
+        token_count: Option<u64>,
+        level: Option<u32>,
+        current_action: Option<String>,
+        current_file: Option<String>,
+        iteration_current: Option<u32>,
+        iteration_total: Option<u32>,
+        transversal: Option<bool>,
+        replaces_worker: Option<String>,
+    ) {
+        let action = current_action
+            .or_else(|| activity.clone())
+            .or_else(|| phase.clone());
+        if let Some(w) = self.workers.workers.iter_mut().find(|w| w.name == name) {
+            w.status = status;
+            if let Some(phase) = phase {
+                w.detail = Some(phase);
+            }
+            if let Some(display_name) = display_name {
+                w.display_name = display_name;
+            }
+            if let Some(activity) = activity {
+                w.activity = Some(activity);
+            }
+            if let Some(tokens) = token_count {
+                w.token_count = tokens;
+            }
+            if level.is_some() {
+                w.level = level;
+            }
+            if action.is_some() {
+                w.current_action = action;
+            }
+            if current_file.is_some() {
+                w.current_file = current_file;
+            }
+            if iteration_current.is_some() {
+                w.iteration_current = iteration_current;
+            }
+            if iteration_total.is_some() {
+                w.iteration_total = iteration_total;
+            }
+            if let Some(transversal) = transversal {
+                w.transversal = transversal;
+            }
+            if replaces_worker.is_some() {
+                w.replaces_worker = replaces_worker;
+            }
+        } else {
+            let mut worker = Worker::new(name.clone());
+            worker.status = status;
+            worker.display_name = display_name.unwrap_or(name);
+            worker.detail = phase;
+            worker.activity = activity;
+            worker.token_count = token_count.unwrap_or(0);
+            worker.level = level;
+            worker.current_action = action;
+            worker.current_file = current_file;
+            worker.iteration_current = iteration_current;
+            worker.iteration_total = iteration_total;
+            worker.transversal = transversal.unwrap_or(false);
+            worker.replaces_worker = replaces_worker;
+            self.workers.workers.push(worker);
+        }
     }
 
     pub fn apply_message(&mut self, msg: crate::ipc::BunMessage) {
@@ -177,13 +474,7 @@ impl AppState {
                 self.session.workers = workers.clone();
                 for name in workers {
                     if !self.workers.workers.iter().any(|w| w.name == name) {
-                        self.workers.workers.push(Worker {
-                            name: name.clone(),
-                            display_name: name.clone(),
-                            status: WorkerStatus::Waiting,
-                            detail: None,
-                            activity: None,
-                        });
+                        self.workers.workers.push(Worker::new(name));
                     }
                 }
                 self.dirty.session = true;
@@ -295,7 +586,21 @@ impl AppState {
             }
 
             // ── Workers ────────────────────────────────────────────────────────
-            BunMessage::WorkerUpdate { task_id, worker, phase, status, display_name, activity } => {
+            BunMessage::WorkerUpdate {
+                task_id,
+                worker,
+                phase,
+                status,
+                display_name,
+                activity,
+                token_count,
+                level,
+                current_action,
+                current_file,
+                iteration_current,
+                iteration_total,
+                transversal,
+            } => {
                 self.harness.last_agent = Some(worker.clone());
                 self.harness.last_phase = Some(phase.clone());
                 if let Some(activity_text) = activity.as_ref().filter(|text| !text.trim().is_empty()) {
@@ -305,43 +610,42 @@ impl AppState {
                     self.harness.active_task_id = Some(task_id.clone());
                     self.harness.active_task_status = Some(status.clone());
                 }
-                let wstatus = match status.as_str() {
-                    "running" => WorkerStatus::Running,
-                    "done"    => WorkerStatus::Done,
-                    "failed"  => WorkerStatus::Failed,
-                    "warn"    => WorkerStatus::Warn,
-                    _         => WorkerStatus::Waiting,
-                };
-                if let Some(w) = self.workers.workers.iter_mut().find(|w| w.name == worker) {
-                    w.status = wstatus;
-                    w.detail = Some(phase.clone());
-                    if let Some(dn) = display_name { w.display_name = dn; }
-                    if let Some(act) = activity { w.activity = Some(act); }
-                } else {
-                    self.workers.workers.push(Worker {
-                        name: worker.clone(),
-                        display_name: display_name.unwrap_or(worker.clone()),
-                        status: wstatus,
-                        detail: Some(phase),
-                        activity,
-                    });
-                }
-                // Auto-routing: only switch tab when a real executor worker starts, not BEE
-                if !self.tab_locked && status == "running" && worker != "bee" {
-                    if self.session.mode != ReplMode::Plan {
-                        self.active_tab = match self.session.mode {
-                            ReplMode::Approval => TabId::Review,
-                            ReplMode::Auto     => TabId::Code,
-                            _ => TabId::Code,
-                        };
-                        self.dirty.full = true;
-                    }
-                }
+                let wstatus = status_to_worker_status(&status);
+                self.upsert_worker(
+                    worker.clone(),
+                    Some(phase.clone()),
+                    wstatus,
+                    display_name,
+                    activity.clone(),
+                    token_count,
+                    level,
+                    current_action,
+                    current_file,
+                    iteration_current,
+                    iteration_total,
+                    transversal,
+                    None,
+                );
+                self.route_after_worker_activity(&worker, &phase, &status, activity.as_deref());
                 self.note_task_worker(task_id, &worker, &status);
                 self.dirty.workers = true;
             }
             // Legado: activity_update → actualiza coordinator activo
-            BunMessage::ActivityUpdate { task_id, coordinator, phase, status, display_name, activity } => {
+            BunMessage::ActivityUpdate {
+                task_id,
+                coordinator,
+                phase,
+                status,
+                display_name,
+                activity,
+                token_count,
+                level,
+                current_action,
+                current_file,
+                iteration_current,
+                iteration_total,
+                transversal,
+            } => {
                 self.harness.last_agent = Some(coordinator.clone());
                 self.harness.last_phase = Some(phase.clone());
                 if let Some(activity_text) = activity.as_ref().filter(|text| !text.trim().is_empty()) {
@@ -351,26 +655,181 @@ impl AppState {
                     self.harness.active_task_id = Some(task_id.clone());
                     self.harness.active_task_status = Some(status.clone());
                 }
-                // Auto-routing: only switch tab when a real executor coordinator starts, not BEE
-                if !self.tab_locked && status == "running" && coordinator != "bee" {
-                    if self.session.mode != ReplMode::Plan {
-                        self.active_tab = match self.session.mode {
-                            ReplMode::Approval => TabId::Review,
-                            ReplMode::Auto     => TabId::Code,
-                            _ => TabId::Code,
-                        };
-                        self.dirty.full = true;
-                    }
-                }
                 self.workers.active_coordinator = coordinator.clone();
                 self.workers.active_phase = phase.clone();
                 self.workers.activity_status = status.clone();
-                if let Some(w) = self.workers.workers.iter_mut().find(|w| w.name == coordinator) {
-                    if let Some(dn) = display_name { w.display_name = dn; }
-                    if let Some(act) = activity { w.activity = Some(act); }
-                }
+                let wstatus = status_to_worker_status(&status);
+                self.upsert_worker(
+                    coordinator.clone(),
+                    Some(phase.clone()),
+                    wstatus,
+                    display_name,
+                    activity.clone(),
+                    token_count,
+                    level,
+                    current_action,
+                    current_file,
+                    iteration_current,
+                    iteration_total,
+                    transversal,
+                    None,
+                );
+                self.route_after_worker_activity(&coordinator, &phase, &status, activity.as_deref());
                 self.note_task_worker(task_id, &coordinator, &status);
                 self.dirty.workers = true;
+            }
+
+            BunMessage::DashboardSnapshot {
+                workers,
+                blackboard_events,
+                conflicts,
+                levels,
+                checkpoints,
+                metrics,
+                security,
+                halt,
+            } => {
+                for w in workers {
+                    let status = status_to_worker_status(&w.status);
+                    self.upsert_worker(
+                        w.name.clone(),
+                        w.detail.clone(),
+                        status,
+                        w.display_name,
+                        w.activity.clone(),
+                        w.token_count,
+                        w.level,
+                        w.current_action,
+                        w.current_file,
+                        w.iteration_current,
+                        w.iteration_total,
+                        w.transversal,
+                        w.replaces_worker,
+                    );
+                }
+                self.dashboard.blackboard_events =
+                    blackboard_events.into_iter().map(map_blackboard_event).collect();
+                self.conflicts.entries = conflicts.into_iter().map(map_conflict).collect();
+                self.dashboard.levels = levels.into_iter().map(map_dashboard_level).collect();
+                if !checkpoints.is_empty() {
+                    self.checkpoints.entries = checkpoints.into_iter().map(map_checkpoint).collect();
+                }
+                if let Some(metrics) = metrics {
+                    if let Some(tokens) = metrics.token_count {
+                        self.session.token_count = tokens;
+                    }
+                    if let Some(cost) = metrics.cost {
+                        self.cost = cost;
+                    }
+                    self.dashboard.metrics.elapsed_secs = metrics.elapsed_secs;
+                }
+                if let Some(security) = security {
+                    self.dashboard.security.status = security.status;
+                    self.dashboard.security.findings = security.findings.unwrap_or(0);
+                }
+                if let Some(halt) = halt {
+                    self.dashboard.halt.active = halt.active;
+                    self.dashboard.halt.reason = halt.reason;
+                    self.dashboard.halt.checkpoint_id = halt.checkpoint_id;
+                }
+                if self.running_worker_count() >= 2 {
+                    self.route_to(TabId::Dashboard);
+                }
+                self.dirty.full = true;
+                self.dirty.workers = true;
+            }
+            BunMessage::BlackboardEvent { timestamp, agent, event_type, content } => {
+                self.dashboard.push_blackboard_event(BlackboardEvent {
+                    timestamp,
+                    agent,
+                    event_type,
+                    content,
+                });
+                self.dirty.full = true;
+            }
+            BunMessage::ConflictResolved { agent_a, agent_b, file } => {
+                self.conflicts.entries.retain(|conflict| {
+                    let same_agents = match (agent_a.as_deref(), agent_b.as_deref()) {
+                        (Some(a), Some(b)) => {
+                            (conflict.agent_a == a && conflict.agent_b == b)
+                                || (conflict.agent_a == b && conflict.agent_b == a)
+                        }
+                        (Some(a), None) | (None, Some(a)) => {
+                            conflict.agent_a == a || conflict.agent_b == a
+                        }
+                        (None, None) => false,
+                    };
+                    let same_file = file
+                        .as_deref()
+                        .map(|path| conflict.path == path)
+                        .unwrap_or(true);
+                    !(same_agents && same_file)
+                });
+                self.dashboard.push_blackboard_event(BlackboardEvent {
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    agent: "bee".to_string(),
+                    event_type: "RESOLVED".to_string(),
+                    content: "conflicto resuelto".to_string(),
+                });
+                self.dirty.conflicts = true;
+                self.dirty.full = true;
+            }
+            BunMessage::ForensicAlert { worker, analysis, recommendation } => {
+                let forensic_name = format!("forensic:{worker}");
+                self.upsert_worker(
+                    forensic_name,
+                    Some("forensic".to_string()),
+                    WorkerStatus::Warn,
+                    Some(format!("ForensicAgent -> {}", agent_display_name(&worker))),
+                    Some(recommendation.clone()),
+                    None,
+                    None,
+                    Some("analizando causa raiz".to_string()),
+                    None,
+                    None,
+                    None,
+                    Some(false),
+                    Some(worker),
+                );
+                self.dashboard.push_blackboard_event(BlackboardEvent {
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    agent: "forensic".to_string(),
+                    event_type: "FORENSIC".to_string(),
+                    content: short_event_text(&analysis),
+                });
+                self.route_to(TabId::Dashboard);
+                self.dirty.full = true;
+            }
+            BunMessage::SecurityStatusUpdate { status, findings } => {
+                self.dashboard.security.status = status;
+                self.dashboard.security.findings = findings.unwrap_or(self.dashboard.security.findings);
+                self.dirty.full = true;
+            }
+            BunMessage::HaltState { active, reason, checkpoint_id } => {
+                self.dashboard.halt.active = active;
+                self.dashboard.halt.reason = reason.clone();
+                self.dashboard.halt.checkpoint_id = checkpoint_id;
+                if active {
+                    self.dashboard.push_blackboard_event(BlackboardEvent {
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        agent: "bee".to_string(),
+                        event_type: "HALT".to_string(),
+                        content: reason.unwrap_or_else(|| "HALT emitido".to_string()),
+                    });
+                    self.route_to(TabId::Dashboard);
+                }
+                self.dirty.full = true;
+            }
+            BunMessage::MetricsUpdate { token_count, cost, elapsed_secs } => {
+                if let Some(tokens) = token_count {
+                    self.session.token_count = tokens;
+                }
+                if let Some(cost) = cost {
+                    self.cost = cost;
+                }
+                self.dashboard.metrics.elapsed_secs = elapsed_secs.or(self.dashboard.metrics.elapsed_secs);
+                self.dirty.session = true;
+                self.dirty.full = true;
             }
 
             // ── Checkpoints ────────────────────────────────────────────────────
@@ -429,7 +888,10 @@ impl AppState {
                 if self.thought.chunks.len() > 100 { self.thought.chunks.remove(0); }
                 if let Some(chunk) = self.thought.chunks.last() {
                     let coordinator = chunk.coordinator.clone();
+                    let phase = chunk.phase.clone();
+                    let content = chunk.content.clone();
                     self.note_task_worker(task_id, &coordinator, "thinking");
+                    self.route_after_worker_activity(&coordinator, &phase, "thinking", Some(&content));
                 }
                 self.dirty.thought = true;
             }
@@ -441,7 +903,10 @@ impl AppState {
                 if self.thought.chunks.len() > 100 { self.thought.chunks.remove(0); }
                 if let Some(chunk) = self.thought.chunks.last() {
                     let coordinator = chunk.coordinator.clone();
+                    let phase = chunk.phase.clone();
+                    let content = chunk.content.clone();
                     self.note_task_worker(task_id, &coordinator, "thinking");
+                    self.route_after_worker_activity(&coordinator, &phase, "thinking", Some(&content));
                 }
                 self.dirty.thought = true;
                 self.dirty.thought_header = true;
@@ -507,7 +972,7 @@ impl AppState {
                         is_active: p.is_active, has_key: p.has_key,
                     }).collect();
                     hub.mcp = mcp.into_iter().map(|m| SettingsMcp {
-                        id: m.id, name: m.name, url: m.url, enabled: m.enabled,
+                        id: m.id, name: m.name, url: m.url, enabled: m.enabled, has_headers: m.has_headers,
                     }).collect();
                     hub.skills = skills.into_iter().map(|s| SettingsSkill {
                         name: s.name, description: s.description,
@@ -601,7 +1066,7 @@ impl AppState {
             }
 
             // ── Plan estructurado ───────────────────────────────────────────────
-            BunMessage::PlanUpdate { task_id, adr_title, adr_content, status, phases, risks } => {
+            BunMessage::PlanUpdate { task_id, adr_title, adr_content, status, phases, risks, api_contracts } => {
                 if adr_title.trim().is_empty() || adr_content.trim().is_empty() || phases.is_empty() {
                     self.history.entries.push(HistoryEntry {
                         role: Role::System,
@@ -640,14 +1105,83 @@ impl AppState {
                         severity: r.severity,
                         description: r.description,
                     }).collect(),
+                    api_contracts: api_contracts.into_iter().map(map_api_contract).collect(),
                 });
                 self.plan.selected_phase = 0;
                 self.plan.scroll = 0;
+                self.filemap.scroll = 0;
+                self.adrs.scroll = 0;
+                if let Some(plan) = self.plan.current.as_ref() {
+                    self.dashboard.levels = dashboard_levels_from_phases(&plan.phases);
+                }
                 if !self.tab_locked {
                     self.active_tab = TabId::Plan;
                     self.history_nav_mode = false;
                     self.history_hscroll = 0;
                 }
+                self.dirty.full = true;
+            }
+            BunMessage::PlanDraftUpdate { task_id, adr_title, adr_content, phases, risks, api_contracts } => {
+                let task_id = task_id
+                    .or_else(|| self.harness.active_task_id.clone())
+                    .unwrap_or_else(|| "draft".to_string());
+                let mut current = self.plan.current.clone().unwrap_or_default();
+                current.task_id = task_id.clone();
+                if let Some(title) = adr_title.filter(|title| !title.trim().is_empty()) {
+                    current.adr_title = title;
+                }
+                if let Some(content) = adr_content.filter(|content| !content.trim().is_empty()) {
+                    current.adr_content = content;
+                }
+                if !phases.is_empty() {
+                    current.phases = phases.into_iter().map(|p| crate::state::PlanPhase {
+                        name: p.name,
+                        coordinator: p.coordinator,
+                        description: p.description,
+                        depends_on: p.depends_on,
+                        level: p.level,
+                        status: p.status,
+                    }).collect();
+                }
+                if !risks.is_empty() {
+                    current.risks = risks.into_iter().map(|r| crate::state::PlanRisk {
+                        severity: r.severity,
+                        description: r.description,
+                    }).collect();
+                }
+                if !api_contracts.is_empty() {
+                    current.api_contracts = api_contracts.into_iter().map(map_api_contract).collect();
+                }
+                if current.status.is_empty() {
+                    current.status = "draft".to_string();
+                }
+                if current.adr_title.is_empty() {
+                    current.adr_title = "ADR en redacción".to_string();
+                }
+                self.harness.active_task_id = Some(task_id);
+                self.harness.active_task_title = Some(current.adr_title.clone());
+                self.harness.active_task_status = Some("planning".to_string());
+                self.plan.current = Some(current);
+                if let Some(plan) = self.plan.current.as_ref() {
+                    self.dashboard.levels = dashboard_levels_from_phases(&plan.phases);
+                }
+                self.route_to(TabId::Plan);
+                self.dirty.full = true;
+            }
+
+            BunMessage::ReviewVerdictUpdate { reviewer, status, summary, observations, requested_changes, affected_files } => {
+                let reviewer = reviewer.unwrap_or_else(|| "reviewer".to_string());
+                self.harness.last_agent = Some(reviewer.clone());
+                self.harness.active_task_status = Some(status.clone());
+                self.review.verdict = Some(ReviewVerdict {
+                    reviewer,
+                    status,
+                    summary,
+                    observations,
+                    requested_changes,
+                    affected_files,
+                });
+                self.route_to(TabId::Review);
                 self.dirty.full = true;
             }
 
@@ -664,6 +1198,7 @@ impl AppState {
                 isolated,
                 integration_status,
             } => {
+                let active_worker_count = active_workers.as_ref().map(|workers| workers.len()).unwrap_or(0);
                 self.harness.active_task_id = Some(task_id.clone());
                 if let Some(title) = title.as_ref().filter(|title| !title.trim().is_empty()) {
                     self.harness.active_task_title = Some(title.clone());
@@ -694,6 +1229,9 @@ impl AppState {
                     integration_status,
                 );
                 self.session.task_count = self.session.task_count.max(self.tasks.tasks.len() as u32);
+                if active_worker_count >= 2 {
+                    self.route_to(TabId::Dashboard);
+                }
                 self.dirty.session = true;
                 self.dirty.full = true;
             }
@@ -719,10 +1257,7 @@ impl AppState {
                 self.diff.lines = chunks;
                 self.diff.scroll = 0;
                 self.harness.active_workspace_status = Some("diff".to_string());
-                // Only auto-route to Code when not in Plan mode (plan tab takes priority)
-                if !self.tab_locked && self.session.mode != ReplMode::Plan {
-                    self.active_tab = TabId::Code;
-                }
+                self.route_after_diff();
                 self.dirty.diff = true;
                 self.dirty.full = true;
             }
@@ -730,26 +1265,25 @@ impl AppState {
             // ── Snapshots de inicio (SQLite → IPC) ─────────────────────────────
             BunMessage::WorkersSnapshot { workers } => {
                 for w in workers {
-                    let status = match w.status.as_str() {
-                        "running" => WorkerStatus::Running,
-                        "done"    => WorkerStatus::Done,
-                        "failed"  => WorkerStatus::Failed,
-                        _         => WorkerStatus::Waiting,
-                    };
-                    if let Some(existing) = self.workers.workers.iter_mut().find(|x| x.name == w.name) {
-                        existing.status = status;
-                        existing.detail = w.detail;
-                        if let Some(ref dn) = w.display_name { existing.display_name = dn.clone(); }
-                        if let Some(ref act) = w.activity { existing.activity = Some(act.clone()); }
-                    } else {
-                        self.workers.workers.push(Worker {
-                            name: w.name.clone(),
-                            display_name: w.display_name.unwrap_or(w.name.clone()),
-                            status,
-                            detail: w.detail,
-                            activity: w.activity,
-                        });
-                    }
+                    let status = status_to_worker_status(&w.status);
+                    self.upsert_worker(
+                        w.name.clone(),
+                        w.detail.clone(),
+                        status,
+                        w.display_name,
+                        w.activity.clone(),
+                        w.token_count,
+                        w.level,
+                        w.current_action,
+                        w.current_file,
+                        w.iteration_current,
+                        w.iteration_total,
+                        w.transversal,
+                        w.replaces_worker,
+                    );
+                }
+                if self.running_worker_count() >= 2 {
+                    self.route_to(TabId::Dashboard);
                 }
                 self.dirty.workers = true;
             }
@@ -811,7 +1345,7 @@ mod tests {
     use crate::ipc::{BunMessage, PlanPhaseIpc, PlanRiskIpc};
 
     #[test]
-    fn plan_mode_stays_in_focus_until_structured_plan_arrives() {
+    fn plan_mode_routes_to_plan_while_architect_is_generating() {
         let mut state = AppState::default();
 
         state.apply_message(BunMessage::StateUpdate {
@@ -827,9 +1361,16 @@ mod tests {
             status: "running".to_string(),
             display_name: None,
             activity: None,
+            token_count: None,
+            level: None,
+            current_action: None,
+            current_file: None,
+            iteration_current: None,
+            iteration_total: None,
+            transversal: None,
         });
 
-        assert_eq!(state.active_tab, TabId::Focus);
+        assert_eq!(state.active_tab, TabId::Plan);
         state.history_nav_mode = true;
 
         state.apply_message(BunMessage::PlanUpdate {
@@ -849,6 +1390,7 @@ mod tests {
                 severity: "LOW".to_string(),
                 description: "Sin cambios destructivos".to_string(),
             }],
+            api_contracts: Vec::new(),
         });
 
         assert_eq!(state.active_tab, TabId::Plan);
@@ -868,6 +1410,7 @@ mod tests {
             status: "pending".to_string(),
             phases: Vec::new(),
             risks: Vec::new(),
+            api_contracts: Vec::new(),
         });
 
         assert_eq!(state.active_tab, TabId::Focus);
@@ -880,7 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn task_update_tracks_active_projection_without_changing_tab() {
+    fn task_update_tracks_active_projection_and_routes_dashboard_with_two_workers() {
         let mut state = AppState::default();
 
         state.apply_message(BunMessage::TaskUpdate {
@@ -896,7 +1439,7 @@ mod tests {
             integration_status: Some("isolated".to_string()),
         });
 
-        assert_eq!(state.active_tab, TabId::Focus);
+        assert_eq!(state.active_tab, TabId::Dashboard);
         assert_eq!(state.tasks.active_task_id.as_deref(), Some("task-1"));
         assert_eq!(state.tasks.tasks[0].title, "Corregir login");
         assert_eq!(state.tasks.tasks[0].active_workers.len(), 2);
@@ -919,6 +1462,13 @@ mod tests {
             status: "running".to_string(),
             display_name: None,
             activity: None,
+            token_count: None,
+            level: None,
+            current_action: None,
+            current_file: None,
+            iteration_current: None,
+            iteration_total: None,
+            transversal: None,
         });
 
         assert_eq!(state.tasks.active_task_id.as_deref(), Some("task-1"));
@@ -932,6 +1482,13 @@ mod tests {
             status: "done".to_string(),
             display_name: None,
             activity: None,
+            token_count: None,
+            level: None,
+            current_action: None,
+            current_file: None,
+            iteration_current: None,
+            iteration_total: None,
+            transversal: None,
         });
 
         assert!(state.tasks.tasks[0].active_workers.is_empty());
@@ -964,5 +1521,74 @@ mod tests {
         });
 
         assert_eq!(state.session.token_count, 42_000);
+    }
+
+    #[test]
+    fn dashboard_routes_when_two_workers_are_running() {
+        let mut state = AppState::default();
+
+        for worker in ["backend", "frontend"] {
+            state.apply_message(BunMessage::WorkerUpdate {
+                task_id: Some("task-1".to_string()),
+                worker: worker.to_string(),
+                phase: "editing".to_string(),
+                status: "running".to_string(),
+                display_name: None,
+                activity: None,
+                token_count: None,
+                level: None,
+                current_action: None,
+                current_file: None,
+                iteration_current: None,
+                iteration_total: None,
+                transversal: None,
+            });
+        }
+
+        assert_eq!(state.active_tab, TabId::Dashboard);
+    }
+
+    #[test]
+    fn bee_respond_or_fix_routes_to_focus() {
+        let mut state = AppState::default();
+        state.active_tab = TabId::Code;
+
+        state.apply_message(BunMessage::WorkerUpdate {
+            task_id: Some("task-1".to_string()),
+            worker: "bee".to_string(),
+            phase: "respond".to_string(),
+            status: "running".to_string(),
+            display_name: None,
+            activity: Some("preparando respuesta".to_string()),
+            token_count: None,
+            level: None,
+            current_action: None,
+            current_file: None,
+            iteration_current: None,
+            iteration_total: None,
+            transversal: None,
+        });
+
+        assert_eq!(state.active_tab, TabId::Focus);
+    }
+
+    #[test]
+    fn review_verdict_routes_to_review_and_stores_summary() {
+        let mut state = AppState::default();
+        state.active_tab = TabId::Code;
+
+        state.apply_message(BunMessage::ReviewVerdictUpdate {
+            reviewer: Some("reviewer".to_string()),
+            status: "approval".to_string(),
+            summary: "Listo para aprobar con una observacion menor.".to_string(),
+            observations: vec!["Cobertura suficiente".to_string()],
+            requested_changes: vec!["Ajustar copy".to_string()],
+            affected_files: vec!["src/app.ts".to_string()],
+        });
+
+        assert_eq!(state.active_tab, TabId::Review);
+        let verdict = state.review.verdict.as_ref().expect("verdict");
+        assert_eq!(verdict.summary, "Listo para aprobar con una observacion menor.");
+        assert_eq!(verdict.affected_files, vec!["src/app.ts".to_string()]);
     }
 }

@@ -1,90 +1,3 @@
-// ─── Streaming text extractor for BEE's JSON output ──────────────────────────
-// BEE outputs JSON like {"action":"...", "reason":"...", "content":"..."}.
-// During streaming, we progressively extract readable text from partial JSON
-// so the user sees the reasoning in real-time, not raw JSON syntax.
-
-class StreamingJsonTextExtractor {
-  private buffer = ""
-  private lastEmittedIdx = 0
-
-  /** Add a token and get any new readable text to display */
-  addToken(token: string): string | null {
-    this.buffer += token
-
-    // Don't try to parse too often — wait until we have enough content
-    if (this.buffer.length < 40 && this.buffer.length - this.lastEmittedIdx < 30) {
-      return null
-    }
-
-    const readable = this.extractReadableText()
-    if (readable === null) return null
-
-    // Only emit new text since last emission
-    if (readable.length > this.lastEmittedIdx) {
-      const newText = readable.slice(this.lastEmittedIdx)
-      this.lastEmittedIdx = readable.length
-      return newText
-    }
-    return null
-  }
-
-  /** Extract readable text from accumulated buffer */
-  private extractReadableText(): string | null {
-    const trimmed = this.buffer.trimStart()
-
-    // If it doesn't look like JSON, it's plain narrative text — stream as-is
-    if (!trimmed.startsWith("{") && !trimmed.startsWith("```")) {
-      return this.buffer
-    }
-
-    // Try to extract text from known JSON fields: reason, content, thought, thinking
-    // These regex patterns match both complete strings and strings still being streamed
-    const textFields = ["reason", "content", "thought", "thinking", "response", "message"]
-    let bestMatch = ""
-    let bestIdx = -1
-
-    for (const field of textFields) {
-      // Match "field": "value" — handles escaped quotes and partial strings
-      const regex = new RegExp(`"${field}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`, "s")
-      const match = this.buffer.match(regex)
-      if (match && match.index !== undefined) {
-        // Decode common JSON escape sequences
-        const decoded = match[1]
-          .replace(/\\n/g, "\n")
-          .replace(/\\t/g, "\t")
-          .replace(/\\"/g, '"')
-          .replace(/\\\\/g, "\\")
-        if (decoded.length > bestMatch.length) {
-          bestMatch = decoded
-          bestIdx = match.index
-        }
-      }
-    }
-
-    if (bestMatch) return bestMatch
-
-    // No text field found yet — might still be streaming the JSON structure
-    // If we see a clear JSON structure with just the action field, show a status
-    const actionMatch = this.buffer.match(/"action"\s*:\s*"([^"]+)"/)
-    if (actionMatch) {
-      return `Decidiendo: ${actionMatch[1]}...`
-    }
-
-    return null
-  }
-
-  /** Get the full readable text extracted so far */
-  getFullText(): string {
-    const readable = this.extractReadableText()
-    return readable || this.buffer
-  }
-
-  reset(): void {
-    this.buffer = ""
-    this.lastEmittedIdx = 0
-  }
-}
-
 import { callLLM } from "@johpaz/hivecode-core/agent/llm-client"
 import type { LLMMessage, LLMToolDef, LLMToolCall } from "@johpaz/hivecode-core/agent/llm-client"
 import { readWorkerSecrets } from "./secrets"
@@ -302,6 +215,115 @@ const SPAWN_SUBAGENT_TOOL: LLMToolDef = {
   },
 }
 
+/** Tool definition for BEE's routing decision */
+const BEE_DECISION_TOOL: LLMToolDef = {
+  type: "function",
+  function: {
+    name: "bee_make_decision",
+    description: "Submit your final routing decision for the user's request. Call this ONLY when you have finished analyzing and are ready to deliver your structured decision. You may reason in free text before calling this tool.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["respond", "fix", "architecture", "dispatch"],
+          description: "Routing action: respond=direct answer, fix=apply code fix, architecture=design multi-module plan, dispatch=delegate to specialists",
+        },
+        content: {
+          type: "string",
+          description: "Direct answer or summary of fix applied. Required for 'respond' and 'fix'.",
+        },
+        reason: {
+          type: "string",
+          description: "One-line explanation of why you made this decision.",
+        },
+        phases: {
+          type: "array",
+          description: "Phases to dispatch. Required for 'dispatch' action.",
+          items: {
+            type: "object",
+            properties: {
+              coordinator: { type: "string", description: "Coordinator to dispatch to (e.g. backend, frontend, test, security, devops)" },
+              description: { type: "string", description: "What this coordinator should do, in 1-2 sentences" },
+              dependsOn: { type: "array", items: { type: "string" }, description: "Coordinators that must complete before this one" },
+            },
+            required: ["coordinator", "description"],
+          },
+        },
+        filesModified: {
+          type: "array",
+          items: { type: "string" },
+          description: "Files modified directly. Required for 'fix' action.",
+        },
+        harness: {
+          type: "string",
+          description: "Structured harness document. Required in plan/approval modes for dispatch/architecture actions.",
+        },
+      },
+      required: ["action", "reason"],
+    },
+  },
+}
+
+/** Tool definition for Architecture plan submission */
+const ARCHITECTURE_PLAN_TOOL: LLMToolDef = {
+  type: "function",
+  function: {
+    name: "create_architecture_plan",
+    description: "Submit the final architecture plan with ADR, phases, risks, and interfaces. Call this ONLY when you have completed the analysis and design. You may reason in free text before calling this tool.",
+    parameters: {
+      type: "object",
+      properties: {
+        adr: {
+          type: "object",
+          description: "Architecture Decision Record",
+          properties: {
+            title: { type: "string" },
+            context: { type: "string" },
+            options: { type: "string" },
+            decision: { type: "string" },
+            consequences: { type: "string" },
+          },
+          required: ["title", "context", "options", "decision", "consequences"],
+        },
+        phases: {
+          type: "array",
+          description: "Implementation phases",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              coordinator: { type: "string", description: "product_manager|backend|frontend|mobile|data_scientist|security|test|devops|dba|integration|reviewer" },
+              description: { type: "string" },
+              dependsOn: { type: "array", items: { type: "string" } },
+            },
+            required: ["name", "coordinator", "description"],
+          },
+        },
+        risks: {
+          type: "array",
+          description: "Identified risks",
+          items: {
+            type: "object",
+            properties: {
+              severity: { type: "string", enum: ["HIGH", "MEDIUM", "LOW"] },
+              description: { type: "string" },
+            },
+            required: ["severity", "description"],
+          },
+        },
+        interfaces: {
+          type: "string",
+          description: "TypeScript interface contracts between modules (optional)",
+        },
+      },
+      required: ["adr", "phases"],
+    },
+  },
+}
+
+const DECISION_TOOL_NAMES = ["bee_make_decision", "create_architecture_plan"]
+
 class WorkerAgent {
   private coordinatorName: string
   private systemPrompt: string
@@ -332,8 +354,11 @@ class WorkerAgent {
     this.totalTokensIn = 0
     this.totalTokensOut = 0
 
-    // Add spawn_subagent to available tools
-    this.tools = [...tools, SPAWN_SUBAGENT_TOOL]
+    // Add spawn_subagent and coordinator-specific decision tool
+    const decisionTool = this.coordinatorName === "bee" ? BEE_DECISION_TOOL
+      : this.coordinatorName === "architecture" ? ARCHITECTURE_PLAN_TOOL
+      : null
+    this.tools = [...tools, SPAWN_SUBAGENT_TOOL, ...(decisionTool ? [decisionTool] : [])]
     this.allTools = (task.allTools ?? []) as any[]
 
     const startTime = performance.now()
@@ -420,44 +445,23 @@ while (this.iterations < MAX_ITERATIONS) {
         const llmTimeout = setTimeout(() => controller.abort(), 120_000)
 
         // Stream tokens in real-time so user sees what the agent is thinking
-        // For BEE: use StreamingJsonTextExtractor to show readable text, not raw JSON
-        // For other coordinators: stream tokens directly as they arrive
         let streamBuffer = ""
         let lastSentLength = 0
-        const isBee = this.coordinatorName === "bee"
-        const jsonExtractor = isBee ? new StreamingJsonTextExtractor() : null
 
         const onToken = (token: string) => {
           streamBuffer += token
-
-          if (isBee && jsonExtractor) {
-            // BEE: extract readable text from partial JSON and send incrementally
-            const newText = jsonExtractor.addToken(token)
-            if (newText) {
-              self.postMessage(JSON.stringify({
-                type: "THINKING",
-                taskId: this.task!.taskId,
-                phaseId: this.task!.phaseId,
-                coordinator: this.coordinatorName,
-                content: newText,
-                streamId,
-              } as WorkerToManagerMessage))
-            }
-          } else {
-            // Other coordinators: send new text added since last emission
-            const unSent = streamBuffer.length - lastSentLength
-            if (unSent >= 80 || (unSent > 0 && token.includes("\n"))) {
-              const newContent = streamBuffer.slice(lastSentLength)
-              lastSentLength = streamBuffer.length
-              self.postMessage(JSON.stringify({
-                type: "THINKING",
-                taskId: this.task!.taskId,
-                phaseId: this.task!.phaseId,
-                coordinator: this.coordinatorName,
-                content: newContent,
-                streamId,
-              } as WorkerToManagerMessage))
-            }
+          const unSent = streamBuffer.length - lastSentLength
+          if (unSent >= 80 || (unSent > 0 && token.includes("\n"))) {
+            const newContent = streamBuffer.slice(lastSentLength)
+            lastSentLength = streamBuffer.length
+            self.postMessage(JSON.stringify({
+              type: "THINKING",
+              taskId: this.task!.taskId,
+              phaseId: this.task!.phaseId,
+              coordinator: this.coordinatorName,
+              content: newContent,
+              streamId,
+            } as WorkerToManagerMessage))
           }
         }
 
@@ -479,35 +483,17 @@ while (this.iterations < MAX_ITERATIONS) {
         this.totalTokensIn  += response.usage?.input_tokens  ?? 0
         this.totalTokensOut += response.usage?.output_tokens ?? 0
 
-// Stream reasoning text to main thread so the user sees what the agent is thinking
+// Stream final reasoning text to main thread
         const content = response.content?.trim() || streamBuffer.trim()
         if (content) {
-          let displayText = content
-          // For BEE, extract the "reason" field from its JSON routing output for final display
-          if (isBee) {
-            try {
-              const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/(\{[\s\S]*\})/)
-              if (jsonMatch) {
-                const parsed = JSON.parse(jsonMatch[1] || jsonMatch[0])
-                if (parsed.reason) displayText = String(parsed.reason)
-                else if (parsed.content) displayText = String(parsed.content)
-              }
-            } catch {
-              // Not JSON, use extractor result or raw content
-              const extracted = jsonExtractor?.getFullText()
-              if (extracted && extracted.length > 10) displayText = extracted
-            }
-          }
-          if (displayText) {
-            self.postMessage(JSON.stringify({
-              type: "THINKING",
-              taskId: this.task!.taskId,
-              phaseId: this.task!.phaseId,
-              coordinator: this.coordinatorName,
-              content: displayText,
-              streamId,
-            } as WorkerToManagerMessage))
-          }
+          self.postMessage(JSON.stringify({
+            type: "THINKING",
+            taskId: this.task!.taskId,
+            phaseId: this.task!.phaseId,
+            coordinator: this.coordinatorName,
+            content: content.replace(/<think>[\s\S]*?<\/think>/g, "").trim() || content,
+            streamId,
+          } as WorkerToManagerMessage))
         }
 
         // No tool calls → final response
@@ -528,14 +514,39 @@ while (this.iterations < MAX_ITERATIONS) {
           tool_calls: response.tool_calls,
         })
 
-        // Separate local tools (spawn_subagent) from remote tools
+        // Separate local tools (spawn_subagent), decision tools, and remote tools
         const localCalls: LLMToolCall[] = []
         const remoteCalls: LLMToolCall[] = []
+        let decisionCall: LLMToolCall | null = null
         for (const tc of response.tool_calls) {
           if (tc.function.name === "spawn_subagent") {
             localCalls.push(tc)
+          } else if (DECISION_TOOL_NAMES.includes(tc.function.name)) {
+            decisionCall = tc
           } else {
             remoteCalls.push(tc)
+          }
+        }
+
+        // If the LLM submitted a structured decision, extract it and finish immediately
+        if (decisionCall) {
+          try {
+            const decisionArgs = JSON.parse(decisionCall.function.arguments || "{}")
+            finalContent = response.content?.trim() || ""
+            return {
+              taskId: task.taskId,
+              phaseId: task.phaseId,
+              coordinator: this.coordinatorName,
+              status: "completed",
+              narrativeEntry: finalContent,
+              filesModified: decisionArgs.filesModified ?? [],
+              structuredDecision: decisionArgs,
+              durationMs: Math.round(performance.now() - startTime),
+              tokensIn: this.totalTokensIn,
+              tokensOut: this.totalTokensOut,
+            }
+          } catch (err) {
+            console.warn(`[worker-handler] ⚠️ Failed to parse decision tool arguments: ${(err as Error).message}. Continuing loop.`)
           }
         }
 

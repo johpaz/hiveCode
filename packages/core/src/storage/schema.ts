@@ -38,6 +38,7 @@ export const SCHEMA = `
     num_gpu         INTEGER DEFAULT -1,
     enabled         INTEGER NOT NULL DEFAULT 1,
     active          INTEGER NOT NULL DEFAULT 0,
+    is_free_tier    INTEGER NOT NULL DEFAULT 0,
     created_at      INTEGER NOT NULL DEFAULT (unixepoch())
   );
 
@@ -252,6 +253,20 @@ CREATE TABLE IF NOT EXISTS channels (
     step      TEXT NOT NULL,
     data      TEXT,
     updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+
+  -- FREE TIER OVERRIDES (per-provider caps for hivecode-free models)
+  -- DEPRECATED: caps are now enforced by the operator's backend. Kept here
+  -- temporarily to allow existing DBs to migrate cleanly; new installs
+  -- should NOT use it. See docs/API_CONTRACT.md.
+  CREATE TABLE IF NOT EXISTS provider_free_overrides (
+    provider_id            TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
+    is_free_tier           INTEGER NOT NULL DEFAULT 0,
+    daily_token_cap        INTEGER NOT NULL DEFAULT 50000,
+    global_daily_token_cap INTEGER NOT NULL DEFAULT 0,
+    enabled                INTEGER NOT NULL DEFAULT 1,
+    notes                  TEXT,
+    updated_at             INTEGER NOT NULL DEFAULT (unixepoch())
   );
 
   -- USAGE TRACKING (tokens, costs)

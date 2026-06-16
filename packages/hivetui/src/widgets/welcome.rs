@@ -1,10 +1,10 @@
 use crate::{
-    state::AppState,
+    state::{AppState, HarnessHealth},
     term::{
-        Canvas, Cell, Color, Rect, Style, AMBER, AMBER_BRIGHT, AMBER_DIM, BG_MAIN, DIM, GREEN,
-        SECONDARY, WHITE, YELLOW,
+        Canvas, Cell, Color, Rect, Style, AMBER, AMBER_BRIGHT, AMBER_DIM, BG_MAIN, BG_PANEL,
+        BLUE, DIM, GREEN, RED, SECONDARY, WHITE, YELLOW,
     },
-    ui::text::ellipsize_cells,
+    ui::text::{cell_width, ellipsize_cells, truncate_cells},
 };
 
 // ── BeeMascot — pixel grid estático (igual que en el diseño JSX) ──────────────
@@ -99,34 +99,28 @@ fn draw_bee(canvas: &mut Canvas, x: u16, y: u16, slow_tick: u16) {
 
 // ── Panel derecho — fiel al diseño ───────────────────────────────────────────
 
-/// Dibuja el lado derecho del welcome con la estructura EXACTA del JSX:
-/// título · subtítulo · bun · @johpaz · separador · boot lines · hints
+/// Dibuja el lado derecho del welcome: título, plataforma y separador.
 fn draw_right_base(canvas: &mut Canvas, x: u16, y: u16, _w: u16, version: &str) -> u16 {
     let mut row = y;
 
-    // hivecode  v1.0.0
-    canvas.print(x, row, "hivecode", Style::new().fg(WHITE).bold());
-    canvas.print(x + 9, row, &format!("v{version}"), Style::new().fg(DIM));
+    canvas.print(x, row, "hiveCode", Style::new().fg(AMBER_BRIGHT).bold());
+    canvas.print(x + 10, row, &format!("v{version}"), Style::new().fg(DIM));
     row += 1;
 
-    // Gateway de agentes de código
-    canvas.print(x, row, "Gateway de agentes de código", Style::new().fg(WHITE));
+    canvas.print(x, row, "Gateway local-first de agentes de código", Style::new().fg(WHITE));
     row += 1;
 
-    // local-first · bun · sqlite + FTS5
-    canvas.print(x, row, "local-first", Style::new().fg(WHITE));
+    canvas.print(x, row, "local-first", Style::new().fg(SECONDARY));
     canvas.print(x + 11, row, " · ", Style::new().fg(DIM));
     canvas.print(x + 14, row, "bun", Style::new().fg(WHITE));
-    canvas.print(x + 17, row, " · sqlite + FTS5", Style::new().fg(WHITE));
+    canvas.print(x + 17, row, " · sqlite + FTS5 · blackboard", Style::new().fg(SECONDARY));
     row += 1;
 
-    // @johpaz
-    canvas.print(x, row, "@johpaz", Style::new().fg(WHITE));
+    canvas.print(x, row, "@johpaz", Style::new().fg(SECONDARY));
     row += 1;
 
-    // ⬡ ──────────────────────── ⬡  (separador exacto del diseño)
     row += 1;
-    canvas.print(x, row, "⬡ ──────────────────────── ⬡", Style::new().fg(AMBER_DIM));
+    draw_section_rule(canvas, x, row, _w, "BOOT");
     row += 2;
 
     row
@@ -201,22 +195,26 @@ fn draw_boot_lines(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &AppState
     row
 }
 
-/// Hints exactos del diseño JSX
+/// Comandos de entrada compactos.
 fn draw_hints(canvas: &mut Canvas, x: u16, y: u16, w: u16) -> u16 {
     let mut row = y + 1; // pequeño gap
 
+    draw_section_rule(canvas, x, row, w, "COMANDOS");
+    row += 2;
+
     let hints: &[(&str, &str)] = &[
-        ("enter",                                    " entrar"),
-        ("/welcome",                                 " volver a esta pantalla"),
-        ("/layout focus|plan|code|review|dashboard", " cambiar vista"),
+        ("enter",                    " entrar al workspace"),
+        ("/provider add",            " configurar IA"),
+        ("/layout plan|code|review", " cambiar vista"),
     ];
 
     for (key, desc) in hints {
         let kw = key.chars().count() as u16;
-        canvas.print(x, row, key, Style::new().fg(AMBER));
+        canvas.print(x, row, "▸", Style::new().fg(AMBER));
+        canvas.print(x + 2, row, key, Style::new().fg(AMBER));
         let avail = w.saturating_sub(kw + 1) as usize;
         let shown: String = desc.chars().take(avail).collect();
-        canvas.print(x + kw, row, &shown, Style::new().fg(DIM));
+        canvas.print(x + 3 + kw, row, &shown, Style::new().fg(DIM));
         row += 1;
     }
 
@@ -232,25 +230,161 @@ fn draw_right_with_provider(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: 
 fn draw_right_no_provider(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &AppState) -> u16 {
     let mut row = draw_right_base(canvas, x, y, w, &state.session.version);
 
-    // ⚠ Sin provider — extensión propia (fuera del diseño original pero solicitada)
     canvas.print(x, row, "⚠  Sin provider de IA configurado", Style::new().fg(YELLOW).bold());
     row += 1;
-    canvas.print(x, row, "   Necesitas al menos un provider para usar hiveCode.", Style::new().fg(SECONDARY));
+    canvas.print(x, row, "   Configura un provider para activar el gateway.", Style::new().fg(SECONDARY));
     row += 2;
 
-    canvas.print(x, row, "Para empezar:", Style::new().fg(WHITE).bold());
+    draw_section_rule(canvas, x, row, w, "SETUP");
+    row += 2;
     row += 1;
     canvas.print(x, row, "  /provider add", Style::new().fg(AMBER_BRIGHT).bold());
-    canvas.print(x + 15, row, "  →  configurar provider de IA", Style::new().fg(DIM));
+    canvas.print(x + 15, row, "  configurar provider de IA", Style::new().fg(DIM));
     row += 1;
     canvas.print(x, row, "  /provider list", Style::new().fg(AMBER));
-    canvas.print(x + 16, row, "  →  ver providers disponibles", Style::new().fg(DIM));
+    canvas.print(x + 16, row, "  ver providers disponibles", Style::new().fg(DIM));
     row += 2;
 
-    canvas.print(x, row, "Escribe el comando arriba y pulsa Enter ↵", Style::new().fg(SECONDARY));
+    canvas.print(x, row, "Escribe el comando y pulsa Enter", Style::new().fg(SECONDARY));
     row += 2;
 
     draw_boot_lines(canvas, x, row, w, state)
+}
+
+// ── Chrome del welcome ───────────────────────────────────────────────────────
+
+fn draw_section_rule(canvas: &mut Canvas, x: u16, y: u16, w: u16, label: &str) {
+    if w == 0 {
+        return;
+    }
+    let prefix = format!("⬡ {label} ");
+    let prefix_w = cell_width(&prefix) as u16;
+    let line_w = w.saturating_sub(prefix_w + 2) as usize;
+    canvas.print(x, y, &prefix, Style::new().fg(AMBER).bold());
+    if line_w > 0 {
+        canvas.print(x + prefix_w, y, &"─".repeat(line_w), Style::new().fg(AMBER_DIM));
+    }
+}
+
+fn draw_top_chrome(canvas: &mut Canvas, area: Rect, state: &AppState) {
+    if area.h == 0 {
+        return;
+    }
+    let chrome_h = area.h.min(2);
+    canvas.fill_rect(Rect::new(area.x, area.y, area.w, chrome_h), ' ', Style::new().bg(BG_PANEL));
+
+    let title = "⬡ hiveCode";
+    canvas.print(area.x + 2, area.y, title, Style::new().fg(AMBER_BRIGHT).bg(BG_PANEL).bold());
+
+    let mut x = area.x + 2 + cell_width(title) as u16 + 3;
+    let mode = format!("{} mode", state.session.mode.label());
+    canvas.print(x, area.y, &mode, Style::new().fg(SECONDARY).bg(BG_PANEL));
+    x += cell_width(&mode) as u16 + 3;
+
+    let workers = format!("{} workers", state.workers.workers.len());
+    canvas.print(x, area.y, &workers, Style::new().fg(DIM).bg(BG_PANEL));
+
+    let right = if state.session.provider.is_empty() {
+        "sin provider".to_string()
+    } else if state.session.model.is_empty() {
+        state.session.provider.clone()
+    } else {
+        format!("{} · {}", state.session.provider, state.session.model)
+    };
+    let right = truncate_cells(&right, area.w.saturating_sub(44) as usize);
+    let right_x = area.right().saturating_sub(cell_width(&right) as u16 + 2);
+    if right_x > x + 2 {
+        canvas.print(right_x, area.y, &right, Style::new().fg(DIM).bg(BG_PANEL));
+    }
+
+    if chrome_h > 1 {
+        canvas.print(area.x, area.y + 1, &"─".repeat(area.w as usize), Style::new().fg(AMBER_DIM).bg(BG_PANEL));
+    }
+}
+
+fn draw_footer_prompt(canvas: &mut Canvas, area: Rect, state: &AppState) {
+    if area.h == 0 {
+        return;
+    }
+    let y = area.bottom().saturating_sub(1);
+    canvas.fill_rect(Rect::new(area.x, y, area.w, 1), ' ', Style::new().bg(BG_PANEL));
+
+    let health = state.harness.health_label(&state.session.provider, state.running);
+    let left = format!("⬡ {health}");
+    canvas.print(area.x + 2, y, &left, Style::new().fg(status_color(state)).bg(BG_PANEL).bold());
+
+    let prompt = "Enter iniciar · /welcome volver · 1-5 cambiar pestaña · Esc cerrar";
+    let prompt = truncate_cells(prompt, area.w.saturating_sub(28) as usize);
+    let prompt_x = area.right().saturating_sub(cell_width(&prompt) as u16 + 2);
+    if prompt_x > area.x + 2 + cell_width(&left) as u16 + 2 {
+        canvas.print(prompt_x, y, &prompt, Style::new().fg(DIM).bg(BG_PANEL));
+    }
+}
+
+fn status_color(state: &AppState) -> Color {
+    match state.harness.health(&state.session.provider, state.running) {
+        HarnessHealth::MissingProvider => YELLOW,
+        HarnessHealth::Starting => AMBER,
+        HarnessHealth::Running => BLUE,
+        HarnessHealth::Approval => YELLOW,
+        HarnessHealth::Error => RED,
+        HarnessHealth::Ready => GREEN,
+    }
+}
+
+fn draw_left_identity(canvas: &mut Canvas, area: Rect, state: &AppState) {
+    if area.w == 0 || area.h == 0 {
+        return;
+    }
+
+    let bee_w = BEE_COLS * PX;
+    let bee_h = 13u16;
+    if area.w >= bee_w && area.h >= bee_h {
+        let bee_x = area.x + area.w.saturating_sub(bee_w) / 2;
+        let bee_y = area.y + area.h.saturating_sub(bee_h + 6) / 2;
+        draw_bee(canvas, bee_x, bee_y, state.slow_tick);
+
+        let mut row = (bee_y + bee_h + 1).min(area.bottom().saturating_sub(4));
+        draw_centered(canvas, area.x, row, area.w, "AGENT GATEWAY", Style::new().fg(AMBER).bold());
+        row += 1;
+        draw_centered(canvas, area.x, row, area.w, "plan · approval · auto", Style::new().fg(SECONDARY));
+        row += 2;
+        draw_centered(canvas, area.x, row, area.w, state.harness.health_label(&state.session.provider, state.running), Style::new().fg(status_color(state)).bold());
+    }
+}
+
+fn draw_centered(canvas: &mut Canvas, x: u16, y: u16, w: u16, text: &str, style: Style) {
+    let shown = truncate_cells(text, w as usize);
+    let text_w = cell_width(&shown) as u16;
+    let tx = x + w.saturating_sub(text_w) / 2;
+    canvas.print(tx, y, &shown, style);
+}
+
+fn draw_vertical_rule(canvas: &mut Canvas, x: u16, y: u16, h: u16) {
+    for row in y..y.saturating_add(h) {
+        canvas.print(x, row, "│", Style::new().fg(AMBER_DIM));
+    }
+}
+
+fn draw_compact(canvas: &mut Canvas, area: Rect, state: &AppState) {
+    let bee_w = BEE_COLS * PX;
+    let bee_y = area.y + 1;
+    if area.w >= bee_w && area.h >= 16 {
+        let bee_x = area.x + area.w.saturating_sub(bee_w) / 2;
+        draw_bee(canvas, bee_x, bee_y, state.slow_tick);
+    }
+
+    let mut row = area.y + 15.min(area.h.saturating_sub(1));
+    draw_centered(canvas, area.x, row, area.w, "hiveCode", Style::new().fg(AMBER_BRIGHT).bold());
+    row += 1;
+    draw_centered(canvas, area.x, row, area.w, state.harness.health_label(&state.session.provider, state.running), Style::new().fg(status_color(state)).bold());
+    row += 2;
+
+    let x = area.x + 2;
+    let w = area.w.saturating_sub(4);
+    if row < area.bottom() {
+        let _ = draw_boot_lines(canvas, x, row, w, state);
+    }
 }
 
 // ── Punto de entrada ──────────────────────────────────────────────────────────
@@ -258,31 +392,41 @@ fn draw_right_no_provider(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &A
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     // Overlay opaco con bg-main (#0D0B07) — cubre todo lo que está debajo
     canvas.fill_rect(area, ' ', Style::new().bg(BG_MAIN));
+    draw_top_chrome(canvas, area, state);
+    draw_footer_prompt(canvas, area, state);
 
-    let bee_w = BEE_COLS * PX; // 26
-    let gap: u16 = 5;
-    let right_x = area.x + bee_w + gap;
-    let right_w = area.w.saturating_sub(bee_w + gap + 1);
-
-    if area.w < bee_w + gap + 20 {
-        // Terminal muy estrecha — solo bee centrada
-        let cx = area.x + area.w.saturating_sub(bee_w) / 2;
-        let cy = area.y + area.h.saturating_sub(12) / 2;
-        draw_bee(canvas, cx, cy, state.slow_tick);
+    if area.h <= 5 {
         return;
     }
 
-    // Centrar verticalmente (bee tiene 12 filas + 1 de margen del bob)
-    let bee_h: u16 = 12;
-    let y = area.y + area.h.saturating_sub(bee_h + 1) / 2;
+    let content = Rect::new(
+        area.x + 2,
+        area.y + 3,
+        area.w.saturating_sub(4),
+        area.h.saturating_sub(5),
+    );
 
-    draw_bee(canvas, area.x + 1, y, state.slow_tick);
-
-    if state.session.provider.is_empty() {
-        draw_right_no_provider(canvas, right_x, y, right_w, state);
-    } else {
-        draw_right_with_provider(canvas, right_x, y, right_w, state);
+    if content.w < 82 || content.h < 24 {
+        canvas.with_clip(content, |canvas| draw_compact(canvas, content, state));
+        return;
     }
+
+    let left_w = ((content.w as u32 * 34) / 100).clamp(30, 42) as u16;
+    let divider_x = content.x + left_w + 1;
+    let right_x = divider_x + 3;
+    let right_w = content.right().saturating_sub(right_x);
+    let right_y = content.y + content.h.saturating_sub(24) / 2;
+
+    canvas.with_clip(content, |canvas| {
+        draw_left_identity(canvas, Rect::new(content.x, content.y, left_w, content.h), state);
+        draw_vertical_rule(canvas, divider_x, content.y, content.h);
+
+        if state.session.provider.is_empty() {
+            draw_right_no_provider(canvas, right_x, right_y, right_w, state);
+        } else {
+            draw_right_with_provider(canvas, right_x, right_y, right_w, state);
+        }
+    });
 }
 
 // ── Helpers públicos ──────────────────────────────────────────────────────────

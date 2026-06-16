@@ -21,4 +21,5 @@ pub struct FileEntry {
 #[derive(Debug, Default, Clone)]
 pub struct FileMapState {
     pub entries: Vec<FileEntry>,
+    pub scroll: usize,
 }
