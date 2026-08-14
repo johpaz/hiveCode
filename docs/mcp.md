@@ -24,7 +24,7 @@ El `MCPClientManager` gestiona el ciclo de vida de cada servidor: conexión, des
 
 Al arrancar (`packages/core/src/gateway/initializer.ts`), el sistema:
 
-1. **Carga desde DB** — selecciona `mcp_servers WHERE enabled = 1` de SQLite
+1. **Carga desde DB** — selecciona `mcpServers WHERE enabled = 1` de HiveDB
 2. **Merge con config** — une con `config.mcp.servers` del archivo de configuración
 3. **Crea el manager** — `createMCPManager({ servers: merged })`
 4. **Conecta** — `mcpManager.initialize()` registra cada servidor y ejecuta `connectAll()`
@@ -36,7 +36,7 @@ Al arrancar (`packages/core/src/gateway/initializer.ts`), el sistema:
 
 ## Configuración
 
-Los servidores MCP se almacenan en la tabla `mcp_servers` de SQLite. Se gestionan via:
+Los servidores MCP se almacenan en la tabla `mcpServers` de HiveDB. Se gestionan via:
 - **TUI**: `Settings Hub` → sección MCP
 - **CLI**: `hivecode mcp add`
 - **API**: endpoint `/api/mcp`
@@ -110,7 +110,7 @@ interface MCPServerConfig {
    - `listTools()` → herramientas ejecutables
    - `listResources()` → recursos disponibles
    - `listPrompts()` → prompts del servidor
-4. **Sincronización FTS5** — Las herramientas se indexan en `mcp_tools_fts` para que `search_knowledge` las encuentre
+4. **Sincronización HiveDB index** — Las herramientas se indexan en `mcpTools` y el índice de capacidades para que `search_knowledge` las encuentre
 5. **Invocación** — El agente llama herramientas MCP igual que las nativas
 6. **Reconexión** — Si el servidor se desconecta, el manager reintenta automáticamente
 
@@ -131,7 +131,7 @@ El agente no necesita saber si una herramienta es nativa o MCP — la interfaz e
 
 ## Seguridad y privacidad
 
-- **Encriptación de headers** — Los headers sensibles (autenticación) se almacenan encriptados en las columnas `headers_encrypted` / `headers_iv` de la tabla `mcp_servers`
+- **Encriptación de headers** — Los headers sensibles (autenticación) se almacenan encriptados en las columnas `headers_encrypted` / `headers_iv` de la tabla `mcpServers`
 - **Redacción de credenciales** — En la UI/TUI los tokens se ocultan: `Authorization`, `token`, `key` → `tok••••••••`
 - **Fail-open** — Si un servidor MCP falla al conectar, el gateway sigue funcionando; el error se loguea pero no detiene el arranque
 
@@ -141,7 +141,7 @@ El agente no necesita saber si una herramienta es nativa o MCP — la interfaz e
 
 Las herramientas MCP no son ciudadanas de segunda clase. El sistema las trata igual que las nativas:
 
-- **Índice FTS5 separado** — Se indexan en `mcp_tools_fts` (aparte de `tools_fts` nativo) para evitar contaminar la búsqueda
+- **Índice HiveDB index separado** — Se indexan como tipo `mcp` en el índice de capacidades para evitar contaminar la búsqueda nativa de tools
 - **Descubrimiento unificado** — `search_knowledge(type="mcp", query="...")` busca exclusivamente herramientas MCP
 - **Namespace seguro** — Los nombres se sanitizan con `mcpToolFullName(serverName, toolName)` para cumplir las reglas de Gemini/OpenAI: solo `[a-zA-Z0-9_.\-:]`, máximo 64 caracteres, separador `__`
 
@@ -158,7 +158,7 @@ Servidor "GitHub Server" + herramienta "create_pr"
 El sistema soporta hot reload de servidores MCP sin reiniciar el gateway. Cuando se agrega o modifica un servidor via la UI/API, el manager desconecta y reconecta solo el servidor afectado (`updateConfig()`).
 
 Bajo el capó, los módulos `packages/core/src/mcp/hot-reload.ts` y `packages/core/src/mcp/tool-sync.ts` se encargan de:
-- Reindexar las herramientas en FTS5 cuando cambian
+- Reindexar las herramientas en HiveDB index cuando cambian
 - Reconectar solo el servidor afectado sin afectar los demás ni reiniciar el gateway
 
 ---
@@ -203,8 +203,8 @@ curl -X POST http://localhost:PORT/api/mcp \
 | `packages/core/src/gateway/initializer.ts` | Bootstrap: carga DB + config → crea manager → hot reload |
 | `packages/core/src/gateway/routes/mcp.ts` | API REST: CRUD, connect/disconnect, toggle |
 | `packages/core/src/mcp/singleton.ts` | Acceso global al manager (`getMCPManager` / `setMCPManager`) |
-| `packages/core/src/mcp/tool-sync.ts` | Sincronización de herramientas MCP al índice FTS5 |
+| `packages/core/src/mcp/tool-sync.ts` | Sincronización de herramientas MCP al índice HiveDB index |
 | `packages/core/src/mcp/hot-reload.ts` | Watcher para reconexión dinámica sin reiniciar |
-| `packages/core/src/agent/tool-selector.ts` | Selección FTS5 y sanitización `mcpToolFullName()` |
-| `packages/core/src/tools/core/index.ts` | `search_knowledge` busca en `mcp_tools_fts` |
-| `packages/core/src/storage/schema.ts` | Tablas `mcp_servers`, `mcp_tools`, `mcp_tools_fts` |
+| `packages/core/src/agent/tool-selector.ts` | Selección HiveDB index y sanitización `mcpToolFullName()` |
+| `packages/core/src/tools/core/index.ts` | `search_knowledge` busca en el índice HiveDB de capacidades |
+| `packages/core/src/storage/collections.ts` | Documentos `mcpServers` y `mcpTools` |

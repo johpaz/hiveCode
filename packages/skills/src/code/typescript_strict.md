@@ -41,6 +41,6 @@ function UserId(id: string): UserId { return id as UserId }
 ```
 
 ## Bun-Specific
-- `bun:sqlite` types are built-in
+- `@johpaz/hive-db` types are built-in
 - `Bun.file()` returns `BunFile` with `.text()`, `.json()`, `.stream()`
 - Workers: use `declare var self` for type safety

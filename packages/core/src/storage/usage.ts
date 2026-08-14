@@ -1,5 +1,5 @@
-import { getDb } from "./sqlite";
-import { randomUUID } from "crypto";
+import { bumpRollup, col, nextId } from "./hive";
+import type { UsageRecordDoc, UsageRollupDoc } from "./collections";
 import { logger } from "../utils/logger";
 
 const log = logger.child("usage");
@@ -82,12 +82,6 @@ const MODEL_PRICING: Record<string, { inputPer1M: number; outputPer1M: number }>
   "groq/compound":            { inputPer1M: 0,    outputPer1M: 0    },
   "groq/compound-mini":       { inputPer1M: 0,    outputPer1M: 0    },
 
-  // ── Ollama local = siempre free ──
-  "qwen3:4b":    { inputPer1M: 0, outputPer1M: 0 },
-  "qwen3:8b":    { inputPer1M: 0, outputPer1M: 0 },
-  "qwen3:14b":   { inputPer1M: 0, outputPer1M: 0 },
-  "llama3.2:3b": { inputPer1M: 0, outputPer1M: 0 },
-  "gemma3:9b":   { inputPer1M: 0, outputPer1M: 0 },
 };
 
 function calculateCost(model: string, inputTokens: number, outputTokens: number): number {
@@ -95,6 +89,73 @@ function calculateCost(model: string, inputTokens: number, outputTokens: number)
   const inputCost = (inputTokens / 1_000_000) * pricing.inputPer1M;
   const outputCost = (outputTokens / 1_000_000) * pricing.outputPer1M;
   return inputCost + outputCost;
+}
+
+/** Hourly bucket key ("2026-07-09T14"). Lexicographic order is chronological. */
+export function hourBucket(ts: number): string {
+  return new Date(ts).toISOString().slice(0, 13);
+}
+
+function emptyRollup(): UsageRollupDoc {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+    toonSavedTokens: 0,
+    toonSavedCost: 0,
+    toonSavedBytes: 0,
+    toonJsonTokens: 0,
+    toonToonTokens: 0,
+    toonJsonBytes: 0,
+    byProvider: {},
+    byModel: {},
+  };
+}
+
+async function bumpUsageRollup(
+  hour: string,
+  delta: { inputTokens: number; outputTokens: number; costUsd: number },
+  provider: string,
+  model: string
+): Promise<void> {
+  const rollups = await col<UsageRollupDoc>("usageRollups");
+  const maxRetries = 5;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const existing = await rollups.get(hour);
+    const doc = existing ? { ...emptyRollup(), ...existing.doc } : emptyRollup();
+
+    doc.inputTokens += delta.inputTokens;
+    doc.outputTokens += delta.outputTokens;
+    doc.costUsd += delta.costUsd;
+
+    const curProvider = doc.byProvider[provider] ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+    doc.byProvider = {
+      ...doc.byProvider,
+      [provider]: {
+        inputTokens: curProvider.inputTokens + delta.inputTokens,
+        outputTokens: curProvider.outputTokens + delta.outputTokens,
+        costUsd: curProvider.costUsd + delta.costUsd,
+      },
+    };
+
+    const curModel = doc.byModel[model] ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+    doc.byModel = {
+      ...doc.byModel,
+      [model]: {
+        inputTokens: curModel.inputTokens + delta.inputTokens,
+        outputTokens: curModel.outputTokens + delta.outputTokens,
+        costUsd: curModel.costUsd + delta.costUsd,
+      },
+    };
+
+    try {
+      await rollups.put(hour, doc, { expectedVersion: existing?.version ?? 0 });
+      return;
+    } catch {
+      // Version conflict — retry with a fresh read.
+    }
+  }
+  log.warn(`[USAGE] bumpUsageRollup: too much contention on usageRollups/${hour}`);
 }
 
 export interface UsageRecord {
@@ -141,133 +202,133 @@ export function recordUsage(options: {
   outputTokens: number;
   latencyMs?: number;
 }): void {
-  try {
-    const db = getDb();
-    const costUsd = calculateCost(options.model, options.inputTokens, options.outputTokens);
+  Promise.resolve().then(async () => {
+    try {
+      const costUsd = calculateCost(options.model, options.inputTokens, options.outputTokens);
+      const now = Date.now();
+      const id = await nextId("usageRecords");
+      const records = await col<UsageRecordDoc>("usageRecords");
 
-    db.prepare(`
-      INSERT INTO usage_records (id, provider, model, input_tokens, output_tokens, cost_usd, latency_ms, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      randomUUID(),
-      options.provider,
-      options.model,
-      options.inputTokens,
-      options.outputTokens,
-      costUsd,
-      options.latencyMs || null,
-      Math.floor(Date.now() / 1000)
-    );
-    log.info(`[USAGE RECORDED] provider=${options.provider} model=${options.model} input=${options.inputTokens} output=${options.outputTokens} cost=$${costUsd.toFixed(4)}`);
-  } catch (error) {
-    console.error("Failed to record usage:", error);
-  }
+      await records.put(id, {
+        id,
+        provider: options.provider,
+        model: options.model,
+        input_tokens: options.inputTokens,
+        output_tokens: options.outputTokens,
+        cost_usd: costUsd,
+        latency_ms: options.latencyMs || null,
+        toon_saved_tokens: 0,
+        toon_saved_cost: 0,
+        toon_json_bytes: 0,
+        toon_toon_bytes: 0,
+        toon_saved_bytes: 0,
+        toon_saved_percent: 0,
+        toon_json_tokens: 0,
+        toon_toon_tokens: 0,
+        toon_saved_tokens_pct: 0,
+        created_at: now,
+      }, { expectedVersion: 0 });
+
+      await bumpUsageRollup(
+        hourBucket(now),
+        { inputTokens: options.inputTokens, outputTokens: options.outputTokens, costUsd },
+        options.provider,
+        options.model
+      );
+
+      log.info(`[USAGE RECORDED] provider=${options.provider} model=${options.model} input=${options.inputTokens} output=${options.outputTokens} cost=$${costUsd.toFixed(4)}`);
+    } catch (error) {
+      console.error("Failed to record usage:", error);
+    }
+  });
 }
 
-export function getUsageStats(hours: number = 24): UsageSummary {
+function hourBucketsSince(hours: number): string[] {
+  const now = Date.now();
+  const buckets: string[] = [];
+  for (let t = now - hours * 3600_000; t <= now; t += 3600_000) {
+    buckets.push(hourBucket(t));
+  }
+  return buckets;
+}
+
+export async function getUsageStats(hours: number = 24): Promise<UsageSummary> {
   log.info(`[USAGE STATS] Fetching stats for last ${hours} hours`);
-  const db = getDb();
-  const since = Math.floor(Date.now() / 1000) - (hours * 3600);
 
-  const totals = db.prepare(`
-    SELECT
-      COALESCE(SUM(input_tokens), 0) as total_input,
-      COALESCE(SUM(output_tokens), 0) as total_output,
-      COALESCE(SUM(cost_usd), 0) as total_cost,
-      COALESCE(SUM(toon_saved_tokens), 0) as toon_saved_tokens,
-      COALESCE(SUM(toon_saved_cost), 0) as toon_saved_cost,
-      COALESCE(SUM(toon_saved_bytes), 0) as toon_saved_bytes,
-      COALESCE(SUM(toon_saved_percent), 0) as toon_saved_percent,
-      COALESCE(SUM(toon_json_tokens), 0) as toon_json_tokens,
-      COALESCE(SUM(toon_toon_tokens), 0) as toon_toon_tokens
-    FROM usage_records
-    WHERE created_at >= ?
-  `).get(since) as { 
-    total_input: number; 
-    total_output: number; 
-    total_cost: number; 
-    toon_saved_tokens: number; 
-    toon_saved_cost: number;
-    toon_saved_bytes: number;
-    toon_saved_percent: number;
-    toon_json_tokens: number;
-    toon_toon_tokens: number;
-  };
+  const rollups = await col<UsageRollupDoc>("usageRollups");
+  const buckets = hourBucketsSince(hours);
+  const docs = (await Promise.all(buckets.map((id) => rollups.get(id))))
+    .map((entry) => entry?.doc ?? emptyRollup());
 
-  const byProvider = db.prepare(`
-    SELECT
-      provider,
-      COALESCE(SUM(input_tokens), 0) as input_tokens,
-      COALESCE(SUM(output_tokens), 0) as output_tokens,
-      COALESCE(SUM(cost_usd), 0) as cost_usd
-    FROM usage_records
-    WHERE created_at >= ? AND provider != 'toon'
-    GROUP BY provider
-  `).all(since) as Array<{ provider: string; input_tokens: number; output_tokens: number; cost_usd: number }>;
-
-  const byModel = db.prepare(`
-    SELECT
-      model,
-      provider,
-      COALESCE(SUM(input_tokens), 0) as input_tokens,
-      COALESCE(SUM(output_tokens), 0) as output_tokens,
-      COALESCE(SUM(cost_usd), 0) as cost_usd
-    FROM usage_records
-    WHERE created_at >= ? AND provider != 'toon'
-    GROUP BY model
-    ORDER BY cost_usd DESC
-  `).all(since) as Array<{ model: string; provider: string; input_tokens: number; output_tokens: number; cost_usd: number }>;
-
-  const recentRecords = db.prepare(`
-    SELECT * FROM usage_records
-    WHERE created_at >= ?
-    ORDER BY created_at DESC
-    LIMIT 20
-  `).all(since) as UsageRecord[];
-
+  let totalInput = 0;
+  let totalOutput = 0;
+  let totalCost = 0;
+  let toonSavedTokens = 0;
+  let toonSavedCost = 0;
+  let toonSavedBytes = 0;
+  let toonJsonTokens = 0;
+  let toonToonTokens = 0;
+  let toonJsonBytes = 0;
   const providerMap: UsageSummary["byProvider"] = {};
-  for (const p of byProvider) {
-    providerMap[p.provider] = {
-      inputTokens: p.input_tokens,
-      outputTokens: p.output_tokens,
-      tokens: p.input_tokens + p.output_tokens,
-      costUsd: p.cost_usd
-    };
-  }
-
   const modelMap: UsageSummary["byModel"] = {};
-  for (const m of byModel) {
-    modelMap[m.model] = {
-      provider: m.provider,
-      inputTokens: m.input_tokens,
-      outputTokens: m.output_tokens,
-      tokens: m.input_tokens + m.output_tokens,
-      costUsd: m.cost_usd
-    };
+
+  for (const doc of docs) {
+    totalInput += doc.inputTokens;
+    totalOutput += doc.outputTokens;
+    totalCost += doc.costUsd;
+    toonSavedTokens += doc.toonSavedTokens;
+    toonSavedCost += doc.toonSavedCost;
+    toonSavedBytes += doc.toonSavedBytes;
+    toonJsonTokens += doc.toonJsonTokens;
+    toonToonTokens += doc.toonToonTokens;
+    toonJsonBytes += doc.toonJsonBytes;
+
+    for (const [provider, providerStats] of Object.entries(doc.byProvider ?? {})) {
+      const current = providerMap[provider] ?? { tokens: 0, costUsd: 0, inputTokens: 0, outputTokens: 0 };
+      current.inputTokens += providerStats.inputTokens;
+      current.outputTokens += providerStats.outputTokens;
+      current.tokens += providerStats.inputTokens + providerStats.outputTokens;
+      current.costUsd += providerStats.costUsd;
+      providerMap[provider] = current;
+    }
+
+    for (const [model, modelStats] of Object.entries(doc.byModel ?? {})) {
+      const current = modelMap[model] ?? { provider: "unknown", tokens: 0, costUsd: 0, inputTokens: 0, outputTokens: 0 };
+      current.inputTokens += modelStats.inputTokens;
+      current.outputTokens += modelStats.outputTokens;
+      current.tokens += modelStats.inputTokens + modelStats.outputTokens;
+      current.costUsd += modelStats.costUsd;
+      modelMap[model] = current;
+    }
   }
 
-  const totalTokens = totals.total_input + totals.total_output;
-  const totalIncludingSaved = totalTokens + totals.toon_saved_tokens;
+  const sinceMs = Date.now() - hours * 3600_000;
+  const records = await col<UsageRecordDoc>("usageRecords");
+  const recentRecords = (await records.scan({ reverse: true, limit: 20 }))
+    .map((entry) => entry.doc)
+    .filter((record) => record.created_at >= sinceMs);
+
+  const totalTokens = totalInput + totalOutput;
+  const totalIncludingSaved = totalTokens + toonSavedTokens;
   const toonSavingsPercent = totalIncludingSaved > 0
-    ? (totals.toon_saved_tokens / totalIncludingSaved) * 100
+    ? (toonSavedTokens / totalIncludingSaved) * 100
     : 0;
 
-  // Calculate average bytes savings percent
-  const toonSavedBytesPercent = totals.toon_toon_tokens > 0
-    ? (totals.toon_saved_bytes / totals.toon_toon_tokens) * 100
+  const toonSavedBytesPercent = toonJsonBytes > 0
+    ? (toonSavedBytes / toonJsonBytes) * 100
     : 0;
 
   return {
     totalTokens,
-    totalInputTokens: totals.total_input,
-    totalOutputTokens: totals.total_output,
-    totalCostUsd: totals.total_cost,
-    toonSavedTokens: totals.toon_saved_tokens,
-    toonSavedCost: totals.toon_saved_cost,
-    toonSavedBytes: totals.toon_saved_bytes,
+    totalInputTokens: totalInput,
+    totalOutputTokens: totalOutput,
+    totalCostUsd: totalCost,
+    toonSavedTokens,
+    toonSavedCost,
+    toonSavedBytes,
     toonSavedBytesPercent,
-    toonJsonTokens: totals.toon_json_tokens,
-    toonToonTokens: totals.toon_toon_tokens,
+    toonJsonTokens,
+    toonToonTokens,
     toonSavingsPercent,
     byProvider: providerMap,
     byModel: modelMap,
@@ -316,7 +377,7 @@ export function getAverageTokenCost(model: string): number {
 
 /**
  * Record TOON savings for metrics tracking
- * This updates the usage_records table with complete TOON compression metrics
+ * This updates HiveDB usage records with complete TOON compression metrics.
  */
 export function recordToonSavings(
   analysis: {
@@ -335,36 +396,41 @@ export function recordToonSavings(
   // Fire-and-forget to avoid blocking
   Promise.resolve().then(async () => {
     try {
-      const db = getDb();
+      const now = Date.now();
+      const savedTokens = Math.max(0, analysis.savedTokens);
+      const savedPercent = Math.max(0, analysis.savedPercent);
+      const savedTokensPct = Math.max(0, analysis.savedTokensPercent);
+      const id = await nextId("usageRecords");
+      const records = await col<UsageRecordDoc>("usageRecords");
 
-      // Insert TOON savings record with complete metrics
-      db.query(`
-        INSERT INTO usage_records (
-          id, provider, model, input_tokens, output_tokens, cost_usd,
-          toon_saved_tokens, toon_saved_cost,
-          toon_json_bytes, toon_toon_bytes, toon_saved_bytes, toon_saved_percent,
-          toon_json_tokens, toon_toon_tokens, toon_saved_tokens_pct,
-          created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        `toon_${category}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        'toon',
-        category,
-        0,
-        0,
-        0,
-        Math.max(0, analysis.savedTokens),
-        costSaved,
-        analysis.jsonBytes,
-        analysis.toonBytes,
-        analysis.savedBytes,
-        Math.max(0, analysis.savedPercent),
-        analysis.jsonTokens,
-        analysis.toonTokens,
-        Math.max(0, analysis.savedTokensPercent),
-        Math.floor(Date.now() / 1000),
-      )
+      await records.put(id, {
+        id,
+        provider: "toon",
+        model: category,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0,
+        latency_ms: null,
+        toon_saved_tokens: savedTokens,
+        toon_saved_cost: costSaved,
+        toon_json_bytes: analysis.jsonBytes,
+        toon_toon_bytes: analysis.toonBytes,
+        toon_saved_bytes: analysis.savedBytes,
+        toon_saved_percent: savedPercent,
+        toon_json_tokens: analysis.jsonTokens,
+        toon_toon_tokens: analysis.toonTokens,
+        toon_saved_tokens_pct: savedTokensPct,
+        created_at: now,
+      }, { expectedVersion: 0 });
+
+      await bumpRollup("usageRollups", hourBucket(now), {
+        toonSavedTokens: savedTokens,
+        toonSavedCost: costSaved,
+        toonSavedBytes: analysis.savedBytes,
+        toonJsonTokens: analysis.jsonTokens,
+        toonToonTokens: analysis.toonTokens,
+        toonJsonBytes: analysis.jsonBytes,
+      });
 
       log.debug(`[TOON] Recorded ${analysis.savedTokens} tokens ($${costSaved.toFixed(6)}) saved for ${category}`)
     } catch (error) {

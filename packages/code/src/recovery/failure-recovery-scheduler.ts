@@ -1,9 +1,14 @@
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import { computeBackoffDelay } from "@johpaz/hivecode-core/utils/retry"
+import type { CronJobDoc } from "@johpaz/hivecode-core/storage/collections"
 import { Scribe } from "../narrative/scribe.ts"
 import { classifyError } from "../errors/classify-error.ts"
 import type { HiveError } from "../errors/hive-errors.ts"
 
 const MAX_RETRIES = 3
+
+/** Exponential backoff between task-level retries: ~15s, ~30s, ~60s (with jitter). */
+const RETRY_BACKOFF = { initialDelayMs: 15_000, backoffMultiplier: 2, maxDelayMs: 120_000 }
 
 export interface RetryPayload {
   _recovery: true
@@ -70,10 +75,10 @@ export class FailureRecoveryScheduler {
       contextSummary: `Process-level ${error.errorClass} during task execution (retry ${retryCount}/${MAX_RETRIES})`,
     })
 
-    const failureId = this.getLastInsertRowId()
+    const failureId = Date.now()
 
     if (retryCount > MAX_RETRIES) {
-      this.writeEscalation({ taskId, failureId, retryCount, task, error })
+      await this.writeEscalation({ taskId, failureId, retryCount, task, error })
       return
     }
 
@@ -90,18 +95,19 @@ export class FailureRecoveryScheduler {
       mode,
     }
 
-    const fireAt = new Date(Date.now() + 60_000)
+    const delayMs = computeBackoffDelay(retryCount, RETRY_BACKOFF)
+    const fireAt = new Date(Date.now() + delayMs)
     this.persistCronJob(payload, fireAt)
 
     process.stdout.write(
       `\n⚠️  Fallo (${error.errorClass}): ${error.message}\n` +
-      `   Reintentando en 60 segundos (intento ${retryCount}/${MAX_RETRIES})...\n\n`
+      `   Reintentando en ${Math.round(delayMs / 1000)}s (intento ${retryCount}/${MAX_RETRIES})...\n\n`
     )
 
     const timer = setTimeout(async () => {
       this.timers.delete(taskId)
       await this.executeRetry(payload)
-    }, 60_000)
+    }, delayMs)
 
     this.timers.set(taskId, timer)
   }
@@ -136,20 +142,39 @@ export class FailureRecoveryScheduler {
     }
   }
 
-  private writeEscalation(params: {
+  private async writeEscalation(params: {
     taskId: string
     failureId: number
     retryCount: number
     task: string
     error: HiveError
-  }): void {
+  }): Promise<void> {
+    // ForensicAgent activation, condition 2: a task retried MAX_RETRIES times without
+    // ever succeeding (condition 1 — a single worker exhausting its iteration budget —
+    // is handled inside CoordinatorManager's normal phase loop). Root-cause analysis
+    // before escalating gives the human a diagnosis instead of just a raw error.
+    let forensicAnalysis = ""
+    try {
+      const { CoordinatorManager } = await import("../workers/coordinator-manager.ts")
+      const manager = new CoordinatorManager()
+      await manager.startAll()
+      try {
+        const result = await manager.analyzeFailure(params.task, `${params.error.errorClass}: ${params.error.message}`)
+        forensicAnalysis = result.narrativeEntry || ""
+      } finally {
+        await manager.stopAll()
+      }
+    } catch (forensicErr) {
+      forensicAnalysis = `(ForensicAgent analysis failed: ${(forensicErr as Error).message})`
+    }
+
     try {
       this.scribe.writeProposal({
         sourceAgent: "failure-recovery-scheduler",
         proposalType: "escalate_to_human",
         description: `Tarea falló ${MAX_RETRIES} veces consecutivas. ` +
           `Último error: ${params.error.errorClass} — ${params.error.message}. ` +
-          `Tarea: "${params.task.slice(0, 200)}"`,
+          `Tarea: "${params.task.slice(0, 200)}"\n\nAnálisis de ForensicAgent:\n${forensicAnalysis}`,
         failureIds: [params.failureId],
       })
     } catch {
@@ -158,51 +183,70 @@ export class FailureRecoveryScheduler {
 
     process.stdout.write(
       `\n❌ La tarea falló ${MAX_RETRIES} veces. Escalando a revisión humana.\n` +
-      `   Revisa learning_proposals en la BD para el diagnóstico.\n\n`
+      `   Análisis de ForensicAgent:\n${forensicAnalysis}\n\n` +
+      `   Revisa learning_proposals en la BD para el diagnóstico completo.\n\n`
     )
 
     process.exit(1)
   }
 
   private persistCronJob(payload: RetryPayload, fireAt: Date): void {
-    try {
-      const db = getDb()
-      db.query(`
-        INSERT INTO cron_jobs (id, name, task, task_type, fire_at, timezone, payload, channel, status, created_at, updated_at)
-        VALUES (?, ?, ?, 'one_shot', ?, 'UTC', ?, 'system', 'active', ?, ?)
-      `).run(
-        `recovery-${payload.taskId}-r${payload.retryCount}`,
-        `Recovery retry ${payload.retryCount}/${payload.maxRetries}`,
-        `Retry: ${payload.originalTask.slice(0, 100)}`,
-        fireAt.toISOString(),
-        JSON.stringify(payload),
-        new Date().toISOString(),
-        new Date().toISOString(),
-      )
-    } catch {
-      // cron_jobs table may not exist in all deployments — non-blocking
-    }
+    void (async () => {
+      try {
+        const cronJobs = await col<CronJobDoc>("cronJobs")
+        const id = `recovery-${payload.taskId}-r${payload.retryCount}`
+        const existing = await cronJobs.get(id)
+        const now = new Date().toISOString()
+        await cronJobs.put(id, {
+          id,
+          name: `Recovery retry ${payload.retryCount}/${payload.maxRetries}`,
+          task: `Retry: ${payload.originalTask.slice(0, 100)}`,
+          task_type: "one_shot",
+          cron_expression: null,
+          fire_at: fireAt.toISOString(),
+          timezone: "UTC",
+          start_at: null,
+          stop_at: null,
+          dom_and_dow: false,
+          max_runs: 1,
+          protect: false,
+          interval_sec: null,
+          agent_id: "system",
+          channel: "system",
+          payload: JSON.stringify(payload),
+          tool_name: null,
+          status: "active",
+          run_count: existing?.doc.run_count ?? 0,
+          error_count: existing?.doc.error_count ?? 0,
+          last_error: null,
+          created_at: existing?.doc.created_at ?? now,
+          updated_at: now,
+          last_run_at: existing?.doc.last_run_at ?? null,
+          next_run_at: fireAt.toISOString(),
+          completed_at: null,
+        }, { expectedVersion: existing?.version ?? 0 })
+      } catch {
+        // Non-blocking.
+      }
+    })()
   }
 
   private markCronJobCompleted(taskId: string, retryCount: number): void {
-    try {
-      const db = getDb()
-      db.query(`
-        UPDATE cron_jobs SET status = 'completed', updated_at = ?
-        WHERE id = ?
-      `).run(new Date().toISOString(), `recovery-${taskId}-r${retryCount}`)
-    } catch {
-      // Non-blocking
-    }
-  }
-
-  private getLastInsertRowId(): number {
-    try {
-      const db = getDb()
-      const row = db.query<{ id: number }, []>("SELECT last_insert_rowid() as id").get()
-      return row?.id ?? 0
-    } catch {
-      return 0
-    }
+    void (async () => {
+      try {
+        const cronJobs = await col<CronJobDoc>("cronJobs")
+        const id = `recovery-${taskId}-r${retryCount}`
+        const existing = await cronJobs.get(id)
+        if (!existing) return
+        await cronJobs.put(id, {
+          ...existing.doc,
+          status: "completed",
+          updated_at: new Date().toISOString(),
+          completed_at: new Date().toISOString(),
+        }, { expectedVersion: existing.version })
+      } catch {
+        // Non-blocking.
+      }
+    })()
   }
 }

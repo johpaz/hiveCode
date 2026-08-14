@@ -2,7 +2,8 @@ import type { Config } from "../config/loader.ts";
 import { logger } from "../utils/logger.ts";
 import type { IChannel, IncomingMessage, MessageHandler } from "./base.ts";
 import { createTelegramChannel, type TelegramConfig } from "./telegram.ts";
-import { getDb } from "../storage/sqlite.ts";
+import { col } from "../storage/hive.ts";
+import type { ChannelDoc, UserChannelDoc } from "../storage/collections.ts";
 import { decryptConfig } from "../storage/crypto.ts";
 
 export class ChannelManager {
@@ -33,42 +34,29 @@ export class ChannelManager {
 
   private async initializeFromDB(): Promise<void> {
     try {
-      const db = getDb();
-      // Migrate: channels that were marked connected but lack active=1 (saved by old code)
-      db.query("UPDATE channels SET active = 1 WHERE enabled = 1 AND status = 'connected' AND active = 0").run();
-      // Load all active channels - config may be empty for webchat
-      const rows = db.query(`
-        SELECT id, type, config_encrypted, config_iv, enabled, active
-        FROM channels
-        WHERE enabled = 1 AND active = 1
-      `).all() as Array<{
-        id: string;
-        type: string;
-        config_encrypted: string | null;
-        config_iv: string | null;
-        enabled: number;
-        active: number;
-      }>;
+      const rows = (await (await col<ChannelDoc>("channels")).scan())
+        .map((entry) => entry.doc)
+        .filter((channel) => channel.enabled && channel.active);
 
       for (const row of rows) {
-        let config: Record<string, unknown> = {};
-
-        if (row.config_encrypted) {
-          try {
-            config = decryptConfig(row.config_encrypted, row.config_iv);
-            this.log.debug(`Loaded config for ${row.type}:${row.id}:`, Object.keys(config));
-          } catch (error) {
-            this.log.warn(`Failed to load config for channel ${row.id}:`, (error as Error).message);
-          }
-        }
-
-        // Use channel id as accountId
+        const config = await this.loadStoredChannelConfig(row.type, row.id);
         const accountId = row.id;
         this.log.info(`Creating channel ${row.type}:${accountId} with config keys:`, Object.keys(config));
         await this.createChannel(row.type, accountId, config);
       }
     } catch (error) {
-      this.log.debug("No channels found in DB or DB not initialized:", (error as Error).message);
+      this.log.debug("No channels found in HiveDB:", (error as Error).message);
+    }
+  }
+
+  private async loadStoredChannelConfig(channel: string, accountId: string): Promise<Record<string, unknown>> {
+    const entry = await (await col<UserChannelDoc>("userChannels")).get(`default:${channel}:${accountId}`);
+    if (!entry) return {};
+    try {
+      const encrypted = JSON.parse(entry.doc.config) as { encrypted: string; iv: string };
+      return decryptConfig(encrypted.encrypted, encrypted.iv);
+    } catch {
+      try { return JSON.parse(entry.doc.config); } catch { return {}; }
     }
   }
 

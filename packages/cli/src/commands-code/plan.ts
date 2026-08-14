@@ -6,7 +6,8 @@ import {
 import { getExecutionMode, setExecutionMode } from "@johpaz/hivecode-core"
 import { CoordinatorManager } from "@johpaz/hivecode-code/workers/coordinator-manager"
 import { listenModeToggle, stopModeToggle } from "@johpaz/hivecode-code/modes/keyboard"
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { CodeNarrativeDoc } from "@johpaz/hivecode-core/storage/collections"
 
 const CYAN   = "\x1b[38;5;87m"
 const AMBER  = "\x1b[38;5;214m"
@@ -99,12 +100,12 @@ export async function plan(
   // Show the harness if Bee generated one
   if (!quiet && activeTaskId) {
     try {
-      const db = getDb()
-      const row = db.query(
-        "SELECT entry FROM code_narrative WHERE task_id = ? AND phase = 'harness' ORDER BY id DESC LIMIT 1"
-      ).get(activeTaskId) as any
+      const row = (await (await col<CodeNarrativeDoc>("codeNarrative")).findBy("task_id", activeTaskId))
+        .map((entry) => entry.doc)
+        .filter((entry) => entry.phase === "harness")
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))[0]
       if (row?.entry) renderHarness(row.entry)
-    } catch { /* DB may not be available in some test contexts */ }
+    } catch { /* HiveDB may not be available in some test contexts */ }
   }
 
   if (!quiet) {

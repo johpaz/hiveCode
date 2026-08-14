@@ -1,5 +1,8 @@
 import type { Tool } from "../types.ts"
 import { validateCommand } from "./command-validator.ts"
+import * as nodePath from "node:path"
+import { col } from "../../storage/hive.ts"
+import type { CodeFileDoc, CodeFileSnapshotDoc, CodeTaskDoc } from "../../storage/collections.ts"
 
 // ─── Git Status ──────────────────────────────────────────────────────────────
 
@@ -641,15 +644,52 @@ const parseAstTool: Tool = {
 
 // ─── Find Imports ─────────────────────────────────────────────────────────────
 
+function normalizeImportPath(value: string): string {
+  return value.replace(/\\/g, "/")
+}
+
+function stripCodeExtension(value: string): string {
+  return value.replace(/\.(tsx?|jsx?|mts|cts|mjs|cjs)$/, "")
+}
+
+function parseCodeFileImports(doc: CodeFileDoc): string[] {
+  if (!doc.imports) return []
+  try {
+    const parsed = JSON.parse(doc.imports)
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : []
+  } catch {
+    return doc.imports.split(/\s+/).filter(Boolean)
+  }
+}
+
+function importMatchesTarget(importPath: string, targetPath: string): boolean {
+  const imp = normalizeImportPath(importPath)
+  const target = normalizeImportPath(targetPath)
+  const impNoExt = stripCodeExtension(imp)
+  const targetNoExt = stripCodeExtension(target)
+  const impBase = stripCodeExtension(nodePath.posix.basename(imp))
+  const targetBase = stripCodeExtension(nodePath.posix.basename(target))
+
+  return imp === target
+    || impNoExt === targetNoExt
+    || imp.endsWith(`/${target}`)
+    || impNoExt.endsWith(`/${targetNoExt}`)
+    || impBase === targetBase
+}
+
 const findImportsTool: Tool = {
   name: "find_imports",
-  description: "Find all files that import a given module path. Queries the code_graph SQLite table. Spanish: encontrar importadores, quién importa, dependencias inversas",
+  description: "Find all files that import a given module path. Queries the indexed code graph. Spanish: encontrar importadores, quién importa, dependencias inversas",
   parameters: {
     type: "object",
     properties: {
       path: {
         type: "string",
         description: "Module path to find importers for (e.g. 'src/auth/jwt.ts' or './jwt')",
+      },
+      sessionId: {
+        type: "string",
+        description: "Optional code session id. If omitted, searches all indexed code files.",
       },
     },
     required: ["path"],
@@ -658,18 +698,25 @@ const findImportsTool: Tool = {
     const targetPath = params.path as string
     if (!targetPath) return { ok: false, error: "path is required" }
     try {
-      const { getDb } = await import("../../storage/sqlite.ts")
-      const db = getDb()
-      const basename = targetPath.split("/").pop()?.replace(/\.(ts|tsx|js|jsx)$/, "") ?? targetPath
-      const rows = db.query(
-        `SELECT DISTINCT importer FROM code_graph
-         WHERE importee = ? OR importee LIKE ? OR importee LIKE ?`
-      ).all(targetPath, `%/${basename}`, `%/${basename}.%`) as { importer: string }[]
+      const codeFiles = await col<CodeFileDoc>("codeFiles")
+      const sessionId = typeof params.sessionId === "string" && params.sessionId.trim()
+        ? params.sessionId.trim()
+        : null
+      const entries = sessionId
+        ? await codeFiles.findBy("session_id", sessionId)
+        : await codeFiles.scan()
+      const importers = [...new Set(entries.flatMap(entry => {
+        const imports = parseCodeFileImports(entry.doc)
+        return imports.some(importPath => importMatchesTarget(importPath, targetPath))
+          ? [entry.doc.file_path]
+          : []
+      }))]
       return {
         ok: true,
         path: targetPath,
-        importers: rows.map(r => r.importer),
-        count: rows.length,
+        sessionId,
+        importers,
+        count: importers.length,
       }
     } catch (err) {
       return { ok: false, error: `find_imports failed: ${(err as Error).message}` }
@@ -990,7 +1037,7 @@ const gitCreatePrTool: Tool = {
 
 const gitRollbackTool: Tool = {
   name: "git_rollback",
-  description: "Restore file snapshots from SQLite and reset git to the state before a specific task. Requires user confirmation before execution. Spanish keywords: revertir tarea, restaurar snapshots, rollback, deshacer cambios, git reset",
+  description: "Restore file snapshots and reset git to the state before a specific task. Requires user confirmation before execution. Spanish keywords: revertir tarea, restaurar snapshots, rollback, deshacer cambios, git reset",
   parameters: {
     type: "object",
     properties: {
@@ -1028,19 +1075,18 @@ const gitRollbackTool: Tool = {
     }
 
     try {
-      const { getDb } = await import("../../storage/sqlite.ts")
-      const db = getDb()
-      const snapshots = db.query(
-        "SELECT * FROM code_file_snapshots WHERE task_id = ? ORDER BY id"
-      ).all(taskId) as any[]
+      const snapshotCol = await col<CodeFileSnapshotDoc>("codeFileSnapshots")
+      const snapshots = (await snapshotCol.findBy("task_id", taskId))
+        .map((entry) => ({ id: entry.id, ...entry.doc }))
+        .sort((a, b) => a.id.localeCompare(b.id))
 
       if (snapshots.length === 0) {
         return { ok: false, error: `No snapshots found for task: ${taskId}` }
       }
 
-      const taskInfo = db.query(
-        "SELECT description, branch_name FROM code_tasks WHERE id = ?"
-      ).get(taskId) as { description: string; branch_name: string | null } | undefined
+      const taskCol = await col<CodeTaskDoc>("codeTasks")
+      const taskEntry = await taskCol.get(taskId)
+      const taskInfo = taskEntry?.doc
 
       if (dryRun) {
         return {
@@ -1080,8 +1126,10 @@ const gitRollbackTool: Tool = {
         Bun.spawn(["git", "branch", "-D", branchName], { cwd: repoPath })
       }
 
-      db.query("DELETE FROM code_file_snapshots WHERE task_id = ?").run(taskId)
-      db.query("UPDATE code_tasks SET status = 'rolled_back' WHERE id = ?").run(taskId)
+      for (const snap of snapshots) await snapshotCol.delete(snap.id)
+      if (taskEntry) {
+        await taskCol.put(taskId, { ...taskEntry.doc, status: "rolled_back" }, { expectedVersion: taskEntry.version })
+      }
 
       return {
         ok: true,

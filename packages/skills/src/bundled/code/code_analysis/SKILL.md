@@ -108,7 +108,7 @@ parse_ast({ path: "src/coordinator/manager.ts" })
 
 ### Encontrar dependientes
 ```javascript
-find_imports({ path: "packages/core/src/storage/sqlite.ts" })
+find_imports({ path: "packages/core/src/storage/hivedb.ts" })
 // → { importers: ["src/tools/...", "src/gateway/..."], count: 12 }
 ```
 

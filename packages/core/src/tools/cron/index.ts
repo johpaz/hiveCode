@@ -1,97 +1,126 @@
 /**
- * Cron Tools for Coordinator Agent
- *
- * Tools for managing cron jobs via natural language chat.
- * These tools are registered with the Coordinator agent and allow
- * users to create, list, update, pause, resume, delete, and trigger cron jobs.
- *
- * @category cron
+ * Cron tools for the Coordinator agent, backed by HiveDB.
  */
 
 import type { Tool } from "../types";
-import { getDb } from "../../storage/sqlite";
+import { col } from "../../storage/hive";
+import type { ChannelDoc, CronJobDoc, TaskRunDoc, UserDoc, UserIdentityDoc } from "../../storage/collections";
+import type { CronScheduler } from "../../scheduler/CronScheduler";
 import { logger } from "../../utils/logger";
 
 const log = logger.child("CronTools");
 
-let _scheduler: any = null;
+let scheduler: CronScheduler | null = null;
 
-export function setSchedulerInstance(scheduler: any): void {
-  _scheduler = scheduler;
+export function setSchedulerInstance(instance: CronScheduler): void {
+  scheduler = instance;
 }
 
-export function getSchedulerInstance(): any {
-  return _scheduler;
+export function getSchedulerInstance(): CronScheduler | null {
+  return scheduler;
 }
 
-function getUserTimezone(): string {
-  const db = getDb();
-  const user = db.query("SELECT timezone FROM users LIMIT 1").get() as { timezone: string } | undefined;
+async function getUserTimezone(): Promise<string> {
+  const user = (await (await col<UserDoc>("users")).scan()).map((entry) => entry.doc)[0];
   return user?.timezone || "UTC";
 }
 
-export function resolveBestChannel(userId: string, explicitChannel?: string): string {
-  const db = getDb();
+export async function resolveBestChannel(userId: string, explicitChannel?: string): Promise<string> {
+  const users = await col<UserDoc>("users");
+  const user = (await users.get(userId))?.doc;
+  const identities = (await (await col<UserIdentityDoc>("userIdentities")).findBy("user_id", userId)).map((entry) => entry.doc);
+  const connectedTypes = new Set((await (await col<ChannelDoc>("channels")).scan())
+    .map((entry) => entry.doc)
+    .filter((channel) => channel.active && channel.status === "connected")
+    .map((channel) => channel.type));
 
-  const user = db.query("SELECT preferred_cron_channel FROM users WHERE id = ? LIMIT 1").get(userId) as {
-    preferred_cron_channel: string;
-  } | undefined;
+  const activeIdentities = identities.filter((identity) => connectedTypes.has(identity.channel));
+  const candidates = activeIdentities.length > 0 ? activeIdentities : identities;
 
-  const activeChannels = db.query(`
-    SELECT DISTINCT ui.channel FROM user_identities ui
-    JOIN channels c ON c.type = ui.channel
-    WHERE ui.user_id = ? AND c.active = 1 AND c.status = 'connected'
-  `).all(userId) as { channel: string }[];
+  log.debug(`[resolveBestChannel] userId=${userId}, explicit=${explicitChannel}, preferred=${user?.preferred_cron_channel}, candidates=[${candidates.map(c => c.channel).join(", ")}]`);
 
-  log.debug(`[resolveBestChannel] userId=${userId}, explicit=${explicitChannel}, preferred=${user?.preferred_cron_channel}, activeChannels=[${activeChannels.map(c => c.channel).join(", ")}]`);
+  if (candidates.length === 0) return "webchat";
 
-  const identities = activeChannels.length > 0
-    ? activeChannels
-    : db.query("SELECT channel FROM user_identities WHERE user_id = ?").all(userId) as { channel: string }[];
-
-  if (identities.length === 0) {
-    log.warn(`[resolveBestChannel] No identities found for user ${userId}, falling back to webchat`);
-    return "webchat";
+  if (explicitChannel && explicitChannel !== "system" && candidates.some((i) => i.channel === explicitChannel)) {
+    return explicitChannel;
   }
 
-  let bestChannel = "";
-
-  if (explicitChannel && explicitChannel !== "system") {
-    if (identities.some((i) => i.channel === explicitChannel)) {
-      bestChannel = explicitChannel;
-      log.info(`[resolveBestChannel] Using explicit channel: ${bestChannel}`);
-    }
+  if (user?.preferred_cron_channel && user.preferred_cron_channel !== "auto" && candidates.some((i) => i.channel === user.preferred_cron_channel)) {
+    return user.preferred_cron_channel;
   }
 
-  if (!bestChannel && user?.preferred_cron_channel && user.preferred_cron_channel !== "auto") {
-    if (identities.some((i) => i.channel === user.preferred_cron_channel)) {
-      bestChannel = user.preferred_cron_channel;
-      log.info(`[resolveBestChannel] Using preferred_cron_channel: ${bestChannel}`);
-    } else {
-      log.warn(`[resolveBestChannel] preferred_cron_channel=${user.preferred_cron_channel} not in identities=[${identities.map(i => i.channel).join(", ")}]`);
-    }
+  for (const preferred of ["telegram", "discord", "slack", "whatsapp", "webchat"]) {
+    if (candidates.some((i) => i.channel === preferred)) return preferred;
   }
 
-  if (!bestChannel) {
-    const preferred = ["telegram", "discord", "slack", "whatsapp", "webchat"];
-    for (const p of preferred) {
-      if (identities.some((i) => i.channel === p)) {
-        bestChannel = p;
-        log.info(`[resolveBestChannel] Using fallback priority: ${bestChannel}`);
-        break;
-      }
-    }
-  }
-
-  if (!bestChannel) {
-    bestChannel = identities[0].channel;
-    log.info(`[resolveBestChannel] Using first identity: ${bestChannel}`);
-  }
-
-  return bestChannel;
+  return candidates[0].channel;
 }
 
-// ─── cron.create ─────────────────────────────────────────────────────────────
+function makeCronDoc(input: {
+  id: string;
+  name: string;
+  task: string;
+  task_type: "recurring" | "one_shot";
+  cron_expression?: string | null;
+  fire_at?: string | null;
+  timezone: string;
+  payload?: Record<string, unknown>;
+  agent_id?: string | null;
+  tool_name?: string | null;
+  max_runs?: number | null;
+  channel?: string;
+  start_at?: string | null;
+  stop_at?: string | null;
+  dom_and_dow?: boolean;
+}): CronJobDoc {
+  const now = new Date().toISOString();
+  return {
+    id: input.id,
+    name: input.name,
+    task: input.task,
+    task_type: input.task_type,
+    cron_expression: input.cron_expression ?? null,
+    fire_at: input.fire_at ?? null,
+    timezone: input.timezone,
+    start_at: input.start_at ?? null,
+    stop_at: input.stop_at ?? null,
+    dom_and_dow: !!input.dom_and_dow,
+    max_runs: input.max_runs ?? null,
+    protect: true,
+    interval_sec: null,
+    agent_id: input.agent_id ?? "",
+    channel: input.channel || "system",
+    payload: JSON.stringify(input.payload ?? {}),
+    tool_name: input.tool_name ?? null,
+    status: "active",
+    run_count: 0,
+    error_count: 0,
+    last_error: null,
+    created_at: now,
+    updated_at: now,
+    last_run_at: null,
+    next_run_at: input.task_type === "one_shot" ? input.fire_at ?? null : null,
+    completed_at: null,
+  };
+}
+
+async function patchCronJob(id: string, patch: Partial<CronJobDoc>): Promise<boolean> {
+  const jobs = await col<CronJobDoc>("cronJobs");
+  const entry = await jobs.get(id);
+  if (!entry) return false;
+  await jobs.put(id, { ...entry.doc, ...patch, updated_at: new Date().toISOString() }, { expectedVersion: entry.version });
+  return true;
+}
+
+function normalizeChanges(changes: Record<string, unknown>): Partial<CronJobDoc> {
+  const patch: Partial<CronJobDoc> = {};
+  for (const key of ["name", "task", "cron_expression", "fire_at", "channel", "max_runs", "start_at", "stop_at", "agent_id", "tool_name"] as const) {
+    if (changes[key] !== undefined) (patch as any)[key] = changes[key] ?? null;
+  }
+  if (changes.payload !== undefined) patch.payload = JSON.stringify(changes.payload ?? {});
+  if (changes.dom_and_dow !== undefined) patch.dom_and_dow = !!changes.dom_and_dow;
+  return patch;
+}
 
 export const cronCreateTool: Tool = {
   name: "cron.create",
@@ -99,58 +128,34 @@ export const cronCreateTool: Tool = {
   parameters: {
     type: "object",
     properties: {
-      name: { type: "string", description: "Short name for the job (e.g., 'daily-report', 'morning-reminder')" },
-      task: { type: "string", description: "REQUIRED: Natural language instruction the agent reads when the job triggers (e.g., 'Generate daily sales report and send summary via Telegram')" },
-      task_type: { type: "string", enum: ["recurring", "one_shot"], description: "Type: 'recurring' for cron-based, 'one_shot' for single execution" },
-      cron_expression: { type: "string", description: "Cron expression (5-7 fields) for recurring tasks. Example: '0 9 * * *' (daily at 9 AM)" },
-      fire_at: { type: "string", description: "ISO 8601 datetime for one_shot tasks. Example: '2026-04-01T09:00:00'" },
-      payload: { type: "object", description: "Payload with 'prompt' or 'message' field. Defaults to using 'task' field if omitted" },
-      agent_id: { type: "string", description: "Target agent ID (optional, defaults to Coordinator)" },
-      tool_name: { type: "string", description: "Specific tool to execute (optional)" },
-      max_runs: { type: "number", description: "Maximum executions (optional, null = unlimited)" },
-      channel: { type: "string", description: "Notification channel (system, telegram, discord, whatsapp, cli)" },
-      start_at: { type: "string", description: "ISO 8601 datetime: start of execution window (Croner startAt). Optional." },
-      stop_at: { type: "string", description: "ISO 8601 datetime: end of execution window (Croner stopAt). Optional." },
-      dom_and_dow: { type: "boolean", description: "If true, both day-of-month AND day-of-week must match (Croner domAndDow). Default: false (OR logic)" },
+      name: { type: "string", description: "Short name for the job" },
+      task: { type: "string", description: "REQUIRED: Natural language instruction the agent reads when the job triggers" },
+      task_type: { type: "string", enum: ["recurring", "one_shot"], description: "Type of scheduled task" },
+      cron_expression: { type: "string", description: "Cron expression for recurring tasks" },
+      fire_at: { type: "string", description: "ISO 8601 datetime for one_shot tasks" },
+      payload: { type: "object", description: "Payload with prompt or message field" },
+      agent_id: { type: "string", description: "Target agent ID" },
+      tool_name: { type: "string", description: "Specific tool to execute" },
+      max_runs: { type: "number", description: "Maximum executions" },
+      channel: { type: "string", description: "Notification channel" },
+      start_at: { type: "string", description: "Execution window start" },
+      stop_at: { type: "string", description: "Execution window end" },
+      dom_and_dow: { type: "boolean", description: "Require both day-of-month and day-of-week match" },
     },
     required: ["name", "task", "task_type"],
   },
   execute: async (params: Record<string, unknown>) => {
-    const timezone = getUserTimezone();
-
     const name = params.name as string | undefined;
     const task = params.task as string | undefined;
     const task_type = params.task_type as "recurring" | "one_shot" | undefined;
     const cron_expression = params.cron_expression as string | undefined;
     const fire_at = params.fire_at as string | undefined;
-    const payload = params.payload as Record<string, unknown> | undefined;
-    const agent_id = params.agent_id as string | undefined;
-    const tool_name = params.tool_name as string | undefined;
-    const max_runs = params.max_runs as number | undefined;
-    const channel = (params.channel as string) || "system";
-    const start_at = params.start_at as string | undefined;
-    const stop_at = params.stop_at as string | undefined;
-    const dom_and_dow = params.dom_and_dow as boolean | undefined;
 
-    if (!name) {
-      return { ok: false, error: "Missing required field: name" };
-    }
-
-    if (!task) {
-      return { ok: false, error: "Missing required field: task — provide the instruction the agent should execute" };
-    }
-
-    if (!task_type) {
-      return { ok: false, error: "Missing required field: task_type (recurring or one_shot)" };
-    }
-
-    if (task_type === "recurring" && !cron_expression) {
-      return { ok: false, error: "recurring task requires cron_expression" };
-    }
-
-    if (task_type === "one_shot" && !fire_at) {
-      return { ok: false, error: "one_shot task requires fire_at" };
-    }
+    if (!name) return { ok: false, error: "Missing required field: name" };
+    if (!task) return { ok: false, error: "Missing required field: task - provide the instruction the agent should execute" };
+    if (!task_type) return { ok: false, error: "Missing required field: task_type (recurring or one_shot)" };
+    if (task_type === "recurring" && !cron_expression) return { ok: false, error: "recurring task requires cron_expression" };
+    if (task_type === "one_shot" && !fire_at) return { ok: false, error: "one_shot task requires fire_at" };
 
     if (cron_expression) {
       try {
@@ -160,37 +165,31 @@ export const cronCreateTool: Tool = {
       }
     }
 
-    if (fire_at) {
-      const fireAtDate = new Date(fire_at);
-      if (fireAtDate.getTime() <= Date.now()) {
-        return { ok: false, error: "fire_at must be in the future" };
-      }
+    if (fire_at && new Date(fire_at).getTime() <= Date.now()) {
+      return { ok: false, error: "fire_at must be in the future" };
     }
 
-    const payloadObj = payload && !payload._internal
-      ? payload
-      : { prompt: task, ...payload };
+    const payload = params.payload as Record<string, unknown> | undefined;
+    const payloadObj = payload && !payload._internal ? payload : { prompt: task, ...payload };
 
     try {
-      if (_scheduler) {
-        const result = _scheduler.create({
+      if (scheduler) {
+        const result = await scheduler.create({
           name,
           task,
           task_type,
           cron_expression,
           fire_at,
-          timezone,
+          timezone: await getUserTimezone(),
           payload: payloadObj,
-          agent_id: agent_id || null,
-          tool_name: tool_name || null,
-          max_runs: max_runs || null,
-          channel,
-          start_at: start_at || undefined,
-          stop_at: stop_at || undefined,
-          dom_and_dow: dom_and_dow || false,
+          agent_id: (params.agent_id as string | undefined) || null,
+          tool_name: (params.tool_name as string | undefined) || null,
+          max_runs: (params.max_runs as number | undefined) || null,
+          channel: (params.channel as string | undefined) || "system",
+          start_at: params.start_at as string | undefined,
+          stop_at: params.stop_at as string | undefined,
+          dom_and_dow: !!params.dom_and_dow,
         });
-
-        log.info(`[create] Job "${name}" created via scheduler: ${result.id}`);
 
         return {
           ok: true,
@@ -198,40 +197,34 @@ export const cronCreateTool: Tool = {
           next_run: result.nextRun,
           message: `Job "${name}" scheduled. Next run: ${result.nextRun ? new Date(result.nextRun).toLocaleString() : "unknown"}`,
         };
-      } else {
-        const db = getDb();
-        const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-        const now = new Date().toISOString();
-        const payloadJson = JSON.stringify(payloadObj || { prompt: task });
-
-        db.query(`
-          INSERT INTO cron_jobs (
-            id, name, task, task_type, cron_expression, fire_at, timezone,
-            start_at, stop_at, dom_and_dow,
-            payload, agent_id, tool_name, max_runs, channel,
-            status, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
-        `).run(
-          id, name, task, task_type, cron_expression || null, fire_at || null, timezone,
-          start_at || null, stop_at || null, dom_and_dow ? 1 : 0,
-          payloadJson, agent_id || null, tool_name || null, max_runs || null, channel,
-          now, now
-        );
-
-        return {
-          ok: true,
-          task_id: id,
-          message: `Job "${name}" saved (scheduler not active)`,
-        };
       }
+
+      const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      await (await col<CronJobDoc>("cronJobs")).put(id, makeCronDoc({
+        id,
+        name,
+        task,
+        task_type,
+        cron_expression,
+        fire_at,
+        timezone: await getUserTimezone(),
+        payload: payloadObj,
+        agent_id: (params.agent_id as string | undefined) || null,
+        tool_name: (params.tool_name as string | undefined) || null,
+        max_runs: (params.max_runs as number | undefined) || null,
+        channel: (params.channel as string | undefined) || "system",
+        start_at: (params.start_at as string | undefined) || null,
+        stop_at: (params.stop_at as string | undefined) || null,
+        dom_and_dow: !!params.dom_and_dow,
+      }), { expectedVersion: 0 });
+
+      return { ok: true, task_id: id, message: `Job "${name}" saved (scheduler not active)` };
     } catch (err) {
       log.error(`[create] Failed: ${(err as Error).message}`);
       return { ok: false, error: `Failed to create job: ${(err as Error).message}` };
     }
   },
 };
-
-// ─── cron.list ────────────────────────────────────────────────────────────────
 
 export const cronListTool: Tool = {
   name: "cron.list",
@@ -244,45 +237,30 @@ export const cronListTool: Tool = {
     },
   },
   execute: async (params: Record<string, unknown>) => {
-    const db = getDb();
-
-    const status = params.status as string | undefined;
-    const task_type = params.task_type as string | undefined;
-
     try {
-      let query = "SELECT * FROM cron_jobs WHERE 1=1";
-      const args: any[] = [];
-
-      if (status) {
-        query += " AND status = ?";
-        args.push(status);
-      }
-
-      if (task_type) {
-        query += " AND task_type = ?";
-        args.push(task_type);
-      }
-
-      query += " ORDER BY next_run_at ASC";
-
-      const tasks = db.query(query).all(...args) as any[];
+      const status = params.status as string | undefined;
+      const task_type = params.task_type as string | undefined;
+      const docs = scheduler
+        ? await scheduler.listTasks(status)
+        : (await (await col<CronJobDoc>("cronJobs")).scan()).map((entry) => entry.doc).filter((task) => !status || task.status === status);
+      const tasks = docs
+        .filter((task) => !task_type || task.task_type === task_type)
+        .sort((a, b) => String(a.next_run_at ?? "").localeCompare(String(b.next_run_at ?? "")));
 
       return {
         ok: true,
-        tasks: tasks.map((t) => ({
-          id: t.id,
-          name: t.name,
-          task: t.task,
-          type: t.task_type,
-          status: t.status,
-          cron_expression: t.cron_expression,
-          fire_at: t.fire_at,
-          start_at: t.start_at,
-          stop_at: t.stop_at,
-          next_run: t.next_run_at,
-          last_run: t.last_run_at,
-          run_count: t.run_count,
-          channel: t.channel,
+        tasks: tasks.map((task) => ({
+          id: task.id,
+          name: task.name,
+          task: task.task,
+          type: task.task_type,
+          status: task.status,
+          cron_expression: task.cron_expression,
+          fire_at: task.fire_at,
+          next_run: task.next_run_at,
+          last_run: task.last_run_at,
+          run_count: task.run_count,
+          channel: task.channel,
         })),
         count: tasks.length,
       };
@@ -293,8 +271,6 @@ export const cronListTool: Tool = {
   },
 };
 
-// ─── cron.update ───────────────────────────────────────────────────────────────
-
 export const cronUpdateTool: Tool = {
   name: "cron.update",
   description: "Update an existing cron job: change expression, task instruction, channel, time window, etc. Spanish: actualizar tarea programada, modificar cron, editar recordatorio",
@@ -302,85 +278,36 @@ export const cronUpdateTool: Tool = {
     type: "object",
     properties: {
       task_id: { type: "string", description: "ID of the job to update" },
-      name: { type: "string", description: "New name for the job" },
-      task: { type: "string", description: "New instruction the agent reads when the job triggers" },
-      cron_expression: { type: "string", description: "New cron expression (for recurring tasks)" },
-      fire_at: { type: "string", description: "New fire_at datetime (for one_shot tasks)" },
-      payload: { type: "object", description: "New payload object" },
-      channel: { type: "string", description: "New notification channel" },
-      max_runs: { type: "number", description: "New max executions limit" },
-      start_at: { type: "string", description: "New start of execution window (ISO 8601)" },
-      stop_at: { type: "string", description: "New end of execution window (ISO 8601)" },
-      dom_and_dow: { type: "boolean", description: "Toggle AND logic for day-of-month + day-of-week" },
-      agent_id: { type: "string", description: "New target agent ID" },
-      tool_name: { type: "string", description: "New tool to execute" },
+      name: { type: "string" },
+      task: { type: "string" },
+      cron_expression: { type: "string" },
+      fire_at: { type: "string" },
+      payload: { type: "object" },
+      channel: { type: "string" },
+      max_runs: { type: "number" },
+      start_at: { type: "string" },
+      stop_at: { type: "string" },
+      dom_and_dow: { type: "boolean" },
+      agent_id: { type: "string" },
+      tool_name: { type: "string" },
     },
     required: ["task_id"],
   },
   execute: async (params: Record<string, unknown>) => {
-    const task_id = params.task_id as string | undefined;
+    const taskId = params.task_id as string | undefined;
+    if (!taskId) return { ok: false, error: "Missing required field: task_id" };
 
-    if (!task_id) {
-      return { ok: false, error: "Missing required field: task_id" };
-    }
-
-    const changes: Record<string, unknown> = {};
-    if (params.name !== undefined) changes.name = params.name;
-    if (params.task !== undefined) changes.task = params.task;
-    if (params.cron_expression !== undefined) changes.cron_expression = params.cron_expression;
-    if (params.fire_at !== undefined) changes.fire_at = params.fire_at;
-    if (params.payload !== undefined) changes.payload = params.payload;
-    if (params.channel !== undefined) changes.channel = params.channel;
-    if (params.max_runs !== undefined) changes.max_runs = params.max_runs;
-    if (params.start_at !== undefined) changes.start_at = params.start_at;
-    if (params.stop_at !== undefined) changes.stop_at = params.stop_at;
-    if (params.dom_and_dow !== undefined) changes.dom_and_dow = params.dom_and_dow;
-    if (params.agent_id !== undefined) changes.agent_id = params.agent_id;
-    if (params.tool_name !== undefined) changes.tool_name = params.tool_name;
-
-    if (Object.keys(changes).length === 0) {
-      return { ok: false, error: "No fields to update. Provide at least one field besides task_id." };
-    }
+    const changes = { ...params };
+    delete changes.task_id;
+    if (Object.keys(changes).length === 0) return { ok: false, error: "No fields to update. Provide at least one field besides task_id." };
 
     try {
-      if (_scheduler) {
-        const success = _scheduler.update(task_id, changes);
-        if (success) {
-          return { ok: true, message: `Job "${task_id}" updated` };
-        } else {
-          return { ok: false, error: `Job "${task_id}" not found` };
-        }
-      } else {
-        const db = getDb();
-        const fields: string[] = [];
-        const values: any[] = [];
-
-        if (changes.name !== undefined) { fields.push("name = ?"); values.push(changes.name); }
-        if (changes.task !== undefined) { fields.push("task = ?"); values.push(changes.task); }
-        if (changes.cron_expression !== undefined) { fields.push("cron_expression = ?"); values.push(changes.cron_expression); }
-        if (changes.fire_at !== undefined) { fields.push("fire_at = ?"); values.push(changes.fire_at); }
-        if (changes.payload !== undefined) { fields.push("payload = ?"); values.push(JSON.stringify(changes.payload)); }
-        if (changes.channel !== undefined) { fields.push("channel = ?"); values.push(changes.channel); }
-        if (changes.max_runs !== undefined) { fields.push("max_runs = ?"); values.push(changes.max_runs); }
-        if (changes.start_at !== undefined) { fields.push("start_at = ?"); values.push(changes.start_at); }
-        if (changes.stop_at !== undefined) { fields.push("stop_at = ?"); values.push(changes.stop_at); }
-        if (changes.dom_and_dow !== undefined) { fields.push("dom_and_dow = ?"); values.push(changes.dom_and_dow ? 1 : 0); }
-        if (changes.agent_id !== undefined) { fields.push("agent_id = ?"); values.push(changes.agent_id); }
-        if (changes.tool_name !== undefined) { fields.push("tool_name = ?"); values.push(changes.tool_name); }
-
-        if (fields.length === 0) {
-          return { ok: true, message: "No changes to apply" };
-        }
-
-        values.push(task_id);
-        const result = db.query(`UPDATE cron_jobs SET ${fields.join(", ")} WHERE id = ?`).run(...values);
-
-        if (result.changes > 0) {
-          return { ok: true, message: `Job "${task_id}" updated (scheduler not active)` };
-        } else {
-          return { ok: false, error: `Job "${task_id}" not found` };
-        }
-      }
+      const success = scheduler
+        ? await scheduler.update(taskId, changes)
+        : await patchCronJob(taskId, normalizeChanges(changes));
+      return success
+        ? { ok: true, message: `Job "${taskId}" updated` }
+        : { ok: false, error: `Job "${taskId}" not found` };
     } catch (err) {
       log.error(`[update] Failed: ${(err as Error).message}`);
       return { ok: false, error: `Failed to update job: ${(err as Error).message}` };
@@ -388,45 +315,16 @@ export const cronUpdateTool: Tool = {
   },
 };
 
-// ─── cron.pause ───────────────────────────────────────────────────────────────
-
 export const cronPauseTool: Tool = {
   name: "cron.pause",
   description: "Pause a cron job temporarily without deleting it. Spanish: pausar tarea programada, detener temporalmente",
-  parameters: {
-    type: "object",
-    properties: {
-      task_id: { type: "string", description: "ID of the job to pause" },
-    },
-    required: ["task_id"],
-  },
+  parameters: { type: "object", properties: { task_id: { type: "string", description: "ID of the job to pause" } }, required: ["task_id"] },
   execute: async (params: Record<string, unknown>) => {
-    const task_id = params.task_id as string | undefined;
-
-    if (!task_id) {
-      return { ok: false, error: "Missing required field: task_id" };
-    }
-
+    const taskId = params.task_id as string | undefined;
+    if (!taskId) return { ok: false, error: "Missing required field: task_id" };
     try {
-      if (_scheduler) {
-        const success = _scheduler.pause(task_id);
-        if (success) {
-          return { ok: true, message: `Job "${task_id}" paused` };
-        } else {
-          return { ok: false, error: `Job "${task_id}" not found or already paused` };
-        }
-      } else {
-        const db = getDb();
-        const result = db.query(
-          "UPDATE cron_jobs SET status = 'paused' WHERE id = ?"
-        ).run(task_id);
-
-        if (result.changes > 0) {
-          return { ok: true, message: `Job "${task_id}" paused (scheduler not active)` };
-        } else {
-          return { ok: false, error: `Job "${task_id}" not found` };
-        }
-      }
+      const success = scheduler ? await scheduler.pause(taskId) : await patchCronJob(taskId, { status: "paused" });
+      return success ? { ok: true, message: `Job "${taskId}" paused` } : { ok: false, error: `Job "${taskId}" not found or already paused` };
     } catch (err) {
       log.error(`[pause] Failed: ${(err as Error).message}`);
       return { ok: false, error: `Failed to pause job: ${(err as Error).message}` };
@@ -434,45 +332,16 @@ export const cronPauseTool: Tool = {
   },
 };
 
-// ─── cron.resume ──────────────────────────────────────────────────────────────
-
 export const cronResumeTool: Tool = {
   name: "cron.resume",
   description: "Resume a paused cron job. Spanish: reanudar tarea programada, continuar",
-  parameters: {
-    type: "object",
-    properties: {
-      task_id: { type: "string", description: "ID of the job to resume" },
-    },
-    required: ["task_id"],
-  },
+  parameters: { type: "object", properties: { task_id: { type: "string", description: "ID of the job to resume" } }, required: ["task_id"] },
   execute: async (params: Record<string, unknown>) => {
-    const task_id = params.task_id as string | undefined;
-
-    if (!task_id) {
-      return { ok: false, error: "Missing required field: task_id" };
-    }
-
+    const taskId = params.task_id as string | undefined;
+    if (!taskId) return { ok: false, error: "Missing required field: task_id" };
     try {
-      if (_scheduler) {
-        const success = _scheduler.resume(task_id);
-        if (success) {
-          return { ok: true, message: `Job "${task_id}" resumed` };
-        } else {
-          return { ok: false, error: `Job "${task_id}" not found or already active` };
-        }
-      } else {
-        const db = getDb();
-        const result = db.query(
-          "UPDATE cron_jobs SET status = 'active' WHERE id = ?"
-        ).run(task_id);
-
-        if (result.changes > 0) {
-          return { ok: true, message: `Job "${task_id}" resumed (scheduler not active)` };
-        } else {
-          return { ok: false, error: `Job "${task_id}" not found` };
-        }
-      }
+      const success = scheduler ? await scheduler.resume(taskId) : await patchCronJob(taskId, { status: "active" });
+      return success ? { ok: true, message: `Job "${taskId}" resumed` } : { ok: false, error: `Job "${taskId}" not found or already active` };
     } catch (err) {
       log.error(`[resume] Failed: ${(err as Error).message}`);
       return { ok: false, error: `Failed to resume job: ${(err as Error).message}` };
@@ -480,45 +349,22 @@ export const cronResumeTool: Tool = {
   },
 };
 
-// ─── cron.delete ──────────────────────────────────────────────────────────────
-
 export const cronDeleteTool: Tool = {
   name: "cron.delete",
   description: "Delete a cron job permanently. Spanish: eliminar tarea programada, cancelar recordatorio",
-  parameters: {
-    type: "object",
-    properties: {
-      task_id: { type: "string", description: "ID of the job to delete" },
-    },
-    required: ["task_id"],
-  },
+  parameters: { type: "object", properties: { task_id: { type: "string", description: "ID of the job to delete" } }, required: ["task_id"] },
   execute: async (params: Record<string, unknown>) => {
-    const task_id = params.task_id as string | undefined;
-
-    if (!task_id) {
-      return { ok: false, error: "Missing required field: task_id" };
-    }
-
+    const taskId = params.task_id as string | undefined;
+    if (!taskId) return { ok: false, error: "Missing required field: task_id" };
     try {
-      if (_scheduler) {
-        const success = _scheduler.delete(task_id);
-        if (success) {
-          return { ok: true, message: `Job "${task_id}" deleted` };
-        } else {
-          return { ok: false, error: `Job "${task_id}" not found` };
-        }
-      } else {
-        const db = getDb();
-        const result = db.query(
-          "DELETE FROM cron_jobs WHERE id = ?"
-        ).run(task_id);
-
-        if (result.changes > 0) {
-          return { ok: true, message: `Job "${task_id}" deleted (scheduler not active)` };
-        } else {
-          return { ok: false, error: `Job "${task_id}" not found` };
-        }
+      if (scheduler) {
+        const success = await scheduler.delete(taskId);
+        return success ? { ok: true, message: `Job "${taskId}" deleted` } : { ok: false, error: `Job "${taskId}" not found` };
       }
+      const jobs = await col<CronJobDoc>("cronJobs");
+      if (!(await jobs.get(taskId))) return { ok: false, error: `Job "${taskId}" not found` };
+      await jobs.delete(taskId);
+      return { ok: true, message: `Job "${taskId}" deleted` };
     } catch (err) {
       log.error(`[delete] Failed: ${(err as Error).message}`);
       return { ok: false, error: `Failed to delete job: ${(err as Error).message}` };
@@ -526,44 +372,23 @@ export const cronDeleteTool: Tool = {
   },
 };
 
-// ─── cron.trigger ─────────────────────────────────────────────────────────────
-
 export const cronTriggerTool: Tool = {
   name: "cron.trigger",
-  description: "Manually trigger a cron job execution immediately. Spanish: ejecutar tarea ahora, forzar ejecución",
-  parameters: {
-    type: "object",
-    properties: {
-      task_id: { type: "string", description: "ID of the job to trigger" },
-    },
-    required: ["task_id"],
-  },
+  description: "Manually trigger a cron job execution immediately. Spanish: ejecutar tarea ahora, forzar ejecucion",
+  parameters: { type: "object", properties: { task_id: { type: "string", description: "ID of the job to trigger" } }, required: ["task_id"] },
   execute: async (params: Record<string, unknown>) => {
-    const task_id = params.task_id as string | undefined;
-
-    if (!task_id) {
-      return { ok: false, error: "Missing required field: task_id" };
-    }
-
+    const taskId = params.task_id as string | undefined;
+    if (!taskId) return { ok: false, error: "Missing required field: task_id" };
+    if (!scheduler) return { ok: false, error: "Scheduler not active - cannot trigger jobs" };
     try {
-      if (_scheduler) {
-        const success = _scheduler.trigger(task_id);
-        if (success) {
-          return { ok: true, message: `Job "${task_id}" triggered` };
-        } else {
-          return { ok: false, error: `Job "${task_id}" not found or not active` };
-        }
-      } else {
-        return { ok: false, error: "Scheduler not active - cannot trigger jobs" };
-      }
+      const success = await scheduler.trigger(taskId);
+      return success ? { ok: true, message: `Job "${taskId}" triggered` } : { ok: false, error: `Job "${taskId}" not found or not active` };
     } catch (err) {
       log.error(`[trigger] Failed: ${(err as Error).message}`);
       return { ok: false, error: `Failed to trigger job: ${(err as Error).message}` };
     }
   },
 };
-
-// ─── cron.history ─────────────────────────────────────────────────────────────
 
 export const cronHistoryTool: Tool = {
   name: "cron.history",
@@ -572,36 +397,29 @@ export const cronHistoryTool: Tool = {
     type: "object",
     properties: {
       task_id: { type: "string", description: "ID of the job" },
-      limit: { type: "number", description: "Maximum number of records (default: 10)" },
+      limit: { type: "number", description: "Maximum number of records" },
     },
     required: ["task_id"],
   },
   execute: async (params: Record<string, unknown>) => {
-    const task_id = params.task_id as string | undefined;
+    const taskId = params.task_id as string | undefined;
     const limit = (params.limit as number) || 10;
-
-    if (!task_id) {
-      return { ok: false, error: "Missing required field: task_id" };
-    }
+    if (!taskId) return { ok: false, error: "Missing required field: task_id" };
 
     try {
-      const db = getDb();
-      const runs = db.query(`
-        SELECT * FROM task_runs
-        WHERE task_id = ?
-        ORDER BY started_at DESC
-        LIMIT ?
-      `).all(task_id, limit) as any[];
-
+      const runs = (await (await col<TaskRunDoc>("taskRuns")).findBy("task_id", taskId))
+        .map((entry) => entry.doc)
+        .sort((a, b) => b.started_at.localeCompare(a.started_at))
+        .slice(0, limit);
       return {
         ok: true,
-        history: runs.map((r) => ({
-          id: r.id,
-          status: r.status,
-          started_at: r.started_at,
-          finished_at: r.finished_at,
-          duration_ms: r.duration_ms,
-          error_message: r.error_message,
+        history: runs.map((run) => ({
+          id: run.id,
+          status: run.status,
+          started_at: run.started_at,
+          finished_at: run.finished_at,
+          duration_ms: run.duration_ms,
+          error_message: run.error_message,
         })),
         count: runs.length,
       };
@@ -612,9 +430,6 @@ export const cronHistoryTool: Tool = {
   },
 };
 
-/**
- * Create all cron tools
- */
 export function createTools(): Tool[] {
   return [
     cronCreateTool,
@@ -628,7 +443,4 @@ export function createTools(): Tool[] {
   ];
 }
 
-/**
- * Alias for backward compatibility
- */
 export const createCronTools = createTools;

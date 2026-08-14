@@ -1,37 +1,54 @@
-import { getDb } from "./sqlite.ts";
+import { col, toIndexable } from "./hive.ts";
+import type { AgentDoc, UserDoc } from "./collections.ts";
+import { ensureCoreAgentProfiles } from "../agent/agent-profiles.ts";
 
-export function resolveUserId(): string {
+export async function resolveUserId(): Promise<string> {
   try {
-    const row = getDb().query("SELECT id FROM users ORDER BY created_at ASC LIMIT 1").get() as { id: string } | undefined;
+    const users = await col<UserDoc>("users");
+    const row = (await users.scan())
+      .map((entry) => entry.doc)
+      .sort((a, b) => a.created_at - b.created_at)[0];
     return row?.id ?? "default";
   } catch {
     return "default";
   }
 }
 
-export function resolveAgentId(): string {
+export async function resolveAgentId(): Promise<string> {
   try {
-    const db = getDb();
-    const row = db.query(
-      "SELECT id FROM agents WHERE role = 'coordinator' AND enabled = 1 ORDER BY created_at ASC LIMIT 1"
-    ).get() as { id: string } | undefined;
-    if (row) return row.id;
+    const userId = await resolveUserId();
+    await ensureCoreAgentProfiles(userId);
+    const bee = await (await col<AgentDoc>("agents")).get("bee");
+    if (bee?.doc.enabled) return bee.doc.id;
 
-    // No coordinator exists — create a minimal default one
-    const userId = resolveUserId();
-    const userRef = userId !== "default"
-      ? db.query("SELECT id FROM users WHERE id = ?").get(userId) as { id: string } | undefined
-      : undefined;
+    const agents = await col<AgentDoc>("agents");
+    const coordinator = (await agents.findBy("role", "coordinator"))
+      .map((entry) => entry.doc)
+      .filter((agent) => agent.enabled)
+      .sort((a, b) => a.created_at - b.created_at)[0];
+    if (coordinator) return coordinator.id;
 
-    db.query(`
-      INSERT OR IGNORE INTO agents (id, name, description, role, status, enabled, max_iterations)
-      VALUES ('default', 'Bee', 'Asistente coordinador principal', 'coordinator', 'idle', 1, 15)
-    `).run();
-
-    if (userRef) {
-      db.query("UPDATE agents SET user_id = ? WHERE id = 'default'").run(userId);
-    }
-
+    const now = Date.now();
+    await agents.put("default", {
+      id: "default",
+      user_id: userId || toIndexable(null),
+      name: "Bee",
+      description: "Asistente coordinador principal",
+      system_prompt: null,
+      tone: null,
+      role: "coordinator",
+      status: "idle",
+      enabled: true,
+      provider_id: toIndexable(null),
+      model_id: toIndexable(null),
+      tools_json: null,
+      skills_json: null,
+      parent_id: toIndexable(null),
+      max_iterations: 15,
+      workspace: null,
+      created_at: now,
+      updated_at: now,
+    }, { expectedVersion: 0 });
     return "default";
   } catch {
     return "default";

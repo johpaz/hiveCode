@@ -144,7 +144,7 @@ fn render_prd_reference(canvas: &mut Canvas, area: Rect, state: &AppState) {
 
 fn render_architect_thought(canvas: &mut Canvas, area: Rect, state: &AppState) {
     canvas.fill_rect(area, ' ', Style::new().bg(BG_ELEVATED));
-    canvas.print(area.x + 1, area.y, "⬡ RAZONAMIENTO · @ARCHITECT", Style::new().fg(PURPLE).bold().bg(BG_ELEVATED));
+    canvas.print(area.x + 1, area.y, "⬡ ACTIVIDAD · AGENTE", Style::new().fg(PURPLE).bold().bg(BG_ELEVATED));
     if area.h < 3 {
         return;
     }
@@ -223,7 +223,7 @@ fn render_architect_thought(canvas: &mut Canvas, area: Rect, state: &AppState) {
             }
             return;
         }
-        canvas.print(area.x + 2, y, "esperando razonamiento del Architect", Style::new().fg(DIM).bg(BG_ELEVATED));
+        canvas.print(area.x + 2, y, "esperando actividad del agente", Style::new().fg(DIM).bg(BG_ELEVATED));
         return;
     }
     let start = memory_events.len().saturating_sub(area.h.saturating_sub(3) as usize);
@@ -657,7 +657,7 @@ mod tests {
         render(&mut canvas, Rect::new(0, 0, 100, 20), &state);
         let rows = canvas.to_text_rows();
 
-        assert!(rows.iter().any(|row| row.contains("RAZONAMIENTO")));
+        assert!(rows.iter().any(|row| row.contains("ACTIVIDAD")));
         assert!(rows.iter().any(|row| row.contains("Bee")));
         assert!(rows.iter().any(|row| row.contains("refresh-token")));
     }

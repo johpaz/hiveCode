@@ -646,7 +646,7 @@ y workers concurrentes.
 
 - El flujo TUI para providers debe guardar API keys mediante `Bun.secrets` o
   un almacen realmente cifrado.
-- Los valores base64 legacy deben migrarse y eliminarse de SQLite tras validar
+- Los valores base64 legacy deben migrarse y eliminarse de HiveDB tras validar
   que el secreto esta disponible.
 - Ninguna narrativa, log o evento IPC puede incluir secrets.
 

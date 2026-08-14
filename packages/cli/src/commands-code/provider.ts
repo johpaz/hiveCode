@@ -17,21 +17,42 @@ import {
 } from "../cli-ui.ts"
 
 const VERSION = "1.0.0"
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
-import { deleteProviderApiKey, storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
+import { deleteProviderApiKey, getProviderApiKey, storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
+import {
+  HIVEAGENTS_MODEL_ID,
+  HIVEAGENTS_OPENAI_BASE_URL,
+  maybeLoadHiveAgentsModelFromDb,
+} from "@johpaz/hivecode-core/agent/hiveagents-loader"
+import {
+  deleteProvider,
+  getAllProviderModels,
+  getDefaultProvider,
+  getProvider,
+  getProviderModel,
+  listModelChoices,
+  listProviderIds,
+  listProviders,
+  setDefaultProvider,
+  setProviderModel,
+  upsertProvider,
+} from "./provider-store"
 
-function modelsForProvider(providerId: string): { value: string; label: string }[] {
-  try {
-    return (getDb()
-      .query("SELECT id, name FROM models WHERE provider_id = ? AND model_type = 'llm' ORDER BY name")
-      .all(providerId) as { id: string; name: string }[])
-      .map((r) => ({ value: r.id, label: r.name }))
-  } catch { return [] }
+async function maybePreloadHiveAgents(providerId: string, modelId: string | undefined): Promise<void> {
+  if (providerId !== "hiveagents" || !modelId) return
+  const spinner = hiveSpinner("default")
+  spinner.start(`Cargando ${HIVEAGENTS_MODEL_ID}...`)
+  const load = await maybeLoadHiveAgentsModelFromDb(providerId, modelId)
+  if (!load.success) {
+    spinner.stop(`No se pudo cargar ${HIVEAGENTS_MODEL_ID}`, "error")
+    hiveNote("HiveAgents", [`No se pudo precargar ${modelId}: ${load.error}`])
+  } else {
+    spinner.stop(`${HIVEAGENTS_MODEL_ID} listo`)
+    hiveNote("HiveAgents", [`Modelo cargado y listo · ctx=${load.ctx}`])
+  }
 }
 
 export async function providerList(): Promise<void> {
-  const db = getDb()
-  const rows = db.query("SELECT id, name, base_url, enabled FROM providers ORDER BY id").all() as any[]
+  const rows = await listProviders()
 
   hiveIntro("hivecode · Providers")
 
@@ -41,11 +62,10 @@ export async function providerList(): Promise<void> {
     return
   }
 
-  const defaultProvider = (db.query("SELECT value FROM code_config WHERE key = 'default_provider'").get() as any)?.value ?? ""
-  const modelRows = db.query("SELECT key, value FROM code_config WHERE key LIKE 'provider_model_%'").all() as any[]
-  const modelMap = new Map(modelRows.map((r: any) => [r.key.replace("provider_model_", ""), r.value]))
+  const defaultProvider = await getDefaultProvider()
+  const modelMap = await getAllProviderModels()
 
-  const lines = rows.map((r: any) => {
+  const lines = rows.map((r) => {
     const mark   = r.enabled ? "●" : "○"
     const def    = defaultProvider === r.id ? " ★" : "  "
     const model  = modelMap.get(r.id) ?? "default"
@@ -72,13 +92,13 @@ export async function providerList(): Promise<void> {
   if (action === "set") {
     const sel = await hiveSelect({
       message: "Provider por defecto:",
-      options: rows.map((r: any) => ({
+      options: rows.map((r) => ({
         value: r.id,
         label: `${r.id}${defaultProvider === r.id ? " (actual)" : ""}`,
       })),
     })
     if (!isCancel(sel)) {
-      db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(sel)
+      await setDefaultProvider(sel as string)
       hiveOutro(`${sel} es ahora el provider por defecto`)
     }
     return
@@ -87,61 +107,52 @@ export async function providerList(): Promise<void> {
   if (action === "delete") {
     const sel = await hiveSelect({
       message: "Provider a eliminar:",
-      options: rows.map((r: any) => ({ value: r.id, label: r.id })),
+      options: rows.map((r) => ({ value: r.id, label: r.id })),
     })
     if (!isCancel(sel)) {
       await deleteProviderApiKey(sel as string)
-      db.query("DELETE FROM providers WHERE id = ?").run(sel as string)
+      await deleteProvider(sel as string)
       hiveOutro(`Provider ${sel} eliminado`)
     }
     return
   }
 
   if (action === "add") {
-    const known = rows.map((r: any) => r.id as string)
+    const known = rows.map((r) => r.id)
     const result = await runProviderSetupWizard(known, VERSION)
     if (!result) { hiveOutro("Cancelado", "error"); return }
     await storeProviderApiKey(result.provider, result.apiKey)
-    db.query(`
-      INSERT INTO providers (id, name, base_url, enabled)
-      VALUES (?,?,?,1)
-      ON CONFLICT(id) DO UPDATE SET
-        base_url = excluded.base_url,
-        enabled  = 1
-    `).run(result.provider, result.provider, result.baseUrl || null)
+    await upsertProvider(result.provider, {
+      name: result.provider,
+      baseUrl: result.baseUrl || null,
+      enabled: true,
+    })
     if (result.model) {
-      db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?,?)")
-        .run(`provider_model_${result.provider}`, result.model)
+      await setProviderModel(result.provider, result.model)
     }
+    await maybePreloadHiveAgents(result.provider, result.model)
     hiveOutro(`Provider ${result.provider} agregado`)
   }
 }
 
 export async function providerAdd(name?: string): Promise<void> {
-  const db = getDb()
-  const knownProviders = (
-    db.query("SELECT id FROM providers ORDER BY id").all() as { id: string }[]
-  ).map((r) => r.id)
+  const knownProviders = await listProviderIds()
 
-  const result = await runProviderSetupWizard(knownProviders, VERSION)
+  const result = await runProviderSetupWizard(knownProviders, VERSION, name)
   if (!result) return
 
-  const existing = db.query("SELECT id FROM providers WHERE id = ?").get(result.provider) as any
-  if (existing) {
-    hiveNote("Provider existente", [`${result.provider} ya existe. Usa 'provider edit' para modificarlo.`])
-    hiveOutro("No se añadió", "error")
-    return
-  }
-
   await storeProviderApiKey(result.provider, result.apiKey)
-  db.query("INSERT INTO providers (id, name, base_url, enabled) VALUES (?, ?, ?, 1)")
-    .run(result.provider, result.provider, result.baseUrl || null)
+  await upsertProvider(result.provider, {
+    name: result.provider,
+    baseUrl: result.baseUrl || null,
+    enabled: true,
+  })
 
   if (result.model) {
-    db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)")
-      .run(`provider_model_${result.provider}`, result.model)
+    await setProviderModel(result.provider, result.model)
   }
 
+  await maybePreloadHiveAgents(result.provider, result.model)
 }
 
 export async function providerRemove(name?: string): Promise<void> {
@@ -151,8 +162,7 @@ export async function providerRemove(name?: string): Promise<void> {
     process.exit(1)
   }
 
-  const db = getDb()
-  const row = db.query("SELECT id, name FROM providers WHERE id = ?").get(name) as any
+  const row = await getProvider(name)
 
   if (!row) {
     hiveOutro(`Provider no encontrado: ${name}`, "error")
@@ -160,18 +170,16 @@ export async function providerRemove(name?: string): Promise<void> {
   }
 
   await deleteProviderApiKey(name)
-  db.query("DELETE FROM providers WHERE id = ?").run(name)
+  await deleteProvider(name)
   hiveOutro(`Provider ${name} eliminado`)
 }
 
 export async function providerEdit(name?: string): Promise<void> {
   hiveIntro("hivecode · Editar Provider")
 
-  const db = getDb()
-
   let providerId = name
   if (!providerId) {
-    const rows = db.query("SELECT id FROM providers ORDER BY id").all() as { id: string }[]
+    const rows = await listProviders()
     if (rows.length === 0) {
       hiveOutro("Sin providers configurados", "error"); return
     }
@@ -183,15 +191,37 @@ export async function providerEdit(name?: string): Promise<void> {
     providerId = sel as string
   }
 
-  const row = db.query("SELECT id, name, base_url FROM providers WHERE id = ?").get(providerId) as any
+  const row = await getProvider(providerId)
   if (!row) {
     hiveOutro(`Provider no encontrado: ${providerId}`, "error")
     process.exit(1)
   }
 
-  const currentModel = (
-    db.query("SELECT value FROM code_config WHERE key = ?").get(`provider_model_${providerId}`) as any
-  )?.value ?? ""
+  const currentModel = await getProviderModel(providerId)
+
+  if (providerId === "hiveagents") {
+    hiveNote("Preset fijo", [
+      `Base URL: ${HIVEAGENTS_OPENAI_BASE_URL}`,
+      `Modelo:   ${HIVEAGENTS_MODEL_ID}`,
+      "Solo necesitas actualizar la API key.",
+    ])
+    const apiKey = await hiveText({
+      message: "Nueva API key (Enter para mantener):",
+      placeholder: "HiveAgents API key",
+      password: true,
+    })
+    await upsertProvider(providerId, {
+      baseUrl: HIVEAGENTS_OPENAI_BASE_URL,
+      enabled: true,
+    })
+    await setProviderModel(providerId, HIVEAGENTS_MODEL_ID)
+    if (!isCancel(apiKey) && apiKey && typeof apiKey === "string") {
+      await storeProviderApiKey(providerId, apiKey)
+      await maybePreloadHiveAgents(providerId, HIVEAGENTS_MODEL_ID)
+    }
+    hiveOutro("HiveAgents actualizado")
+    return
+  }
 
   hiveNote("Valores actuales", [
     `ID:       ${row.id}`,
@@ -214,7 +244,7 @@ export async function providerEdit(name?: string): Promise<void> {
 
   // ── Modelo ───────────────────────────────────────────────────────────────────
   let model = currentModel
-  const dbModels = modelsForProvider(providerId)
+  const dbModels = await listModelChoices(providerId)
 
   if (dbModels.length > 0) {
     const opts = [
@@ -240,16 +270,16 @@ export async function providerEdit(name?: string): Promise<void> {
 
   // ── Aplicar cambios ──────────────────────────────────────────────────────────
   if (!isCancel(baseUrl) && baseUrl && typeof baseUrl === "string") {
-    db.query("UPDATE providers SET base_url = ? WHERE id = ?").run(baseUrl, providerId)
+    await upsertProvider(providerId, { baseUrl })
   }
 
-  db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)").run(
-    `provider_model_${providerId}`, model,
-  )
+  await setProviderModel(providerId, model)
 
   if (!isCancel(apiKey) && apiKey && typeof apiKey === "string") {
     await storeProviderApiKey(providerId, apiKey)
   }
+
+  await maybePreloadHiveAgents(providerId, model)
 
   hiveOutro(`Provider ${providerId} actualizado`)
 }
@@ -261,15 +291,14 @@ export async function providerSetDefault(name?: string): Promise<void> {
     process.exit(1)
   }
 
-  const db = getDb()
-  const row = db.query("SELECT id FROM providers WHERE id = ?").get(name) as any
+  const row = await getProvider(name)
 
   if (!row) {
     hiveOutro(`Provider no encontrado: ${name}`, "error")
     process.exit(1)
   }
 
-  db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(name)
+  await setDefaultProvider(name)
   hiveOutro(`${name} es ahora el provider por defecto`)
 }
 
@@ -283,16 +312,19 @@ export async function providerSetModel(args: string[]): Promise<void> {
     process.exit(1)
   }
 
-  const db = getDb()
-  db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)")
-    .run(`provider_model_${providerId}`, model)
+  if (providerId === "hiveagents" && model !== HIVEAGENTS_MODEL_ID) {
+    hiveOutro(`HiveAgents solo admite ${HIVEAGENTS_MODEL_ID}`, "error")
+    process.exit(1)
+  }
+
+  await setProviderModel(providerId, model)
+  await maybePreloadHiveAgents(providerId, model)
   hiveOutro(`Modelo ${model} asignado a ${providerId}`)
 }
 
 export async function providerTest(name?: string): Promise<void> {
   hiveIntro("hivecode · Test Provider")
 
-  const db = getDb()
   const providerId = name ?? await hiveText({
     message: "Provider a probar:",
     placeholder: "anthropic, openai...",
@@ -303,7 +335,7 @@ export async function providerTest(name?: string): Promise<void> {
     return
   }
 
-  const row = db.query("SELECT id, name, base_url FROM providers WHERE id = ?").get(providerId) as any
+  const row = await getProvider(providerId)
   if (!row) {
     hiveOutro(`Provider no encontrado: ${providerId}`, "error")
     process.exit(1)
@@ -315,12 +347,17 @@ export async function providerTest(name?: string): Promise<void> {
   try {
     const start = performance.now()
 
-    // Try a simple ping — fetch the base URL or a known endpoint
     const baseUrl = row.base_url || "https://api.anthropic.com"
-    const response = await fetch(`${baseUrl}/v1/models`, {
+    const apiKey = await getProviderApiKey(providerId)
+    const modelsUrl = `${baseUrl.replace(/\/+$/, "")}${baseUrl.endsWith("/v1") ? "" : "/v1"}/models`
+    const response = await fetch(modelsUrl, {
       method: "GET",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
     })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
     const latency = Math.round(performance.now() - start)
 
     spinner.stop(`${providerId} responde en ${latency}ms`)

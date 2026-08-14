@@ -8,7 +8,8 @@
  */
 
 import { sign, verify, revokeJTI, revokeAllSessions, needsRefresh } from "../../utils/jwt";
-import { getDb } from "../../storage/sqlite";
+import { col } from "../../storage/hive";
+import type { UserDoc } from "../../storage/collections";
 import { logger } from "../../utils/logger";
 
 const log = logger.child("auth");
@@ -30,8 +31,9 @@ function isLegacyHash(hash: string): boolean {
 async function migratePasswordHash(userId: string, plainPassword: string): Promise<void> {
   try {
     const newHash = await Bun.password.hash(plainPassword)
-    const db = getDb()
-    db.query("UPDATE users SET password_hash = ? WHERE id = ?").run(newHash, userId)
+    const users = await col<UserDoc>("users")
+    const user = await users.get(userId)
+    if (user) await users.put(userId, { ...user.doc, password_hash: newHash }, { expectedVersion: user.version })
     log.info(`Migrated password hash for user ${userId} from SHA-256 to bcrypt`)
   } catch (err) {
     log.warn(`Failed to migrate password hash for user ${userId}: ${(err as Error).message}`)
@@ -50,10 +52,9 @@ export async function handleAuthLogin(req: Request, addCorsHeaders: (r: Response
     return addCorsHeaders(Response.json({ error: "Missing email or password" }, { status: 400 }), req);
   }
 
-  const db = getDb();
-  const user = db.query<{ id: string; email: string; password_hash: string }, [string]>(
-    "SELECT id, email, password_hash FROM users WHERE email = ?"
-  ).get(body.email);
+  const user = (await (await col<UserDoc>("users")).scan())
+    .map((entry) => entry.doc)
+    .find((entry) => entry.email === body.email);
 
   if (!user || !user.password_hash) {
     return addCorsHeaders(Response.json({ error: "Invalid credentials" }, { status: 401 }), req);
@@ -92,18 +93,29 @@ export async function handleAuthRegister(req: Request, addCorsHeaders: (r: Respo
     return addCorsHeaders(Response.json({ error: "Missing email or password" }, { status: 400 }), req);
   }
 
-  const db = getDb();
-  const existing = db.query<{ count: number }, [string]>("SELECT COUNT(*) as count FROM users WHERE email = ?").get(body.email);
+  const users = await col<UserDoc>("users")
+  const existing = (await users.scan()).some((entry) => entry.doc.email === body.email);
 
-  if (existing && existing.count > 0) {
+  if (existing) {
     return addCorsHeaders(Response.json({ error: "Email already registered" }, { status: 409 }), req);
   }
 
   const passwordHash = await Bun.password.hash(body.password)
   const id = crypto.randomUUID();
 
-  db.query("INSERT INTO users (id, name, email, password_hash, language, timezone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .run(id, body.email.split("@")[0], body.email, passwordHash, "es", "UTC", new Date().toISOString());
+  await users.put(id, {
+    id,
+    name: body.email.split("@")[0],
+    language: "es",
+    timezone: "UTC",
+    occupation: "",
+    notes: "",
+    master_key_hash: null,
+    email: body.email,
+    password_hash: passwordHash,
+    preferred_cron_channel: "webchat",
+    created_at: Date.now(),
+  });
 
   const token = await sign({ sub: id, email: body.email }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 

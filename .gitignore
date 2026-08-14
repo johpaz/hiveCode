@@ -38,6 +38,7 @@ node-compile-cache/
 
 # hivecode local state
 .hivecode
+/hivecode/
 
 # Rust/Cargo build artifacts (packages/hivetui and any future Rust crates)
 target/

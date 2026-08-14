@@ -1,5 +1,5 @@
 import { logger } from "../../utils/logger"
-import { sanitizeMessages } from "./interface"
+import { sanitizeMessages, resolveMaxTokens } from "./interface"
 import type { LLMCallOptions, LLMProvider, LLMResponse, LLMToolCall } from "./interface"
 import type { ContentPart, LLMMessage } from "../llm-client"
 
@@ -149,7 +149,8 @@ export class GeminiProvider implements LLMProvider {
 
     const config: any = {}
     if (systemText) config.systemInstruction = systemText
-    if (options.maxTokens) config.maxOutputTokens = options.maxTokens
+    const maxTokens = resolveMaxTokens(options.maxTokens, options.contextWindow)
+    if (maxTokens) config.maxOutputTokens = maxTokens
     if (options.temperature !== undefined) config.temperature = options.temperature
     if (options.tools?.length) {
       config.tools = [{

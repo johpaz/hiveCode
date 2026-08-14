@@ -9,13 +9,13 @@
  * }
  */
 
-import { getDb } from "../../storage/sqlite";
 import { resolveUserId, resolveAgentId } from "../../storage/onboarding";
 import { laneQueue } from "../lane-queue";
-import { getRecentMessages } from "../../agent/conversation-store";
-import { AgentRunner } from "../../agent/providers";
+import { getRecentMessages, listAllScratchpadNotes, saveScratchpadNote } from "../../agent/conversation-store";
+import { AgentRunner, DEFAULT_INTERACTIVE_MAX_STEPS } from "../../agent/providers";
 import { logger } from "../../utils/logger";
-import { getUserDate, getUserTime } from "../../utils/date";
+import { col, fromIndexable } from "../../storage/hive";
+import type { AgentDoc, UserDoc } from "../../storage/collections";
 
 const log = logger.child("api:chat");
 
@@ -52,13 +52,11 @@ export async function handleChat(
       );
     }
 
-    const db = getDb();
-
     // Resolve user ID
-  const finalUserId = userId || resolveUserId() || "default";
+  const finalUserId = userId || await resolveUserId() || "default";
 
   // Resolve agent ID (coordinator by default)
-  const finalAgentId = agentId || resolveAgentId() || "main";
+  const finalAgentId = agentId || await resolveAgentId() || "main";
 
     // Generate or use provided thread_id
     const threadId = thread_id || `${finalUserId}-${Date.now()}`;
@@ -66,9 +64,7 @@ export async function handleChat(
     log.info(`[chat] Processing message from user=${finalUserId} agent=${finalAgentId} thread=${threadId}`);
 
     // Get user timezone for timestamp
-    const userRow = db.query<any, [string]>(
-      "SELECT timezone FROM users WHERE id = ?"
-    ).get(finalUserId);
+    const userRow = (await (await col<UserDoc>("users")).get(finalUserId))?.doc;
     const userTimezone = userRow?.timezone || "UTC";
     const now = new Date();
     
@@ -87,7 +83,7 @@ export async function handleChat(
     const messageContent = `[Timestamp: ${exactTime} (${userTimezone})]\n${message}`;
 
     // Get recent conversation history
-    const history = getRecentMessages(threadId, 15);
+    const history = await getRecentMessages(threadId, 15);
     const messages = [
       ...history.map((row) => ({
         role: row.role as "user" | "assistant" | "system",
@@ -97,11 +93,9 @@ export async function handleChat(
     ];
 
     // Get provider config from DB
-    const agent = db.query<any, [string]>(
-      "SELECT provider_id, model_id FROM agents WHERE id = ?"
-    ).get(finalAgentId);
+    const agent = (await (await col<AgentDoc>("agents")).get(finalAgentId))?.doc;
 
-    const provider = agent?.provider_id || "gemini";
+    const provider = fromIndexable(agent?.provider_id) || "gemini";
 
     // Create runner
     const runner = new AgentRunner({} as any);
@@ -121,7 +115,7 @@ export async function handleChat(
           messages,
           rawUserMessage: message,
           maxTokens: 4096,
-          maxSteps: 15,
+          maxSteps: DEFAULT_INTERACTIVE_MAX_STEPS,
           threadId,
           userId: finalUserId,
           channel,
@@ -202,14 +196,11 @@ export async function handleGetChatHistory(req: Request, addCorsHeaders: (r: Res
   const threadId = url.searchParams.get("sessionId") || url.searchParams.get("threadId") || "default"
   const limit = parseInt(url.searchParams.get("limit") || "15")
 
-  const messages = getDb().query(`
-    SELECT id, thread_id, channel, role, content, tool_calls_json, tool_call_id, reasoning_content, token_count, created_at, updated_at FROM conversations
-    WHERE thread_id = ? AND role IN ('user', 'assistant')
-    ORDER BY created_at DESC
-    LIMIT ?
-  `).all(threadId, limit) as Record<string, unknown>[]
+  const messages = (await getRecentMessages(threadId, limit))
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .map((message) => ({ ...message }))
 
-  return addCorsHeaders(Response.json({ messages: messages.reverse() }), req)
+  return addCorsHeaders(Response.json({ messages }), req)
 }
 
 export async function handleGetCanvas(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
@@ -217,9 +208,7 @@ export async function handleGetCanvas(req: Request, addCorsHeaders: (r: Response
 }
 
 export async function handleGetNotes(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
-  const notes = getDb().query(`
-    SELECT * FROM scratchpad ORDER BY updated_at DESC LIMIT 50
-  `).all() as Record<string, unknown>[]
+  const notes = await listAllScratchpadNotes(50)
   
   return addCorsHeaders(Response.json({ notes }), req)
 }
@@ -232,10 +221,7 @@ export async function handleUpdateNote(req: Request, addCorsHeaders: (r: Respons
     return addCorsHeaders(Response.json({ success: false, error: "threadId and content required" }), req)
   }
   
-  getDb().query(`
-    INSERT OR REPLACE INTO scratchpad(thread_id, key, value, updated_at)
-    VALUES(?, 'note', ?, ?)
-  `).run(threadId, content, Math.floor(Date.now() / 1000))
+  await saveScratchpadNote(threadId, "note", content, "api")
   
   return addCorsHeaders(Response.json({ success: true }), req)
 }

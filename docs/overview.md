@@ -1,6 +1,6 @@
 # HiveCode — Overview del Proyecto
 
-HiveCode es un sistema de codificación multi-agente con TUI (Terminal UI) y arquitectura de enjambre de workers. El agente principal (BEE) coordina hasta 13 coordinadores especializados que trabajan en paralelo sobre tareas de desarrollo.
+HiveCode es un sistema de codificación multi-agente con TUI (Terminal UI) y arquitectura de enjambre de workers. El agente principal (BEE) coordina 11 coordinadores especializados (más 2 on-demand) que trabajan en paralelo sobre tareas de desarrollo. El roster está deliberadamente consolidado: cada coordinador cubre una responsabilidad no redundante, evitando "escritores paralelos" que puedan asumir contratos conflictivos entre sí sobre el mismo módulo (ver [workers.md](workers.md) para el razonamiento detrás de cada fusión).
 
 ---
 
@@ -37,9 +37,9 @@ Gateway (Bun HTTP + WebSocket)
       │
       └── CoordinatorManager
                 │
-         Bun Workers (13 coordinadores)
+         Bun Workers (11 coordinadores + 2 on-demand)
                 │
-          SQLite Blackboard
+          HiveDB Blackboard
 ```
 
 ---
@@ -52,10 +52,11 @@ Ver [workers.md](workers.md) para detalle completo.
 ```
 Nivel 0: ProductManager  → PRD (siempre primero)
 Nivel 1: Architecture    → ADR + plan de fases
-Nivel 2: BackendEngineer | FrontendEngineer | MobileEngineer | DataScientist | Security
-Nivel 3: QAEngineer | DBA
-Nivel 4: Integration | DevOps
-Nivel 5: CodeReviewer   → gate final
+Nivel 2: BackendEngineer (absorbe DBA) | FrontendEngineer (absorbe Mobile) | DataScientist | Security (transversal)
+Nivel 3: QAEngineer | Security (dedicado)
+Nivel 4: DevOps
+Nivel 5: Verifier        → reproduce los criterios de aceptación del PRD contra el sistema real
+Nivel 6: CodeReviewer    → gate final (absorbe Integration: cruza contratos entre módulos)
 ```
 
 **On-demand:** `Librarian` (post-sesión) · `ForensicAgent` (recuperación de fallos)
@@ -82,20 +83,20 @@ Telegram es el canal principal para notificaciones del agente fuera del TUI.
 
 ## Storage
 
-SQLite centralizado en `~/.hivecode/data.db`:
+HiveDB centralizado en `./hivecode` respecto al directorio desde el que se ejecuta el CLI. `HIVE_DB_PATH` permite definir una ruta explícita:
 
 | Tabla | Contenido |
 |-------|-----------|
 | `providers` | LLM providers configurados |
 | `models` | Modelos disponibles por provider |
-| `mcp_servers` | Servidores MCP (builtin + usuario) |
+| `mcpServers` | Servidores MCP (builtin + usuario) |
 | `channels` | Canales de comunicación |
-| `skills` | Skills activas (FTS5) |
-| `tools_index` | Índice FTS5 de herramientas nativas |
-| `mcp_tools` | Índice FTS5 de herramientas MCP |
+| `skills` | Skills activas (HiveDB index) |
+| `tools_index` | Índice HiveDB index de herramientas nativas |
+| `mcp_tools` | Índice HiveDB index de herramientas MCP |
 | `code_playbook` | Preferencias y reglas del developer |
 | `code_sessions` | Sesiones de trabajo |
-| `code_tasks` | Tareas en ejecución |
+| `codeTasks` | Tareas en ejecución |
 | `narrative` | Log narrativo de cada tarea |
 | `adrs` | Architecture Decision Records |
 
@@ -103,7 +104,7 @@ SQLite centralizado en `~/.hivecode/data.db`:
 
 ## Descubrimiento de Capacidades
 
-El agente descubre todo via FTS5:
+El agente descubre todo via HiveDB index:
 
 ```
 search_knowledge(type="tools",  query="leer archivos grandes")

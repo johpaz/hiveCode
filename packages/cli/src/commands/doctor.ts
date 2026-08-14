@@ -39,10 +39,9 @@ export async function doctor(): Promise<void> {
   }
 
   // 3. Provider API Keys
-  const providers = ["openai", "anthropic", "groq", "mistral", "gemini", "ollama", "local-llama"];
+  const providers = ["openai", "anthropic", "groq", "mistral", "gemini", "hiveagents"];
   let providerCount = 0;
   for (const p of providers) {
-// 6. Check for secrets in SQLite (should be empty)
   try {
       if (await hasProviderApiKey(p)) providerCount++;
     } catch { /* ignore */ }
@@ -72,22 +71,6 @@ export async function doctor(): Promise<void> {
     console.log("   The gateway token is now managed exclusively via Bun.secrets");
     issues++;
   }
-  // 6. Check for secrets in SQLite (should be empty)
-  try {
-    const { getDb } = await import("../../../core/src/storage/sqlite");
-    const db = getDb();
-    const rows = db.query("SELECT id FROM providers WHERE api_key_encrypted IS NOT NULL AND api_key_encrypted != ''").all() as Array<{ id: string }>;
-    if (rows.length > 0) {
-      console.log(`⚠️ SQLite contains ${rows.length} legacy API key(s): ${rows.map(r => r.id).join(", ")}`);
-      warnings++;
-    } else {
-      console.log("✅ SQLite: no legacy API keys stored");
-    }
-  } catch (e) {
-    console.log(`⚠️ SQLite check failed: ${(e as Error).message}`);
-    warnings++;
-  }
-
   // 6. Check lockfile
   try {
     const { existsSync } = await import("node:fs");

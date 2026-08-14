@@ -1,58 +1,23 @@
 export * from "./scribe"
 export * from "./schema"
 
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
-import { CODE_SCHEMA } from "./schema"
+import { ensureHiveDb } from "@johpaz/hivecode-core/storage/bootstrap"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
-import { syncCommandsToFTS } from "../coordinator/command-parser"
-import { seedPlaybook } from "../seed-playbook"
 
 /**
- * Initialize Hive-Code specific tables (code_sessions, code_tasks, code_narrative, etc.)
- * Must be called AFTER initializeDatabase() from the core.
+ * Compatibility initializer for older callers.
+ *
+ * New installs start directly on HiveDB; there is no legacy data migration and
+ * no SQL schema bootstrap here.
  */
 export function initializeCodeDatabase(): void {
-  try {
-    const db = getDb()
-    db.run(CODE_SCHEMA)
-    syncCommandsToFTS(db)
-    seedPlaybook(db)
-    logger.info("🗄️  Hive-Code schema initialized (code_* tables)")
-  } catch (err) {
-    logger.warn("⚠️  Failed to initialize Hive-Code schema:", { error: (err as Error).message })
-  }
+  void ensureHiveDb()
+    .then(() => logger.info("[hivedb] Hive-Code collections ready"))
+    .catch((err) => logger.warn("[hivedb] Failed to initialize Hive-Code collections:", { error: (err as Error).message }))
 }
 
-/**
- * Validate that all required Hive-Code tables exist.
- * Throws if any required table is missing.
- */
 export function validateCodeSchema(): boolean {
-  const db = getDb()
-  const requiredTables = [
-    "code_sessions",
-    "code_tasks",
-    "code_narrative",
-    "code_decisions",
-    "code_file_snapshots",
-    "code_task_phases",
-    "code_traces",
-    "code_playbook",
-    "code_reflections",
-    "code_context_cache",
-    "code_config",
-  ]
-
-  for (const table of requiredTables) {
-    const exists = db.query(
-      `SELECT name FROM sqlite_master WHERE type='table' AND name = ?`
-    ).get(table) as { name: string } | undefined
-
-    if (!exists) {
-      throw new Error(`Missing required Hive-Code table: ${table}`)
-    }
-  }
-
-  logger.info("[validate] ✅ All code_* tables present")
+  void ensureHiveDb()
+  logger.info("[validate] Hive-Code collections available via HiveDB")
   return true
 }

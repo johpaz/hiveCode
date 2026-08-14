@@ -70,12 +70,21 @@ export type BunMessage =
   | { type: "halt_state"; active: boolean; reason?: string; checkpoint_id?: string }
   // normal priority — live streaming output
   | { type: "history_append";  role: string; content: string; content_type?: string; agent?: string; timestamp?: string; task_id?: string }
+  /** Incremental answer token. Closed by `assistant_done`. */
+  | { type: "assistant_chunk"; text: string; agent?: string; timestamp?: string }
+  /** Ends the current `assistant_chunk` stream and commits it to history. */
+  | { type: "assistant_done" }
+  /** Live model reasoning. Shares the Bee panel with `narrative_chunk`, but the
+   *  source differs: this is the model thinking, not coordinator phase narration. */
+  | { type: "thought_chunk"; task_id?: string; coordinator: string; phase: string; content: string }
+  /** Plan being drafted — rendered incrementally before the final `plan_update`. */
+  | { type: "plan_draft_update"; task_id?: string; adr_title?: string; adr_content?: string; phases?: { name: string; coordinator: string; description: string; depends_on: string[]; level: number; status: string }[]; risks?: { severity: string; description: string }[] }
+  /** Harness-level failure surfaced to the user. */
+  | { type: "error"; message: string }
   | { type: "status";          running: boolean; msg: string }
   | { type: "state_update";    new_mode?: string; new_provider?: string; new_model?: string; new_token_count?: number }
   | ({ type: "worker_update"; worker: string; phase: string; status: string; display_name?: string; activity?: string; task_id?: string; token_count?: number } & WorkerDashboardFields)
-  | { type: "suggestions";     items: string[] }
   | { type: "quick_menu";      items: { label: string; cmd: string; desc: string }[] }
-  | { type: "shell_output";    stdout: string; stderr: string; exit_code: number }
   | ({ type: "activity_update"; coordinator: string; phase: string; status: string; display_name?: string; activity?: string; task_id?: string; token_count?: number } & WorkerDashboardFields)
   | { type: "narrative_chunk"; coordinator: string; phase: string; content: string; content_type?: string; stream_id?: string; task_id?: string }
   | { type: "blackboard_event"; timestamp: string; agent: string; event_type: string; content: string }
@@ -109,21 +118,48 @@ export type BunMessage =
   | { type: "plan_update"; task_id: string; adr_title: string; adr_content: string; status: string; phases: { name: string; coordinator: string; description: string; depends_on: string[]; level: number; status: string }[]; risks: { severity: string; description: string }[] }
   | { type: "plan_approval_request" }
   | { type: "task_update"; task_id: string; title?: string; status: string; mode?: string; active_workers?: string[]; workspace_id?: string; workspace_path?: string; branch_name?: string; isolated?: boolean; integration_status?: string }
+  | {
+      // Field shape matches the pre-existing Rust ReviewVerdictUpdate contract
+      // (reviewer/status/summary/observations/requested_changes/affected_files —
+      // already rendered by review_layout.rs and exercised by tui-e2e.test.ts).
+      // criteria/categories are additive: the structured acceptance checklist,
+      // rendered when present, falling back to the observation-keyword heuristic
+      // when absent (e.g. a reviewer model that didn't call submit_review_verdict).
+      type: "review_verdict_update"
+      reviewer?: string
+      status: "aprobado" | "aprobado_con_observaciones" | "rechazado"
+      summary: string
+      observations?: string[]
+      requested_changes?: string[]
+      affected_files?: string[]
+      criteria?: { description: string; met: boolean; evidence?: string }[]
+      categories?: { name: string; status: "ok" | "warning" | "blocking"; detail?: string }[]
+    }
+  | { type: "resume_available"; task_id: string; checkpoint_id: string; reason: string }
+  | { type: "phase_retry"; worker: string; attempt: number; max_attempts: number; reason: string }
+  | {
+      type: "settings_data"
+      providers: Array<{ id: string; name: string; model: string; is_active: boolean; has_key: boolean }>
+      agents: Array<{ id: string; name: string; provider: string; model: string; effort: string; max_turns: number; max_input_tokens: number; max_output_tokens: number; max_cost_usd: number; permission_profile: string }>
+      mcp: Array<{ id: string; name: string; url: string; enabled: boolean; has_headers: boolean }>
+      skills: Array<{ name: string; description: string; category: string; active: boolean }>
+      github_connected: boolean
+      github_repo: string | null
+      telegram_active: boolean
+    }
 
 // ── TUI → Bun ────────────────────────────────────────────────────────────────
 
 export type TuiMessage =
   | { type: "ready" }
   | { type: "submit";               input: string }
-  | { type: "suggestions_request";  query: string }
   | { type: "mode_change";          mode: string }
-  | { type: "shell_execute";        command: string }
   | { type: "modal_submit";         command: string; values: Record<string, string> }
   | { type: "modal_cancel";         command: string }
   | { type: "info_modal_close" }
+  /** Acknowledges `suspend` — the TUI released the terminal. */
   | { type: "suspended" }
   | { type: "exit" }
-  | { type: "quit" }
   | { type: "rollback"; checkpoint_id: string }
   | { type: "request_settings" }
 
@@ -131,12 +167,14 @@ export type TuiMessage =
 
 const CRITICAL_TYPES = new Set<BunMessage["type"]>([
   "init", "conflict_alert", "conflict_resolved", "file_risk_update", "forensic_alert",
-  "security_status_update", "halt_state",
+  "security_status_update", "halt_state", "review_verdict_update", "resume_available",
 ])
 const LOW_TYPES = new Set<BunMessage["type"]>([
   "log_entry", "checkpoint_created", "checkpoint_rollback", "context_update",
   "adr_update", "file_diff", "workers_snapshot", "files_snapshot",
   "memory_update", "librarian_progress", "dashboard_snapshot", "metrics_update",
+  // High-volume token streams: they must never delay a critical alert.
+  "assistant_chunk", "thought_chunk",
 ])
 
 export function messagePriority(msg: BunMessage): IpcPriority {

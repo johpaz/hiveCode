@@ -5,10 +5,35 @@
  */
 
 import type { Tool } from "../types.ts";
-import { getDb } from "../../storage/sqlite.ts";
+import { col } from "../../storage/hive.ts";
+import type {
+  CodeContextCacheDoc,
+  CodeFileDoc,
+  CodeSessionDoc,
+  McpToolDoc,
+  PlaybookDoc,
+  ScratchpadDoc,
+  SkillDoc,
+  TaskDoc,
+  ToolDoc,
+} from "../../storage/collections.ts";
 import { logger } from "../../utils/logger.ts";
+import {
+  searchCapabilities,
+  type CapabilityHit,
+  type CapabilityType,
+} from "../../agent/capability-search.ts";
+import { CORE_TOOL_CATALOG } from "../../agent/tool-selector.ts";
 
 const log = logger.child("core");
+
+async function getActiveCodeSessionId(): Promise<string> {
+  const sessions = await col<CodeSessionDoc>("codeSessions");
+  const active = (await sessions.findBy("status", "active"))
+    .map((entry) => entry.doc)
+    .sort((a, b) => b.last_active.localeCompare(a.last_active))[0];
+  return active?.id ?? "";
+}
 
 // ─── Bilingual dictionary: Spanish → English ────────────────────────────────
 
@@ -109,7 +134,7 @@ const ES_EN_DICT: Record<string, string[]> = {
 };
 
 /**
- * Translate a Spanish query to English equivalents for FTS5 fallback.
+ * Translate a Spanish query to English equivalents for the bilingual fallback.
  * Returns an array of English keyword tokens.
  */
 function translateQueryToEnglish(query: string): string {
@@ -126,22 +151,38 @@ function translateQueryToEnglish(query: string): string {
   return [...new Set(translated)].join(" ");
 }
 
-/**
- * Build an FTS5 MATCH expression from a list of words.
- * Multi-word: AND with prefix wildcard. Single: exact OR prefix.
- */
-function buildFtsMatch(words: string[]): string {
-  if (words.length > 1) {
-    return words.map(w => `${w}*`).join(' AND ');
+function parseJsonOr<T>(value: string | null | undefined, fallback: T): T {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
   }
-  return `"${words.join(' ')}" OR ${words[0]}*`;
+}
+
+function buildSnippet(content: string, query: string, maxLen = 420): string {
+  const terms = query
+    .replace(/_/g, " ")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  const lower = content.toLowerCase();
+  let idx = -1;
+  for (const term of terms) {
+    idx = lower.indexOf(term);
+    if (idx !== -1) break;
+  }
+  if (idx === -1) return content.slice(0, maxLen);
+  const start = Math.max(0, idx - Math.floor(maxLen / 2));
+  const end = Math.min(content.length, start + maxLen);
+  return `${start > 0 ? "..." : ""}${content.slice(start, end)}${end < content.length ? "..." : ""}`;
 }
 
 // ─── search_knowledge ────────────────────────────────────────────────────────
 
 export const searchKnowledgeTool: Tool = {
   name: "search_knowledge",
-  description: "Busca herramientas NATIVAS (tools), MCP (tools externas), habilidades (skills), reglas del playbook o CÓDIGO FUENTE del proyecto en la base de conocimientos. Usa búsqueda full-text (FTS5) con fallback bilingüe español→inglés. type='mcp' para herramientas MCP, type='code' para buscar en el código fuente, type='all' para buscar en todo.",
+  description: "Busca herramientas NATIVAS (tools), MCP (tools externas), habilidades (skills), reglas del playbook o CÓDIGO FUENTE del proyecto en la base de conocimientos HiveDB. Usa fallback bilingüe español→inglés. type='mcp' para herramientas MCP, type='code' para buscar en el código fuente, type='all' para buscar en todo.",
   parameters: {
     type: "object",
     properties: {
@@ -162,216 +203,168 @@ export const searchKnowledgeTool: Tool = {
     required: ["query"],
   },
   execute: async (params: Record<string, unknown>) => {
-    const db = getDb();
     const query = params.query as string;
     const type = (params.type as string) ?? "all";
     const limit = (params.limit as number) ?? 10;
     const MIN_RESULTS_FOR_BILINGUAL = 2;
 
     try {
-      const escapedQuery = query.replace(/'/g, "''");
-      const normalizedQuery = escapedQuery.replace(/_/g, " ").trim();
-      const words = normalizedQuery.split(/\s+/).filter(w => w.length > 0);
-      const ftsMatch = buildFtsMatch(words);
+      if (!query) {
+        return { ok: true, query, type, tools: [], skills: [], playbook: [], toolsmcp: [], code: [], totalResults: 0 };
+      }
+
+      const normalizedQuery = query.replace(/_/g, " ").trim();
 
       const result: any = { query, type, tools: [], skills: [], playbook: [], toolsmcp: [], code: [] };
 
-      // ─── Search functions (reusable for bilingual fallback) ───────────
+      const typeMap: Record<string, CapabilityType[]> = {
+        tools: ["tool"],
+        skills: ["skill"],
+        playbook: ["playbook"],
+        mcp: ["mcp"],
+        code: ["code"],
+      };
+      const wantsCode = type === "all" || type === "code";
+      const nonCodeTypes = type === "all"
+        ? ["tool", "skill", "playbook", "mcp"] as CapabilityType[]
+        : (typeMap[type] ?? []).filter(t => t !== "code");
 
-      function searchTools(matchExpr: string): any[] {
-        if (type !== "all" && type !== "tools") return [];
+      let activeSessionId = "";
+      if (wantsCode) {
         try {
-          return db.query(`
-            SELECT
-              COALESCE(t.id, tools_fts.tool_name) as id,
-              COALESCE(t.name, tools_fts.tool_name) as name,
-              COALESCE(t.description, tools_fts.description) as description,
-              COALESCE(t.category, tools_fts.category) as category,
-              COALESCE(t.enabled, 1) as enabled,
-              COALESCE(t.active, 1) as active,
-              bm25(tools_fts) as rank
-            FROM tools_fts
-            LEFT JOIN tools t ON t.name = tools_fts.tool_name
-            WHERE tools_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-          `).all(matchExpr, limit) as any[];
-        } catch { return []; }
+          activeSessionId = await getActiveCodeSessionId();
+        } catch {
+          activeSessionId = "";
+        }
       }
 
-      function searchSkills(matchExpr: string): any[] {
-        if (type !== "all" && type !== "skills") return [];
-        try {
-          return db.query(`
-            SELECT s.id, s.name, s.description, s.category, s.tools, s.triggers, s.preferred_agents, s.body, s.active, bm25(skills_fts) as rank
-            FROM skills_fts
-            JOIN skills s ON s.id = skills_fts.id
-            WHERE skills_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-          `).all(matchExpr, limit) as any[];
-        } catch { return []; }
+      const coreCatalog = new Map(CORE_TOOL_CATALOG.map(t => [t.name, t]));
+      const toolsCol = await col<ToolDoc>("tools");
+      const skillsCol = await col<SkillDoc>("skills");
+      const playbookCol = await col<PlaybookDoc>("playbook");
+      const mcpToolsCol = await col<McpToolDoc>("mcpTools");
+      const codeFilesCol = await col<CodeFileDoc>("codeFiles");
+
+      async function runCapabilitySearch(text: string): Promise<CapabilityHit[]> {
+        const groups: Promise<CapabilityHit[]>[] = [];
+        if (nonCodeTypes.length > 0) {
+          groups.push(searchCapabilities(text, { types: nonCodeTypes, k: limit * 4 }));
+        }
+        if (wantsCode && activeSessionId) {
+          groups.push(searchCapabilities(text, {
+            types: ["code"],
+            filters: [{ field: "session_id", value: activeSessionId }],
+            k: limit * 4,
+          }));
+        }
+        const merged = (await Promise.all(groups)).flat();
+        return merged.sort((a, b) => b.score - a.score);
       }
 
-      function searchPlaybook(matchExpr: string): any[] {
-        if (type !== "all" && type !== "playbook") return [];
-        try {
-          return db.query(`
-            SELECT p.id, p.rule, p.category, p.applicable_to, p.helpful_count, p.harmful_count, p.active, bm25(playbook_fts) as rank
-            FROM playbook_fts
-            JOIN playbook p ON p.id = playbook_fts.rowid
-            WHERE playbook_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-          `).all(matchExpr, limit) as any[];
-        } catch { return []; }
+      async function hydrateTool(hit: CapabilityHit): Promise<any | null> {
+        const entry = await toolsCol.get(hit.rawId);
+        if (entry) {
+          const row = entry.doc;
+          return {
+            id: row.id, name: row.name, description: row.description, category: row.category,
+            enabled: row.enabled, active: row.active, rank: hit.score,
+          };
+        }
+        const cat = coreCatalog.get(hit.rawId);
+        if (!cat) return null;
+        return {
+          id: cat.name, name: cat.name, description: cat.description, category: cat.category,
+          enabled: true, active: true, rank: hit.score,
+        };
       }
 
-      function searchMcpTools(matchExpr: string): any[] {
-        if (type !== "all" && type !== "mcp") return [];
-        try {
-          return db.query(`
-            SELECT m.id, m.server_name, m.tool_name, m.description, m.category, m.active, bm25(mcp_tools_fts) as rank
-            FROM mcp_tools_fts
-            JOIN mcp_tools m ON m.id = mcp_tools_fts.id
-            WHERE mcp_tools_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-          `).all(matchExpr, limit) as any[];
-        } catch { return []; }
+      async function hydrateSkill(hit: CapabilityHit): Promise<any | null> {
+        const entry = await skillsCol.get(hit.rawId);
+        const s = entry?.doc;
+        if (!s || !s.active) return null;
+        return {
+          id: s.id, name: s.name, description: s.description, category: s.category,
+          tools: s.tools, triggers: s.triggers,
+          preferred_agents: parseJsonOr(s.preferred_agents, []),
+          body: s.body ? (s.body.length > 1500 ? s.body.substring(0, 1500) + "…" : s.body) : undefined,
+          active: s.active, rank: hit.score,
+        };
       }
 
-      function searchCode(matchExpr: string): any[] {
-        if (type !== "all" && type !== "code") return [];
-        try {
-          const sessionRow = db.query<any, []>(
-            "SELECT id FROM code_sessions WHERE status = 'active' ORDER BY last_active DESC LIMIT 1"
-          ).get();
-          const sessionId = sessionRow?.id ?? "";
-          if (!sessionId) return [];
-          return db.query(`
-            SELECT
-              file_path,
-              highlight(code_fts, 2, '<match>', '</match>') AS snippet,
-              bm25(code_fts) AS rank
-            FROM code_fts
-            WHERE session_id = ? AND code_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-          `).all(sessionId, matchExpr, limit) as any[];
-        } catch { return []; }
+      async function hydratePlaybook(hit: CapabilityHit): Promise<any | null> {
+        const entry = await playbookCol.get(hit.rawId);
+        const p = entry?.doc;
+        if (!p || !p.active) return null;
+        return {
+          id: p.id, rule: p.rule, category: p.category,
+          applicable_to: parseJsonOr(p.applicable_to, null),
+          helpful_count: p.helpful_count, harmful_count: p.harmful_count,
+          active: p.active, rank: hit.score,
+        };
       }
 
-      // ─── Pass 1: Search with original query ─────────────────────────
+      async function hydrateMcp(hit: CapabilityHit): Promise<any | null> {
+        const entry = await mcpToolsCol.get(hit.rawId);
+        const t = entry?.doc;
+        if (!t || !t.active) return null;
+        return {
+          id: t.id, full_name: t.id, server_name: t.server_name, tool_name: t.tool_name,
+          description: t.description, category: t.category,
+          active: t.active, rank: hit.score,
+        };
+      }
 
-      const tools1 = searchTools(ftsMatch);
-      const skills1 = searchSkills(ftsMatch);
-      const playbook1 = searchPlaybook(ftsMatch);
-      const mcp1 = searchMcpTools(ftsMatch);
-      const code1 = searchCode(ftsMatch);
+      async function hydrateCode(hit: CapabilityHit): Promise<any | null> {
+        const entry = await codeFilesCol.get(hit.rawId);
+        const c = entry?.doc;
+        if (!c) return null;
+        return {
+          file_path: c.file_path,
+          snippet: buildSnippet(c.content, normalizedQuery),
+          rank: hit.score,
+        };
+      }
 
-      const totalFirst = tools1.length + skills1.length + playbook1.length + mcp1.length + code1.length;
+      const seenIds = new Set<string>();
+      async function mergeHits(hits: CapabilityHit[]): Promise<number> {
+        let added = 0;
+        for (const hit of hits) {
+          if (seenIds.has(hit.id)) continue;
+          let entry: any = null;
+          let bucket: any[] | null = null;
+          switch (hit.type) {
+            case "tool":
+              if (result.tools.length < limit) { entry = await hydrateTool(hit); bucket = result.tools; }
+              break;
+            case "skill":
+              if (result.skills.length < limit) { entry = await hydrateSkill(hit); bucket = result.skills; }
+              break;
+            case "playbook":
+              if (result.playbook.length < limit) { entry = await hydratePlaybook(hit); bucket = result.playbook; }
+              break;
+            case "mcp":
+              if (result.toolsmcp.length < limit) { entry = await hydrateMcp(hit); bucket = result.toolsmcp; }
+              break;
+            case "code":
+              if (result.code.length < limit) { entry = await hydrateCode(hit); bucket = result.code; }
+              break;
+          }
+          if (entry && bucket) {
+            bucket.push(entry);
+            seenIds.add(hit.id);
+            added++;
+          }
+        }
+        return added;
+      }
 
-      // Map results
-      result.tools = tools1.map((t: any) => ({
-        id: t.id, name: t.name, description: t.description, category: t.category,
-        enabled: t.enabled === 1, active: t.active === 1, rank: t.rank,
-      }));
-      result.skills = skills1.map((s: any) => ({
-        id: s.id, name: s.name, description: s.description, category: s.category,
-        tools: s.tools, triggers: s.triggers,
-        preferred_agents: s.preferred_agents ? JSON.parse(s.preferred_agents) : [],
-        body: s.body ? (s.body.length > 400 ? s.body.substring(0, 400) + "…" : s.body) : undefined,
-        active: s.active === 1, rank: s.rank,
-      }));
-      result.playbook = playbook1.map((p: any) => ({
-        id: p.id, rule: p.rule, category: p.category,
-        applicable_to: p.applicable_to ? JSON.parse(p.applicable_to) : null,
-        helpful_count: p.helpful_count, harmful_count: p.harmful_count,
-        active: p.active === 1, rank: p.rank,
-      }));
-      result.toolsmcp = mcp1.map((t: any) => ({
-        id: t.id, full_name: t.id, server_name: t.server_name, tool_name: t.tool_name,
-        description: t.description, category: t.category,
-        active: t.active === 1, rank: t.rank,
-      }));
-      result.code = code1.map((c: any) => ({
-        file_path: c.file_path,
-        snippet: c.snippet,
-        rank: c.rank,
-      }));
-
-      // ─── Pass 2: Bilingual fallback (ES → EN) ──────────────────────
+      const totalFirst = await mergeHits(await runCapabilitySearch(normalizedQuery));
 
       if (totalFirst < MIN_RESULTS_FOR_BILINGUAL) {
         const englishQuery = translateQueryToEnglish(normalizedQuery);
         if (englishQuery.length > 0) {
-          const enWords = englishQuery.split(/\s+/).filter(w => w.length > 0);
-          const enMatch = buildFtsMatch(enWords);
-
           log.info(`[search_knowledge] Bilingual fallback: "${normalizedQuery}" → "${englishQuery}" (first pass: ${totalFirst} results)`);
-
-          const existingIds = new Set([
-            ...result.tools.map((t: any) => t.name),
-            ...result.skills.map((s: any) => s.id),
-            ...result.playbook.map((p: any) => p.id),
-            ...result.toolsmcp.map((t: any) => t.id),
-            ...result.code.map((c: any) => c.file_path),
-          ]);
-
-          // Merge English results (dedup by id)
-          for (const t of searchTools(enMatch)) {
-            if (!existingIds.has(t.name || t.id)) {
-              result.tools.push({
-                id: t.id, name: t.name, description: t.description, category: t.category,
-                enabled: t.enabled === 1, active: t.active === 1, rank: t.rank,
-              });
-              existingIds.add(t.name || t.id);
-            }
-          }
-          for (const s of searchSkills(enMatch)) {
-            if (!existingIds.has(s.id)) {
-              result.skills.push({
-                id: s.id, name: s.name, description: s.description, category: s.category,
-                tools: s.tools, triggers: s.triggers,
-                preferred_agents: s.preferred_agents ? JSON.parse(s.preferred_agents) : [],
-                body: s.body ? (s.body.length > 400 ? s.body.substring(0, 400) + "…" : s.body) : undefined,
-                active: s.active === 1, rank: s.rank,
-              });
-              existingIds.add(s.id);
-            }
-          }
-          for (const p of searchPlaybook(enMatch)) {
-            if (!existingIds.has(p.id)) {
-              result.playbook.push({
-                id: p.id, rule: p.rule, category: p.category,
-                applicable_to: p.applicable_to ? JSON.parse(p.applicable_to) : null,
-                helpful_count: p.helpful_count, harmful_count: p.harmful_count,
-                active: p.active === 1, rank: p.rank,
-              });
-              existingIds.add(p.id);
-            }
-          }
-          for (const t of searchMcpTools(enMatch)) {
-            if (!existingIds.has(t.id)) {
-              result.toolsmcp.push({
-                id: t.id, full_name: t.id, server_name: t.server_name, tool_name: t.tool_name,
-                description: t.description, category: t.category,
-                active: t.active === 1, rank: t.rank,
-              });
-              existingIds.add(t.id);
-            }
-          }
-          for (const c of searchCode(enMatch)) {
-            if (!existingIds.has(c.file_path)) {
-              result.code.push({
-                file_path: c.file_path,
-                snippet: c.snippet,
-                rank: c.rank,
-              });
-              existingIds.add(c.file_path);
-            }
-          }
+          await mergeHits(await runCapabilitySearch(englishQuery));
         }
       }
 
@@ -400,22 +393,16 @@ export const getProjectContextTool: Tool = {
     required: [],
   },
   execute: async (_params: Record<string, unknown>, _config?: any) => {
-    const db = getDb();
     try {
-      const sessionRow = db.query<any, []>(
-        "SELECT id FROM code_sessions WHERE status = 'active' ORDER BY last_active DESC LIMIT 1"
-      ).get();
-      const sessionId = sessionRow?.id ?? "";
+      const sessionId = await getActiveCodeSessionId();
       if (!sessionId) {
         return { ok: false, error: "No active session found." };
       }
 
-      const cacheRow = db.query<{ compiled: string }, [string]>(/* sql */ `
-        SELECT compiled FROM code_context_cache
-        WHERE cache_key = ? AND expires_at > datetime('now')
-      `).get(`project_context:${sessionId}`);
+      const cacheEntry = await (await col<CodeContextCacheDoc>("codeContextCache")).get(`project_context:${sessionId}`);
+      const cacheRow = cacheEntry?.doc;
 
-      if (cacheRow?.compiled) {
+      if (cacheRow?.compiled && new Date(cacheRow.expires_at).getTime() > Date.now()) {
         return { ok: true, context: cacheRow.compiled };
       }
 
@@ -483,16 +470,37 @@ export const saveNoteTool: Tool = {
     required: ["key", "value"],
   },
   execute: async (params: Record<string, unknown>, config?: any) => {
-    const db = getDb();
     const key = params.key as string;
     const value = params.value as string;
     const threadId = (params.thread_id as string) ?? config?.configurable?.thread_id ?? "default";
 
+    // Without this the note is silently lost: a model that guesses the argument
+    // names writes a row keyed "<thread>:undefined" with no content and still
+    // gets "Note saved." back.
+    if (typeof key !== "string" || !key.trim()) {
+      return { ok: false, error: "save_note requires a non-empty 'key' string." };
+    }
+    if (typeof value !== "string" || !value.trim()) {
+      return { ok: false, error: "save_note requires a non-empty 'value' string." };
+    }
+
     try {
-      db.query(`
-        INSERT OR REPLACE INTO scratchpad (thread_id, key, value, source, updated_at)
-        VALUES (?, ?, ?, 'agent', unixepoch())
-      `).run(threadId, key, value);
+      const scratchpad = await col<ScratchpadDoc>("scratchpad");
+      const id = `${threadId}:${key}`;
+      const existing = await scratchpad.get(id);
+      await scratchpad.put(
+        id,
+        {
+          id,
+          thread_id: threadId,
+          key,
+          value,
+          source: "agent",
+          created_at: existing?.doc.created_at ?? Date.now(),
+          updated_at: Date.now(),
+        },
+        { expectedVersion: existing?.version ?? 0 },
+      );
 
       return { ok: true, key, message: "Note saved." };
     } catch (error) {
@@ -539,8 +547,11 @@ export const reportProgressTool: Tool = {
 
     // Update task progress in DB if task_id provided
     if (taskId) {
-      const db = getDb();
-      db.query(`UPDATE tasks SET progress = ?, updated_at = unixepoch() WHERE id = ?`).run(progress, taskId);
+      const tasks = await col<TaskDoc>("tasks");
+      const task = await tasks.get(taskId);
+      if (task) {
+        await tasks.put(taskId, { ...task.doc, progress, updated_at: Date.now() }, { expectedVersion: task.version });
+      }
     }
 
     // Send real-time update to the user's channel

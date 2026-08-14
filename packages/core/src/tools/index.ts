@@ -36,6 +36,7 @@ import * as narrative from "./narrative/index.ts";
 
 // API (1) - HTTP client for REST APIs
 import * as api from "./api/index.ts";
+import * as speckit from "./speckit/index.ts";
 
 /**
  * Creates all tools with proper configuration
@@ -68,6 +69,9 @@ export function createAllTools(config: Config): Tool[] {
 
     // API (1) - HTTP client for REST APIs
     ...api.createTools(),
+
+    // SPEC KIT (6) — mandatory planning/architecture/validation protocol
+    ...speckit.createTools(),
   ];
 }
 
@@ -94,6 +98,8 @@ export function createToolsByCategory(category: string, config: Config): Tool[] 
       return narrative.createTools();
     case "api":
       return api.createTools();
+    case "speckit":
+      return speckit.createTools();
     default:
       return [];
   }
@@ -145,6 +151,7 @@ export { cliExecTool } from "./cli/index.ts";
 
 export {
   memoryWriteTool,
+  writeMemoryTool,
   memoryReadTool,
   memoryListTool,
   memorySearchTool,
@@ -193,6 +200,15 @@ export {
 } from "./core/index.ts";
 
 export { apiRequestTool } from "./api/index.ts";
+
+export {
+  specKitInitTool,
+  specKitArtifactReadTool,
+  specKitArtifactWriteTool,
+  specKitValidateTool,
+  specKitTasksSyncTool,
+  specKitConvergeTool,
+} from "./speckit/index.ts";
 
 export {
   readNarrativeTool,

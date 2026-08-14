@@ -1,6 +1,6 @@
 use crate::{
     state::AppState,
-    term::{Canvas, Rect, Style, AMBER_BRIGHT, AMBER_DIM, CYAN, RED, SECONDARY},
+    term::{Canvas, Rect, Style, AMBER_BRIGHT, AMBER_DIM, CYAN, GREEN, RED, SECONDARY},
 };
 
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -9,6 +9,16 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     }
     let row = area.y;
     let mut x = area.x + 1;
+
+    // A checkpoint left by boot-time reconciliation, distinct from ordinary
+    // rollback: this one continues the task from its saved level.
+    if let Some(resume) = &state.dashboard.resume {
+        let label = format!(" [▶ RESUME · {}]", resume.reason);
+        let max_w = (area.w / 2).max(20) as usize;
+        let label = crate::ui::truncate_cells(&label, max_w);
+        canvas.print(x, row, &label, Style::new().fg(GREEN).bold());
+        x += label.chars().count() as u16 + 1;
+    }
 
     canvas.print(x, row, "⬡ CHECKPOINTS", Style::new().fg(AMBER_DIM).bold());
     x += 14;

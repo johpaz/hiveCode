@@ -9,20 +9,23 @@ import {
   runProviderSetupWizard,
 } from "../cli-ui.ts"
 
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
+import { maybeLoadHiveAgentsModelFromDb } from "@johpaz/hivecode-core/agent/hiveagents-loader"
+import {
+  listProviderIds,
+  modelExists,
+  setCoordinatorProviderModel,
+  setDefaultProvider,
+  setProviderModel,
+  upsertProvider,
+} from "./provider-store"
 
 const VERSION = "1.0.0"
 
 export async function onboard(version = VERSION): Promise<void> {
   hiveIntro(`hivecode  v${version}`)
 
-  const db = getDb()
-
-  // Check existing providers
-  const existing = (
-    db.query("SELECT id FROM providers ORDER BY id").all() as { id: string }[]
-  ).map((r) => r.id)
+  const existing = await listProviderIds()
 
   if (existing.length > 0) {
     hiveNote("Providers existentes", [
@@ -41,37 +44,32 @@ export async function onboard(version = VERSION): Promise<void> {
 
   await storeProviderApiKey(result.provider, result.apiKey)
 
-  // Upsert provider
-  db.query(`
-    INSERT INTO providers (id, name, base_url, enabled)
-    VALUES (?, ?, ?, 1)
-    ON CONFLICT(id) DO UPDATE SET
-      base_url = excluded.base_url,
-      enabled = 1
-  `).run(
-    result.provider,
-    result.provider,
-    result.baseUrl || null,
-  )
+  await upsertProvider(result.provider, {
+    name: result.provider,
+    baseUrl: result.baseUrl || null,
+    enabled: true,
+  })
 
-  // Set as default
-  db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)")
-    .run(result.provider)
+  await setDefaultProvider(result.provider)
 
   if (result.model) {
-    db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)")
-      .run(`provider_model_${result.provider}`, result.model)
+    await setProviderModel(result.provider, result.model)
   }
 
-  // Update coordinator agents to use this provider/model
   const agentModelId = result.model
-    ? (db.query("SELECT 1 FROM models WHERE id = ?").get(result.model) ? result.model : null)
+    ? (await modelExists(result.model) ? result.model : null)
     : null
+  await setCoordinatorProviderModel(result.provider, agentModelId)
 
-  db.query(`
-    UPDATE agents SET provider_id = ?, model_id = ?
-    WHERE role = 'coordinator'
-  `).run(result.provider, agentModelId)
+  if (result.provider === "hiveagents" && agentModelId) {
+    hiveNote("HiveAgents", [`Cargando ${agentModelId}; se esperará hasta que esté listo...`])
+    const load = await maybeLoadHiveAgentsModelFromDb(result.provider, agentModelId)
+    if (!load.success) {
+      hiveNote("HiveAgents", [`No se pudo precargar ${agentModelId}: ${load.error}`])
+    } else {
+      hiveNote("HiveAgents", [`Modelo ${agentModelId} cargado y listo · ctx=${load.ctx}`])
+    }
+  }
 
   hiveOutro(`Onboarding completo · Provider ${result.provider} configurado`)
 }

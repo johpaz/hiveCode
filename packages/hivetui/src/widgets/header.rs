@@ -49,8 +49,13 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
         // [MODE] badge
         sep!();
         let (badge, bg_color, fg_color) = mode_badge(&state.session.mode);
-        canvas.print(x, y, badge, Style::new().fg(fg_color).bg(bg_color).bold());
-        x += cell_width(badge) as u16;
+        let badge = if state.tab_locked {
+            format!("{}✎ ", badge.trim_end())
+        } else {
+            badge.to_string()
+        };
+        canvas.print(x, y, &badge, Style::new().fg(fg_color).bg(bg_color).bold());
+        x += cell_width(&badge) as u16;
 
         // ⬡N workers activos
         let active = state

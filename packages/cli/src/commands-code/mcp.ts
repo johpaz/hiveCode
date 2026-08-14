@@ -14,13 +14,14 @@ import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveSpinner, hiveText, isCancel,
 } from "../cli-ui.ts"
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { McpServerDoc } from "@johpaz/hivecode-core/storage/collections"
 
 export async function mcpList(): Promise<void> {
   hiveIntro("hivecode · MCP Servers")
 
-  const db = getDb()
-  const rows = db.query("SELECT id, name, transport, url, command, enabled, status, tools_count FROM mcp_servers ORDER BY id").all() as any[]
+  const mcpServers = await col<McpServerDoc>("mcpServers")
+  const rows = (await mcpServers.scan()).map((entry) => entry.doc).sort((a, b) => a.id.localeCompare(b.id))
 
   if (rows.length === 0) {
     hiveNote("Sin MCPs", ["No hay servidores MCP configurados. Usa 'hivecode mcp add <url>'"])
@@ -56,17 +57,32 @@ export async function mcpAdd(urlOrName?: string): Promise<void> {
     return
   }
 
-  const db = getDb()
   const id = input.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase()
 
   // Detect if URL or command-based
   const isUrl = input.startsWith("http://") || input.startsWith("https://")
   const transport = isUrl ? "sse" : "stdio"
 
-  db.query(`
-    INSERT OR REPLACE INTO mcp_servers (id, name, transport, url, command, enabled, active, builtin, status)
-    VALUES (?, ?, ?, ?, ?, 1, 0, 0, 'disconnected')
-  `).run(id, input, transport, isUrl ? input : null, isUrl ? null : input)
+  const mcpServers = await col<McpServerDoc>("mcpServers")
+  const existing = await mcpServers.get(id)
+  await mcpServers.put(id, {
+    id,
+    name: input,
+    transport,
+    command: isUrl ? null : input,
+    args: JSON.stringify([]),
+    url: isUrl ? input : null,
+    enabled: true,
+    active: false,
+    builtin: false,
+    status: "disconnected",
+    tools_count: existing?.doc.tools_count ?? 0,
+    user_id: existing?.doc.user_id,
+    env_encrypted: existing?.doc.env_encrypted ?? null,
+    env_iv: existing?.doc.env_iv ?? null,
+    headers_encrypted: existing?.doc.headers_encrypted ?? null,
+    headers_iv: existing?.doc.headers_iv ?? null,
+  }, { expectedVersion: existing?.version ?? 0 })
 
   hiveOutro(`MCP ${id} añadido (${transport})`)
 }
@@ -78,8 +94,7 @@ export async function mcpRemove(name?: string): Promise<void> {
     process.exit(1)
   }
 
-  const db = getDb()
-  db.query("DELETE FROM mcp_servers WHERE id = ?").run(name)
+  await (await col<McpServerDoc>("mcpServers")).delete(name)
   hiveOutro(`MCP ${name} eliminado`)
 }
 
@@ -90,8 +105,9 @@ export async function mcpEnable(name?: string): Promise<void> {
     process.exit(1)
   }
 
-  const db = getDb()
-  db.query("UPDATE mcp_servers SET enabled = 1 WHERE id = ?").run(name)
+  const mcpServers = await col<McpServerDoc>("mcpServers")
+  const row = await mcpServers.get(name)
+  if (row) await mcpServers.put(name, { ...row.doc, enabled: true }, { expectedVersion: row.version })
   hiveOutro(`MCP ${name} habilitado`)
 }
 
@@ -102,8 +118,9 @@ export async function mcpDisable(name?: string): Promise<void> {
     process.exit(1)
   }
 
-  const db = getDb()
-  db.query("UPDATE mcp_servers SET enabled = 0 WHERE id = ?").run(name)
+  const mcpServers = await col<McpServerDoc>("mcpServers")
+  const row = await mcpServers.get(name)
+  if (row) await mcpServers.put(name, { ...row.doc, enabled: false }, { expectedVersion: row.version })
   hiveOutro(`MCP ${name} deshabilitado`)
 }
 
@@ -120,8 +137,7 @@ export async function mcpTest(name?: string): Promise<void> {
     return
   }
 
-  const db = getDb()
-  const row = db.query("SELECT id, url, transport FROM mcp_servers WHERE id = ?").get(mcpId) as any
+  const row = (await (await col<McpServerDoc>("mcpServers")).get(mcpId))?.doc
 
   if (!row) {
     hiveOutro(`MCP no encontrado: ${mcpId}`, "error")
@@ -154,8 +170,7 @@ export async function mcpInspect(name?: string): Promise<void> {
     process.exit(1)
   }
 
-  const db = getDb()
-  const row = db.query("SELECT * FROM mcp_servers WHERE id = ?").get(name) as any
+  const row = (await (await col<McpServerDoc>("mcpServers")).get(name))?.doc
 
   if (!row) {
     hiveOutro(`MCP no encontrado: ${name}`, "error")

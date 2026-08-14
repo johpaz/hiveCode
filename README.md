@@ -2,17 +2,18 @@
 
 **Multi-AI Coding Swarm — Consola-first. Enfocado en código. Multi-proveedor.**
 
-`hivecode` es un sistema de ingeniería de software autónoma impulsado por un enjambre de coordinadores IA especializados. **BEE** actúa como punto de entrada único: recibe la tarea, clasifica la intención, y orquesta los workers en paralelo por niveles de dependencia. El sistema aprende con cada sesión — el conocimiento se destila en `agent_memory` (SQLite) y se inyecta automáticamente en sesiones futuras.
+`hivecode` es un harness de ingeniería de software con cinco perfiles estables: **BEE**, **Scout**, **Builder**, **Verifier** y **Reviewer**. Solo activa agentes bajo demanda, limita la concurrencia global a tres y usa Spec Kit nativo como protocolo obligatorio para features, arquitectura, migraciones y refactors amplios.
 
 > **Runtime:** Bun >= 1.3.13
-> **Base de datos:** SQLite WAL — única fuente de verdad
+> **Base de datos:** HiveDB WAL — única fuente de verdad
 > **TUI:** Rust + crossterm, renderer custom (`packages/hivetui/`)
 > **Licencia:** hivecode-NC-1.0 (no comercial)
 
 **Documentación técnica:**
 - [`docs/harness.md`](./docs/harness.md) — arquitectura completa del harness, las 4 capas del sistema, Learning Harness y comparación con Google ADK / Antigravity CLI.
-- [`docs/workers.md`](./docs/workers.md) — referencia detallada de los 13 coordinadores, 2 workers on-demand, 18 sub-agentes y tabla completa de herramientas por rol.
-- [`docs/code-context-retrieval.md`](./docs/code-context-retrieval.md) — cómo los workers obtienen contexto del proyecto: resumen precacheado + búsqueda FTS5.
+- [`docs/agent-harness.md`](./docs/agent-harness.md) — arquitectura vigente: perfiles, activación perezosa, Spec Kit, DAG, budgets y gates.
+- [`docs/workers.md`](./docs/workers.md) — referencia histórica del pipeline de compatibilidad.
+- [`docs/code-context-retrieval.md`](./docs/code-context-retrieval.md) — cómo los workers obtienen contexto del proyecto: resumen precacheado + búsqueda HiveDB index.
 
 ---
 
@@ -174,9 +175,11 @@ SIN activar ningún worker.                       (solo cuando BEE decide archit
 
 Si un worker agota sus iteraciones sin completar, **ForensicAgent** se activa automáticamente antes de cualquier relanzamiento — analiza la causa raíz y recomienda `relanzar_con_constraint`, `reasignar` o `escalar_al_humano`.
 
-### Los 13 coordinadores del enjambre
+### Los 11 coordinadores del enjambre
 
-Cada worker es un **Bun Worker independiente** (proceso JS separado con su propio heap). Se comunican exclusivamente por paso de mensajes — nunca entre sí directamente. El blackboard en SQLite es el único medio de coordinación.
+Roster consolidado (antes 13): DBA se fusionó en BackendEngineer, MobileEngineer se fusionó en FrontendEngineer, e Integration se fusionó en CodeReviewer — los tres eran "escritores paralelos" sobre un dominio que ya tenía dueño, generando costuras de conflicto sin dividir trabajo real del LLM. Se sumó **Verifier**, que reproduce los criterios de aceptación del PRD contra el sistema real — el hueco de verificación que ni QA ni Reviewer cubrían por sí solos.
+
+Cada worker es un **Bun Worker independiente** (proceso JS separado con su propio heap). Se comunican exclusivamente por paso de mensajes — nunca entre sí directamente. El blackboard en HiveDB es el único medio de coordinación.
 
 ---
 
@@ -207,36 +210,29 @@ Se activa después de ProductManager cuando BEE clasifica como `architecture`. L
 ---
 
 #### 3. BackendEngineer — Ingeniero de Servidor
-Implementa APIs, lógica de negocio y acceso a datos. Lee el plan de Architecture y los contratos del blackboard. Al terminar escribe los endpoints implementados con sus contratos exactos para que Frontend, Mobile y DataScientist los consuman. Si va a modificar archivos de schema, verifica si existe un ADR que requiera migration script previo.
+Implementa APIs, lógica de negocio, acceso a datos y el **modelo de datos** (absorbe el rol de DBA: el schema es parte del contrato de backend, no un dominio aparte). Lee el plan de Architecture y los contratos del blackboard. Al terminar escribe los endpoints y el modelo de datos implementados con sus contratos exactos para que Frontend y DataScientist los consuman. El sub-agente `db-agent` sigue disponible para el diseño de datos.
 
-**Herramientas:** read + write completo + git + build/test/lint + shell
+**Herramientas:** read + write completo + git + build/test/lint + `write_decision` + shell
 
 ---
 
-#### 4. FrontendEngineer — Ingeniero de Interfaz Web
-Implementa componentes UI y consume las APIs de Backend. Si un endpoint que necesita aún no está definido en el blackboard, escribe una pregunta dirigida a Backend y continúa con las partes independientes. Al terminar documenta qué componentes creó y qué endpoints consume para que CodeReviewer valide la consistencia.
+#### 4. FrontendEngineer — Ingeniero de Interfaz de Cliente
+Implementa UI de cliente — **web y mobile** (absorbe el rol de MobileEngineer: mismo trabajo de UI contra un único contrato de API). En modo web, verifica cada componente con `browser_screenshot` antes de darlo por completo; en modo mobile (React Native, Expo, iOS/SwiftUI, Android/Jetpack Compose) el ciclo de verificación es build+test. Si un endpoint que necesita aún no está definido en el blackboard, escribe una pregunta dirigida a Backend y continúa con las partes independientes. Al terminar documenta qué componentes creó y qué endpoints consume para que CodeReviewer valide la consistencia.
 
 **Herramientas:** read + write completo + git + build/test/lint
 
 ---
 
-#### 5. MobileEngineer — Ingeniero de Apps Móviles
-Implementa aplicaciones React Native, iOS (Swift/SwiftUI) o Android (Kotlin/Jetpack Compose) según el stack definido por Architecture. Es fundamentalmente distinto a FrontendEngineer — maneja APIs de plataforma nativa, compiladores nativos y ciclos build-test-debug autónomos. Lee los contratos de API de Backend del blackboard. Si un endpoint que necesita no está definido, escribe la solicitud en el blackboard y continúa con las partes independientes.
-
-**Herramientas:** read + write + build + test + shell (expo, pod install, gradle, etc.)
-
----
-
-#### 6. DataScientist — Científico de Datos / IA
+#### 5. DataScientist — Científico de Datos / IA
 Implementa modelos ML, pipelines de datos y agentes de IA. Es fundamentalmente distinto a BackendEngineer — maneja PyTorch, scikit-learn, transformers y MLOps. Coordina con BackendEngineer vía blackboard para definir el contrato del endpoint de predicciones antes de que el backend lo implemente. Reporta métricas concretas (F1, AUC, accuracy) en el blackboard, no narrativas vagas.
 
 **Herramientas:** read + write + run_script + shell
 
 ---
 
-#### 7. SecurityAuditor — Auditor de Seguridad
+#### 6. SecurityAuditor — Auditor de Seguridad
 Opera en **dos modos simultáneos**:
-- **Transversal** durante el nivel de engineers: corre en paralelo con Backend/Frontend/Mobile/DataScientist, detecta hallazgos CRITICAL y escribe constraints en el blackboard antes de que los workers afectados continúen
+- **Transversal** durante el nivel de engineers: corre en paralelo con Backend/Frontend/DataScientist, detecta hallazgos CRITICAL y escribe constraints en el blackboard antes de que los workers afectados continúen
 - **Dedicado** en el nivel de QA: análisis completo del código producido
 
 Categorías que siempre audita: inyecciones SQL/command, secrets hardcodeados, autenticación débil, dependencias vulnerables, XSS, exposición de datos. **No modifica código.**
@@ -245,36 +241,43 @@ Categorías que siempre audita: inyecciones SQL/command, secrets hardcodeados, a
 
 ---
 
-#### 8. QAEngineer — Ingeniero de Calidad
+#### 7. QAEngineer — Ingeniero de Calidad
 Escribe y ejecuta tests después de que todos los engineers del nivel anterior completaron. Lee los criterios de aceptación del PRD de ProductManager (si existe) para escribir casos verificables. El Context Compiler le inyecta `forensic_lessons` de sesiones anteriores para evitar repetir casos que ya causaron problemas. Si un test falla, escribe el fallo en el blackboard dirigido al worker responsable.
 
 **Herramientas:** read + write + test runner
 
 ---
 
-#### 9. DevOpsEngineer — Infraestructura y CI/CD
+#### 8. DevOpsEngineer — Infraestructura y CI/CD
 Configura pipelines de CI/CD, Dockerfiles, Terraform y configuraciones de monitoreo. Se activa después de QA y Security porque necesita conocer el estado final del código. Lee el blackboard para entender qué cambios hicieron los otros workers y actualiza la infraestructura para soportarlos.
 
 **Herramientas:** read + write + git completo (incluyendo `git_create_pr`, `git_rollback`) + shell
 
 ---
 
+#### 9. Verifier — Verificación de Comportamiento *(nuevo)*
+Reproduce, de forma independiente, los criterios de aceptación del PRD de ProductManager contra el sistema real — no confía en que QA escribió los tests correctos ni en que el código "parece" correcto. Corre después de DevOps y antes de CodeReviewer: levanta build/servidor, ejecuta cada criterio, y prioriza siempre evidencia determinística (`code_test`, `code_build`, comandos exactos) sobre juicio propio. Si un criterio no es reproducible en el entorno, lo dice explícitamente en vez de asumir que cumple. **No modifica código.**
+
+**Herramientas:** solo lectura + `code_test`, `code_build`, `shell_executor`, `run_script`, `write_decision`
+
+---
+
 #### 10. CodeReviewer — Gate de Calidad Final
-Siempre usa el **modelo de mayor capacidad disponible**, independientemente del modelo configurado para los otros workers. Lee todo el blackboard, los diffs contra checkpoints, hallazgos de Security, resultados de QA, e incompatibilidades de Integration. El Context Compiler le inyecta toda la `agent_memory` del proyecto — llega con el historial completo de lo que funcionó y lo que no.
+Siempre usa el **modelo de mayor capacidad disponible**, independientemente del modelo configurado para los otros workers. Lee todo el blackboard, los diffs contra checkpoints, hallazgos de Security, resultados de QA, y la evidencia de Verifier. Además, **cruza contratos entre módulos** (absorbe el rol de Integration): endpoints↔consumo, modelo de datos↔queries, tipos↔imports. El Context Compiler le inyecta toda la `agentMemory` del proyecto — llega con el historial completo de lo que funcionó y lo que no.
 
-Emite uno de tres veredictos:
-- `APROBADO` — el trabajo cumple todos los criterios
-- `APROBADO_CON_OBSERVACIONES` — aprobado, con puntos de mejora para próximas sesiones
-- `RECHAZADO: {razones específicas}` — no puede pasar a producción sin correcciones
+Emite el veredicto invocando la tool **`submit_review_verdict`** (estructurada, no texto libre): un checklist de criterios de aceptación cruzados con evidencia real, categorías de estado (ok/warning/blocking), y razones específicas si rechaza.
+- `aprobado` — el trabajo cumple todos los criterios
+- `aprobado_con_observaciones` — aprobado, con puntos de mejora para próximas sesiones
+- `rechazado: {razones específicas}` — no puede pasar a producción sin correcciones
 
-Si rechaza, BEE relanza los workers afectados con los constraints del rechazo. **No modifica código.**
+Un test debilitado o eliminado para forzar la aprobación es motivo de rechazo automático. Si rechaza, BEE relanza los workers afectados con los constraints del rechazo. **No modifica código.**
 
-**Herramientas:** solo lectura + `check_types` + `code_test`
+**Herramientas:** solo lectura + `write_decision` + `check_types` + `code_test`
 
 ---
 
 #### 11. ForensicAgent — Reflexión Forzada *(on-demand)*
-Se activa **exclusivamente** cuando un worker alcanza su límite de iteraciones sin completar. El `CoordinatorManager` nunca relanza un worker que falló por límite sin esperar el análisis del ForensicAgent.
+Se activa en dos casos: (1) un worker alcanza su límite de iteraciones sin completar, o (2) una tarea agota sus reintentos automáticos con backoff exponencial sin resolverse — en ese caso, el análisis forense se adjunta a la escalación a revisión humana en vez de escalar solo con el error crudo. El `CoordinatorManager` nunca relanza un worker que falló por límite sin esperar el análisis del ForensicAgent.
 
 Analiza el historial completo del worker fallido en el blackboard y produce:
 1. **Qué intentó** — cada enfoque en orden cronológico
@@ -289,7 +292,7 @@ Analiza el historial completo del worker fallido en el blackboard y produce:
 ---
 
 #### 12. Librarian — Memoria Compuesta *(on-demand, post-sesión)*
-Se activa solo cuando CodeReviewer emitió `APROBADO` o `APROBADO_CON_OBSERVACIONES`. Lee el blackboard completo y **destila** — no transcribe — el conocimiento accionable en `agent_memory` (`~/.hivecode/memory.db`). Escribe patrones, antipatrones, contratos, convenciones y lecciones forenses. Incrementa `confirmed_count` de registros que la sesión validó y depreca los que ya no aplican (`refuted_count > confirmed_count + 2`). El conocimiento no se borra — se depreca con trazabilidad.
+Se activa solo cuando CodeReviewer emitió `APROBADO` o `APROBADO_CON_OBSERVACIONES`. Lee el blackboard completo y **destila** — no transcribe — el conocimiento accionable en la colección `agent_memory` de `./hivecode`. Escribe patrones, antipatrones, contratos, convenciones y lecciones forenses. Incrementa `confirmed_count` de registros que la sesión validó y depreca los que ya no aplican (`refuted_count > confirmed_count + 2`). El conocimiento no se borra — se depreca con trazabilidad.
 
 **No modifica código de producción. Herramientas:** solo lectura + `write_memory`
 
@@ -310,13 +313,16 @@ BEE (siempre primero)
                                         Plan de fases dinámico
                                                   │
                               Nivel 0 ──► Engineers según el plan
-                                        (backend, frontend, mobile,
-                                         data_scientist, dba, integration...)
+                                        (backend absorbe DBA, frontend absorbe
+                                         mobile, data_scientist)
                                         + SecurityAuditor transversal
                                                   │
-                              Nivel 1 ──► QA / DevOps / otros según dependencias
+                              Nivel 1 ──► QA / DevOps según dependencias
                                                   │
-                              Nivel N ──► CodeReviewer (modelo máximo)
+                              Nivel N ──► Verifier (reproduce criterios del PRD)
+                                                  │
+                              Nivel N+1 ► CodeReviewer (modelo máximo,
+                                                          absorbe Integration)
                                                   │
                               Post-sesión ► Librarian (solo si APROBADO)
 ```
@@ -327,15 +333,16 @@ La tabla `worker_activity` registra `started_at` y `completed_at` con `level`. T
 
 ## Memoria compuesta entre sesiones
 
-El **Librarian** destila el conocimiento de cada sesión aprobada en la tabla `agent_memory` (`~/.hivecode/memory.db`). El **Context Compiler** consulta esta tabla por FTS5 antes de despachar cada worker, con filtrado por dominio: cada worker recibe solo el tipo de conocimiento relevante para su rol.
+El **Librarian** destila el conocimiento de cada sesión aprobada en la colección `agentMemory` de HiveDB. El **Context Compiler** la consulta por índice antes de despachar cada worker, con filtrado por dominio: cada worker recibe solo el tipo de conocimiento relevante para su rol.
 
 | Worker | Tipos de memoria que recibe |
 |--------|----------------------------|
 | Architecture | `pattern`, `contract` |
 | SecurityAuditor | `antipattern` |
 | QAEngineer | `forensic_lesson` |
+| Verifier | `contract`, `forensic_lesson` |
 | CodeReviewer | todos los tipos |
-| demás workers | filtrado por relevancia semántica (FTS5) |
+| demás workers | filtrado por relevancia semántica (HiveDB index) |
 
 Tipos de conocimiento persistido:
 
@@ -463,15 +470,15 @@ Las API keys se almacenan en **Bun.secrets** (gestión segura del runtime), no e
 packages/
 ├── cli/        CLI: comandos externos, REPL, launchers
 ├── code/       Motor: CoordinatorManager, workers, plan-parser
-├── core/       Gateway HTTP/WS, SQLite, agent loop, tools, context compiler
+├── core/       Gateway HTTP/WS, HiveDB, agent loop, tools, context compiler
 ├── hivetui/    TUI Rust/crossterm — renderer custom, sin dependencias de Ratatui
 ├── mcp/        Cliente Model Context Protocol
 └── skills/     Skills empaquetadas
 ```
 
-### Base de datos — SQLite
+### Base de datos — HiveDB
 
-**`~/.hivecode/data/hivecode.db`** — Global (providers, agents, config, narrativo de código):
+**`./hivecode`** — Directorio HiveDB central del proyecto (providers, agentes, sesiones, memoria, configuración y estado durable). Puede sobrescribirse explícitamente con `HIVE_DB_PATH`.
 
 ```sql
 PRAGMA journal_mode = WAL;
@@ -486,33 +493,33 @@ PRAGMA mmap_size    = 268435456;  -- 256 MB
 | `models` | Modelos disponibles por provider |
 | `agents` | Agente/coordinadores y sus prompts |
 | `code_sessions` | Sesiones de trabajo |
-| `code_tasks` | Tareas con modo, status, tokens |
+| `codeTasks` | Tareas con modo, status, tokens |
 | `code_task_phases` | Fases por coordinador |
-| `code_narrative` | Historial narrativo estructurado (FTS5) |
+| `code_narrative` | Historial narrativo estructurado (HiveDB index) |
 | `code_recovery_points` | Recovery points por nivel de ejecución |
 | `code_file_snapshots` | Snapshots para rollback |
-| `code_playbook` | Reglas aprendidas por el ACE Reflector (FTS5) |
+| `code_playbook` | Reglas aprendidas por el ACE Reflector (HiveDB index) |
 | `code_traces` | Trazas de ejecución de herramientas por agente |
 | `learning_failures` | Log append-only de fallos (tool_error, phase_failure, timeout…) |
 | `learning_proposals` | Propuestas de mejora generadas por BEE y Architecture (pending → aprobación manual) |
 
-**`~/.hivecode/memory.db`** — Memoria cross-sesión:
+**Colección de memoria cross-sesión:**
 
 | Tabla | Contenido |
 |-------|-----------|
-| `agent_memory` | Conocimiento destilado por el Librarian con FTS5 |
+| `agent_memory` | Conocimiento destilado por el Librarian con HiveDB index |
 
-**`~/.hivecode/sessions/<id>.db`** — Por sesión:
+**Colecciones por sesión:**
 
 | Tabla | Contenido |
 |-------|-----------|
 | `sessions` | Metadata de la sesión |
 | `messages` | Historial de mensajes |
-| `agent_context` | Blackboard: decisiones, constraints, observaciones (FTS5) |
+| `agent_context` | Blackboard: decisiones, constraints, observaciones (HiveDB index) |
 | `agent_conflicts` | Conflictos detectados y sus resoluciones |
 | `worker_activity` | Actividad por worker con `level` y timestamps |
 | `checkpoints` | Snapshots de archivos para rollback por nivel |
-| `adrs` | Architecture Decision Records (FTS5) |
+| `adrs` | Architecture Decision Records (HiveDB index) |
 | `file_risks` | Mapa de riesgo de archivos |
 
 ---
@@ -536,16 +543,14 @@ dist/
 ├── bee.worker.js             # Coordinador principal
 ├── architecture.worker.js
 ├── product-manager.worker.js
-├── backend.worker.js
-├── frontend.worker.js
-├── mobile.worker.js
+├── backend.worker.js         # absorbe el rol de DBA
+├── frontend.worker.js        # absorbe el rol de Mobile
 ├── data-scientist.worker.js
-├── dba.worker.js
 ├── security.worker.js
 ├── test.worker.js
 ├── devops.worker.js
-├── integration.worker.js
-├── reviewer.worker.js
+├── verifier.worker.js        # nuevo: reproduce criterios de aceptación del PRD
+├── reviewer.worker.js        # absorbe el rol de Integration
 ├── librarian.worker.js       # On-demand: post-sesión aprobada
 ├── forensic.worker.js        # On-demand: análisis de fallos
 ├── tool.worker.js            # Pool de herramientas pesadas

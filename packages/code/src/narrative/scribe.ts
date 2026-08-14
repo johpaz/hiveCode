@@ -1,5 +1,21 @@
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
+import type {
+  CodeDecisionDoc,
+  CodeFileChangeDoc,
+  CodeFileSnapshotDoc,
+  CodeNarrativeDoc,
+  CodeRecoveryPointDoc,
+  CodeSessionDoc,
+  CodeSessionModeDoc,
+  CodeTaskDoc,
+  CodeTaskPhaseDoc,
+  CodeTaskPlanDoc,
+  CodeTraceDoc,
+  CodeTurnDoc,
+  LearningFailureDoc,
+  LearningProposalDoc,
+} from "@johpaz/hivecode-core/storage/collections"
 import type { NarrativeEntry, ADR, FileSnapshot } from "../workers/types"
 
 export interface Turn {
@@ -30,186 +46,379 @@ export interface TaskMetadata {
 
 const log = logger.child("scribe")
 
-function mapEntry(r: any): NarrativeEntry {
+function nowIso(): string {
+  return new Date().toISOString()
+}
+
+function nextNumericId(): number {
+  return Date.now() * 1000 + Math.floor(Math.random() * 1000)
+}
+
+function mapEntry(r: CodeNarrativeDoc): NarrativeEntry {
   return {
-    id: r.id, taskId: r.task_id, sessionId: r.session_id,
-    coordinator: r.coordinator, phase: r.phase, entry: r.entry,
-    isDraft: r.is_draft === 1, isOverride: r.is_override === 1,
+    id: Number(r.id),
+    taskId: r.task_id,
+    sessionId: r.session_id,
+    coordinator: r.coordinator,
+    phase: r.phase,
+    entry: r.entry,
+    isDraft: r.is_draft,
+    isOverride: r.is_override,
     createdAt: r.created_at,
   }
 }
 
-function mapADR(r: any): ADR {
+function mapADR(r: CodeDecisionDoc): ADR {
   return {
-    id: r.id, taskId: r.task_id, title: r.title, context: r.context,
-    options: r.options, decision: r.decision, consequences: r.consequences,
-    status: r.status, createdAt: r.created_at,
+    id: r.id,
+    taskId: r.task_id,
+    title: r.title,
+    context: r.context,
+    options: r.options,
+    decision: r.decision,
+    consequences: r.consequences,
+    status: r.status,
+    createdAt: r.created_at,
   }
 }
 
-function mapSnapshot(r: any): FileSnapshot {
+function mapSnapshot(r: CodeFileSnapshotDoc): FileSnapshot {
   return {
-    id: r.id, taskId: r.task_id, filePath: r.file_path,
-    content: r.content, hash: r.hash, snapshotAt: r.snapshot_at,
+    id: Number(r.id),
+    taskId: r.task_id,
+    filePath: r.file_path,
+    content: r.content,
+    hash: r.hash,
+    snapshotAt: r.snapshot_at,
   }
 }
 
 export class Scribe {
-  private db = getDb()
+  private queue = Promise.resolve()
+  private sessions = new Map<string, CodeSessionDoc>()
+  private turns = new Map<string, CodeTurnDoc>()
+  private tasks = new Map<string, CodeTaskDoc>()
+  private phases = new Map<number, CodeTaskPhaseDoc>()
+  private narrative: CodeNarrativeDoc[] = []
+  private decisions: CodeDecisionDoc[] = []
+  private snapshots: CodeFileSnapshotDoc[] = []
+  private recoveryPoints: CodeRecoveryPointDoc[] = []
+  private failures: LearningFailureDoc[] = []
+
+  private enqueue(work: () => Promise<void>): void {
+    this.queue = this.queue.then(work, work).catch((err) => {
+      log.warn("[scribe] HiveDB persistence failed:", (err as Error).message)
+    })
+  }
+
+  private put<T>(collection: string, id: string, doc: T): void {
+    this.enqueue(async () => {
+      const docs = await col<T>(collection)
+      const existing = await docs.get(id)
+      await docs.put(id, doc, { expectedVersion: existing?.version ?? 0 })
+    })
+  }
+
+  private delete<T>(collection: string, id: string): void {
+    this.enqueue(async () => {
+      await (await col<T>(collection)).delete(id)
+    })
+  }
+
+  /** Await all queued durable writes — for graceful shutdown and tests. */
+  async flush(): Promise<void> {
+    await this.queue
+  }
+
+  private hydrated = false
+
+  /**
+   * Load durable state from HiveDB into the in-memory caches. Without this, a
+   * fresh process starts with empty caches, so every read method below
+   * (recovery points, snapshots, narrative, failure patterns) returns nothing
+   * even though the data was persisted — the root cause that silently defeated
+   * crash recovery. Idempotent; call once at manager boot before any task runs.
+   */
+  async hydrate(): Promise<void> {
+    if (this.hydrated) return
+    this.hydrated = true
+    try {
+      const load = async <T>(collection: string): Promise<T[]> =>
+        (await (await col<T>(collection)).scan()).map((entry) => entry.doc)
+
+      for (const doc of await load<CodeSessionDoc>("codeSessions")) this.sessions.set(doc.id, doc)
+      for (const doc of await load<CodeTurnDoc>("codeTurns")) this.turns.set(doc.id, doc)
+      for (const doc of await load<CodeTaskDoc>("codeTasks")) this.tasks.set(doc.id, doc)
+      for (const doc of await load<CodeTaskPhaseDoc>("codeTaskPhases")) this.phases.set(Number(doc.id), doc)
+      this.narrative = await load<CodeNarrativeDoc>("codeNarrative")
+      this.decisions = await load<CodeDecisionDoc>("codeDecisions")
+      this.snapshots = await load<CodeFileSnapshotDoc>("codeFileSnapshots")
+      this.recoveryPoints = await load<CodeRecoveryPointDoc>("codeRecoveryPoints")
+      this.failures = await load<LearningFailureDoc>("learningFailures")
+      log.info(
+        `[scribe] Hydrated from HiveDB: ${this.recoveryPoints.length} recovery points, ` +
+        `${this.tasks.size} tasks, ${this.narrative.length} narrative entries`,
+      )
+    } catch (err) {
+      log.warn("[scribe] Hydration failed:", (err as Error).message)
+    }
+  }
+
+  /** Tasks left in a non-terminal state by a previous process — resume candidates. */
+  findInterruptedTasks(): CodeTaskDoc[] {
+    return [...this.tasks.values()].filter(
+      (task) => task.status === "running" || task.status === "planning" || task.status === "pending",
+    )
+  }
 
   createSession(projectPath: string): string {
     const id = Bun.randomUUIDv7()
-    this.db.query(
-      "INSERT INTO code_sessions (id, project_path, status) VALUES (?, ?, 'active')"
-    ).run(id, projectPath)
+    const doc: CodeSessionDoc = {
+      id,
+      project_path: projectPath,
+      status: "active",
+      created_at: nowIso(),
+      last_active: nowIso(),
+    }
+    this.sessions.set(id, doc)
+    this.put("codeSessions", id, doc)
     log.info(`[scribe] Session created: ${id} (${projectPath})`)
     return id
   }
 
   closeSession(sessionId: string): void {
-    this.db.query(
-      "UPDATE code_sessions SET status = 'closed', last_active = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?"
-    ).run(sessionId)
+    const doc = this.sessions.get(sessionId)
+    if (doc) {
+      const updated: CodeSessionDoc = { ...doc, status: "closed", last_active: nowIso() }
+      this.sessions.set(sessionId, updated)
+      this.put("codeSessions", sessionId, updated)
+    }
     log.info(`[scribe] Session closed: ${sessionId}`)
   }
 
   createTurn(sessionId: string, userMessage: string): string {
     const id = Bun.randomUUIDv7()
-    this.db.query(
-      "INSERT INTO code_turns (id, session_id, user_message) VALUES (?, ?, ?)"
-    ).run(id, sessionId, userMessage)
+    const doc: CodeTurnDoc = {
+      id,
+      session_id: sessionId,
+      task_id: null,
+      user_message: userMessage,
+      agent_response: "",
+      created_at: nowIso(),
+      completed_at: null,
+    }
+    this.turns.set(id, doc)
+    this.put("codeTurns", id, doc)
     return id
   }
 
   completeTurn(turnId: string, agentResponse: string, taskId?: string | null): void {
-    this.db.query(
-      "UPDATE code_turns SET agent_response = ?, task_id = ?, completed_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?"
-    ).run(agentResponse, taskId ?? null, turnId)
+    const existing = this.turns.get(turnId)
+    if (!existing) return
+    const updated: CodeTurnDoc = {
+      ...existing,
+      agent_response: agentResponse,
+      task_id: taskId ?? null,
+      completed_at: nowIso(),
+    }
+    this.turns.set(turnId, updated)
+    this.put("codeTurns", turnId, updated)
   }
 
   getRecentTurns(sessionId: string, limit = 10): Turn[] {
-    const rows = this.db.query(`
-      SELECT * FROM code_turns
-      WHERE session_id = ? AND completed_at IS NOT NULL
-      ORDER BY created_at DESC LIMIT ?
-    `).all(sessionId, limit) as any[]
-    return rows.reverse().map(r => ({
-      id: r.id,
-      sessionId: r.session_id,
-      taskId: r.task_id,
-      userMessage: r.user_message,
-      agentResponse: r.agent_response,
-      createdAt: r.created_at,
-      completedAt: r.completed_at,
-    }))
+    return [...this.turns.values()]
+      .filter((turn) => turn.session_id === sessionId && turn.completed_at)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .slice(0, limit)
+      .reverse()
+      .map((turn) => ({
+        id: turn.id,
+        sessionId: turn.session_id,
+        taskId: turn.task_id,
+        userMessage: turn.user_message,
+        agentResponse: turn.agent_response,
+        createdAt: turn.created_at,
+        completedAt: turn.completed_at,
+      }))
   }
 
   createTask(sessionId: string, description: string, mode: string): string {
     const id = Bun.randomUUIDv7()
-    this.db.query(
-      "INSERT INTO code_tasks (id, session_id, description, status, mode) VALUES (?, ?, ?, 'pending', ?)"
-    ).run(id, sessionId, description, mode)
-    log.info(`[scribe] Task created: ${id} — ${description.slice(0, 60)}`)
+    const doc: CodeTaskDoc = {
+      id,
+      session_id: sessionId,
+      description,
+      status: "pending",
+      mode: mode as CodeTaskDoc["mode"],
+      branch_name: null,
+      pr_url: null,
+      tokens_in: 0,
+      tokens_out: 0,
+      files_changed: 0,
+      lines_added: 0,
+      lines_removed: 0,
+      duration_ms: 0,
+      created_at: nowIso(),
+      completed_at: null,
+    }
+    this.tasks.set(id, doc)
+    this.put("codeTasks", id, doc)
+    log.info(`[scribe] Task created: ${id} - ${description.slice(0, 60)}`)
     return id
   }
 
   updateTaskStatus(taskId: string, status: string, extra?: { branchName?: string; prUrl?: string }): void {
-    const sets = ["status = ?", "completed_at = CASE WHEN ? IN ('completed','failed','cancelled') THEN strftime('%Y-%m-%dT%H:%M:%SZ', 'now') ELSE NULL END"]
-    const params: unknown[] = [status, status]
-    if (extra?.branchName) { sets.push("branch_name = ?"); params.push(extra.branchName) }
-    if (extra?.prUrl) { sets.push("pr_url = ?"); params.push(extra.prUrl) }
-    params.push(taskId)
-    this.db.query(`UPDATE code_tasks SET ${sets.join(", ")} WHERE id = ?`).run(...params as [string, string, string])
+    const existing = this.tasks.get(taskId)
+    if (!existing) return
+    const terminal = status === "completed" || status === "failed" || status === "cancelled"
+    const updated: CodeTaskDoc = {
+      ...existing,
+      status: status as CodeTaskDoc["status"],
+      branch_name: extra?.branchName ?? existing.branch_name,
+      pr_url: extra?.prUrl ?? existing.pr_url,
+      completed_at: terminal ? nowIso() : null,
+    }
+    this.tasks.set(taskId, updated)
+    this.put("codeTasks", taskId, updated)
   }
 
   createPhase(taskId: string, phaseName: string, coordinator: string): number {
-    const result = this.db.query(
-      "INSERT INTO code_task_phases (task_id, phase_name, coordinator, status) VALUES (?, ?, ?, 'pending') RETURNING id"
-    ).get(taskId, phaseName, coordinator) as { id: number }
-    return result.id
+    const id = nextNumericId()
+    const doc: CodeTaskPhaseDoc = {
+      id: String(id),
+      task_id: taskId,
+      phase_name: phaseName,
+      coordinator,
+      status: "pending",
+      result_summary: null,
+      approved_at: null,
+      approved_by: "auto",
+      tokens_in: 0,
+      tokens_out: 0,
+      duration_ms: 0,
+      started_at: null,
+      completed_at: null,
+    }
+    this.phases.set(id, doc)
+    this.put("codeTaskPhases", doc.id, doc)
+    return id
   }
 
   updatePhaseStatus(phaseId: number, status: string, resultSummary?: string): void {
-    const sets = ["status = ?"]
-    const params: unknown[] = [status]
-    if (status === "running") { sets.push("started_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')") }
-    if (status === "completed" || status === "failed") { sets.push("completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')") }
-    if (resultSummary) { sets.push("result_summary = ?"); params.push(resultSummary) }
-    params.push(phaseId)
-    this.db.query(`UPDATE code_task_phases SET ${sets.join(", ")} WHERE id = ?`).run(...params as [string, string, string, string])
+    const existing = this.phases.get(phaseId)
+    if (!existing) return
+    const updated: CodeTaskPhaseDoc = {
+      ...existing,
+      status: status as CodeTaskPhaseDoc["status"],
+      result_summary: resultSummary ?? existing.result_summary,
+      started_at: status === "running" ? nowIso() : existing.started_at,
+      completed_at: status === "completed" || status === "failed" ? nowIso() : existing.completed_at,
+    }
+    this.phases.set(phaseId, updated)
+    this.put("codeTaskPhases", updated.id, updated)
   }
 
   logModeChange(sessionId: string, mode: string, taskId?: string, phaseName?: string): void {
-    this.db.query(
-      "INSERT INTO code_session_modes (session_id, task_id, mode, phase_at_change, triggered_by) VALUES (?, ?, ?, ?, 'cli')"
-    ).run(sessionId, taskId || null, mode, phaseName || null)
+    const id = Bun.randomUUIDv7()
+    const doc: CodeSessionModeDoc = {
+      id,
+      session_id: sessionId,
+      task_id: taskId ?? null,
+      mode: mode as CodeSessionModeDoc["mode"],
+      changed_at: nowIso(),
+      phase_at_change: phaseName ?? null,
+      triggered_by: "cli",
+    }
+    this.put("codeSessionModes", id, doc)
   }
 
   appendNarrative(entry: NarrativeEntry): number {
-    const result = this.db.query(`
-      INSERT INTO code_narrative (task_id, session_id, coordinator, phase, entry, is_draft, is_override)
-      VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id
-    `).get(
-      entry.taskId, entry.sessionId, entry.coordinator, entry.phase || null,
-      entry.entry, entry.isDraft ? 1 : 0, entry.isOverride ? 1 : 0
-    ) as { id: number }
-    return result.id
+    const numericId = nextNumericId()
+    const doc: CodeNarrativeDoc = {
+      id: String(numericId),
+      task_id: entry.taskId,
+      session_id: entry.sessionId,
+      coordinator: entry.coordinator,
+      phase: entry.phase || null,
+      entry: entry.entry,
+      is_draft: entry.isDraft,
+      is_override: entry.isOverride,
+      created_at: nowIso(),
+    }
+    this.narrative.push(doc)
+    this.put("codeNarrative", doc.id, doc)
+    return numericId
   }
 
   readNarrative(taskId?: string, lastN = 50): NarrativeEntry[] {
-    if (taskId) {
-      const rows = this.db.query(
-        "SELECT * FROM code_narrative WHERE task_id = ? ORDER BY id DESC LIMIT ?"
-      ).all(taskId, lastN) as any[]
-      return rows.map(mapEntry).reverse()
-    }
-    const rows = this.db.query(
-      "SELECT * FROM code_narrative ORDER BY id DESC LIMIT ?"
-    ).all(lastN) as any[]
-    return rows.map(mapEntry).reverse()
+    return this.narrative
+      .filter((entry) => !taskId || entry.task_id === taskId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .slice(0, lastN)
+      .reverse()
+      .map(mapEntry)
   }
 
   searchNarrative(query: string): NarrativeEntry[] {
-    const rows = this.db.query(
-      `SELECT n.* FROM code_narrative n
-       JOIN code_narrative_fts fts ON n.id = fts.rowid
-       WHERE code_narrative_fts MATCH ? ORDER BY rank LIMIT 20`
-    ).all(query) as any[]
-    return rows.map(mapEntry)
+    const needle = query.toLowerCase()
+    return this.narrative
+      .filter((entry) =>
+        entry.entry.toLowerCase().includes(needle) ||
+        entry.coordinator.toLowerCase().includes(needle) ||
+        (entry.phase ?? "").toLowerCase().includes(needle)
+      )
+      .slice(0, 20)
+      .map(mapEntry)
   }
 
   writeDecision(adr: ADR): void {
-    this.db.query(
-      "INSERT INTO code_decisions (id, task_id, title, context, options, decision, consequences, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    ).run(adr.id, adr.taskId, adr.title, adr.context, adr.options, adr.decision, adr.consequences, adr.status)
+    const doc: CodeDecisionDoc = {
+      id: adr.id,
+      task_id: adr.taskId,
+      title: adr.title,
+      context: adr.context,
+      options: adr.options,
+      decision: adr.decision,
+      consequences: adr.consequences,
+      status: adr.status,
+      created_at: adr.createdAt ?? nowIso(),
+    }
+    this.decisions.push(doc)
+    this.put("codeDecisions", doc.id, doc)
   }
 
   readDecisions(status?: string): ADR[] {
-    if (status) {
-      const rows = this.db.query(
-        "SELECT * FROM code_decisions WHERE status = ? ORDER BY created_at DESC"
-      ).all(status) as any[]
-      return rows.map(mapADR)
-    }
-    const rows = this.db.query("SELECT * FROM code_decisions ORDER BY created_at DESC").all() as any[]
-    return rows.map(mapADR)
+    return this.decisions
+      .filter((decision) => !status || decision.status === status)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .map(mapADR)
   }
 
   saveSnapshot(taskId: string, filePath: string, content: string, hash: string): void {
-    this.db.query(
-      "INSERT INTO code_file_snapshots (task_id, file_path, content, hash) VALUES (?, ?, ?, ?)"
-    ).run(taskId, filePath, content, hash)
+    const id = String(nextNumericId())
+    const doc: CodeFileSnapshotDoc = {
+      id,
+      task_id: taskId,
+      file_path: filePath,
+      content,
+      hash,
+      snapshot_at: nowIso(),
+    }
+    this.snapshots.push(doc)
+    this.put("codeFileSnapshots", id, doc)
   }
 
   getSnapshots(taskId: string): FileSnapshot[] {
-    const rows = this.db.query(
-      "SELECT * FROM code_file_snapshots WHERE task_id = ? ORDER BY id"
-    ).all(taskId) as any[]
-    return rows.map(mapSnapshot)
+    return this.snapshots
+      .filter((snapshot) => snapshot.task_id === taskId)
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map(mapSnapshot)
   }
 
   deleteSnapshots(taskId: string): void {
-    this.db.query("DELETE FROM code_file_snapshots WHERE task_id = ?").run(taskId)
+    const deleted = this.snapshots.filter((snapshot) => snapshot.task_id === taskId)
+    this.snapshots = this.snapshots.filter((snapshot) => snapshot.task_id !== taskId)
+    for (const snapshot of deleted) this.delete<CodeFileSnapshotDoc>("codeFileSnapshots", snapshot.id)
   }
 
   saveRecoveryPoint(taskId: string, phaseId: number | null, completedPhases: number[], pendingPhases: number[], level = 0): void {
@@ -217,43 +426,74 @@ export class Scribe {
     try {
       const proc = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: process.cwd() })
       if (proc.exitCode === 0) gitRef = proc.stdout.toString().trim()
-    } catch { /* no git repo — silently skip */ }
+    } catch { /* no git repo */ }
 
-    const lastNarrativeId = (this.db.query(
-      "SELECT MAX(id) as mid FROM code_narrative WHERE task_id = ?"
-    ).get(taskId) as any)?.mid ?? null
-
-    this.db.query(
-      `INSERT INTO code_recovery_points
-         (task_id, phase_id, level, git_ref, completed_phases, pending_phases, last_narrative_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      taskId,
-      phaseId,
+    const lastNarrative = this.narrative
+      .filter((entry) => entry.task_id === taskId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))[0]
+    const id = String(nextNumericId())
+    const doc: CodeRecoveryPointDoc = {
+      id,
+      task_id: taskId,
+      phase_id: phaseId == null ? null : String(phaseId),
       level,
-      gitRef,
-      JSON.stringify(completedPhases),
-      JSON.stringify(pendingPhases),
-      lastNarrativeId,
-    )
+      git_ref: gitRef,
+      completed_phases: JSON.stringify(completedPhases),
+      pending_phases: JSON.stringify(pendingPhases),
+      last_narrative_id: lastNarrative?.id ?? null,
+      created_at: nowIso(),
+    }
+    this.recoveryPoints.push(doc)
+    this.put("codeRecoveryPoints", id, doc)
+  }
+
+  /** Persist the dependency-ordered plan a task is executing, so it can be resumed. */
+  savePlan(taskId: string, plan: {
+    phases: unknown[]
+    description: string
+    provider: string
+    model: string
+    archNarrative: string | null
+    interfaces: string | null
+    mode: string
+  }): void {
+    const doc: CodeTaskPlanDoc = {
+      id: taskId,
+      task_id: taskId,
+      phases_json: JSON.stringify(plan.phases),
+      description: plan.description,
+      provider: plan.provider,
+      model: plan.model,
+      arch_narrative: plan.archNarrative,
+      interfaces: plan.interfaces,
+      mode: plan.mode,
+      created_at: nowIso(),
+    }
+    this.put("codeTaskPlans", taskId, doc)
+  }
+
+  /** Read a task's persisted plan (resume path; reads HiveDB directly). */
+  async getPlan(taskId: string): Promise<CodeTaskPlanDoc | null> {
+    return (await (await col<CodeTaskPlanDoc>("codeTaskPlans")).get(taskId))?.doc ?? null
   }
 
   getLatestRecoveryPoint(taskId: string): {
-    id: number; taskId: string; phaseId: number | null; gitRef: string | null;
+    id: number; taskId: string; phaseId: number | null; level: number; gitRef: string | null;
     completedPhases: number[]; pendingPhases: number[]; lastNarrativeId: number | null; createdAt: string;
   } | null {
-    const row = this.db.query(
-      "SELECT * FROM code_recovery_points WHERE task_id = ? ORDER BY id DESC LIMIT 1"
-    ).get(taskId) as any
+    const row = this.recoveryPoints
+      .filter((point) => point.task_id === taskId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))[0]
     if (!row) return null
     return {
-      id: row.id,
+      id: Number(row.id),
       taskId: row.task_id,
-      phaseId: row.phase_id,
+      phaseId: row.phase_id == null ? null : Number(row.phase_id),
+      level: row.level,
       gitRef: row.git_ref,
       completedPhases: JSON.parse(row.completed_phases || "[]"),
       pendingPhases: JSON.parse(row.pending_phases || "[]"),
-      lastNarrativeId: row.last_narrative_id,
+      lastNarrativeId: row.last_narrative_id == null ? null : Number(row.last_narrative_id),
       createdAt: row.created_at,
     }
   }
@@ -267,31 +507,48 @@ export class Scribe {
   }
 
   updatePhaseMetadata(phaseId: number, tokensIn: number, tokensOut: number, durationMs: number): void {
-    this.db.query(
-      "UPDATE code_task_phases SET tokens_in = ?, tokens_out = ?, duration_ms = ? WHERE id = ?"
-    ).run(tokensIn, tokensOut, durationMs, phaseId)
+    const existing = this.phases.get(phaseId)
+    if (!existing) return
+    const updated: CodeTaskPhaseDoc = {
+      ...existing,
+      tokens_in: tokensIn,
+      tokens_out: tokensOut,
+      duration_ms: durationMs,
+    }
+    this.phases.set(phaseId, updated)
+    this.put("codeTaskPhases", updated.id, updated)
   }
 
   updateTaskMetadata(taskId: string, meta: TaskMetadata): void {
-    this.db.query(`
-      UPDATE code_tasks SET
-        tokens_in = tokens_in + ?,
-        tokens_out = tokens_out + ?,
-        files_changed = ?,
-        lines_added = ?,
-        lines_removed = ?,
-        duration_ms = duration_ms + ?
-      WHERE id = ?
-    `).run(meta.tokensIn, meta.tokensOut, meta.filesChanged, meta.linesAdded, meta.linesRemoved, meta.durationMs, taskId)
+    const existing = this.tasks.get(taskId)
+    if (!existing) return
+    const updated: CodeTaskDoc = {
+      ...existing,
+      tokens_in: existing.tokens_in + meta.tokensIn,
+      tokens_out: existing.tokens_out + meta.tokensOut,
+      files_changed: meta.filesChanged,
+      lines_added: meta.linesAdded,
+      lines_removed: meta.linesRemoved,
+      duration_ms: existing.duration_ms + meta.durationMs,
+    }
+    this.tasks.set(taskId, updated)
+    this.put("codeTasks", taskId, updated)
   }
 
   writeFileChanges(taskId: string, phaseId: number | null, changes: FileChange[]): void {
-    const stmt = this.db.prepare(`
-      INSERT INTO code_file_changes (task_id, phase_id, file_path, change_type, lines_added, lines_removed)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `)
-    for (const c of changes) {
-      stmt.run(taskId, phaseId, c.filePath, c.changeType, c.linesAdded, c.linesRemoved)
+    for (const change of changes) {
+      const id = String(nextNumericId())
+      const doc: CodeFileChangeDoc = {
+        id,
+        task_id: taskId,
+        phase_id: phaseId == null ? null : String(phaseId),
+        file_path: change.filePath,
+        change_type: change.changeType,
+        lines_added: change.linesAdded,
+        lines_removed: change.linesRemoved,
+        created_at: nowIso(),
+      }
+      this.put("codeFileChanges", id, doc)
     }
   }
 
@@ -307,25 +564,24 @@ export class Scribe {
     tokensIn?: number
     tokensOut?: number
   }): void {
-    this.db.query(`
-      INSERT INTO code_traces
-        (task_id, agent_id, coordinator, tool_name, input_summary, output_summary, success, duration_ns, tokens_in, tokens_out, analyzed)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-    `).run(
-      trace.taskId,
-      trace.agentId,
-      trace.coordinator,
-      trace.toolName,
-      trace.inputSummary ?? "",
-      trace.outputSummary ?? "",
-      trace.success ? 1 : 0,
-      trace.durationNs ?? 0,
-      trace.tokensIn ?? 0,
-      trace.tokensOut ?? 0,
-    )
+    const id = String(nextNumericId())
+    const doc: CodeTraceDoc = {
+      id,
+      task_id: trace.taskId,
+      agent_id: trace.agentId,
+      coordinator: trace.coordinator,
+      tool_name: trace.toolName,
+      input_summary: trace.inputSummary ?? "",
+      output_summary: trace.outputSummary ?? "",
+      success: trace.success,
+      duration_ns: trace.durationNs ?? 0,
+      tokens_in: trace.tokensIn ?? 0,
+      tokens_out: trace.tokensOut ?? 0,
+      analyzed: false,
+      created_at: nowIso(),
+    }
+    this.put("codeTraces", id, doc)
   }
-
-  // ── Learning Harness ──────────────────────────────────────────────────────
 
   writeFailure(f: {
     taskId: string
@@ -335,10 +591,21 @@ export class Scribe {
     errorMessage: string
     contextSummary?: string
   }): void {
-    this.db.query(`
-      INSERT INTO learning_failures (task_id, phase_id, agent, failure_type, error_message, context_summary)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(f.taskId, f.phaseId ?? null, f.agent, f.failureType, f.errorMessage, f.contextSummary ?? null)
+    const id = String(nextNumericId())
+    const doc: LearningFailureDoc = {
+      id,
+      task_id: f.taskId,
+      phase_id: f.phaseId,
+      agent: f.agent,
+      failure_type: f.failureType,
+      error_message: f.errorMessage,
+      context_summary: f.contextSummary ?? null,
+      resolved: false,
+      resolution: null,
+      created_at: nowIso(),
+    }
+    this.failures.push(doc)
+    this.put("learningFailures", id, doc)
   }
 
   writeProposal(p: {
@@ -347,10 +614,17 @@ export class Scribe {
     description: string
     failureIds: number[]
   }): void {
-    this.db.query(`
-      INSERT INTO learning_proposals (source_agent, proposal_type, description, failure_ids)
-      VALUES (?, ?, ?, ?)
-    `).run(p.sourceAgent, p.proposalType, p.description, JSON.stringify(p.failureIds))
+    const id = String(nextNumericId())
+    const doc: LearningProposalDoc = {
+      id,
+      source_agent: p.sourceAgent,
+      proposal_type: p.proposalType,
+      description: p.description,
+      failure_ids: JSON.stringify(p.failureIds),
+      status: "pending",
+      created_at: nowIso(),
+    }
+    this.put("learningProposals", id, doc)
   }
 
   getFailurePatterns(opts?: { minOccurrences?: number }): Array<{
@@ -361,22 +635,24 @@ export class Scribe {
     lastSeen: string
   }> {
     const min = opts?.minOccurrences ?? 1
-    const rows = this.db.query<any, [number]>(`
-      SELECT agent, failure_type, COUNT(*) as count,
-             GROUP_CONCAT(id) as id_list, MAX(created_at) as last_seen
-      FROM learning_failures
-      WHERE resolved = 0
-      GROUP BY agent, failure_type
-      HAVING COUNT(*) >= ?
-      ORDER BY count DESC
-    `).all(min)
-    return rows.map(r => ({
-      agent: r.agent,
-      failureType: r.failure_type,
-      count: r.count,
-      ids: String(r.id_list).split(",").map(Number),
-      lastSeen: r.last_seen,
-    }))
+    const grouped = new Map<string, LearningFailureDoc[]>()
+    for (const failure of this.failures.filter((entry) => !entry.resolved)) {
+      const key = `${failure.agent}:${failure.failure_type}`
+      grouped.set(key, [...(grouped.get(key) ?? []), failure])
+    }
+    return [...grouped.entries()]
+      .map(([key, rows]) => {
+        const [agent, failureType] = key.split(":")
+        return {
+          agent,
+          failureType,
+          count: rows.length,
+          ids: rows.map((row) => Number(row.id)),
+          lastSeen: rows.sort((a, b) => b.created_at.localeCompare(a.created_at))[0]?.created_at ?? "",
+        }
+      })
+      .filter((entry) => entry.count >= min)
+      .sort((a, b) => b.count - a.count)
   }
 
   evaluateTaskPhases(taskId: string): {
@@ -384,23 +660,20 @@ export class Scribe {
     frictionPhase: string | null
     failureSummary: string
   } {
-    const failures = this.db.query<any, [string]>(
-      "SELECT agent, failure_type, COUNT(*) as c FROM learning_failures WHERE task_id = ? GROUP BY agent, failure_type ORDER BY c DESC"
-    ).all(taskId)
-
-    if (failures.length === 0) {
+    const grouped = new Map<string, number>()
+    for (const failure of this.failures.filter((entry) => entry.task_id === taskId)) {
+      const key = `${failure.agent}/${failure.failure_type}`
+      grouped.set(key, (grouped.get(key) ?? 0) + 1)
+    }
+    if (grouped.size === 0) {
       return { hasFailures: false, frictionPhase: null, failureSummary: "" }
     }
-
-    const top = failures[0]
-    const summary = failures
-      .map((f: any) => `${f.agent}/${f.failure_type}(×${f.c})`)
-      .join(", ")
-
+    const entries = [...grouped.entries()].sort((a, b) => b[1] - a[1])
+    const [agent] = entries[0][0].split("/")
     return {
       hasFailures: true,
-      frictionPhase: top.agent,
-      failureSummary: summary,
+      frictionPhase: agent,
+      failureSummary: entries.map(([key, count]) => `${key}(x${count})`).join(", "),
     }
   }
 }

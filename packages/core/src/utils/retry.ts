@@ -16,6 +16,19 @@ export async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Exponential backoff delay with equal jitter, for callers that schedule their
+ * own retry (a timer, a persisted job) rather than looping in-process. `attempt`
+ * is 1-based. Half the computed delay is fixed and half is randomised, so
+ * concurrent retries neither thunder together nor fire near-instantly.
+ */
+export function computeBackoffDelay(attempt: number, options: Partial<RetryOptions> = {}): number {
+  const opts = { ...DEFAULT_OPTIONS, ...options };
+  const exp = opts.initialDelayMs * Math.pow(opts.backoffMultiplier, Math.max(0, attempt - 1));
+  const capped = Math.min(exp, opts.maxDelayMs);
+  return Math.floor(capped / 2 + Math.random() * (capped / 2));
+}
+
 export async function retry<T>(
   fn: () => Promise<T>,
   options: Partial<RetryOptions> = {}

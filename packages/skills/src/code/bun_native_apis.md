@@ -4,7 +4,7 @@
 | Need | API | Why |
 |------|-----|-----|
 | HTTP server | `Bun.serve()` | Fast, native, WebSocket built-in |
-| Database | `bun:sqlite` | Zero deps, WAL mode, 10x faster than node-sqlite3 |
+| Database | `@johpaz/hive-db` | Zero deps, WAL mode, 10x faster than node-hivedb3 |
 | Parallel work | `new Worker()` | Real threads, `smol` for light workers |
 | Secrets | `Bun.secrets` | OS keystore, never in env |
 | File I/O | `Bun.file()` / `Bun.write()` | Optimized, streaming |
@@ -20,7 +20,7 @@
 - `postMessage(string)` is 500x faster than objects
 - `setEnvironmentData` for static config (zero overhead)
 
-## SQLite Tips
+## HiveDB Tips
 - Always enable WAL: `PRAGMA journal_mode = WAL`
 - Use prepared statements
 - `Database.transaction()` for atomic batches

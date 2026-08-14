@@ -1,7 +1,9 @@
-import type { Database } from "bun:sqlite"
-import { AgentConflictsRepo, FileRisksRepo, type ConflictSeverity } from "@johpaz/hivecode-core/db"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { AgentConflictDoc, FileRiskDoc } from "@johpaz/hivecode-core/storage/collections"
 import type { Blackboard } from "./blackboard.ts"
 import type { IpcEmitter } from "./ipc-emitter.ts"
+
+export type ConflictSeverity = "low" | "medium" | "high" | "critical"
 
 export interface Conflict {
   type: "file_collision" | "decision_clash" | "adr_violation" | "dependency_race"
@@ -10,33 +12,29 @@ export interface Conflict {
   filePath?: string
   description: string
   severity: ConflictSeverity
-  contextId?: number
+  contextId?: string
 }
 
 export class ConflictDetector {
-  private conflicts: AgentConflictsRepo
-  private fileRisks: FileRisksRepo
+  private conflictCache: AgentConflictDoc[] = []
 
-  // Bug-A fix: ipc agregado al constructor
   constructor(
-    private db: Database,
+    _db: unknown,
     private sessionId: string,
     private blackboard: Blackboard,
     private ipc: IpcEmitter,
-  ) {
-    this.conflicts = new AgentConflictsRepo(db)
-    this.fileRisks = new FileRisksRepo(db)
-  }
+  ) {}
 
   /** Llamar ANTES de que un worker escriba un archivo */
   async checkBeforeWrite(agent: string, filePath: string): Promise<Conflict[]> {
     const found: Conflict[] = []
+    const now = Date.now()
+    const windowStart = now - 30_000
 
-    // 1. ¿Otro worker tocó este archivo en los últimos 30s?
-    const recentRisks = this.fileRisks.getByAgent(this.sessionId, agent, Date.now() - 30_000)
-    const others = this.fileRisks
-      .listBySession(this.sessionId)
-      .filter(r => r.file_path === filePath && r.agent !== agent && r.updated_at > Date.now() - 30_000)
+    const risks = await col<FileRiskDoc>("fileRisks")
+    const others = (await risks.findBy("session_id", this.sessionId))
+      .map(entry => entry.doc)
+      .filter(r => r.file_path === filePath && r.agent !== agent && r.updated_at > windowStart)
 
     for (const other of others) {
       found.push({
@@ -44,12 +42,11 @@ export class ConflictDetector {
         agentA: agent,
         agentB: other.agent ?? "unknown",
         filePath,
-        description: `${agent} y ${other.agent} quieren modificar ${filePath} simultáneamente`,
+        description: `${agent} y ${other.agent} quieren modificar ${filePath} simultaneamente`,
         severity: "high",
       })
     }
 
-    // 2. ¿Existe un constraint activo para este archivo?
     const constraints = this.blackboard.getConstraints(filePath)
     for (const c of constraints) {
       found.push({
@@ -63,18 +60,28 @@ export class ConflictDetector {
       })
     }
 
-    // Persistir y emitir conflictos
+    const conflicts = await col<AgentConflictDoc>("agentConflicts")
     for (const c of found) {
-      this.conflicts.create({
-        sessionId: this.sessionId,
-        agentA: c.agentA,
-        agentB: c.agentB,
+      const id = `conflict_${now}_${Math.random().toString(16).slice(2, 8)}`
+      const doc: AgentConflictDoc = {
+        id,
+        session_id: this.sessionId,
+        agent_a: c.agentA,
+        agent_b: c.agentB,
         type: c.type,
         description: c.description,
-        filePath: c.filePath,
+        file_path: c.filePath ?? null,
+        context_id_a: c.contextId ?? null,
+        context_id_b: null,
         severity: c.severity,
-        contextIdA: c.contextId,
-      })
+        resolved: false,
+        resolved_by: null,
+        resolution: null,
+        created_at: Date.now(),
+        resolved_at: null,
+      }
+      this.conflictCache.push(doc)
+      await conflicts.put(id, doc)
 
       this.ipc.emit("conflict_detected", {
         agent_a: c.agentA,
@@ -88,12 +95,36 @@ export class ConflictDetector {
     return found
   }
 
-  listUnresolved(): ReturnType<AgentConflictsRepo["listUnresolved"]> {
-    return this.conflicts.listUnresolved(this.sessionId)
+  listUnresolved(): AgentConflictDoc[] {
+    return this.conflictCache
+      .filter(entry => !entry.resolved)
+      .sort((a, b) => b.created_at - a.created_at)
   }
 
-  resolve(id: number, resolvedBy: "bee" | "human", resolution: string): void {
-    this.conflicts.resolve(id, resolvedBy, resolution)
+  resolve(id: string, resolvedBy: "bee" | "human", resolution: string): void {
+    this.conflictCache = this.conflictCache.map(entry =>
+      entry.id === id
+        ? { ...entry, resolved: true, resolved_by: resolvedBy, resolution, resolved_at: Date.now() }
+        : entry,
+    )
+    void this.persistResolution(id, resolvedBy, resolution)
     this.ipc.emit("conflict_resolved", { conflict_id: id, resolution })
+  }
+
+  private async persistResolution(id: string, resolvedBy: "bee" | "human", resolution: string): Promise<void> {
+    const conflicts = await col<AgentConflictDoc>("agentConflicts")
+    const existing = await conflicts.get(id)
+    if (!existing) return
+    await conflicts.put(
+      id,
+      {
+        ...existing.doc,
+        resolved: true,
+        resolved_by: resolvedBy,
+        resolution,
+        resolved_at: Date.now(),
+      },
+      { expectedVersion: existing.version },
+    )
   }
 }

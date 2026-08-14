@@ -1,72 +1,6 @@
-import { getDb } from "../../storage/sqlite"
 import { encryptConfig, decryptConfig } from "../../storage/crypto"
-
-export async function handleGetChannels(
-  req: Request,
-  addCorsHeaders: (r: Response, req: Request) => Response,
-  channelManager?: any
-): Promise<Response> {
-  const channels = getDb().query(`
-    SELECT id, type, id as account_id, enabled, active, status, last_active, 
-           voice_enabled, tts_enabled, stt_provider, tts_provider, tts_voice_id, step_delivery_mode,
-           vision_enabled, ocr_provider, vision_provider, vision_model_id,
-           (config_encrypted IS NOT NULL) as is_configured
-    FROM channels
-  `).all() as Array<{
-    id: string;
-    type: string;
-    account_id: string;
-    enabled: number;
-    active: number;
-    status: string;
-    last_active: number | null;
-    voice_enabled: number;
-    tts_enabled: number;
-    stt_provider: string | null;
-    tts_provider: string | null;
-    tts_voice_id: string | null;
-    step_delivery_mode: string | null;
-    vision_enabled: number;
-    ocr_provider: string | null;
-    vision_provider: string | null;
-    vision_model_id: string | null;
-    is_configured: number;
-  }>
-
-  // Convert to format expected by UI (ConnectedChannel[])
-  // Overlay the live runtime status from channelManager so that channels like
-  // Telegram/Discord (which never write "connected" to the DB) show the correct state.
-  const formattedChannels = channels.map(c => {
-    let liveStatus: string = c.status;
-    if (channelManager && typeof channelManager.getChannelStatus === "function") {
-      const live = channelManager.getChannelStatus(c.type, c.id);
-      if (live && live.status !== "not_found") liveStatus = live.status;
-    }
-
-    return {
-      id: c.id,
-      type: c.type as ConnectedChannel["type"],
-      accountId: c.account_id,
-      enabled: c.enabled === 1,
-      active: c.active === 1,
-      status: liveStatus as ConnectedChannel["status"],
-      last_active: c.last_active ?? undefined,
-      voice_enabled: c.voice_enabled === 1,
-      tts_enabled: c.tts_enabled === 1,
-      stt_provider: c.stt_provider ?? undefined,
-      tts_provider: c.tts_provider ?? undefined,
-      tts_voice_id: c.tts_voice_id ?? undefined,
-      step_delivery_mode: c.step_delivery_mode ?? undefined,
-      vision_enabled: c.vision_enabled === 1,
-      ocr_provider: c.ocr_provider ?? undefined,
-      vision_provider: c.vision_provider ?? undefined,
-      vision_model_id: c.vision_model_id ?? undefined,
-      isConfigured: c.is_configured === 1,
-    };
-  })
-
-  return addCorsHeaders(Response.json({ channels: formattedChannels }), req)
-}
+import { col } from "../../storage/hive"
+import type { ChannelDoc, UserChannelDoc } from "../../storage/collections"
 
 type ConnectedChannel = {
   id: string;
@@ -89,36 +23,63 @@ type ConnectedChannel = {
   isConfigured?: boolean;
 }
 
+export async function handleGetChannels(
+  req: Request,
+  addCorsHeaders: (r: Response, req: Request) => Response,
+  channelManager?: any
+): Promise<Response> {
+  const userConfigs = await col<UserChannelDoc>("userChannels")
+  const channels = (await (await col<ChannelDoc>("channels")).scan()).map((entry) => entry.doc)
+  const formattedChannels: ConnectedChannel[] = []
+
+  for (const c of channels) {
+    let liveStatus = c.status
+    if (channelManager && typeof channelManager.getChannelStatus === "function") {
+      const live = channelManager.getChannelStatus(c.type, c.id)
+      if (live && live.status !== "not_found") liveStatus = live.status
+    }
+    const configured = (await userConfigs.findBy("channel", c.type)).some((entry) => entry.doc.account_id === c.id)
+    formattedChannels.push({
+      id: c.id,
+      type: c.type,
+      accountId: c.id,
+      enabled: c.enabled,
+      active: c.active,
+      status: liveStatus,
+      last_active: c.last_active ?? undefined,
+      voice_enabled: c.voice_enabled,
+      tts_enabled: c.tts_enabled,
+      stt_provider: c.stt_provider ?? undefined,
+      tts_provider: c.tts_provider ?? undefined,
+      tts_voice_id: c.tts_voice_id ?? undefined,
+      step_delivery_mode: c.step_delivery_mode ?? undefined,
+      vision_enabled: c.vision_enabled,
+      ocr_provider: c.ocr_provider ?? undefined,
+      vision_provider: c.vision_provider ?? undefined,
+      vision_model_id: c.vision_model_id ?? undefined,
+      isConfigured: configured,
+    })
+  }
+
+  return addCorsHeaders(Response.json({ channels: formattedChannels }), req)
+}
+
 export async function handleGetChannelConfig(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
   const url = new URL(req.url)
   const channelIdMatch = url.pathname.match(/^\/api\/channels\/([^/]+)$/)
-  
-  if (!channelIdMatch) {
-    return addCorsHeaders(Response.json({ error: "Invalid path" }), req)
-  }
-  
+  if (!channelIdMatch) return addCorsHeaders(Response.json({ error: "Invalid path" }), req)
+
   const channelId = channelIdMatch[1]
-  const config = getDb().query(`
-    SELECT * FROM user_channels WHERE channel = ?
-  `).all(channelId) as Record<string, unknown>[]
-  
+  const config = (await (await col<UserChannelDoc>("userChannels")).findBy("channel", channelId)).map((entry) => entry.doc)
   return addCorsHeaders(Response.json({ config }), req)
 }
 
 export async function handleActivateChannel(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
   const body = await req.json().catch(() => ({}))
   const { channel, config, accountId } = body
-  
-  if (!channel) {
-    return addCorsHeaders(Response.json({ success: false, error: "channel required" }), req)
-  }
-  
-  const userId = "default"
-  getDb().query(`
-    INSERT OR REPLACE INTO user_channels(user_id, channel, account_id, config, active)
-    VALUES(?, ?, ?, ?, 1)
-  `).run(userId, channel, accountId || null, JSON.stringify(config || {}))
-  
+  if (!channel) return addCorsHeaders(Response.json({ success: false, error: "channel required" }), req)
+
+  await putUserChannel("default", channel, accountId || channel, config || {}, true)
   return addCorsHeaders(Response.json({ success: true, channel }), req)
 }
 
@@ -127,18 +88,14 @@ export async function handleDeactivateChannel(req: Request, addCorsHeaders: (r: 
   const parts = url.pathname.split("/")
   const channel = parts[3]
   const accountId = parts[4]
+  if (!channel) return addCorsHeaders(Response.json({ success: false, error: "channel required" }), req)
 
-  if (!channel) {
-    return addCorsHeaders(Response.json({ success: false, error: "channel required" }), req)
+  const configs = await col<UserChannelDoc>("userChannels")
+  for (const entry of await configs.findBy("channel", channel)) {
+    if (entry.doc.user_id === "default" && (!accountId || entry.doc.account_id === accountId)) {
+      await configs.delete(entry.id)
+    }
   }
-
-  const userId = "default"
-  if (accountId) {
-    getDb().query(`DELETE FROM user_channels WHERE user_id = ? AND channel = ? AND account_id = ?`).run(userId, channel, accountId)
-  } else {
-    getDb().query(`DELETE FROM user_channels WHERE user_id = ? AND channel = ?`).run(userId, channel)
-  }
-
   return addCorsHeaders(Response.json({ success: true }), req)
 }
 
@@ -147,49 +104,23 @@ export async function handleCreateChannel(
   addCorsHeaders: (r: Response, req: Request) => Response,
   channelManager?: any
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}));
-  const { type, config: channelConfig } = body;
+  const body = await req.json().catch(() => ({}))
+  const { type, config: channelConfig } = body
+  if (!type) return addCorsHeaders(new Response("Missing type", { status: 400 }), req)
 
-  if (!type) {
-    return addCorsHeaders(new Response("Missing type", { status: 400 }), req);
-  }
-
-  let encryptedData: string | null = null;
-  let configIv: string | null = null;
-  if (channelConfig && Object.keys(channelConfig).length > 0) {
-    const { encrypted, iv } = encryptConfig(channelConfig);
-    encryptedData = encrypted;
-    configIv = iv;
-  }
-
-  // Reuse the existing seeded channel record (e.g. id="whatsapp") if it exists
-  // and has not been configured yet — avoids creating duplicate UUID entries.
-  const seeded = getDb().query(
-    `SELECT id FROM channels WHERE type = ? AND config_encrypted IS NULL LIMIT 1`
-  ).get(type) as { id: string } | null;
-
-  let id: string;
-  if (seeded) {
-    id = seeded.id;
-    getDb().query(
-      `UPDATE channels SET config_encrypted = ?, config_iv = ?, enabled = 1, active = 1, status = 'connecting' WHERE id = ?`
-    ).run(encryptedData, configIv, id);
-  } else {
-    const { randomUUID } = await import("crypto");
-    id = randomUUID();
-    getDb().query(`
-      INSERT INTO channels(id, type, config_encrypted, config_iv, enabled, active, status)
-      VALUES(?, ?, ?, ?, 1, 1, 'connecting')
-    `).run(id, type, encryptedData, configIv);
-  }
+  const channels = await col<ChannelDoc>("channels")
+  const seeded = (await channels.findBy("type", type)).find((entry) => entry.doc.status === "disconnected" || entry.doc.status === "idle")
+  const id = seeded?.id ?? crypto.randomUUID()
+  const doc = channelDoc(id, type, { enabled: true, active: true, status: "connecting" })
+  await channels.put(id, seeded ? { ...seeded.doc, ...doc } : doc, { expectedVersion: seeded?.version ?? 0 })
+  await putUserChannel("default", type, id, channelConfig || {}, true)
 
   if (channelManager) {
     channelManager.addChannel(type, id, channelConfig || {}).catch((err: Error) => {
-      console.error(`[channels] Failed to start ${type}:${id}:`, err.message);
-    });
+      console.error(`[channels] Failed to start ${type}:${id}:`, err.message)
+    })
   }
-
-  return addCorsHeaders(Response.json({ success: true, id, status: "connecting" }), req);
+  return addCorsHeaders(Response.json({ success: true, id, status: "connecting" }), req)
 }
 
 export async function handleReconnectChannel(
@@ -198,53 +129,26 @@ export async function handleReconnectChannel(
   channelId: string,
   channelManager?: any
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}));
-  const { config: newConfig } = body;
+  const body = await req.json().catch(() => ({}))
+  const { config: newConfig } = body
+  const channels = await col<ChannelDoc>("channels")
+  const row = await channels.get(channelId)
+  if (!row) return addCorsHeaders(Response.json({ success: false, error: "Channel not found" }, { status: 404 }), req)
 
-  const row = getDb().query(`SELECT type, config_encrypted, config_iv FROM channels WHERE id = ?`).get(channelId) as {
-    type: string;
-    config_encrypted: string | null;
-    config_iv: string | null;
-  } | undefined;
-
-  if (!row) {
-    return addCorsHeaders(Response.json({ success: false, error: "Channel not found" }, { status: 404 }), req);
-  }
-
-  // Update credentials if new config provided
-  if (newConfig && Object.keys(newConfig).length > 0) {
-    const { encrypted, iv } = encryptConfig(newConfig);
-    getDb().query(`UPDATE channels SET config_encrypted = ?, config_iv = ?, enabled = 1, active = 1, status = 'connecting' WHERE id = ?`)
-      .run(encrypted, iv, channelId);
-  } else {
-    getDb().query(`UPDATE channels SET enabled = 1, active = 1, status = 'connecting' WHERE id = ?`)
-      .run(channelId);
-  }
+  await channels.put(channelId, { ...row.doc, enabled: true, active: true, status: "connecting" }, { expectedVersion: row.version })
+  const config = newConfig && Object.keys(newConfig).length > 0 ? newConfig : await getStoredChannelConfig(row.doc.type, channelId)
+  if (newConfig && Object.keys(newConfig).length > 0) await putUserChannel("default", row.doc.type, channelId, newConfig, true)
 
   if (channelManager) {
-    // Resolve config: use new or existing encrypted config
-    let config: Record<string, unknown> = {};
-    if (newConfig && Object.keys(newConfig).length > 0) {
-      config = newConfig;
-    } else if (row.config_encrypted && row.config_iv) {
-      try {
-        config = decryptConfig(row.config_encrypted, row.config_iv);
-      } catch { /* keep empty */ }
-    }
-
-    // Remove old instance then start fresh — must be sequential to avoid race
-    // where removeChannel deletes the key AFTER addChannel already set it
     ;(async () => {
-      try { await channelManager.removeChannel(row.type, channelId); } catch { /* ignore */ }
-      try {
-        await channelManager.addChannel(row.type, channelId, config);
-      } catch (err: unknown) {
-        console.error(`[channels] Failed to reconnect ${row.type}:${channelId}:`, (err as Error).message);
+      try { await channelManager.removeChannel(row.doc.type, channelId) } catch { /* ignore */ }
+      try { await channelManager.addChannel(row.doc.type, channelId, config) } catch (err: unknown) {
+        console.error(`[channels] Failed to reconnect ${row.doc.type}:${channelId}:`, (err as Error).message)
       }
-    })();
+    })()
   }
 
-  return addCorsHeaders(Response.json({ success: true, status: "connecting" }), req);
+  return addCorsHeaders(Response.json({ success: true, status: "connecting" }), req)
 }
 
 export async function handleGetChannelStatus(
@@ -252,20 +156,12 @@ export async function handleGetChannelStatus(
   addCorsHeaders: (r: Response, req: Request) => Response,
   channelManager?: any
 ): Promise<Response> {
-  const url = new URL(req.url);
-  const match = url.pathname.match(/^\/api\/channels\/([^/]+)\/([^/]+)\/status$/);
-  if (!match) {
-    return addCorsHeaders(Response.json({ error: "Invalid path" }, { status: 400 }), req);
-  }
-
-  const [, type, id] = match;
-
-  if (!channelManager) {
-    return addCorsHeaders(Response.json({ status: "unknown" }), req);
-  }
-
-  const statusData = channelManager.getChannelStatus(type, id);
-  return addCorsHeaders(Response.json(statusData), req);
+  const url = new URL(req.url)
+  const match = url.pathname.match(/^\/api\/channels\/([^/]+)\/([^/]+)\/status$/)
+  if (!match) return addCorsHeaders(Response.json({ error: "Invalid path" }, { status: 400 }), req)
+  const [, type, id] = match
+  if (!channelManager) return addCorsHeaders(Response.json({ status: "unknown" }), req)
+  return addCorsHeaders(Response.json(channelManager.getChannelStatus(type, id)), req)
 }
 
 export async function handleGetChannelAccount(
@@ -274,9 +170,7 @@ export async function handleGetChannelAccount(
   name: string,
   accountId: string
 ): Promise<Response> {
-  // This should read from the config file or database
-  // For now, return a placeholder - the actual implementation depends on config storage
-  return addCorsHeaders(Response.json({ name, accountId, config: {} }), req);
+  return addCorsHeaders(Response.json({ name, accountId, config: await getStoredChannelConfig(name, accountId) }), req)
 }
 
 export async function handleUpdateChannelAccount(
@@ -286,18 +180,14 @@ export async function handleUpdateChannelAccount(
   accountId: string,
   channelManager?: any
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}));
-  if (!body.config) {
-    return new Response("Missing config", { status: 400 });
-  }
-
-  // Note: Channel config persistence should be handled by the caller
+  const body = await req.json().catch(() => ({}))
+  if (!body.config) return new Response("Missing config", { status: 400 })
+  await putUserChannel("default", name, accountId, body.config, true)
   if (channelManager) {
-    await channelManager.removeChannel(name, accountId);
-    await channelManager.startChannel(name, accountId);
+    await channelManager.removeChannel(name, accountId)
+    await channelManager.startChannel(name, accountId)
   }
-
-  return addCorsHeaders(Response.json({ success: true }), req);
+  return addCorsHeaders(Response.json({ success: true }), req)
 }
 
 export async function handleDeleteChannelAccount(
@@ -305,15 +195,12 @@ export async function handleDeleteChannelAccount(
   addCorsHeaders: (r: Response, req: Request) => Response,
   name: string,
   accountId: string,
-  config?: any,
+  _config?: any,
   channelManager?: any
 ): Promise<Response> {
-  // Note: Config update should be handled by the caller
-  if (channelManager) {
-    await channelManager.removeChannel(name, accountId);
-  }
-
-  return addCorsHeaders(Response.json({ success: true }), req);
+  await deleteUserChannel("default", name, accountId)
+  if (channelManager) await channelManager.removeChannel(name, accountId)
+  return addCorsHeaders(Response.json({ success: true }), req)
 }
 
 export async function handleChannelAction(
@@ -325,21 +212,12 @@ export async function handleChannelAction(
   channelManager?: any
 ): Promise<Response> {
   try {
-    if (!channelManager) {
-      return addCorsHeaders(new Response("Channel manager not available", { status: 500 }), req);
-    }
-
-    if (action === "start") {
-      await channelManager.startChannel(name, accountId);
-    } else {
-      await channelManager.stopChannel(name, accountId);
-    }
-    return addCorsHeaders(Response.json({ success: true }), req);
+    if (!channelManager) return addCorsHeaders(new Response("Channel manager not available", { status: 500 }), req)
+    if (action === "start") await channelManager.startChannel(name, accountId)
+    else await channelManager.stopChannel(name, accountId)
+    return addCorsHeaders(Response.json({ success: true }), req)
   } catch (error) {
-    return addCorsHeaders(Response.json(
-      { success: false, error: (error as Error).message },
-      { status: 500 }
-    ), req);
+    return addCorsHeaders(Response.json({ success: false, error: (error as Error).message }, { status: 500 }), req)
   }
 }
 
@@ -348,47 +226,24 @@ export async function handleUpdateChannelSettings(
   addCorsHeaders: (r: Response, req: Request) => Response,
   channelId: string
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({})) as Record<string, unknown>;
-  const allowed = ["voice_enabled", "tts_enabled", "stt_provider", "tts_provider", "tts_voice_id", "step_delivery_mode", "vision_enabled", "ocr_provider", "vision_provider", "vision_model_id"] as const;
-  const updates: string[] = [];
-  const params: unknown[] = [];
+  const body = await req.json().catch(() => ({})) as Record<string, unknown>
+  const channels = await col<ChannelDoc>("channels")
+  const row = await channels.get(channelId)
+  if (!row) return addCorsHeaders(Response.json({ success: false, error: "Channel not found" }, { status: 404 }), req)
 
-  for (const key of allowed) {
-    if (key in body) {
-      updates.push(`${key} = ?`);
-      params.push(typeof body[key] === "boolean" ? (body[key] ? 1 : 0) : body[key]);
-    }
+  const patch: Partial<ChannelDoc> = {}
+  for (const key of ["voice_enabled", "tts_enabled", "stt_provider", "tts_provider", "tts_voice_id", "step_delivery_mode", "vision_enabled", "ocr_provider", "vision_provider", "vision_model_id"] as const) {
+    if (key in body) (patch as any)[key] = body[key]
   }
-
-  // Merge type-specific config into config_encrypted if body.config is provided
-  const newConfig = body.config as Record<string, unknown> | undefined;
-  if (newConfig && typeof newConfig === "object" && Object.keys(newConfig).length > 0) {
-    const row = getDb().query(`SELECT type, config_encrypted, config_iv FROM channels WHERE id = ?`).get(channelId) as {
-      type: string;
-      config_encrypted: string | null;
-      config_iv: string | null;
-    } | undefined;
-
-    if (row) {
-      let currentConfig: Record<string, unknown> = {};
-      if (row.config_encrypted && row.config_iv) {
-        try { currentConfig = decryptConfig(row.config_encrypted, row.config_iv); } catch { /* keep empty */ }
-      }
-      const merged = { ...currentConfig, ...newConfig };
-      const { encrypted, iv } = encryptConfig(merged);
-      updates.push("config_encrypted = ?", "config_iv = ?");
-      params.push(encrypted, iv);
-    }
+  if (body.config && typeof body.config === "object") {
+    const current = await getStoredChannelConfig(row.doc.type, channelId)
+    await putUserChannel("default", row.doc.type, channelId, { ...current, ...(body.config as Record<string, unknown>) }, true)
   }
-
-  if (updates.length === 0) {
-    return addCorsHeaders(Response.json({ error: "No valid fields to update" }, { status: 400 }), req);
+  if (Object.keys(patch).length === 0 && !body.config) {
+    return addCorsHeaders(Response.json({ error: "No valid fields to update" }, { status: 400 }), req)
   }
-
-  params.push(channelId);
-  getDb().query(`UPDATE channels SET ${updates.join(", ")} WHERE id = ?`).run(...params as any[]);
-
-  return addCorsHeaders(Response.json({ success: true }), req);
+  await channels.put(channelId, { ...row.doc, ...patch }, { expectedVersion: row.version })
+  return addCorsHeaders(Response.json({ success: true }), req)
 }
 
 export async function handleToggleChannel(
@@ -396,16 +251,15 @@ export async function handleToggleChannel(
   addCorsHeaders: (r: Response, req: Request) => Response,
   channelId: string
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}));
-  const { active } = body;
-
+  const body = await req.json().catch(() => ({}))
+  const { active } = body
   if (active === undefined) {
-    return addCorsHeaders(Response.json({ success: false, error: "Missing active field", message: "Falta el campo 'active'" }, { status: 400 }), req);
+    return addCorsHeaders(Response.json({ success: false, error: "Missing active field", message: "Falta el campo 'active'" }, { status: 400 }), req)
   }
-
-  getDb().query(`UPDATE channels SET active = ?, enabled = ? WHERE id = ?`).run(active ? 1 : 0, active ? 1 : 0, channelId);
-
-  return addCorsHeaders(Response.json({ success: true, active, message: active ? `Canal "${channelId}" activado` : `Canal "${channelId}" desactivado` }), req);
+  const channels = await col<ChannelDoc>("channels")
+  const row = await channels.get(channelId)
+  if (row) await channels.put(channelId, { ...row.doc, active: !!active, enabled: !!active }, { expectedVersion: row.version })
+  return addCorsHeaders(Response.json({ success: true, active, message: active ? `Canal "${channelId}" activado` : `Canal "${channelId}" desactivado` }), req)
 }
 
 export async function handleGetWhatsAppDetails(
@@ -414,16 +268,10 @@ export async function handleGetWhatsAppDetails(
   channelId: string,
   channelManager?: any
 ): Promise<Response> {
-  if (!channelManager) {
-    return addCorsHeaders(Response.json({ error: "Channel manager not available", status: 500 }), req);
-  }
-
-  const details = channelManager.getWhatsAppDetails(channelId);
-  if (!details) {
-    return addCorsHeaders(Response.json({ error: "WhatsApp channel not found", status: 404 }), req);
-  }
-
-  return addCorsHeaders(Response.json(details), req);
+  if (!channelManager) return addCorsHeaders(Response.json({ error: "Channel manager not available", status: 500 }), req)
+  const details = channelManager.getWhatsAppDetails(channelId)
+  if (!details) return addCorsHeaders(Response.json({ error: "WhatsApp channel not found", status: 404 }), req)
+  return addCorsHeaders(Response.json(details), req)
 }
 
 export async function handleDisconnectWhatsApp(
@@ -432,27 +280,17 @@ export async function handleDisconnectWhatsApp(
   channelId: string,
   channelManager?: any
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}));
-  const { clearSession } = body;
-
-  if (!channelManager) {
-    return addCorsHeaders(Response.json({ success: false, error: "Channel manager not available", status: 500 }), req);
-  }
-
-  const key = `whatsapp:${channelId}`;
-  const channel = channelManager.channels?.get?.(key);
-
-  if (!channel) {
-    return addCorsHeaders(Response.json({ success: false, error: "WhatsApp channel not found", status: 404 }), req);
-  }
+  const body = await req.json().catch(() => ({}))
+  const { clearSession } = body
+  if (!channelManager) return addCorsHeaders(Response.json({ success: false, error: "Channel manager not available", status: 500 }), req)
+  const channel = channelManager.channels?.get?.(`whatsapp:${channelId}`)
+  if (!channel) return addCorsHeaders(Response.json({ success: false, error: "WhatsApp channel not found", status: 404 }), req)
 
   try {
-    if (typeof (channel as any).disconnect === "function") {
-      await (channel as any).disconnect(clearSession === true);
-    }
-    return addCorsHeaders(Response.json({ success: true }), req);
+    if (typeof (channel as any).disconnect === "function") await (channel as any).disconnect(clearSession === true)
+    return addCorsHeaders(Response.json({ success: true }), req)
   } catch (error) {
-    return addCorsHeaders(Response.json({ success: false, error: (error as Error).message }, { status: 500 }), req);
+    return addCorsHeaders(Response.json({ success: false, error: (error as Error).message }, { status: 500 }), req)
   }
 }
 
@@ -462,44 +300,78 @@ export async function handleUpdateWhatsAppConfig(
   channelId: string,
   channelManager?: any
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}));
-  const { acceptGroups, reconnectMaxAttempts, reconnectBaseDelayMs, dmPolicy, selfMessagesOnly, allowFrom } = body;
-
-  // Read and decrypt the existing config, merge new values, then re-encrypt.
-  // These fields live inside config_encrypted — not as top-level columns.
-  const row = getDb().query(`SELECT config_encrypted, config_iv FROM channels WHERE id = ?`)
-    .get(channelId) as { config_encrypted: string | null; config_iv: string | null } | undefined;
-
-  if (!row) {
-    return addCorsHeaders(Response.json({ success: false, error: "Channel not found" }, { status: 404 }), req);
+  const body = await req.json().catch(() => ({}))
+  const currentConfig = await getStoredChannelConfig("whatsapp", channelId)
+  const merged: Record<string, unknown> = { ...currentConfig }
+  for (const key of ["acceptGroups", "reconnectMaxAttempts", "reconnectBaseDelayMs", "dmPolicy", "selfMessagesOnly", "allowFrom"]) {
+    if (body[key] !== undefined) merged[key] = key === "allowFrom" ? (Array.isArray(body[key]) ? body[key] : []) : body[key]
   }
+  await putUserChannel("default", "whatsapp", channelId, merged, true)
 
-  let currentConfig: Record<string, unknown> = {};
-  if (row.config_encrypted && row.config_iv) {
-    try {
-      currentConfig = decryptConfig(row.config_encrypted, row.config_iv);
-    } catch { /* start from empty if decryption fails */ }
-  }
-
-  const merged: Record<string, unknown> = { ...currentConfig };
-  if (acceptGroups !== undefined) merged.acceptGroups = Boolean(acceptGroups);
-  if (reconnectMaxAttempts !== undefined) merged.reconnectMaxAttempts = Number(reconnectMaxAttempts);
-  if (reconnectBaseDelayMs !== undefined) merged.reconnectBaseDelayMs = Number(reconnectBaseDelayMs);
-  if (dmPolicy !== undefined) merged.dmPolicy = dmPolicy;
-  if (selfMessagesOnly !== undefined) merged.selfMessagesOnly = Boolean(selfMessagesOnly);
-  if (allowFrom !== undefined) merged.allowFrom = Array.isArray(allowFrom) ? allowFrom : [];
-
-  const { encrypted, iv } = encryptConfig(merged);
-  getDb().query(`UPDATE channels SET config_encrypted = ?, config_iv = ? WHERE id = ?`)
-    .run(encrypted, iv, channelId);
-
-  // Restart the running channel so it picks up the new config immediately.
   if (channelManager) {
     try {
-      await channelManager.removeChannel("whatsapp", channelId);
-      await channelManager.addChannel("whatsapp", channelId, merged);
+      await channelManager.removeChannel("whatsapp", channelId)
+      await channelManager.addChannel("whatsapp", channelId, merged)
     } catch { /* ignore restart errors */ }
   }
+  return addCorsHeaders(Response.json({ success: true }), req)
+}
 
-  return addCorsHeaders(Response.json({ success: true }), req);
+function channelDoc(id: string, type: string, patch: Partial<ChannelDoc> = {}): ChannelDoc {
+  return {
+    id,
+    user_id: "default",
+    type,
+    enabled: false,
+    active: false,
+    status: "disconnected",
+    last_active: null,
+    voice_enabled: false,
+    tts_enabled: false,
+    stt_provider: null,
+    tts_provider: null,
+    tts_voice_id: null,
+    step_delivery_mode: "summary",
+    vision_enabled: false,
+    ocr_provider: null,
+    vision_provider: null,
+    vision_model_id: null,
+    ...patch,
+  }
+}
+
+function configDocId(userId: string, channel: string, accountId: string): string {
+  return `${userId}:${channel}:${accountId}`
+}
+
+async function putUserChannel(userId: string, channel: string, accountId: string, config: Record<string, unknown>, active: boolean): Promise<void> {
+  const userChannels = await col<UserChannelDoc>("userChannels")
+  const id = configDocId(userId, channel, accountId)
+  const existing = await userChannels.get(id)
+  const encrypted = encryptConfig(config || {})
+  await userChannels.put(id, {
+    id,
+    user_id: userId,
+    channel,
+    account_id: accountId,
+    config: JSON.stringify(encrypted),
+    active,
+    created_at: existing?.doc.created_at ?? Date.now(),
+    updated_at: Date.now(),
+  }, { expectedVersion: existing?.version ?? 0 })
+}
+
+async function deleteUserChannel(userId: string, channel: string, accountId: string): Promise<void> {
+  await (await col<UserChannelDoc>("userChannels")).delete(configDocId(userId, channel, accountId))
+}
+
+async function getStoredChannelConfig(channel: string, accountId: string): Promise<Record<string, unknown>> {
+  const entry = await (await col<UserChannelDoc>("userChannels")).get(configDocId("default", channel, accountId))
+  if (!entry) return {}
+  try {
+    const encrypted = JSON.parse(entry.doc.config) as { encrypted: string; iv: string }
+    return decryptConfig(encrypted.encrypted, encrypted.iv)
+  } catch {
+    try { return JSON.parse(entry.doc.config) } catch { return {} }
+  }
 }

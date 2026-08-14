@@ -1,22 +1,29 @@
 /**
- * FTS5-based Dynamic Skill Selector Module
+ * HiveDB-based Dynamic Skill Selector Module
  * 
  * Context Compiler Level 4 - Intelligent Skill Selection
  * 
- * This module uses SQLite FTS5 bm25() scoring to select the most relevant
- * skills (0-5) based on the user message, similar to tool selection.
+ * This module uses HiveDB BM25 scoring to select the most relevant skills
+ * based on the user message, similar to tool selection.
  * 
  * DESIGN DECISIONS:
  * 
  * 1. Reads from skills table in database (not hardcoded catalog)
  * 2. Maximum 5 skills per turn for balanced context injection
  * 3. Relevance threshold for conversational messages
- * 4. Uses skill descriptions for FTS5 matching
+ * 4. Uses skill descriptions for HiveDB BM25 matching
  * 5. Returns skill content for injection into system prompt
  */
 
-import { getDb } from "../storage/sqlite"
+import { col } from "../storage/hive"
+import type { SkillDoc } from "../storage/collections"
 import { logger } from "../utils/logger"
+import {
+    searchCapabilities,
+    applyRelativeCutoff,
+    replaceCapabilityDocs,
+    type CapabilityDoc,
+} from "./capability-search"
 
 const log = logger.child("skill-selector")
 
@@ -24,10 +31,12 @@ const log = logger.child("skill-selector")
 
 /**
  * Skills mínimas que SIEMPRE están disponibles (asociadas a las tools iniciales)
+ * - busqueda_hivedb: discovery central vía search_knowledge
  * - memory_manager: usa save_note (notas persistentes)
  * - task_orchestrator: usa notify (comunicación entre agentes)
  */
 export const MINIMAL_SKILL_NAMES = new Set([
+  "busqueda_hivedb",   // Core: cómo descubrir tools, MCP, skills, playbook
   "memory_manager",    // Asociada a save_note
   "task_orchestrator", // Asociada a notify y agent coordination
 ])
@@ -45,7 +54,23 @@ export interface SkillDescriptor {
     body: string
     version: string
     version_num: number
-    active: number
+    active: boolean
+}
+
+function toSkillDescriptor(doc: SkillDoc): SkillDescriptor {
+    return {
+        id: doc.id,
+        name: doc.name,
+        description: doc.description ?? "",
+        category: doc.category,
+        tools: doc.tools,
+        triggers: doc.triggers,
+        preferred_agents: doc.preferred_agents,
+        body: doc.body,
+        version: doc.version,
+        version_num: doc.version_num,
+        active: doc.active,
+    }
 }
 
 export interface SelectedSkill {
@@ -70,15 +95,13 @@ export interface SkillSelectorResult {
 const MAX_SKILLS_PER_TURN = 4  // Increased from 2 to allow more skills
 
 /**
- * Minimum bm25 score threshold. Below this = conversational, no skills needed.
- * 
- * CRITICAL: bm25() returns NEGATIVE scores where closer to 0 = more relevant.
- * - Score of -5 is MORE relevant than -20
- * - We use -15 as threshold to allow reasonable matching while filtering noise
+ * Relative relevance cutoff: keep a hit only if it scores at least this
+ * fraction of the top hit. HiveDB BM25 scores are positive (higher = better)
+ * but corpus-dependent, so absolute thresholds do not transfer.
  */
-const MIN_RELEVANCE_THRESHOLD = -15  // Increased from -5 to allow more matches
+const RELEVANCE_RATIO = 0.3
 
-/** Stopwords to filter out before FTS5 query construction */
+/** Stopwords used by conversational filtering before capability search */
 const STOPWORDS = new Set([
     "que", "con", "para", "por", "una", "uno", "los", "las", "del",
     "como", "esta", "esto", "ese", "eso", "the", "and", "for",
@@ -133,27 +156,6 @@ function isConversational(message: string): boolean {
 }
 
 /**
- * Build FTS5 query from user message
- * 
- * Uses prefix matching for better recall:
- * - "generar" matches "generando", "generación", "genera"
- * - "código" matches "codigos", "codificar"
- */
-function buildFTSQuery(message: string): string {
-    const words = message
-        .toLowerCase()
-        .replace(/[^\p{L}\p{N}\s]/gu, " ")
-        .split(/\s+/)
-        .filter((w) => w.length > 2 && !STOPWORDS.has(w))
-        .slice(0, 8)
-
-    if (words.length === 0) return ""
-
-    // Use prefix matching for better recall (e.g., "gener*" matches "generar", "generando", "generación")
-    return words.map(w => `${w}*`).join(" OR ")
-}
-
-/**
  * Check if message matches explicit triggers from a skill
  */
 function matchTriggers(message: string, triggersJson: string | null): boolean {
@@ -179,7 +181,7 @@ function matchTriggers(message: string, triggersJson: string | null): boolean {
 /**
  * Select skills for a given user message using hybrid matching:
  * 1. First check explicit triggers (high confidence match)
- * 2. Fallback to FTS5 bm25() scoring for semantic matching
+ * 2. Fallback to HiveDB BM25 scoring for semantic matching
  *
  * @param userMessage - The raw user message
  * @returns Array of 0-5 selected skills with scores
@@ -188,12 +190,11 @@ function matchTriggers(message: string, triggersJson: string | null): boolean {
  * 1. If conversational → return []
  * 2. Check explicit triggers from all enabled skills
  * 3. If trigger match found → return matching skill immediately
- * 4. Build FTS5 query from message keywords
- * 5. Query skills_fts with bm25() scoring
- * 6. Filter results below MIN_RELEVANCE_THRESHOLD
- * 7. Return top MAX_SKILLS_PER_TURN results
+ * 4. Query the HiveDB capability index with the raw message
+ * 5. Keep hits scoring at least RELEVANCE_RATIO of the top hit
+ * 6. Hydrate skill details from HiveDB and return top MAX_SKILLS_PER_TURN
  */
-export function selectSkills(userMessage: string): SkillDescriptor[] {
+export async function selectSkills(userMessage: string): Promise<SkillDescriptor[]> {
     const startTime = performance.now()
 
     log.debug(`[skill-selector] Processing user message: "${userMessage.substring(0, 100)}"`)
@@ -205,12 +206,10 @@ export function selectSkills(userMessage: string): SkillDescriptor[] {
     }
 
     // Step 2: Check explicit triggers first (high priority)
-    const db = getDb()
-    const allSkills = db.query(`
-        SELECT id, name, description, category, tools, triggers, preferred_agents, body, version, version_num, active
-        FROM skills
-        WHERE active = 1
-    `).all() as SkillDescriptor[]
+    const skillsCol = await col<SkillDoc>("skills")
+    const allSkills = (await skillsCol.scan({}))
+        .filter(e => e.doc.active)
+        .map(e => toSkillDescriptor(e.doc))
 
     // Check trigger match - if found, return immediately with high confidence
     for (const skill of allSkills) {
@@ -220,84 +219,37 @@ export function selectSkills(userMessage: string): SkillDescriptor[] {
         }
     }
 
-    // Step 3: Build FTS5 query for semantic matching
-    const ftsQuery = buildFTSQuery(userMessage)
-    if (!ftsQuery) {
-        log.debug(`[skill-selector] No valid FTS query terms, returning empty array`)
-        return []
-    }
-
-    log.debug(`[skill-selector] FTS query: "${ftsQuery}"`)
-
-    // Step 4: Execute FTS5 query with bm25 scoring
-    // Use bm25() with column weights for relevance scoring
-    // FTS5 table columns: id, name, description, category, tools, triggers, body
-    // Weights: id=1.0, name=4.0, description=5.0, category=1.0, tools=1.0, triggers=5.0, body=2.0
-    // Higher weight on description (5.0) and triggers (5.0) for best semantic matching
-    const ftsResults = db.query(`
-        SELECT id, bm25(skills_fts, 1.0, 4.0, 5.0, 1.0, 1.0, 5.0, 2.0) as bm25_score
-        FROM skills_fts
-        WHERE skills_fts MATCH ?
-        ORDER BY bm25_score ASC
-        LIMIT 20
-    `).all(ftsQuery) as { id: string; bm25_score: number }[]
-
-    if (ftsResults.length === 0) {
-        log.debug(`[skill-selector] No FTS matches, returning empty array`)
-        return []
-    }
-
-    // Log raw scores for debugging
-    log.info(`[skill-selector] Raw FTS scores: ${ftsResults.slice(0, 10).map(r => `id=${r.id}, score=${r.bm25_score.toFixed(2)}`).join(", ")}`)
-
-    // Step 5: Apply relevance threshold filter
-    const relevantResults = ftsResults.filter(r => r.bm25_score >= MIN_RELEVANCE_THRESHOLD)
-
-    if (relevantResults.length === 0) {
-        log.debug(`[skill-selector] All results below threshold ${MIN_RELEVANCE_THRESHOLD}, returning empty`)
-        return []
-    }
-
-    // Step 6: Fetch full skill details from database
-    const skillIds = relevantResults.map(r => r.id)
-
-    let dbSkills: SkillDescriptor[] = []
+    // Step 3: Semantic matching via the HiveDB capability index
+    let hits
     try {
-        const db = getDb()
-        dbSkills = db.query(`
-            SELECT id, name, description, category, tools, triggers, preferred_agents, body, version, version_num, active
-            FROM skills
-            WHERE id IN (${skillIds.map(() => '?').join(',')})
-            AND active = 1
-        `).all(...skillIds) as SkillDescriptor[]
+        hits = await searchCapabilities(userMessage, { types: ["skill"], k: 20 })
     } catch (err) {
-        log.warn(`[skill-selector] Failed to fetch skills from DB:`, err)
+        log.error(`[skill-selector] Capability search failed:`, err)
         return []
     }
 
-    // Map scores to skills
-    const skillMap = new Map(dbSkills.map(s => [s.id, s]))
-    const scoredSkills: SelectedSkill[] = []
+    if (hits.length === 0) {
+        log.debug(`[skill-selector] No matches, returning empty array`)
+        return []
+    }
 
-    for (const result of relevantResults) {
-        const skill = skillMap.get(result.id)
+    log.info(`[skill-selector] Raw scores: ${hits.slice(0, 10).map(h => `id=${h.rawId}, score=${h.score.toFixed(2)}`).join(", ")}`)
+
+    const relevantHits = applyRelativeCutoff(hits, RELEVANCE_RATIO)
+    if (relevantHits.length === 0) {
+        log.debug(`[skill-selector] All results below ratio cutoff, returning empty`)
+        return []
+    }
+
+    const skillMap = new Map(allSkills.map(s => [s.id, s]))
+    const result: SkillDescriptor[] = []
+    for (const hit of relevantHits) {
+        const skill = skillMap.get(hit.rawId)
         if (skill) {
-            scoredSkills.push({
-                id: skill.id,
-                name: skill.name,
-                score: result.bm25_score,
-                category: skill.category,
-                description: skill.description || "",
-                body: skill.body,
-            })
+            result.push(skill)
+            if (result.length === MAX_SKILLS_PER_TURN) break
         }
     }
-
-    // Step 7: Take top N skills
-    const topSkills = scoredSkills.slice(0, MAX_SKILLS_PER_TURN)
-
-    // Step 8: Return as SkillDescriptor array
-    const result = topSkills.map(t => skillMap.get(t.id)!).filter(Boolean)
 
     const timing = performance.now() - startTime
 
@@ -315,21 +267,16 @@ export function selectSkills(userMessage: string): SkillDescriptor[] {
 
 /**
  * Load minimal skills that are ALWAYS available (associated with MINIMAL_TOOLS)
- * These are loaded at startup, not via FTS5 search.
+ * These are loaded at startup, not via semantic search.
  *
  * @returns Array of minimal skills (memory_manager, task_orchestrator)
  */
-export function getMinimalSkills(): SkillDescriptor[] {
-    const db = getDb()
-
+export async function getMinimalSkills(): Promise<SkillDescriptor[]> {
     try {
-        const placeholders = Array.from(MINIMAL_SKILL_NAMES).map(() => "?").join(",")
-        const skills = db.query(`
-            SELECT id, name, description, category, tools, triggers, preferred_agents, body, version, version_num, active
-            FROM skills
-            WHERE name IN (${placeholders})
-            AND active = 1
-        `).all(...MINIMAL_SKILL_NAMES) as SkillDescriptor[]
+        const skillsCol = await col<SkillDoc>("skills")
+        const skills = (await skillsCol.scan({}))
+            .filter(e => MINIMAL_SKILL_NAMES.has(e.doc.name) && e.doc.active)
+            .map(e => toSkillDescriptor(e.doc))
 
         log.info(`[skill-selector] Loaded ${skills.length} minimal skills: ${skills.map(s => s.name).join(", ")}`)
         return skills
@@ -339,74 +286,37 @@ export function getMinimalSkills(): SkillDescriptor[] {
     }
 }
 
-// ─── Sync Skills to FTS5 ───────────────────────────────────────────────────
+// ─── Sync Skills to HiveDB ──────────────────────────────────────────────────
 
 /**
- * Sync all enabled skills from database to FTS5
+ * Sync all enabled skills from database to the HiveDB capability index.
  * Should be called on initialization from gateway/initializer.ts
- * The skills_fts table is created by schema.ts (v0.0.28 includes description)
  */
-export async function syncSkillsToFTS(): Promise<void> {
-    const db = getDb()
-
+export async function syncSkillsToIndex(): Promise<void> {
     try {
-        // Step 1: Get all enabled skills from database (v0.0.28 schema with description)
-        const dbSkills = db.query(`
-            SELECT id, name, description, category, tools, triggers, body
-            FROM skills
-            WHERE active = 1
-        `).all() as Array<{
-            id: string
-            name: string
-            description: string
-            category: string
-            tools: string
-            triggers: string
-            body: string
-        }>
+        // Step 1: Get all enabled skills from HiveDB
+        const skillsCol = await col<SkillDoc>("skills")
+        const dbSkills = (await skillsCol.scan({})).map(e => e.doc).filter(s => s.active)
 
         if (dbSkills.length === 0) {
             log.debug(`[skill-selector] No skills found in DB to sync`)
         }
 
-        // Step 2: Atomic transaction for FTS5 sync
-        const syncTransaction = db.transaction(() => {
-            // Verify table exists
-            const tableCheck = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='skills_fts'").get()
-            if (!tableCheck) {
-                throw new Error("skills_fts table does not exist!")
-            }
+        // Step 2: Replace all skill documents in the HiveDB capability index
+        const docs: CapabilityDoc[] = dbSkills.map(skill => ({
+            type: "skill" as const,
+            rawId: skill.id,
+            name: skill.name,
+            tags: [skill.triggers, skill.category, skill.tools].filter(Boolean).join(" "),
+            body: [skill.description, skill.body].filter(Boolean).join("\n"),
+        }))
 
-            // A: Clear existing data
-            db.run("DELETE FROM skills_fts")
+        await replaceCapabilityDocs("skill", docs)
 
-            // B: Prepare insertion (v0.0.28 schema with description)
-            const insert = db.prepare(`
-                INSERT INTO skills_fts(id, name, description, category, tools, triggers, body)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            `)
-
-            // C: Re-populate
-            for (const skill of dbSkills) {
-                insert.run(
-                    skill.id,
-                    skill.name,
-                    skill.description || "",
-                    skill.category,
-                    skill.tools,
-                    skill.triggers,
-                    skill.body
-                )
-            }
-        })
-
-        // Execute transaction
-        syncTransaction()
-
-        log.info(`[skill-selector] Atomic sync complete: ${dbSkills.length} skills indexed in FTS5`)
+        log.info(`[skill-selector] Sync complete: ${dbSkills.length} skills indexed in HiveDB`)
 
     } catch (err) {
-        log.error(`[skill-selector] Transactional sync failed:`, err)
+        log.error(`[skill-selector] Skill index sync failed:`, err)
         throw err // Re-throw to inform initializer
     }
 }
@@ -414,12 +324,12 @@ export async function syncSkillsToFTS(): Promise<void> {
 
 /**
  * Initialize the skill selector
- * DEPRECATED: syncSkillsToFTS() is now called from gateway/initializer.ts
+ * DEPRECATED: syncSkillsToIndex() is now called from gateway/initializer.ts
  * This function is kept for backward compatibility but is no longer needed
  */
 export function initializeSkillSelector(): void {
     log.info(`[skill-selector] Initializing skill selector (deprecated - sync is done in gateway/initializer.ts)`)
-    // syncSkillsToFTS() - No longer needed here, done in gateway/initializer.ts
+    // syncSkillsToIndex() - No longer needed here, done in gateway/initializer.ts
 }
 
 // ─── Debug/Test Helpers ─────────────────────────────────────────────────────
@@ -427,14 +337,10 @@ export function initializeSkillSelector(): void {
 /**
  * Get all enabled skills from database (for debugging/testing)
  */
-export function getAllSkillsFromDB(): SkillDescriptor[] {
+export async function getAllSkillsFromDB(): Promise<SkillDescriptor[]> {
     try {
-        const db = getDb()
-        return db.query(`
-            SELECT id, name, description, category, tools, triggers, preferred_agents, body, version, version_num, active
-            FROM skills
-            WHERE active = 1
-        `).all() as SkillDescriptor[]
+        const skillsCol = await col<SkillDoc>("skills")
+        return (await skillsCol.scan({})).filter(e => e.doc.active).map(e => toSkillDescriptor(e.doc))
     } catch (err) {
         log.error(`[skill-selector] Failed to fetch skills:`, err)
         return []
@@ -444,14 +350,11 @@ export function getAllSkillsFromDB(): SkillDescriptor[] {
 /**
  * Get skill by name
  */
-export function getSkillByName(name: string): SkillDescriptor | undefined {
+export async function getSkillByName(name: string): Promise<SkillDescriptor | undefined> {
     try {
-        const db = getDb()
-        return db.query(`
-            SELECT id, name, description, category, tools, triggers, preferred_agents, body, version, version_num, active
-            FROM skills
-            WHERE name = ? AND active = 1
-        `).get(name) as SkillDescriptor | undefined
+        const skillsCol = await col<SkillDoc>("skills")
+        const match = (await skillsCol.scan({})).find(e => e.doc.name === name && e.doc.active)
+        return match ? toSkillDescriptor(match.doc) : undefined
     } catch (err) {
         log.error(`[skill-selector] Failed to fetch skill by name:`, err)
         return undefined
@@ -461,14 +364,11 @@ export function getSkillByName(name: string): SkillDescriptor | undefined {
 /**
  * Get skills by category
  */
-export function getSkillsByCategory(category: string): SkillDescriptor[] {
+export async function getSkillsByCategory(category: string): Promise<SkillDescriptor[]> {
     try {
-        const db = getDb()
-        return db.query(`
-            SELECT id, name, description, category, tools, triggers, preferred_agents, body, version, version_num, active
-            FROM skills
-            WHERE category = ? AND active = 1
-        `).all(category) as SkillDescriptor[]
+        const skillsCol = await col<SkillDoc>("skills")
+        const entries = await skillsCol.findBy("category", category)
+        return entries.filter(e => e.doc.active).map(e => toSkillDescriptor(e.doc))
     } catch (err) {
         log.error(`[skill-selector] Failed to fetch skills by category:`, err)
         return []

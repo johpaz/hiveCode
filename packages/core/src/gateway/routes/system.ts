@@ -1,5 +1,6 @@
-import { getDb } from "../../storage/sqlite.ts"
 import { loadConfig } from "../../config/loader.ts"
+import { col } from "../../storage/hive"
+import type { ConversationDoc, UsageRecordDoc } from "../../storage/collections"
 import pkg from "../../../../../package.json"
 
 const CURRENT_VERSION = pkg.version
@@ -253,7 +254,6 @@ export function getSystemStats(startTime: number) {
 }
 
 export async function handleGetActivityStats(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
-  const db = getDb()
   const url = new URL(req.url)
   const hours = parseInt(url.searchParams.get("hours") || "12", 10)
 
@@ -261,21 +261,18 @@ export async function handleGetActivityStats(req: Request, addCorsHeaders: (r: R
   const now = Date.now()
   const startTime = now - (hours * 60 * 60 * 1000)
 
-  const rows = db.query(`
-    SELECT
-      strftime('%Y-%m-%d %H:00', datetime(created_at, 'unixepoch')) as hour,
-      COUNT(*) as count
-    FROM conversations
-    WHERE created_at >= ?
-    GROUP BY hour
-    ORDER BY hour
-  `).all(startTime / 1000) as { hour: string; count: number }[]
+  const buckets = new Map<string, number>()
+  const rows = (await (await col<ConversationDoc>("conversations")).scan()).map((entry) => entry.doc)
+  for (const row of rows) {
+    if (row.created_at < startTime) continue
+    const hour = new Date(row.created_at).toISOString().slice(0, 13).replace("T", " ") + ":00"
+    buckets.set(hour, (buckets.get(hour) ?? 0) + 1)
+  }
 
   // Format as array expected by frontend
-  const activityData = rows.map(r => ({
-    time: r.hour,
-    count: r.count,
-  }))
+  const activityData = [...buckets.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([time, count]) => ({ time, count }))
 
   return addCorsHeaders(Response.json(activityData), req)
 }
@@ -285,68 +282,48 @@ export async function handleGetSystemStats(req: Request, addCorsHeaders: (r: Res
 }
 
 export async function handleGetUsageStats(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
-  const db = getDb()
-
   // Get hours parameter from URL (default to 24 hours)
   const url = new URL(req.url)
   const hours = parseInt(url.searchParams.get("hours") || "24", 10)
-  const since = Math.floor(Date.now() / 1000) - (hours * 3600)
+  const since = Date.now() - (hours * 3600 * 1000)
+  const records = (await (await col<UsageRecordDoc>("usageRecords")).scan())
+    .map((entry) => entry.doc)
+    .filter((record) => record.created_at >= since)
 
-  // Get totals from usage_records table (excluding TOON records)
-  const totals = db.query(`
-    SELECT
-      COALESCE(SUM(input_tokens), 0) as inputTokens,
-      COALESCE(SUM(output_tokens), 0) as outputTokens,
-      COALESCE(SUM(cost_usd), 0) as costUsd
-    FROM usage_records
-    WHERE created_at >= ? AND provider != 'toon'
-  `).get(since) as { inputTokens: number; outputTokens: number; costUsd: number }
+  const normal = records.filter((record) => record.provider !== "toon")
+  const toon = records.filter((record) => record.provider === "toon")
+  const totals = normal.reduce((acc, record) => ({
+    inputTokens: acc.inputTokens + record.input_tokens,
+    outputTokens: acc.outputTokens + record.output_tokens,
+    costUsd: acc.costUsd + record.cost_usd,
+  }), { inputTokens: 0, outputTokens: 0, costUsd: 0 })
 
-  // Get TOON savings separately
-  const toonTotals = db.query(`
-    SELECT
-      COALESCE(SUM(toon_saved_tokens), 0) as toonSavedTokens,
-      COALESCE(SUM(toon_saved_cost), 0) as toonSavedCost,
-      COALESCE(SUM(toon_saved_bytes), 0) as toonSavedBytes,
-      COALESCE(AVG(toon_saved_percent), 0) as toonSavedPercent,
-      COALESCE(SUM(toon_json_tokens), 0) as toonJsonTokens,
-      COALESCE(SUM(toon_toon_tokens), 0) as toonToonTokens,
-      COALESCE(SUM(toon_json_bytes), 0) as toonJsonBytes,
-      COALESCE(AVG(toon_saved_tokens_pct), 0) as toonSavedTokensPct
-    FROM usage_records
-    WHERE created_at >= ? AND provider = 'toon'
-  `).get(since) as {
-    toonSavedTokens: number;
-    toonSavedCost: number;
-    toonSavedBytes: number;
-    toonSavedPercent: number;
-    toonJsonTokens: number;
-    toonToonTokens: number;
-    toonJsonBytes: number;
-    toonSavedTokensPct: number;
+  const toonTotals = toon.reduce((acc, record) => ({
+    toonSavedTokens: acc.toonSavedTokens + record.toon_saved_tokens,
+    toonSavedCost: acc.toonSavedCost + record.toon_saved_cost,
+    toonSavedBytes: acc.toonSavedBytes + record.toon_saved_bytes,
+    toonSavedPercent: acc.toonSavedPercent + record.toon_saved_percent,
+    toonJsonTokens: acc.toonJsonTokens + record.toon_json_tokens,
+    toonToonTokens: acc.toonToonTokens + record.toon_toon_tokens,
+    toonJsonBytes: acc.toonJsonBytes + record.toon_json_bytes,
+    toonSavedTokensPct: acc.toonSavedTokensPct + record.toon_saved_tokens_pct,
+  }), {
+    toonSavedTokens: 0,
+    toonSavedCost: 0,
+    toonSavedBytes: 0,
+    toonSavedPercent: 0,
+    toonJsonTokens: 0,
+    toonToonTokens: 0,
+    toonJsonBytes: 0,
+    toonSavedTokensPct: 0,
+  })
+  if (toon.length > 0) {
+    toonTotals.toonSavedPercent /= toon.length
+    toonTotals.toonSavedTokensPct /= toon.length
   }
-  const byProviderRows = db.query(`
-    SELECT
-      provider,
-      COALESCE(SUM(input_tokens), 0) as inputTokens,
-      COALESCE(SUM(output_tokens), 0) as outputTokens,
-      COALESCE(SUM(cost_usd), 0) as costUsd
-    FROM usage_records
-    WHERE created_at >= ? AND provider != 'toon'
-    GROUP BY provider
-  `).all(since) as { provider: string; inputTokens: number; outputTokens: number; costUsd: number }[]
 
-  // Get by model
-  const byModelRows = db.query(`
-    SELECT
-      model,
-      COALESCE(SUM(input_tokens), 0) as inputTokens,
-      COALESCE(SUM(output_tokens), 0) as outputTokens,
-      COALESCE(SUM(cost_usd), 0) as costUsd
-    FROM usage_records
-    WHERE created_at >= ? AND provider != 'toon'
-    GROUP BY model
-  `).all(since) as { model: string; inputTokens: number; outputTokens: number; costUsd: number }[]
+  const byProviderRows = aggregateUsage(normal, "provider")
+  const byModelRows = aggregateUsage(normal, "model")
 
   const totalTokens = (totals.inputTokens || 0) + (totals.outputTokens || 0)
   const totalCostUsd = totals.costUsd || 0
@@ -397,6 +374,22 @@ export async function handleGetUsageStats(req: Request, addCorsHeaders: (r: Resp
   }
 
   return addCorsHeaders(Response.json(stats), req)
+}
+
+function aggregateUsage(records: UsageRecordDoc[], field: "provider" | "model") {
+  const grouped = new Map<string, { inputTokens: number; outputTokens: number; costUsd: number }>()
+  for (const record of records) {
+    const key = record[field]
+    const cur = grouped.get(key) ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 }
+    cur.inputTokens += record.input_tokens
+    cur.outputTokens += record.output_tokens
+    cur.costUsd += record.cost_usd
+    grouped.set(key, cur)
+  }
+  return [...grouped.entries()].map(([key, value]) => ({
+    [field]: key,
+    ...value,
+  })) as Array<Record<typeof field, string> & { inputTokens: number; outputTokens: number; costUsd: number }>
 }
 
 // Add UsageStats interface for backend

@@ -35,6 +35,7 @@
     "./runtime/task-supervisor": "./src/runtime/task-supervisor.ts",
     "./modes/keyboard": "./src/modes/keyboard.ts",
     "./workers/tool-bridge": "./src/workers/tool-bridge.ts",
+    "./workers/worker-handler": "./src/workers/worker-handler.ts",
     "./workers/secrets": "./src/workers/secrets.ts",
     "./workspace": "./src/workspace/index.ts",
     "./workspace/leases": "./src/workspace/leases.ts",

@@ -1,11 +1,65 @@
 import { Bot, GrammyError, InputFile, type Context } from "grammy";
 import { BaseChannel, type ChannelConfig, type IncomingMessage, type OutboundMessage } from "./base.ts";
 import { logger } from "../utils/logger.ts";
-import { getDb } from "../storage/sqlite.ts";
+import { col } from "../storage/hive.ts";
+import type { ChannelDoc, CodeConfigDoc, CodeNarrativeDoc, CodeTaskDoc, ProviderDoc } from "../storage/collections.ts";
 
 export interface TelegramConfig extends ChannelConfig {
   botToken: string;
   groups?: boolean;
+}
+
+async function setChannelStatus(id: string, status: string): Promise<void> {
+  const channels = await col<ChannelDoc>("channels");
+  const entry = await channels.get(id);
+  if (entry) await channels.put(id, { ...entry.doc, status }, { expectedVersion: entry.version });
+}
+
+async function getCodeConfig(key: string): Promise<string | null> {
+  return (await (await col<CodeConfigDoc>("codeConfig")).get(key))?.doc.value ?? null;
+}
+
+async function setCodeConfig(key: string, value: string): Promise<void> {
+  const config = await col<CodeConfigDoc>("codeConfig");
+  const existing = await config.get(key);
+  await config.put(key, { key, value, updated_at: Math.floor(Date.now() / 1000) }, { expectedVersion: existing?.version ?? 0 });
+}
+
+async function latestTask(statuses: string[]): Promise<CodeTaskDoc | null> {
+  return (await (await col<CodeTaskDoc>("codeTasks")).scan())
+    .map((entry) => entry.doc)
+    .filter((task) => statuses.includes(task.status))
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0] ?? null;
+}
+
+async function recentTasks(limit: number): Promise<CodeTaskDoc[]> {
+  return (await (await col<CodeTaskDoc>("codeTasks")).scan())
+    .map((entry) => entry.doc)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .slice(0, limit);
+}
+
+async function updateTaskStatus(id: string, status: CodeTaskDoc["status"]): Promise<void> {
+  const tasks = await col<CodeTaskDoc>("codeTasks");
+  const entry = await tasks.get(id);
+  if (entry) await tasks.put(id, { ...entry.doc, status }, { expectedVersion: entry.version });
+}
+
+async function tokenTotal24h(): Promise<number> {
+  const since = Date.now() - 24 * 60 * 60 * 1000;
+  return (await (await col<CodeTaskDoc>("codeTasks")).scan())
+    .map((entry) => entry.doc)
+    .filter((task) => new Date(task.created_at).getTime() > since)
+    .reduce((sum, task) => sum + task.tokens_in + task.tokens_out, 0);
+}
+
+async function recentNarrative(limit: number, query?: string): Promise<CodeNarrativeDoc[]> {
+  const needle = query?.toLowerCase();
+  return (await (await col<CodeNarrativeDoc>("codeNarrative")).scan())
+    .map((entry) => entry.doc)
+    .filter((entry) => !needle || entry.entry.toLowerCase().includes(needle) || entry.coordinator.toLowerCase().includes(needle))
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .slice(0, limit);
 }
 
 export class TelegramChannel extends BaseChannel {
@@ -55,11 +109,10 @@ export class TelegramChannel extends BaseChannel {
     // Inline keyboard callbacks
     this.bot.on("callback_query:data", async (ctx) => {
       const data = ctx.callbackQuery.data;
-      const db = getDb();
       try {
         if (data.startsWith("cancel_task:")) {
           const taskId = data.slice("cancel_task:".length);
-          db.query("UPDATE code_tasks SET status = 'cancelled' WHERE id = ?").run(taskId);
+          await updateTaskStatus(taskId, "cancelled");
           await ctx.editMessageText(`❌ Tarea <code>${taskId.slice(0, 8)}</code> cancelada.`, { parse_mode: "HTML" });
         } else if (data === "cancel_abort") {
           await ctx.editMessageText("↩️ Cancelación abortada.");
@@ -75,7 +128,7 @@ export class TelegramChannel extends BaseChannel {
           await ctx.editMessageText("⏭ Fase saltada.");
         } else if (data.startsWith("mode:")) {
           const newMode = data.slice("mode:".length);
-          db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('active_mode', ?)").run(newMode);
+          await setCodeConfig("active_mode", newMode);
           await ctx.editMessageText(`🎛 Modo cambiado a: <code>${newMode}</code>`, { parse_mode: "HTML" });
         }
       } catch (e) {
@@ -95,16 +148,12 @@ export class TelegramChannel extends BaseChannel {
       onStart: () => {
         this.running = true;
         this.log.info(`Telegram bot started: @${this.bot?.botInfo?.username ?? "unknown"}`);
-        try {
-          getDb().query(`UPDATE channels SET status = 'connected' WHERE id = ?`).run(this.accountId);
-        } catch { /* ignore DB errors */ }
+        void setChannelStatus(this.accountId, "connected");
       },
     }).catch((error: Error) => {
       this.log.error(`Telegram bot error: ${error.message}`);
       this.running = false;
-      try {
-        getDb().query(`UPDATE channels SET status = 'error' WHERE id = ?`).run(this.accountId);
-      } catch { /* ignore DB errors */ }
+      void setChannelStatus(this.accountId, "error");
     });
   }
 
@@ -180,21 +229,16 @@ export class TelegramChannel extends BaseChannel {
 
     if (text === "/status" || text?.startsWith("/status@")) {
       try {
-        const db = getDb();
-        const config = db.query("SELECT value FROM code_config WHERE key = 'active_provider'").get() as any;
-        const mode = db.query("SELECT value FROM code_config WHERE key = 'active_mode'").get() as any;
-        const activeTask = db.query(
-          "SELECT id, description, status FROM code_tasks WHERE status IN ('running','planning') ORDER BY created_at DESC LIMIT 1"
-        ).get() as any;
-        const tokenSum = db.query(
-          "SELECT COALESCE(SUM(tokens_in + tokens_out), 0) as total FROM code_tasks WHERE created_at > datetime('now', '-24 hours')"
-        ).get() as any;
-        const cost = ((tokenSum?.total ?? 0) / 1_000_000 * 3).toFixed(4);
+        const provider = await getCodeConfig("active_provider");
+        const mode = await getCodeConfig("active_mode");
+        const activeTask = await latestTask(["running", "planning"]);
+        const tokens = await tokenTotal24h();
+        const cost = (tokens / 1_000_000 * 3).toFixed(4);
 
         await ctx.reply(
           `🐝 <b>Estado de hivecode</b>\n\n` +
-          `Provider: <code>${config?.value ?? "N/A"}</code>\n` +
-          `Modo: <code>${mode?.value ?? "auto"}</code>\n` +
+          `Provider: <code>${provider ?? "N/A"}</code>\n` +
+          `Modo: <code>${mode ?? "auto"}</code>\n` +
           `Costo hoy: <b>~$${cost}</b>\n` +
           (activeTask ? `\n✅ Tarea activa:\n<code>${activeTask.description?.slice(0, 60)}</code>` : "\n💤 Sin tarea activa"),
           { parse_mode: "HTML" }
@@ -207,10 +251,7 @@ export class TelegramChannel extends BaseChannel {
 
     if (text === "/tareas" || text?.startsWith("/tareas@")) {
       try {
-        const db = getDb();
-        const tasks = db.query(
-          "SELECT id, description, status, created_at FROM code_tasks ORDER BY created_at DESC LIMIT 5"
-        ).all() as any[];
+        const tasks = await recentTasks(5);
         if (tasks.length === 0) {
           await ctx.reply("📋 Sin tareas registradas.");
           return;
@@ -228,10 +269,7 @@ export class TelegramChannel extends BaseChannel {
 
     if (text === "/narrativo" || text?.startsWith("/narrativo@")) {
       try {
-        const db = getDb();
-        const entries = db.query(
-          "SELECT coordinator, phase, entry FROM code_narrative ORDER BY id DESC LIMIT 5"
-        ).all() as any[];
+        const entries = await recentNarrative(5);
         if (entries.length === 0) {
           await ctx.reply("📖 Sin entradas en el narrativo.");
           return;
@@ -250,10 +288,7 @@ export class TelegramChannel extends BaseChannel {
       const query = text.replace(/^\/buscar(@\S+)?\s*/, "").trim();
       if (!query) { await ctx.reply("Uso: /buscar <términos>"); return; }
       try {
-        const db = getDb();
-        const rows = db.query(
-          "SELECT n.coordinator, n.entry FROM code_narrative n JOIN code_narrative_fts fts ON n.id = fts.rowid WHERE code_narrative_fts MATCH ? LIMIT 3"
-        ).all(`${query}*`) as any[];
+        const rows = await recentNarrative(3, query);
         if (rows.length === 0) {
           await ctx.reply(`🔍 Sin resultados para: <i>${query}</i>`, { parse_mode: "HTML" });
           return;
@@ -268,11 +303,7 @@ export class TelegramChannel extends BaseChannel {
 
     if (text === "/costo" || text?.startsWith("/costo@")) {
       try {
-        const db = getDb();
-        const row = db.query(
-          "SELECT COALESCE(SUM(tokens_in), 0) as ti, COALESCE(SUM(tokens_out), 0) as to_ FROM code_tasks WHERE created_at > datetime('now', '-24 hours')"
-        ).get() as any;
-        const total = (row?.ti ?? 0) + (row?.to_ ?? 0);
+        const total = await tokenTotal24h();
         const usd = (total / 1_000_000 * 3).toFixed(4);
         await ctx.reply(
           `💰 <b>Costo (últimas 24h)</b>\n\nTokens: <code>${total.toLocaleString()}</code>\nUSD: <b>~$${usd}</b>`,
@@ -286,9 +317,7 @@ export class TelegramChannel extends BaseChannel {
 
     if (text === "/modo" || text?.startsWith("/modo@")) {
       try {
-        const db = getDb();
-        const cfg = db.query("SELECT value FROM code_config WHERE key = 'active_mode'").get() as any;
-        const current = cfg?.value ?? "auto";
+        const current = await getCodeConfig("active_mode") ?? "auto";
         await ctx.reply(
           `🎛 <b>Modo actual:</b> <code>${current}</code>\n\nCambia con los botones:`,
           {
@@ -310,12 +339,9 @@ export class TelegramChannel extends BaseChannel {
 
     if (text === "/pausa" || text?.startsWith("/pausa@")) {
       try {
-        const db = getDb();
-        const task = db.query(
-          "SELECT id FROM code_tasks WHERE status = 'running' ORDER BY created_at DESC LIMIT 1"
-        ).get() as any;
+        const task = await latestTask(["running"]);
         if (!task) { await ctx.reply("💤 Sin tarea activa para pausar."); return; }
-        db.query("UPDATE code_tasks SET status = 'paused' WHERE id = ?").run(task.id);
+        await updateTaskStatus(task.id, "paused");
         await ctx.reply(`⏸ Tarea <code>${task.id.slice(0, 8)}</code> pausada.`, { parse_mode: "HTML" });
       } catch (e) {
         await ctx.reply(`❌ Error: ${(e as Error).message}`);
@@ -325,12 +351,9 @@ export class TelegramChannel extends BaseChannel {
 
     if (text === "/reanudar" || text?.startsWith("/reanudar@")) {
       try {
-        const db = getDb();
-        const task = db.query(
-          "SELECT id FROM code_tasks WHERE status = 'paused' ORDER BY created_at DESC LIMIT 1"
-        ).get() as any;
+        const task = await latestTask(["paused"]);
         if (!task) { await ctx.reply("💤 Sin tarea pausada para reanudar."); return; }
-        db.query("UPDATE code_tasks SET status = 'running' WHERE id = ?").run(task.id);
+        await updateTaskStatus(task.id, "running");
         await ctx.reply(`▶️ Tarea <code>${task.id.slice(0, 8)}</code> reanudada.`, { parse_mode: "HTML" });
       } catch (e) {
         await ctx.reply(`❌ Error: ${(e as Error).message}`);
@@ -340,10 +363,7 @@ export class TelegramChannel extends BaseChannel {
 
     if (text === "/cancelar" || text?.startsWith("/cancelar@")) {
       try {
-        const db = getDb();
-        const task = db.query(
-          "SELECT id, description FROM code_tasks WHERE status IN ('running','planning') ORDER BY created_at DESC LIMIT 1"
-        ).get() as any;
+        const task = await latestTask(["running", "planning"]);
         if (!task) { await ctx.reply("💤 Sin tarea activa para cancelar."); return; }
         await ctx.reply(
           `⚠️ ¿Cancelar tarea <code>${task.id.slice(0, 8)}</code>?\n<i>${task.description?.slice(0, 60)}</i>`,
@@ -365,14 +385,13 @@ export class TelegramChannel extends BaseChannel {
 
     if (text === "/doctor" || text?.startsWith("/doctor@")) {
       try {
-        const db = getDb();
-        const providers = db.query("SELECT name, status FROM providers LIMIT 3").all() as any[];
-        const tasks = db.query("SELECT COUNT(*) as n FROM code_tasks WHERE status = 'running'").get() as any;
+        const providers = (await (await col<ProviderDoc>("providers")).scan()).map((entry) => entry.doc).slice(0, 3);
+        const activeTasks = (await recentTasks(100)).filter((task) => task.status === "running").length;
         const lines = [
           `🩺 <b>Doctor hivecode</b>\n`,
-          `DB: ✅ conectada`,
-          `Providers: ${providers.length > 0 ? providers.map(p => `${p.name} (${p.status})`).join(", ") : "ninguno configurado"}`,
-          `Tareas activas: ${tasks?.n ?? 0}`,
+          `HiveDB: ✅ conectada`,
+          `Providers: ${providers.length > 0 ? providers.map(p => `${p.name} (${p.active ? "active" : "inactive"})`).join(", ") : "ninguno configurado"}`,
+          `Tareas activas: ${activeTasks}`,
         ];
         await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
       } catch (e) {
@@ -620,9 +639,7 @@ export class TelegramChannel extends BaseChannel {
       await this.bot.stop();
       this.running = false;
       this.log.info("Telegram bot stopped");
-      try {
-        getDb().query(`UPDATE channels SET status = 'disconnected' WHERE id = ?`).run(this.accountId);
-      } catch { /* ignore DB errors */ }
+      await setChannelStatus(this.accountId, "disconnected");
     }
   }
 

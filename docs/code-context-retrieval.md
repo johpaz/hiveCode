@@ -1,4 +1,4 @@
-# Code Context Retrieval — FTS5
+# Code Context Retrieval — HiveDB index
 
 Sistema de indexación y búsqueda full-text sobre el código fuente del proyecto. Permite a los agentes recuperar contexto relevante del codebase en < 50 ms sin dependencias externas.
 
@@ -10,8 +10,8 @@ El `Context Compiler` inyecta en cada worker un system prompt + skills + playboo
 |----------|--------------|---------------|
 | Worker necesita entender un módulo existente | Lee archivos enteros al azar | Busca por función/clase y recibe el archivo + dependencias |
 | Dos workers modifican el mismo archivo | Colisión silenciosa | El indexer rastrea quién importa qué (`exported_by`) |
-| Sesión nueva, contexto en cero | Cada tarea empieza de cero | El índice persiste en SQLite entre sesiones |
-| Búsqueda por keyword en código | `grep` lento sobre miles de archivos | FTS5 nativo de SQLite con ranking BM25 |
+| Sesión nueva, contexto en cero | Cada tarea empieza de cero | El índice persiste en HiveDB entre sesiones |
+| Búsqueda por keyword en código | `grep` lento sobre miles de archivos | HiveDB index nativo de HiveDB con ranking BM25 |
 
 ---
 
@@ -24,12 +24,12 @@ El `Context Compiler` inyecta en cada worker un system prompt + skills + playboo
 │       └── bm25(code_fts) → file_path + snippet + rank          │
 ├─────────────────────────────────────────────────────────────────┤
 │  Context Retriever                                              │
-│  ├── searchCode(sessionId, query) → resultados FTS5            │
+│  ├── searchCode(sessionId, query) → resultados HiveDB index            │
 │  └── getModuleContext(filePath) → contenido + deps + metadatos │
 ├─────────────────────────────────────────────────────────────────┤
-│  SQLite — Tablas                                                │
+│  HiveDB — Tablas                                                │
 │  ├── code_graph    (dependencias, exports, funciones, clases)  │
-│  └── code_fts      (virtual FTS5 — contenido full-text)        │
+│  └── code_fts      (virtual HiveDB index — contenido full-text)        │
 ├─────────────────────────────────────────────────────────────────┤
 │  Code Indexer                                                   │
 │  ├── buildFullIndex()     — indexado completo al iniciar       │
@@ -40,7 +40,7 @@ El `Context Compiler` inyecta en cada worker un system prompt + skills + playboo
 
 ---
 
-## Tablas SQLite
+## Tablas HiveDB
 
 ### `code_graph` — grafo de dependencias
 
@@ -60,7 +60,7 @@ Tabla normal (no FTS). Guarda metadatos estructurales por archivo:
 
 ### `code_fts` — índice full-text (virtual table)
 
-Tabla virtual FTS5 con tokenizador `porter`. Se sincroniza manualmente con `code_graph`.
+Tabla virtual HiveDB index con tokenizador `porter`. Se sincroniza manualmente con `code_graph`.
 
 | Columna | Indexada | Contenido |
 |---------|----------|-----------|
@@ -71,7 +71,7 @@ Tabla virtual FTS5 con tokenizador `porter`. Se sincroniza manualmente con `code
 | `functions` | Sí | Nombres de funciones como texto plano |
 | `classes` | Sí | Nombres de clases como texto plano |
 
-**Por qué standalone:** FTS5 con `content=` + `content_rowid` rompe la sincronía cuando `code_graph` hace `REPLACE` (cambia el `rowid`). Por eso `code_fts` es tabla independiente y se sincroniza con `DELETE + INSERT` explícito.
+**Por qué standalone:** HiveDB index con `content=` + `content_rowid` rompe la sincronía cuando `code_graph` hace `REPLACE` (cambia el `rowid`). Por eso `code_fts` es tabla independiente y se sincroniza con `DELETE + INSERT` explícito.
 
 ---
 
@@ -232,13 +232,13 @@ Worker A intenta editar src/utils/logger.ts
 |---------|-------------|-------|
 | Full index | ~1-2 segundos | Para 500-1000 archivos TypeScript |
 | Incremental | ~5-20 ms | Un solo archivo |
-| Búsqueda FTS5 | < 50 ms | Incluso en proyectos grandes |
+| Búsqueda HiveDB index | < 50 ms | Incluso en proyectos grandes |
 | Reconciliación | ~100-300 ms | Depende de cuántos archivos cambiaron |
-| Storage extra | ~2-3× el tamaño del código | FTS5 indexa contenido + metadatos |
+| Storage extra | ~2-3× el tamaño del código | HiveDB index indexa contenido + metadatos |
 
 **Optimizaciones aplicadas:**
 - Batch writes de 50 archivos por transacción
-- WAL mode activo en SQLite (sin bloqueos de lectura)
+- WAL mode activo en HiveDB (sin bloqueos de lectura)
 - `Bun.Transpiler` para AST (sin overhead de `tsc`)
 - Índices B-tree en `code_graph(session_id, file_path)`
 
@@ -262,7 +262,7 @@ Worker A intenta editar src/utils/logger.ts
 
 1. Agregar columna a `code_fts` en `schema.ts`:
    ```sql
-   CREATE VIRTUAL TABLE IF NOT EXISTS code_fts USING fts5(
+   CREATE VIRTUAL TABLE IF NOT EXISTS code_fts USING hivedb_index(
      session_id UNINDEXED,
      file_path UNINDEXED,
      content,
@@ -295,7 +295,7 @@ Worker A intenta editar src/utils/logger.ts
 El tokenizador `porter` hace stemming en inglés. Para proyectos con muchos identificadores en español, evaluar `unicode61` (sin stemming) o un tokenizer custom:
 
 ```sql
-CREATE VIRTUAL TABLE code_fts USING fts5(
+CREATE VIRTUAL TABLE code_fts USING hivedb_index(
   ..., tokenize='unicode61'
 );
 ```

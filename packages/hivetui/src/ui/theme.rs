@@ -90,10 +90,12 @@ impl Theme {
             PINK
         } else if lower.contains("test") || lower.contains("qa") {
             YELLOW
-        } else if lower.contains("devops") || lower.contains("integration") {
+        } else if lower.contains("devops") {
             LAVENDER
-        } else if lower.contains("data") || lower.contains("dba") {
+        } else if lower.contains("data") {
             GREEN
+        } else if lower.contains("verifier") {
+            RED
         } else {
             self.text_muted
         }

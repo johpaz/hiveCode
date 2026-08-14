@@ -304,7 +304,7 @@ pub enum BunMessage {
         files_restored: u32,
     },
 
-    // ── ADRs (SQLite → Bun → TUI) ─────────────────────────────────────────────
+    // ── ADRs (storage → Bun → TUI) ────────────────────────────────────────────
     AdrUpdate {
         path:    String,
         title:   String,
@@ -355,6 +355,30 @@ pub enum BunMessage {
         requested_changes: Vec<String>,
         #[serde(default)]
         affected_files: Vec<String>,
+        /// Structured acceptance-criteria checklist (Fase 4: submit_review_verdict).
+        /// Additive — absent when the reviewer model didn't call the structured
+        /// tool, in which case the view falls back to the observation heuristic.
+        #[serde(default)]
+        criteria: Vec<ReviewCriterionIpc>,
+        #[serde(default)]
+        categories: Vec<ReviewCategoryIpc>,
+    },
+
+    /// Un checkpoint quedó disponible para reanudar tras la reconciliación de
+    /// boot (una tarea `running` sin lease vigente, dejada por un proceso previo).
+    ResumeAvailable {
+        task_id: String,
+        checkpoint_id: String,
+        reason: String,
+    },
+
+    /// Una fase/worker está reintentando con backoff exponencial tras un crash
+    /// o fallo transitorio — informativo, no bloqueante.
+    PhaseRetry {
+        worker: String,
+        attempt: u32,
+        max_attempts: u32,
+        reason: String,
     },
 
     // ── Proyección de tareas concurrentes ─────────────────────────────────────
@@ -371,20 +395,34 @@ pub enum BunMessage {
         integration_status: Option<String>,
     },
 
-    // ── Snapshots de inicio (dump de SQLite al conectar) ───────────────────────
+    // ── Snapshots de inicio (dump de estado al conectar) ───────────────────────
     WorkersSnapshot { workers: Vec<WorkerSnapshotEntry> },
     FilesSnapshot   { files:   Vec<FileSnapshotEntry>   },
 
     // ── No-ops: Bun puede enviar estos; los ignoramos sin romper el parser ─────
-    Suggestions { items: Vec<String> },
     QuickMenu { items: Vec<sonic_rs::Value> },
-    ShellOutput { stdout: String, stderr: String, exit_code: i32 },
     Suspend,
     Resume,
     ContextUpdate { agent: String, key: String, scope: String },
+    /// Progreso del Librarian mientras destila memoria de proyecto.
+    LibrarianProgress {
+        status: String,
+        #[serde(default)]
+        records_written: u64,
+    },
+    /// Resumen de lo que el Librarian escribió en memoria.
+    MemoryUpdate {
+        #[serde(default)]
+        records_added: u64,
+        #[serde(default)]
+        records_updated: u64,
+        #[serde(default)]
+        records_deprecated: u64,
+    },
     /// Datos del hub de settings (respuesta a RequestSettings).
     SettingsData {
         providers: Vec<IpcSettingsProvider>,
+        agents: Vec<IpcSettingsAgent>,
         mcp: Vec<IpcSettingsMcp>,
         skills: Vec<IpcSettingsSkill>,
         github_connected: bool,
@@ -529,6 +567,22 @@ pub struct PlanRiskIpc {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ReviewCriterionIpc {
+    pub description: String,
+    pub met: bool,
+    #[serde(default)]
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReviewCategoryIpc {
+    pub name: String,
+    pub status: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct ApiContractIpc {
     pub name: String,
     #[serde(default)]
@@ -554,6 +608,20 @@ pub struct IpcSettingsProvider {
     pub model: String,
     pub is_active: bool,
     pub has_key: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpcSettingsAgent {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    pub effort: String,
+    pub max_turns: u32,
+    pub max_input_tokens: u64,
+    pub max_output_tokens: u64,
+    pub max_cost_usd: f64,
+    pub permission_profile: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -600,6 +668,9 @@ pub enum TuiMessage {
     ModalSubmit { command: String, values: std::collections::HashMap<String, String> },
     ModalCancel { command: String },
     InfoModalClose,
+    /// Confirma a Bun que la TUI soltó el terminal y ya puede usarlo.
+    /// Sin esto `suspendTui()` en tui-launcher.ts nunca resuelve.
+    Suspended,
     /// Solicita a Bun que envíe un SettingsData con el estado actual de la configuración.
     RequestSettings,
     Exit,

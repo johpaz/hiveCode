@@ -12,12 +12,7 @@ export * from "./workspace/index"
 export { seedCodeData } from "./seed"
 
 import type { BootstrapModule } from "@johpaz/hivecode-core"
-import { initializeCodeDatabase, validateCodeSchema } from "./narrative/index"
-import { seedCodeData } from "./seed"
 
 export const HiveCodeModule: BootstrapModule = {
   name: "hive-code",
-  initializeSchema: () => initializeCodeDatabase(),
-  seedData: (_, force) => seedCodeData(force),
-  validate: () => validateCodeSchema()
 }

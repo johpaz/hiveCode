@@ -63,7 +63,7 @@ steps:
   - step: 4
     action: cron.list
     instruction: "List all cron jobs with next execution times"
-    output: cron_jobs
+    output: cronJobs
 
 rules:
   - "ALWAYS use cron.* tools — never exec/terminal"

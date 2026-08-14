@@ -2,14 +2,16 @@ import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote,
 } from "../cli-ui.ts"
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { CodeDecisionDoc } from "@johpaz/hivecode-core/storage/collections"
 
 export async function decisionList(): Promise<void> {
 
   hiveIntro("hivecode · Decisiones (ADRs)")
 
-  const db = getDb()
-  const rows = db.query("SELECT * FROM code_decisions ORDER BY created_at DESC").all() as any[]
+  const rows = (await (await col<CodeDecisionDoc>("codeDecisions")).scan())
+    .map((entry) => entry.doc)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
 
   if (rows.length === 0) {
     hiveNote("Sin ADRs", ["No hay decisiones registradas todavía."])
@@ -39,8 +41,7 @@ export async function decisionShow(args: string[]): Promise<void> {
 
   hiveIntro("hivecode · ADR")
 
-  const db = getDb()
-  const row = db.query("SELECT * FROM code_decisions WHERE id = ?").get(id) as any
+  const row = (await (await col<CodeDecisionDoc>("codeDecisions")).get(id))?.doc
 
   if (!row) {
     hiveNote("No encontrado", [`No existe ADR con ID: ${id}`])

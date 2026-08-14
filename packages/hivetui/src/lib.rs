@@ -1,4 +1,5 @@
 pub mod app;
+pub mod clipboard;
 pub mod controller;
 pub mod ipc;
 pub mod renderer;

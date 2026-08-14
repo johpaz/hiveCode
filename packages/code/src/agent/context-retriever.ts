@@ -1,12 +1,14 @@
 /**
- * Context Retriever — fast code context via SQLite FTS5.
+ * Context Retriever — fast code context via HiveDB capability search.
  *
  * - searchCode: keyword search over source files (used by search_knowledge type="code")
  * - getModuleContext: rich context for a single file (content + deps + dependents)
  * - buildProjectContext / getProjectContext: global project summary injected into Bee
  */
 
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { CodeContextCacheDoc, CodeDecisionDoc, CodeFileDoc, CodeGraphDoc } from "@johpaz/hivecode-core/storage/collections"
+import { searchCapabilities } from "@johpaz/hivecode-core/agent/capability-search"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import * as fs from "node:fs"
 import * as path from "node:path"
@@ -36,50 +38,58 @@ export interface ModuleContext {
   complexity: number
 }
 
-function buildFtsMatch(words: string[]): string {
-  if (words.length > 1) {
-    return words.map(w => `${w}*`).join(" AND ")
+function buildSnippet(content: string, query: string, maxLen = 420): string {
+  const terms = query
+    .replace(/_/g, " ")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+
+  const lower = content.toLowerCase()
+  let idx = -1
+  for (const term of terms) {
+    idx = lower.indexOf(term)
+    if (idx !== -1) break
   }
-  return `"${words.join(" ")}" OR ${words[0]}*`
+
+  if (idx === -1) return content.slice(0, maxLen)
+
+  const start = Math.max(0, idx - Math.floor(maxLen / 2))
+  const end = Math.min(content.length, start + maxLen)
+  return `${start > 0 ? "..." : ""}${content.slice(start, end)}${end < content.length ? "..." : ""}`
 }
 
 /**
- * Search source code via FTS5. Returns matching files with highlighted snippets.
+ * Search source code via HiveDB. Returns matching files with snippets.
  */
-export function searchCode(
+export async function searchCode(
   sessionId: string,
   query: string,
   limit = 10,
-): CodeSearchResult[] {
-  const db = getDb()
+): Promise<CodeSearchResult[]> {
   const normalizedQuery = query.replace(/_/g, " ").trim()
-  const words = normalizedQuery.split(/\s+/).filter(w => w.length > 0)
-  if (words.length === 0) return []
-
-  const ftsMatch = buildFtsMatch(words)
+  if (!normalizedQuery) return []
 
   try {
-    const rows = db.query<
-      { file_path: string; snippet: string; rank: number },
-      [string, string, number]
-    >(/* sql */ `
-      SELECT
-        file_path,
-        highlight(code_fts, 2, '<match>', '</match>') AS snippet,
-        bm25(code_fts) AS rank
-      FROM code_fts
-      WHERE session_id = ? AND code_fts MATCH ?
-      ORDER BY rank
-      LIMIT ?
-    `).all(sessionId, ftsMatch, limit)
+    const hits = await searchCapabilities(normalizedQuery, {
+      types: ["code"],
+      filters: [{ field: "session_id", value: sessionId }],
+      k: limit,
+    })
+    const codeFiles = await col<CodeFileDoc>("codeFiles")
+    const entries = await Promise.all(hits.map(hit => codeFiles.get(hit.rawId)))
 
-    return rows.map(r => ({
-      filePath: r.file_path,
-      snippet: r.snippet,
-      rank: r.rank,
-    }))
+    return hits.flatMap((hit, index) => {
+      const doc = entries[index]?.doc
+      if (!doc) return []
+      return [{
+        filePath: doc.file_path,
+        snippet: buildSnippet(doc.content, normalizedQuery),
+        rank: hit.score,
+      }]
+    })
   } catch (err) {
-    log.warn(`[context-retriever] FTS search failed: ${(err as Error).message}`)
+    log.warn(`[context-retriever] HiveDB code search failed: ${(err as Error).message}`)
     return []
   }
 }
@@ -92,23 +102,10 @@ export async function getModuleContext(
   sessionId: string,
   filePath: string,
 ): Promise<ModuleContext | null> {
-  const db = getDb()
-
-  const row = db.query<
-    {
-      imports: string
-      exported_by: string
-      exports: string
-      functions: string
-      classes: string
-      complexity: number
-    },
-    [string, string]
-  >(/* sql */ `
-    SELECT imports, exported_by, exports, functions, classes, complexity
-    FROM code_graph
-    WHERE session_id = ? AND file_path = ?
-  `).get(sessionId, filePath)
+  const codeGraph = await col<CodeGraphDoc>("codeGraph")
+  const row = (await codeGraph.findBy("session_id", sessionId))
+    .map((entry) => entry.doc)
+    .find((doc) => doc.file_path === filePath)
 
   if (!row) return null
 
@@ -142,14 +139,12 @@ export async function getModuleContext(
 }
 
 /**
- * Build a global project context summary and cache it in SQLite + memory.
+ * Build a global project context summary and cache it in HiveDB + memory.
  * Called after buildFullIndex / reconcileCodeIndex. Runs async — does NOT block startup.
  */
 export async function buildProjectContext(sessionId: string, workspace: string): Promise<void> {
   const t0 = performance.now()
   try {
-    const db = getDb()
-
     // 1. Top-level structure
     const packagesDir = path.join(workspace, "packages")
     const packages: string[] = []
@@ -179,16 +174,10 @@ export async function buildProjectContext(sessionId: string, workspace: string):
     }
 
     // 3. Most critical files (highest exported_by count)
-    const criticalRows = db.query<
-      { file_path: string; exports: string; functions: string; classes: string },
-      [string]
-    >(/* sql */ `
-      SELECT file_path, exports, functions, classes
-      FROM code_graph
-      WHERE session_id = ?
-      ORDER BY length(exported_by) DESC
-      LIMIT 10
-    `).all(sessionId)
+    const criticalRows = (await (await col<CodeGraphDoc>("codeGraph")).findBy("session_id", sessionId))
+      .map((entry) => entry.doc)
+      .sort((a, b) => b.exported_by.length - a.exported_by.length)
+      .slice(0, 10)
 
     const criticalFiles = criticalRows.map(r => {
       const exports = JSON.parse(r.exports ?? "[]") as string[]
@@ -202,12 +191,10 @@ export async function buildProjectContext(sessionId: string, workspace: string):
     })
 
     // 4. Active ADRs
-    const adrRows = db.query<{ title: string }, [string]>(/* sql */ `
-      SELECT title FROM code_decisions
-      WHERE status = 'active'
-      ORDER BY created_at DESC
-      LIMIT 5
-    `).all(sessionId)
+    const adrRows = (await (await col<CodeDecisionDoc>("codeDecisions")).findBy("status", "active"))
+      .map((entry) => entry.doc)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .slice(0, 5)
 
     // 5. Build compact context string
     let ctx = `# PROJECT CONTEXT — ${path.basename(workspace)}\n\n`
@@ -239,13 +226,17 @@ export async function buildProjectContext(sessionId: string, workspace: string):
     ctx += `Para descubrir skills:\n`
     ctx += `search_knowledge(type="skills", query="<tarea>")\n`
 
-    // 6. Cache it — SQLite + memory
+    // 6. Cache it — HiveDB + memory
     const cacheKey = `project_context:${sessionId}`
     const expiresAt = new Date(Date.now() + CONTEXT_CACHE_TTL_MS).toISOString()
-    db.query(`
-      INSERT OR REPLACE INTO code_context_cache (cache_key, compiled, expires_at)
-      VALUES (?, ?, ?)
-    `).run(cacheKey, ctx, expiresAt)
+    const cache = await col<CodeContextCacheDoc>("codeContextCache")
+    const existing = await cache.get(cacheKey)
+    await cache.put(cacheKey, {
+      cache_key: cacheKey,
+      compiled: ctx,
+      expires_at: expiresAt,
+      created_at: existing?.doc.created_at ?? new Date().toISOString(),
+    }, { expectedVersion: existing?.version ?? 0 })
 
     _memProjectCtx = { sessionId, compiled: ctx, expiresAt: Date.now() + CONTEXT_CACHE_TTL_MS }
 
@@ -258,7 +249,7 @@ export async function buildProjectContext(sessionId: string, workspace: string):
 
 /**
  * Retrieve cached project context for a session.
- * Memory-first (< 0.1ms), SQLite fallback.
+ * Memory-first (< 0.1ms). Rebuild callers refresh HiveDB and memory together.
  * Returns null if not found or expired.
  */
 export function getProjectContext(sessionId: string): string | null {
@@ -271,22 +262,5 @@ export function getProjectContext(sessionId: string): string | null {
     return _memProjectCtx.compiled
   }
 
-  // 2. SQLite fallback
-  try {
-    const db = getDb()
-    const row = db.query<{ compiled: string }, [string]>(/* sql */ `
-      SELECT compiled FROM code_context_cache
-      WHERE cache_key = ? AND expires_at > datetime('now')
-    `).get(`project_context:${sessionId}`)
-
-    if (row) {
-      _memProjectCtx = { sessionId, compiled: row.compiled, expiresAt: Date.now() + CONTEXT_CACHE_TTL_MS }
-    }
-
-    const elapsed = performance.now() - t0
-    if (elapsed > 1) log.debug(`[context-retriever] getProjectContext (sqlite) took ${elapsed.toFixed(2)}ms`)
-    return row?.compiled ?? null
-  } catch {
-    return null
-  }
+  return null
 }

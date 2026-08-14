@@ -3,7 +3,7 @@
 **Total: 74 herramientas** distribuidas en 9 categorías.
 Todas en `packages/core/src/tools/`. Se cargan via `createAllTools()` y están disponibles en cada worker del enjambre.
 
-> **Descubrimiento en runtime:** Usá `search_knowledge(type="tools", query="...")` para encontrar herramientas por tarea o sinónimo. El índice FTS5 soporta búsqueda bilingüe ES→EN.
+> **Descubrimiento en runtime:** Usá `search_knowledge(type="tools", query="...")` para encontrar herramientas por tarea o sinónimo. El índice HiveDB index soporta búsqueda bilingüe ES→EN.
 
 ---
 
@@ -92,7 +92,7 @@ Cuando dispara un job, el scheduler:
 3. El agente procesa con todas sus herramientas y responde
 4. La respuesta se envía al `channel` configurado
 5. Actualiza `task_runs` (éxito/fallo, `duration_ms`)
-6. Actualiza `cron_jobs` (`last_run_at`, `run_count`, `next_run_at`)
+6. Actualiza `cronJobs` (`last_run_at`, `run_count`, `next_run_at`)
 
 ### Timezone
 
@@ -136,7 +136,7 @@ Cuando dispara un job, el scheduler:
 | `memory_write` | Guarda información con título único (persiste entre sesiones) |
 | `memory_read` | Recupera entrada de memoria por título |
 | `memory_list` | Lista todas las entradas de memoria |
-| `memory_search` | Busca memorias por keyword (FTS5) |
+| `memory_search` | Busca memorias por keyword (HiveDB index) |
 | `memory_delete` | Elimina entrada de memoria específica |
 
 ### Gestión de Workers
@@ -202,7 +202,7 @@ Cuando dispara un job, el scheduler:
 
 | Herramienta | Descripción |
 |-------------|-------------|
-| `search_knowledge` | FTS5 sobre tools, skills, playbook, MCP y código fuente. Bilingüe ES→EN. Tipos: `tools`, `skills`, `playbook`, `code`, `all` |
+| `search_knowledge` | HiveDB index sobre tools, skills, playbook, MCP y código fuente. Bilingüe ES→EN. Tipos: `tools`, `skills`, `playbook`, `code`, `all` |
 | `get_project_context` | Resumen cacheado de la estructura del proyecto: módulos clave, archivos críticos, ADRs activos. Más rápido que `fs_list` recursivo |
 | `notify` | Envía notificación al canal activo del usuario (Telegram, webchat, etc.) |
 | `save_note` | Guarda nota en scratchpad que sobrevive compresión de contexto |

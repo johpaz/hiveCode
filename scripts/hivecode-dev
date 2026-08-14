@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+launcher_path="$(readlink -f "${BASH_SOURCE[0]}")"
+project_root="$(dirname "$(dirname "$launcher_path")")"
+
+if [[ "$#" -eq 0 ]]; then
+  cd "$project_root"
+  exec bun run dev
+fi
+
+exec bun "$project_root/packages/cli/src/index.ts" "$@"

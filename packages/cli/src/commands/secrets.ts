@@ -16,7 +16,7 @@ export async function secrets(subcommand?: string, args?: string[]): Promise<voi
       } catch { console.log(`  gateway-token: ❌ error reading`); }
 
       try {
-        const providers = ["openai", "anthropic", "groq", "mistral", "gemini", "ollama", "local-llama"];
+        const providers = ["openai", "anthropic", "groq", "mistral", "gemini", "hiveagents"];
         for (const p of providers) {
           const has = await hasProviderApiKey(p);
           console.log(`  provider.${p}: ${has ? "✅ present" : "❌ missing"}`);

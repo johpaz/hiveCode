@@ -23,25 +23,26 @@ writeFileSync(join(distDir, "hivecode.ps1"), `#!/usr/bin/env pwsh\n$scriptDir = 
 console.log("[postbuild] ✅ Shell wrappers generated")
 
 // ── TUI binary ────────────────────────────────────────────────────────────────
-const tuiRelease = join(rootDir, "packages/tui/target/release/hivecode-tui")
-const tuiDebug   = join(rootDir, "packages/tui/target/debug/hivecode-tui")
+const tuiRelease = join(rootDir, "packages/hivetui/target/release/hivetui")
+const tuiDebug   = join(rootDir, "packages/hivetui/target/debug/hivetui")
 const tuiSrc     = existsSync(tuiRelease) ? tuiRelease : existsSync(tuiDebug) ? tuiDebug : null
 
 if (tuiSrc) {
-  copyFileSync(tuiSrc, join(distDir, "hivecode-tui"))
-  chmodSync(join(distDir, "hivecode-tui"), 0o755)
+  copyFileSync(tuiSrc, join(distDir, "hivetui"))
+  chmodSync(join(distDir, "hivetui"), 0o755)
   console.log(`[postbuild] ✅ TUI binary copied (${tuiSrc.includes("release") ? "release" : "debug"})`)
 } else {
-  console.warn("[postbuild] ⚠️  TUI binary not found — run: cd packages/tui && cargo build --release")
+  console.warn("[postbuild] ⚠️  TUI binary not found — run: cd packages/hivetui && cargo build --release")
 }
 
 // ── hive-ui static assets ─────────────────────────────────────────────────────
 const uiSrc = join(rootDir, "packages/hive-ui/dist")
 const uiDst = join(distDir, "ui")
+const uiPackage = join(rootDir, "packages/hive-ui")
 
 if (existsSync(uiSrc)) {
   cpSync(uiSrc, uiDst, { recursive: true })
   console.log(`[postbuild] ✅ UI assets copied → dist/ui/`)
-} else {
+} else if (existsSync(uiPackage)) {
   console.warn("[postbuild] ⚠️  hive-ui not built — run: cd packages/hive-ui && bun run build")
 }

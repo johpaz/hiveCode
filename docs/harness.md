@@ -1,5 +1,7 @@
 # El Harness de hiveCode
 
+> **Documento histórico.** El diseño vigente usa cinco perfiles estables, activación perezosa, concurrencia máxima de tres y Spec Kit nativo. Consulta [Agent Harness](./agent-harness.md). Las secciones inferiores describen el pipeline de compatibilidad para sesiones antiguas; ya no representan el arranque ni el modelo recomendado.
+
 ## ¿Qué es un AI Harness?
 
 Un **AI Harness** (arnés de IA) es la infraestructura que rodea a los modelos de lenguaje y les da capacidad de operar. No es el agente que "piensa" — es todo lo demás: el ciclo de vida, los permisos, la ejecución de herramientas, la memoria entre sesiones, la comunicación entre procesos y la recuperación ante fallos.
@@ -51,7 +53,7 @@ Envuelve a **un único agente LLM**. Gestiona el ciclo `LLM → tool_call → to
 
 **Responsabilidades:**
 - Construir el mensaje inicial con el contexto compilado
-- Llamar al LLM del provider configurado (Anthropic, OpenAI, Gemini, Ollama)
+- Llamar al LLM del provider configurado (Anthropic, OpenAI, Gemini, HiveAgents)
 - Enviar `TOOL_CALL` al CoordinatorManager y esperar `TOOL_RESULT`
 - Compactar el historial de mensajes cuando supera el 75% del límite de contexto
 - Retornar `CoordinatorResult` con narrativa, archivos modificados y tokens usados
@@ -138,7 +140,7 @@ Tool call llega al CoordinatorManager
 
 ### Capa 3 — Harness de Sincronización
 
-Permite que **13 workers paralelos** trabajen en el mismo codebase sin colisionar. Usa SQLite como bus de mensajes compartido — todos los workers leen y escriben en la misma base de datos de sesión.
+Permite que **13 workers paralelos** trabajen en el mismo codebase sin colisionar. Usa HiveDB como bus de mensajes compartido — todos los workers leen y escriben en la misma base de datos de sesión.
 
 #### Blackboard (`blackboard.ts`)
 
@@ -204,7 +206,7 @@ Sesión termina (CodeReviewer: APROBADO)
 Librarian lee el blackboard completo de la sesión
   │
   ▼ (destila, no transcribe)
-agent_memory.db (FTS5)
+agent_memory.db (HiveDB index)
   ├── pattern       — enfoque que funcionó
   ├── antipattern   — enfoque que falló
   ├── contract      — interfaz entre módulos establecida
@@ -213,7 +215,7 @@ agent_memory.db (FTS5)
 
   ▼ (próxima sesión)
 ContextCompiler.compile(agent, task)
-  ├── FTS5 query por relevancia semántica
+  ├── HiveDB index query por relevancia semántica
   ├── Filtra por tipo según el rol del worker (ver tabla en README)
   └── Inyecta como sección "# PROJECT MEMORY" en el system prompt
 ```
@@ -246,7 +248,7 @@ El Learning Harness convierte esos fallos en señal estructurada.
 ```sql
 CREATE TABLE learning_failures (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  task_id         TEXT REFERENCES code_tasks(id),
+  task_id         TEXT REFERENCES codeTasks(id),
   phase_id        TEXT REFERENCES code_task_phases(id),
   agent           TEXT NOT NULL,         -- "backend", "frontend", etc.
   failure_type    TEXT NOT NULL,         -- "tool_error" | "phase_failure" | "invalid_output" | "plan_drift" | "timeout"
@@ -440,8 +442,8 @@ El CoordinatorManager emite eventos hacia la TUI Rust a través del Unix socket 
 |-----------|--------------------|---------------------------------|--------------------|
 | **Agentes simultáneos** | 1 | N (jerárquico, dinámico) | 13 (fijos + on-demand) |
 | **Coordinación** | Lineal | Árbol jerárquico | Multinivel con dependency graph |
-| **Blackboard** | No | No | SQLite FTS5 compartido |
-| **Memoria cross-sesión** | MEMORY.md (archivos) | Ninguna nativa | SQLite FTS5 + destilación |
+| **Blackboard** | No | No | HiveDB HiveDB index compartido |
+| **Memoria cross-sesión** | MEMORY.md (archivos) | Ninguna nativa | HiveDB HiveDB index + destilación |
 | **Recovery** | Manual | No | Automático (CheckpointManager + ForensicAgent) |
 | **Tool execution** | Secuencial | Por agente | Pool de 4 workers paralelos |
 | **Detección de colisiones** | No | No | ConflictDetector pre-escritura |
@@ -487,11 +489,11 @@ Cambia `3` por el valor que necesites.
 | `packages/code/src/workers/coordinator-manager.ts` | 2, 5 | Núcleo del harness: lifecycle, dispatch, tools, learning |
 | `packages/code/src/workers/worker-handler.ts` | 1 | Loop LLM individual |
 | `packages/code/src/workers/types.ts` | 1, 2 | Contratos: Task, Result, Messages |
-| `packages/code/src/context/blackboard.ts` | 3 | Pizarra compartida SQLite |
+| `packages/code/src/context/blackboard.ts` | 3 | Pizarra compartida HiveDB |
 | `packages/code/src/context/conflict-detector.ts` | 3 | Detección pre-escritura |
 | `packages/code/src/context/ipc-emitter.ts` | 3 | Eventos hacia TUI |
 | `packages/code/src/narrative/scribe.ts` | 2, 5 | Persistencia: fases, trazas, learning |
-| `packages/code/src/narrative/schema.ts` | 2, 5 | Schema SQLite del motor de código |
+| `packages/code/src/narrative/schema.ts` | 2, 5 | Schema HiveDB del motor de código |
 | `packages/core/src/agent/context-compiler.ts` | 4 | Inyección de memoria en workers |
 | `packages/code/src/workers/librarian.worker.ts` | 4 | Destilación post-sesión |
 | `packages/code/src/workers/forensic.worker.ts` | 2 | Análisis de fallos por límite de iteraciones |

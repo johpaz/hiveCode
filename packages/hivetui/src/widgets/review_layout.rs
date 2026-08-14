@@ -92,9 +92,58 @@ fn render_review_detail_center(canvas: &mut Canvas, area: Rect, state: &AppState
         vec![Constraint::Percent(50), Constraint::Fill(1)],
     );
     let (cols, handles) = split_panes(area, &split);
-    canvas.with_clip(cols[0], |canvas| render_observation_categories(canvas, cols[0], state));
+    let has_criteria = state.review.verdict.as_ref().is_some_and(|v| !v.criteria.is_empty());
+    if has_criteria {
+        canvas.with_clip(cols[0], |canvas| render_criteria_checklist(canvas, cols[0], state));
+    } else {
+        canvas.with_clip(cols[0], |canvas| render_observation_categories(canvas, cols[0], state));
+    }
     render_split_handles(canvas, &handles, Axis::Horizontal);
     canvas.with_clip(cols[1], |canvas| render_review_diff(canvas, cols[1], state));
+}
+
+/// Real pass/fail checklist from `submit_review_verdict` — one row per PRD
+/// acceptance criterion, cross-checked against actual evidence (not the
+/// keyword-matched heuristic below, which is only a fallback for reviewer
+/// models that didn't call the structured tool).
+fn render_criteria_checklist(canvas: &mut Canvas, area: Rect, state: &AppState) {
+    canvas.fill_rect(area, ' ', Style::new().bg(BG_PANEL));
+    let Some(verdict) = state.review.verdict.as_ref() else {
+        return;
+    };
+    let met = verdict.criteria.iter().filter(|c| c.met).count();
+    let title = format!("⬡ CRITERIOS DE ACEPTACIÓN · {met}/{}", verdict.criteria.len());
+    canvas.print(area.x + 1, area.y, &truncate_cells(&title, area.w.saturating_sub(2) as usize), Style::new().fg(AMBER).bold().bg(BG_PANEL));
+
+    let mut y = area.y + 2;
+    for criterion in &verdict.criteria {
+        if y >= area.bottom() {
+            break;
+        }
+        let (marker, color) = if criterion.met { ("✓", GREEN) } else { ("✗", RED) };
+        canvas.print(area.x + 2, y, marker, Style::new().fg(color).bold().bg(BG_PANEL));
+        canvas.print(
+            area.x + 4,
+            y,
+            &truncate_cells(&criterion.description, area.w.saturating_sub(6) as usize),
+            Style::new().fg(WHITE).bg(BG_PANEL),
+        );
+        y += 1;
+        if let Some(evidence) = &criterion.evidence {
+            if y < area.bottom() {
+                canvas.print(
+                    area.x + 5,
+                    y,
+                    &truncate_cells(evidence, area.w.saturating_sub(7) as usize),
+                    Style::new().fg(SECONDARY).bg(BG_PANEL),
+                );
+                y += 1;
+            }
+        }
+        if y < area.bottom() {
+            y += 1;
+        }
+    }
 }
 
 fn render_observation_categories(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -229,6 +278,13 @@ fn render_verdict_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
     let mut content = String::new();
     content.push_str("## Resumen\n");
     content.push_str(&verdict.summary);
+    if !verdict.criteria.is_empty() {
+        content.push_str("\n\n## Criterios de Aceptación\n");
+        for criterion in &verdict.criteria {
+            let mark = if criterion.met { "x" } else { " " };
+            content.push_str(&format!("- [{mark}] {}\n", criterion.description));
+        }
+    }
     content.push_str("\n\n## Observaciones\n");
     if verdict.observations.is_empty() {
         content.push_str("- Sin observaciones reportadas\n");

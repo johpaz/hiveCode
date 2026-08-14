@@ -1,16 +1,18 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import * as path from "node:path"
-import type { Database } from "bun:sqlite"
-import { AdrsRepo } from "@johpaz/hivecode-core/db/repos/adrs"
-import type { AdrStatus } from "@johpaz/hivecode-core/db/repos/adrs"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { AdrDoc } from "@johpaz/hivecode-core/storage/collections"
 
-// Extrae el título de la primera línea H1 del markdown
+export type AdrStatus = "accepted" | "deprecated" | "superseded" | "proposed"
+export type Adr = AdrDoc
+
+const ADR_CACHE = new Map<string, Adr>()
+
 function parseTitle(content: string): string {
   const m = content.match(/^#\s+(.+)/m)
-  return m ? m[1].trim() : "Sin título"
+  return m ? m[1].trim() : "Sin titulo"
 }
 
-// Extrae el status del campo "Status:" en el markdown
 function parseStatus(content: string): AdrStatus {
   const m = content.match(/\*\*?[Ss]tatus\*\*?:?\s*(\w+)/m)
   const raw = m?.[1]?.toLowerCase() ?? ""
@@ -24,17 +26,13 @@ export interface AdrLoaderResult {
 }
 
 /**
- * Escanea el directorio `adrs/` del proyecto, indexa o actualiza cada ADR
- * en la tabla `adrs` + FTS5. Re-carga solo si el archivo cambió (mtime).
+ * Escanea el directorio `adrs/` del proyecto y sincroniza documentos ADR en HiveDB.
+ * Re-carga solo si el archivo cambio de mtime.
  */
 export class AdrLoader {
-  private repo: AdrsRepo
-  // mtime por ruta para detectar cambios
   private mtimeCache = new Map<string, number>()
 
-  constructor(private db: Database) {
-    this.repo = new AdrsRepo(db)
-  }
+  constructor(_db: unknown) {}
 
   load(projectPath: string): AdrLoaderResult {
     const adrsDir = path.join(projectPath, "adrs")
@@ -61,16 +59,19 @@ export class AdrLoader {
       const content = readFileSync(filePath, "utf8")
       const title = parseTitle(content)
       const status = parseStatus(content)
-
-      this.repo.upsert({
+      const id = filePath
+      const doc: Adr = {
+        id,
         file_path: filePath,
         title,
         status,
         content,
         summary: null,
         updated_at: Math.floor(mtime),
-      })
+      }
 
+      ADR_CACHE.set(id, doc)
+      void persistAdr(id, doc)
       this.mtimeCache.set(filePath, mtime)
       loaded++
     }
@@ -78,13 +79,23 @@ export class AdrLoader {
     return { loaded, skipped }
   }
 
-  /** Recarga forzada ignorando el caché de mtime */
+  /** Recarga forzada ignorando el cache de mtime. */
   reload(projectPath: string): AdrLoaderResult {
     this.mtimeCache.clear()
     return this.load(projectPath)
   }
 
-  getAll() {
-    return this.repo.getAll()
+  getAll(): Adr[] {
+    return getCachedAdrs()
   }
+}
+
+export function getCachedAdrs(): Adr[] {
+  return [...ADR_CACHE.values()].sort((a, b) => b.updated_at - a.updated_at)
+}
+
+async function persistAdr(id: string, doc: Adr): Promise<void> {
+  const adrs = await col<AdrDoc>("adrs")
+  const existing = await adrs.get(id)
+  await adrs.put(id, doc, { expectedVersion: existing?.version ?? 0 })
 }

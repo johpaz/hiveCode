@@ -76,6 +76,7 @@ pub enum SettingsTab {
     #[default]
     Providers,
     Models,
+    Agents,
     Mcp,
     Skills,
     Github,
@@ -86,6 +87,7 @@ impl SettingsTab {
     pub const ALL: &'static [SettingsTab] = &[
         SettingsTab::Providers,
         SettingsTab::Models,
+        SettingsTab::Agents,
         SettingsTab::Mcp,
         SettingsTab::Skills,
         SettingsTab::Github,
@@ -96,6 +98,7 @@ impl SettingsTab {
         match self {
             Self::Providers => "Providers",
             Self::Models    => "Modelos",
+            Self::Agents    => "Agentes",
             Self::Mcp       => "MCP",
             Self::Skills    => "Skills",
             Self::Github    => "GitHub",
@@ -133,6 +136,20 @@ pub struct SettingsMcp {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct SettingsAgent {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    pub effort: String,
+    pub max_turns: u32,
+    pub max_input_tokens: u64,
+    pub max_output_tokens: u64,
+    pub max_cost_usd: f64,
+    pub permission_profile: String,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct SettingsSkill {
     pub name: String,
     pub description: String,
@@ -146,6 +163,7 @@ pub struct SettingsHubState {
     pub selected_row: usize,
     pub scroll_offset: usize,
     pub providers: Vec<SettingsProvider>,
+    pub agents: Vec<SettingsAgent>,
     pub mcp: Vec<SettingsMcp>,
     pub skills: Vec<SettingsSkill>,
     pub github_connected: bool,

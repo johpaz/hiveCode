@@ -16,7 +16,7 @@ use tokio::signal::unix::{signal, SignalKind};
 
 use crate::{
     controller::{handle_key_event, handle_mouse_event, handle_paste_event},
-    ipc::{self, TuiMessage},
+    ipc::{self, BunMessage, TuiMessage},
     renderer,
     state::{AppState, Role},
     term::Canvas,
@@ -72,16 +72,19 @@ pub async fn run_headless() -> Result<()> {
         tokio::select! {
             biased;
             Some(msg) = ipc_ch.critical.recv() => {
+                headless_ack(&msg, &ipc_ch.tx);
                 state.apply_message(msg);
                 frame += 1;
                 emit(&mut canvas, &mut state, frame, &mut stdout);
             }
             Some(msg) = ipc_ch.normal.recv() => {
+                headless_ack(&msg, &ipc_ch.tx);
                 state.apply_message(msg);
                 frame += 1;
                 emit(&mut canvas, &mut state, frame, &mut stdout);
             }
             Some(msg) = ipc_ch.low.recv() => {
+                headless_ack(&msg, &ipc_ch.tx);
                 state.apply_message(msg);
                 frame += 1;
                 emit(&mut canvas, &mut state, frame, &mut stdout);
@@ -117,7 +120,9 @@ pub async fn run() -> Result<()> {
     state.show_workers = true;
     state.show_welcome = true;
     state.clock = Local::now().format("%H:%M:%S").to_string();
-    let mut events = EventStream::new();
+    // `None` while suspended: dropping the stream stops the TUI from consuming
+    // stdin bytes that belong to Bun's interactive prompt.
+    let mut events = Some(EventStream::new());
     let mut anim_tick_timer = time::interval(Duration::from_millis(120));
     let mut frame_tick = time::interval(Duration::from_millis(16));
     anim_tick_timer.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -136,7 +141,8 @@ pub async fn run() -> Result<()> {
 
             // 1. Mensajes críticos (ConflictAlert, Error) — máxima prioridad
             Some(msg) = ipc_ch.critical.recv() => {
-                state.apply_message(msg);
+                let effect = apply_ipc_message(msg, &mut state, &mut session, &ipc_ch.tx)?;
+                apply_terminal_effect(effect, &mut events);
                 session.draw(&mut state)?;
                 draw_pending = false;
             }
@@ -150,7 +156,7 @@ pub async fn run() -> Result<()> {
                 should_quit = true;
             }
             // 3. Eventos de teclado y ratón: latencia interactiva, dibujar ya.
-            maybe_event = events.next() => {
+            maybe_event = async { events.as_mut().expect("guarded by events.is_some()").next().await }, if events.is_some() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) => {
                         let before = state.history.entries.len();
@@ -206,6 +212,7 @@ pub async fn run() -> Result<()> {
             _ = anim_tick_timer.tick() => {
                 state.anim_tick = (state.anim_tick + 1) % 8;
                 state.slow_tick = (state.slow_tick + 1) % 30;
+                state.tick_layout_transition();
                 state.clock = Local::now().format("%H:%M:%S").to_string();
                 draw_pending = true;
             }
@@ -220,17 +227,21 @@ pub async fn run() -> Result<()> {
             // Patrón "drain inbox" de tuie: procesar todos los mensajes del buffer
             // antes del siguiente draw para evitar renders intermedios durante búsqueda.
             Some(msg) = ipc_ch.normal.recv() => {
-                state.apply_message(msg);
+                let effect = apply_ipc_message(msg, &mut state, &mut session, &ipc_ch.tx)?;
+                apply_terminal_effect(effect, &mut events);
                 while let Ok(extra) = ipc_ch.normal.try_recv() {
-                    state.apply_message(extra);
+                    let effect = apply_ipc_message(extra, &mut state, &mut session, &ipc_ch.tx)?;
+                    apply_terminal_effect(effect, &mut events);
                 }
                 draw_pending = true;
             }
             // 7. Mensajes low (ThoughtChunk, FileRiskUpdate, AssistantChunk)
             Some(msg) = ipc_ch.low.recv() => {
-                state.apply_message(msg);
+                let effect = apply_ipc_message(msg, &mut state, &mut session, &ipc_ch.tx)?;
+                apply_terminal_effect(effect, &mut events);
                 while let Ok(extra) = ipc_ch.low.try_recv() {
-                    state.apply_message(extra);
+                    let effect = apply_ipc_message(extra, &mut state, &mut session, &ipc_ch.tx)?;
+                    apply_terminal_effect(effect, &mut events);
                 }
                 draw_pending = true;
             }
@@ -238,6 +249,57 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Headless mode owns no terminal, but the handshake contract still holds:
+/// Bun blocks until it gets the acknowledgement back.
+fn headless_ack(msg: &BunMessage, tx: &tokio::sync::mpsc::Sender<TuiMessage>) {
+    if matches!(msg, BunMessage::Suspend) {
+        let _ = tx.try_send(TuiMessage::Suspended);
+    }
+}
+
+/// Starts/stops reading stdin to match the terminal handover.
+fn apply_terminal_effect(effect: TerminalEffect, events: &mut Option<EventStream>) {
+    match effect {
+        TerminalEffect::Suspended => *events = None,
+        TerminalEffect::Resumed => *events = Some(EventStream::new()),
+        TerminalEffect::None => {}
+    }
+}
+
+/// What the terminal must do after an IPC message was applied.
+#[derive(PartialEq, Eq)]
+enum TerminalEffect {
+    None,
+    Suspended,
+    Resumed,
+}
+
+/// Applies an IPC message, handling the suspend/resume handshake before the
+/// state machine sees it (both are no-ops there).
+fn apply_ipc_message(
+    msg: BunMessage,
+    state: &mut AppState,
+    session: &mut TerminalSession,
+    tx: &tokio::sync::mpsc::Sender<TuiMessage>,
+) -> Result<TerminalEffect> {
+    let effect = match &msg {
+        BunMessage::Suspend => {
+            session.leave()?;
+            // Bun blocks on this reply before touching the terminal.
+            let _ = tx.try_send(TuiMessage::Suspended);
+            TerminalEffect::Suspended
+        }
+        BunMessage::Resume => {
+            session.reenter()?;
+            state.dirty.full = true;
+            TerminalEffect::Resumed
+        }
+        _ => TerminalEffect::None,
+    };
+    state.apply_message(msg);
+    Ok(effect)
 }
 
 fn ensure_tty() -> Result<()> {
@@ -261,6 +323,9 @@ fn install_panic_hook() {
 struct TerminalSession {
     stdout: Stdout,
     canvas: Canvas,
+    /// True while the terminal is handed over to the parent process (see
+    /// `leave`). Drawing is a no-op and `Drop` must not restore twice.
+    suspended: bool,
 }
 
 impl TerminalSession {
@@ -274,10 +339,42 @@ impl TerminalSession {
         Ok(Self {
             stdout,
             canvas: Canvas::new(w, h),
+            suspended: false,
         })
     }
 
+    /// Gives the terminal back so Bun can run an interactive prompt on it.
+    /// The caller must also stop reading stdin, or the TUI and the prompt
+    /// compete for the same keystrokes.
+    fn leave(&mut self) -> Result<()> {
+        if self.suspended {
+            return Ok(());
+        }
+        disable_raw_mode()?;
+        execute!(self.stdout, LeaveAlternateScreen, Show, DisableBracketedPaste, DisableMouseCapture)?;
+        self.stdout.flush()?;
+        self.suspended = true;
+        Ok(())
+    }
+
+    /// Takes the terminal back once the prompt is done. Re-reads the size
+    /// because the user may have resized the window while suspended.
+    fn reenter(&mut self) -> Result<()> {
+        if !self.suspended {
+            return Ok(());
+        }
+        enable_raw_mode()?;
+        execute!(self.stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste, Hide)?;
+        let (w, h) = terminal::size()?;
+        self.canvas.resize(w, h);
+        self.suspended = false;
+        Ok(())
+    }
+
     fn draw(&mut self, state: &mut AppState) -> Result<()> {
+        if self.suspended {
+            return Ok(());
+        }
         let (cx, cy) = renderer::render(&mut self.canvas, state);
         self.canvas.flush(&mut self.stdout)?;
         execute!(self.stdout, MoveTo(cx, cy))?;
@@ -292,6 +389,11 @@ impl TerminalSession {
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
+        // Already handed back in `leave` — restoring again would leave the
+        // parent's prompt in a broken state.
+        if self.suspended {
+            return;
+        }
         let _ = disable_raw_mode();
         let _ = execute!(self.stdout, LeaveAlternateScreen, Show, DisableBracketedPaste, DisableMouseCapture);
     }

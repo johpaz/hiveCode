@@ -22,7 +22,9 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     canvas.print(area.x + 7, area.y, mode, mode_style);
 
     // status_msg de Bun tiene prioridad; si está vacío mostrar atajos de teclado
-    let right_content = if !state.status_msg.is_empty() {
+    let right_content = if let Some(reason) = state.routing.transition_reason.as_deref() {
+        reason.to_string()
+    } else if !state.status_msg.is_empty() {
         let prefix = if state.running { "⟳ " } else { "" };
         format!("{prefix}{}", state.status_msg)
     } else {
@@ -31,7 +33,9 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
         )
     };
 
-    let style = if state.running {
+    let style = if state.routing.transition_reason.is_some() {
+        Style::new().fg(AMBER).bold()
+    } else if state.running {
         Style::new().fg(CYAN)
     } else {
         Style::new().fg(DIM)

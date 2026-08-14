@@ -32,8 +32,8 @@ export interface ParsedPlan {
 }
 
 const VALID_PHASES: PhaseName[] = [
-  "product_manager", "backend", "frontend", "mobile", "data_scientist",
-  "security", "test", "devops", "dba", "integration", "reviewer",
+  "product_manager", "backend", "frontend", "data_scientist",
+  "security", "test", "devops", "verifier", "reviewer",
 ]
 
 /** Extract JSON from text (handles markdown code blocks) */
@@ -215,11 +215,12 @@ export function groupPhasesByLevel(phases: ParsedPhase[]): ParsedPhase[][] {
  */
 export function getDefaultPhases(): ParsedPhase[] {
   return [
-    { name: "backend",  coordinator: "backend",  description: "Implement backend logic and APIs", dependsOn: [] },
+    { name: "backend",  coordinator: "backend",  description: "Implement backend logic, APIs and data model", dependsOn: [] },
     { name: "frontend", coordinator: "frontend",  description: "Implement frontend UI",            dependsOn: [] },
     { name: "security", coordinator: "security",  description: "Security audit",                   dependsOn: ["backend", "frontend"] },
     { name: "test",     coordinator: "test",      description: "Generate and run tests",            dependsOn: ["backend", "frontend"] },
     { name: "devops",   coordinator: "devops",    description: "Prepare deployment pipeline",       dependsOn: ["security", "test"] },
-    { name: "reviewer", coordinator: "reviewer",  description: "Final quality gate",                dependsOn: ["devops"] },
+    { name: "verifier", coordinator: "verifier",  description: "Reproduce acceptance criteria against the running system", dependsOn: ["devops"] },
+    { name: "reviewer", coordinator: "reviewer",  description: "Final quality gate",                dependsOn: ["verifier"] },
   ]
 }

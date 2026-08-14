@@ -54,6 +54,16 @@ pub struct HaltState {
     pub checkpoint_id: Option<String>,
 }
 
+/// A checkpoint left available to resume by boot-time reconciliation (a task a
+/// previous process left `running` without a live lease). Distinct from rollback:
+/// resume continues the task from its saved level, rollback discards it.
+#[derive(Debug, Clone)]
+pub struct ResumeInfo {
+    pub task_id: String,
+    pub checkpoint_id: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DashboardMetrics {
     pub elapsed_secs: Option<u64>,
@@ -65,6 +75,7 @@ pub struct DashboardState {
     pub blackboard_events: Vec<BlackboardEvent>,
     pub security: SecurityState,
     pub halt: HaltState,
+    pub resume: Option<ResumeInfo>,
     pub metrics: DashboardMetrics,
     pub rollback_confirm_checkpoint: Option<String>,
 }

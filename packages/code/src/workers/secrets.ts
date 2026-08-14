@@ -9,9 +9,11 @@
  */
 
 import { getProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { ProviderDoc } from "@johpaz/hivecode-core/storage/collections"
 
 const logPrefix = "[secrets]"
+const SUPPORTED_LLM_PROVIDERS = new Set(["hiveagents", "openai", "anthropic", "gemini", "mistral", "deepseek", "kimi", "openrouter", "groq", "qwen", "nvidia", "codex", "opencode-go", "minimax", "hivecode-free"])
 
 export interface HiveSecrets {
   provider: string
@@ -32,16 +34,17 @@ function providerEnvKey(providerId: string): string {
 export async function loadSecrets(): Promise<Record<string, string>> {
   const secrets: Record<string, string> = {}
   const missing: string[] = []
-  const providerRows = getDb().query(
-    "SELECT id FROM providers WHERE enabled = 1 ORDER BY id"
-  ).all() as { id: string }[]
+  const providerRows = (await (await col<ProviderDoc>("providers")).scan())
+    .map((entry) => entry.doc)
+    .filter((provider) => provider.enabled && SUPPORTED_LLM_PROVIDERS.has(provider.id))
+    .sort((a, b) => a.id.localeCompare(b.id))
 
-  for (const { id } of providerRows) {
-    const value = await getProviderApiKey(id)
+  for (const provider of providerRows) {
+    const value = await getProviderApiKey(provider.id)
     if (value) {
-      secrets[providerEnvKey(id)] = value
+      secrets[providerEnvKey(provider.id)] = value
     } else {
-      missing.push(id)
+      missing.push(provider.id)
     }
   }
 

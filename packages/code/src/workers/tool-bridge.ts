@@ -46,6 +46,9 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
   ],
   backend: [
     ...MINIMAL_TOOLSET,
+    // Absorbs the former DBA role: registers the data model in the blackboard
+    // (write_decision, scope='schema') for frontend/reviewer to read.
+    "write_decision",
   ],
   frontend: [
     ...MINIMAL_TOOLSET,
@@ -59,13 +62,10 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
   devops: [
     ...MINIMAL_TOOLSET,
   ],
-  dba: [
+  verifier: [
     ...MINIMAL_TOOLSET,
     "write_decision",
-  ],
-  integration: [
-    ...MINIMAL_TOOLSET,
-    "write_decision",
+    "code_test", "code_build", "shell_executor", "run_script",
   ],
   reviewer: [
     ...MINIMAL_TOOLSET,
@@ -73,7 +73,7 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
   ],
   librarian: [
     ...MINIMAL_TOOLSET,
-    "memory_write",
+    "write_memory",
   ],
   forensic: [
     ...MINIMAL_TOOLSET,
@@ -86,9 +86,6 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
     "read_narrative",
     "write_decision",
     "append_narrative",
-  ],
-  mobile: [
-    ...MINIMAL_TOOLSET,
   ],
   data_scientist: [
     ...MINIMAL_TOOLSET,

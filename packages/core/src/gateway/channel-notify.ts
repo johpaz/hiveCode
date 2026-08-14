@@ -6,7 +6,8 @@
  */
 
 import { logger } from "../utils/logger"
-import { getDb } from "../storage/sqlite"
+import { col } from "../storage/hive"
+import type { UserIdentityDoc } from "../storage/collections"
 
 const log = logger.child("channel-notify")
 
@@ -24,15 +25,14 @@ export function setChannelSendFn(fn: SendFn): void {
  * Resuelve el sessionId real (chat ID de Telegram, etc.) desde user_identities.
  * Necesario porque config.thread_id es el userId interno, no el chat ID externo.
  */
-function resolveSessionId(userId: string, channel: string): string {
+async function resolveSessionId(userId: string, channel: string): Promise<string> {
   try {
-    const db = getDb()
-    const identity = db.query<{ channel_user_id: string }, [string, string]>(
-      "SELECT channel_user_id FROM user_identities WHERE user_id = ? AND channel = ? LIMIT 1"
-    ).get(userId, channel)
+    const identity = (await (await col<UserIdentityDoc>("userIdentities")).findBy("user_id", userId))
+      .map((entry) => entry.doc)
+      .find((entry) => entry.channel === channel)
     if (identity?.channel_user_id) return identity.channel_user_id
   } catch {
-    // DB no lista — fallback al userId
+    // Store unavailable: fallback to userId.
   }
   return userId
 }
@@ -51,7 +51,7 @@ export async function sendToUserChannel(
     return { ok: false, error: "Channel send not initialized" }
   }
 
-  const sessionId = resolveSessionId(userId, channel)
+  const sessionId = await resolveSessionId(userId, channel)
   log.info(`[channel-notify] Sending to ${channel}/${sessionId}: ${message.substring(0, 80)}`)
 
   try {

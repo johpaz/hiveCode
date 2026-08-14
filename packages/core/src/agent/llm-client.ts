@@ -3,8 +3,8 @@
  *
  *   gemini / google  → native Gemini REST API (v1beta, ?key=)
  *   anthropic        → @anthropic-ai/sdk
- *   ollama           → ollama npm package
- *   everything else  → openai  npm package  (OpenAI-compatible endpoint)
+ *   groq / mistral / openrouter / deepseek / kimi / nvidia / qwen
+ *                    → openai npm package (OpenAI-compatible endpoint, per-provider adapter)
  *
  * Public interface (LLMMessage, callLLM, resolveProviderConfig) is stable.
  */
@@ -13,20 +13,19 @@ import { logger } from "../utils/logger"
 import { getProviderApiKey, isFreeProvider } from "../storage/crypto"
 import { GeminiProvider } from "./llm-providers/gemini"
 import { AnthropicProvider } from "./llm-providers/anthropic"
-import { OllamaProvider } from "./llm-providers/ollama"
 import { OpenAIProvider } from "./llm-providers/openai"
 import { GroqProvider } from "./llm-providers/groq"
 import { MistralProvider } from "./llm-providers/mistral"
 import { OpenRouterProvider } from "./llm-providers/openrouter"
 import { DeepSeekProvider } from "./llm-providers/deepseek"
 import { KimiProvider } from "./llm-providers/kimi"
-import { LocalLlamaProvider } from "./llm-providers/local-llama"
 import { NvidiaProvider } from "./llm-providers/nvidia"
 import { QwenProvider } from "./llm-providers/qwen"
 import { CodexProvider } from "./llm-providers/codex"
 import { OpenCodeGoProvider } from "./llm-providers/opencode-go"
 import { MiniMaxProvider } from "./llm-providers/minimax"
 import { HivecodeFreeProvider } from "./llm-providers/hivecode-free"
+import { HiveAgentsProvider } from "./llm-providers/hiveagents"
 import type { LLMProvider } from "./llm-providers/interface"
 
 const log = logger.child("llm-client")
@@ -47,6 +46,14 @@ export type ContentPart =
   | { type: "image_base64"; base64: string; mimeType: string }
   | { type: "document"; base64: string; mimeType: string; fileName?: string }
 
+/** Raw Anthropic extended-thinking content block, round-tripped verbatim when needed. */
+export interface ThinkingBlock {
+  type: "thinking" | "redacted_thinking"
+  thinking?: string
+  signature?: string
+  data?: string
+}
+
 export interface LLMMessage {
   role: "system" | "user" | "assistant" | "tool"
   content: string | ContentPart[]
@@ -55,6 +62,8 @@ export interface LLMMessage {
   name?: string
   /** Kimi K2 thinking mode — must be round-tripped when tool calls are present. */
   reasoning_content?: string
+  /** Anthropic extended thinking — must be round-tripped verbatim when tool calls are present. */
+  thinking_blocks?: ThinkingBlock[]
 }
 
 export interface LLMToolDef {
@@ -72,6 +81,7 @@ export interface LLMCallOptions {
   apiKey: string
   baseUrl?: string
   numCtx?: number
+  contextWindow?: number
   messages: LLMMessage[]
   tools?: LLMToolDef[]
   temperature?: number
@@ -81,6 +91,8 @@ export interface LLMCallOptions {
   signal?: AbortSignal
   /** Enable extended thinking for supported models (Anthropic Claude 3.7+). */
   thinking?: { enabled: boolean; budget_tokens?: number }
+  /** Live reasoning/thinking tokens as they stream, for display only. */
+  onReasoningToken?: (token: string) => void
   /** User ID for free-tier cap enforcement. Defaults to "default" if absent. */
   userId?: string
 }
@@ -94,36 +106,77 @@ export interface LLMResponse {
   reasoning_content?: string
   /** Anthropic extended thinking content (not sent to LLM, for display only). */
   thinking_content?: string
+  /** Anthropic extended thinking raw blocks — must be round-tripped verbatim when tool calls follow. */
+  thinking_blocks?: ThinkingBlock[]
+}
+
+function positiveContextWindow(value: unknown): number | undefined {
+  const contextWindow = typeof value === "number" ? value : Number(value)
+  return Number.isFinite(contextWindow) && contextWindow > 0
+    ? Math.floor(contextWindow)
+    : undefined
+}
+
+/**
+ * Resolve a model's context window from HiveDB.
+ *
+ * This lookup intentionally happens at call time. Long-running agents can
+ * therefore pick up a context-window edit without being restarted.
+ */
+export async function resolveModelContextWindow(
+  modelId: string,
+): Promise<number | undefined> {
+  const { col } = await import("../storage/hive")
+  const modelsCol = await col<import("../storage/collections").ModelDoc>("models")
+  const modelEntry = await modelsCol.get(modelId)
+  return positiveContextWindow(modelEntry?.doc.context_window)
+}
+
+/**
+ * Apply mutable, model-specific call settings from HiveDB.
+ *
+ * `contextWindow` supplied by a cached agent configuration is only a fallback
+ * for old/incomplete catalogs. A valid model record is always authoritative.
+ */
+export async function resolveCallOptionsFromDb(
+  options: LLMCallOptions,
+): Promise<LLMCallOptions> {
+  try {
+    const contextWindow = await resolveModelContextWindow(options.model)
+    if (contextWindow !== undefined) return { ...options, contextWindow }
+    log.warn(
+      `[llm-client] Model "${options.model}" has no valid context_window in HiveDB; ` +
+        "using the caller fallback",
+    )
+  } catch (err) {
+    log.warn(
+      `[llm-client] Could not read context_window for "${options.model}" from HiveDB; ` +
+        `using the caller fallback: ${(err as Error).message}`,
+    )
+  }
+  return options
 }
 
 // ─── Provider factory ─────────────────────────────────────────────────────────
 
-const GEMINI_PROVIDERS = new Set(["gemini", "google"])
-
-const KNOWN_PROVIDERS = new Set(["anthropic", "gemini", "google", "ollama", "openai", "groq", "mistral", "openrouter", "deepseek", "kimi", "local-llama", "nvidia", "codex", "opencode-go", "minimax", "hivecode-free"])
-
 function getProvider(provider: string): LLMProvider {
-  if (GEMINI_PROVIDERS.has(provider)) return new GeminiProvider()
-  if (provider === "anthropic") return new AnthropicProvider()
-  if (provider === "ollama") return new OllamaProvider()
-  if (!KNOWN_PROVIDERS.has(provider)) {
-    log.warn(`[llm-client] Unknown provider "${provider}" — falling back to OpenAI-compatible endpoint`)
-    return new OpenAIProvider()
-  }
   switch (provider) {
+    case "gemini":
+    case "google":       return new GeminiProvider()
+    case "anthropic":    return new AnthropicProvider()
     case "openai":      return new OpenAIProvider()
     case "groq":        return new GroqProvider()
     case "mistral":     return new MistralProvider()
     case "openrouter":  return new OpenRouterProvider()
     case "deepseek":    return new DeepSeekProvider()
     case "kimi":        return new KimiProvider()
-    case "local-llama": return new LocalLlamaProvider()
     case "nvidia":      return new NvidiaProvider()
     case "qwen":        return new QwenProvider()
     case "codex":        return new CodexProvider()
     case "opencode-go":  return new OpenCodeGoProvider()
     case "minimax":      return new MiniMaxProvider()
     case "hivecode-free": return new HivecodeFreeProvider()
+    case "hiveagents":   return new HiveAgentsProvider()
     default:
       log.warn(`[llm-client] Unhandled provider "${provider}" — falling back to OpenAI-compatible endpoint`)
       return new OpenAIProvider()
@@ -143,7 +196,8 @@ function getProvider(provider: string): LLMProvider {
  */
 export async function callLLM(options: LLMCallOptions): Promise<LLMResponse> {
   try {
-    return await getProvider(options.provider).call(options)
+    const callOptions = await resolveCallOptionsFromDb(options)
+    return await getProvider(callOptions.provider).call(callOptions)
   } catch (err) {
     const msg = (err as Error).message
     const cleanModel = options.model.replace(new RegExp(`^${options.provider}\\/`), "")
@@ -165,21 +219,46 @@ export async function callLLM(options: LLMCallOptions): Promise<LLMResponse> {
 }
 
 /**
- * Resolve provider config from DB (decrypts API key).
- *
- * For free-tier providers (`hivecode-free`), the key is the user's
- * `hivecode_token` stored in Bun.secrets via `/auth` (browser-based Firebase
- * Auth flow). No env var is required on the client.
+ * Default provider/model resolved from HiveDB. Used when an agent has no
+ * provider/model configured.
+ */
+export async function getDefaultLLM(): Promise<{ provider: string; model: string } | null> {
+  const { col, fromIndexable } = await import("../storage/hive")
+  const agentsCol = await col<import("../storage/collections").AgentDoc>("agents")
+  const modelsCol = await col<import("../storage/collections").ModelDoc>("models")
+  const providersCol = await col<import("../storage/collections").ProviderDoc>("providers")
+
+  const coordinators = await agentsCol.findBy("role", "coordinator")
+  const coordinator = coordinators[0]
+  const coordinatorProvider = fromIndexable(coordinator?.doc.provider_id ?? null)
+  const coordinatorModel = fromIndexable(coordinator?.doc.model_id ?? null)
+  if (coordinatorProvider && coordinatorModel) {
+    return { provider: coordinatorProvider, model: coordinatorModel }
+  }
+
+  const activeModels = (await modelsCol.findBy("model_type", "llm")).filter(m => m.doc.active)
+  for (const m of activeModels) {
+    const provider = await providersCol.get(m.doc.provider_id)
+    if (provider?.doc.active) {
+      return { provider: m.doc.provider_id, model: m.doc.id }
+    }
+  }
+  return null
+}
+
+/**
+ * Resolve provider config from HiveDB and Bun.secrets.
  */
 export async function resolveProviderConfig(
   providerId: string,
   modelId: string
-): Promise<Pick<LLMCallOptions, "provider" | "model" | "apiKey" | "baseUrl" | "numCtx" | "numGpu">> {
-  const { getDb } = await import("../storage/sqlite")
-  const db = getDb()
-  const providerRow = db
-    .query<any, [string]>("SELECT * FROM providers WHERE id = ? AND enabled = 1")
-    .get(providerId)
+): Promise<Pick<LLMCallOptions, "provider" | "model" | "apiKey" | "baseUrl" | "numCtx" | "numGpu" | "contextWindow">> {
+  const { col } = await import("../storage/hive")
+  const providersCol = await col<import("../storage/collections").ProviderDoc>("providers")
+  const modelsCol = await col<import("../storage/collections").ModelDoc>("models")
+  const providerEntry = await providersCol.get(providerId)
+  const providerRow = (providerEntry?.doc.enabled && providerEntry?.doc.active) ? providerEntry.doc : undefined
+  const modelEntry = await modelsCol.get(modelId)
 
   // TDD §38.12: API keys / auth tokens stored exclusively in Bun.secrets.
   // For `hivecode-free` the secret is the personal hivecode_token issued by
@@ -200,5 +279,6 @@ export async function resolveProviderConfig(
     baseUrl: providerRow?.base_url || undefined,
     numCtx: providerRow?.num_ctx ?? undefined,
     numGpu: providerRow?.num_gpu ?? undefined,
+    contextWindow: modelEntry?.doc.context_window ?? undefined,
   }
 }

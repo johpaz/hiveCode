@@ -6,6 +6,9 @@ export * from "./gateway/server.ts";
 export * from "./agent/service.ts";
 export * from "./agent/agent-loop.ts";
 export * from "./agent/context-compiler.ts";
+export * from "./agent/agent-profiles.ts";
+export * from "./harness/adaptive-scheduler.ts";
+export * from "./harness/profile-harness.ts";
 export * from "./agent/prompt-builder.ts";
 export * from "./agent/conversation-store.ts";
 export * from "./agent/execution-mode.ts";
@@ -19,12 +22,10 @@ export * from "./channels/manager.ts";
 export * from "./channels/base.ts";
 export * from "./channels/telegram.ts";
 
-// Session DB (TDD v2 — per-session SQLite)
-export * from "./db/index.ts";
-
 // Storage
-export * from "./storage/sqlite.ts";
-export * from "./storage/schema.ts";
+export * from "./storage/hive.ts";
+export * from "./storage/hivedb.ts";
+export * from "./storage/collections.ts";
 export * from "./storage/seed.ts";
 export * from "./storage/crypto.ts";
 export * from "./storage/bootstrapper.ts";

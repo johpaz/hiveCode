@@ -1,5 +1,5 @@
 /**
- * Code Indexer — builds and maintains the code_graph dependency table.
+ * Code Indexer — builds and maintains the HiveDB code graph.
  *
  * - Full index: called at `hive-code init`, scans all code files via Bun.Glob
  * - Incremental: called after each fs_edit / fs_write to update affected files only
@@ -7,7 +7,12 @@
  * Uses Bun.Transpiler for lightweight AST analysis (no tsc needed).
  */
 
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { CodeFileDoc, CodeGraphDoc, CodeSessionDoc } from "@johpaz/hivecode-core/storage/collections"
+import {
+  upsertCapabilityDocs,
+  deleteCapabilitiesByFilter,
+} from "@johpaz/hivecode-core/agent/capability-search"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import * as path from "node:path"
 import * as fs from "node:fs"
@@ -97,47 +102,83 @@ async function indexFile(filePath: string, workspace: string): Promise<FileIndex
   }
 }
 
-function upsertFileIndex(sessionId: string, index: FileIndex): void {
-  const db = getDb()
-  db.query(`
-    INSERT OR REPLACE INTO code_graph
-      (session_id, file_path, imports, exports, functions, classes, complexity, last_modified, indexed_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-  `).run(
-    sessionId,
-    index.filePath,
-    JSON.stringify(index.imports),
-    JSON.stringify(index.exports),
-    JSON.stringify(index.functions),
-    JSON.stringify(index.classes),
-    index.complexity,
-    index.lastModified,
-  )
-
-  // Sync code_fts: delete then insert to keep FTS5 in sync
-  db.query(`DELETE FROM code_fts WHERE session_id = ? AND file_path = ?`).run(sessionId, index.filePath)
-  db.query(`
-    INSERT INTO code_fts (session_id, file_path, content, exports, functions, classes)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(
-    sessionId,
-    index.filePath,
-    index.content,
-    index.exports.join(' '),
-    index.functions.join(' '),
-    index.classes.join(' '),
-  )
+function codeFileId(sessionId: string, filePath: string): string {
+  return `${sessionId}:${filePath}`
 }
 
-function buildExportedByIndex(sessionId: string): void {
-  const db = getDb()
-  const rows = db.query<any, [string]>(
-    "SELECT file_path, imports FROM code_graph WHERE session_id = ?"
-  ).all(sessionId)
+async function upsertFileGraphIndex(sessionId: string, index: FileIndex): Promise<void> {
+  const codeGraph = await col<CodeGraphDoc>("codeGraph")
+  const id = codeFileId(sessionId, index.filePath)
+  const existing = await codeGraph.get(id)
+  await codeGraph.put(id, {
+    id,
+    session_id: sessionId,
+    file_path: index.filePath,
+    imports: JSON.stringify(index.imports),
+    exported_by: existing?.doc.exported_by ?? "[]",
+    exports: JSON.stringify(index.exports),
+    functions: JSON.stringify(index.functions),
+    classes: JSON.stringify(index.classes),
+    complexity: index.complexity,
+    last_modified: index.lastModified,
+    indexed_at: new Date().toISOString(),
+  }, { expectedVersion: existing?.version ?? 0 })
+}
+
+async function upsertFileSearchIndex(sessionId: string, index: FileIndex): Promise<void> {
+  const codeFiles = await col<CodeFileDoc>("codeFiles")
+  const id = codeFileId(sessionId, index.filePath)
+  const importSymbols = index.imports.join(" ")
+  const exportedSymbols = index.exports.join(" ")
+  const functionSymbols = index.functions.join(" ")
+  const classSymbols = index.classes.join(" ")
+
+  await codeFiles.put(id, {
+    id,
+    session_id: sessionId,
+    file_path: index.filePath,
+    content: index.content,
+    imports: importSymbols,
+    exports: exportedSymbols,
+    functions: functionSymbols,
+    classes: classSymbols,
+    updated_at: Math.floor(Date.now() / 1000),
+  })
+
+  await upsertCapabilityDocs([{
+    type: "code",
+    rawId: id,
+    name: path.basename(index.filePath),
+    body: index.content,
+    tags: [index.filePath, importSymbols, exportedSymbols, functionSymbols, classSymbols].filter(Boolean).join(" "),
+    extraFilters: [
+      { field: "session_id", value: sessionId },
+      { field: "code_file_id", value: id },
+    ],
+  }])
+}
+
+async function upsertFileIndex(sessionId: string, index: FileIndex): Promise<void> {
+  await upsertFileGraphIndex(sessionId, index)
+  await upsertFileSearchIndex(sessionId, index)
+}
+
+async function deleteFileSearchIndex(sessionId: string, filePath: string): Promise<void> {
+  const codeFiles = await col<CodeFileDoc>("codeFiles")
+  const codeGraph = await col<CodeGraphDoc>("codeGraph")
+  const id = codeFileId(sessionId, filePath)
+  await codeFiles.delete(id)
+  await codeGraph.delete(id)
+  await deleteCapabilitiesByFilter("code_file_id", id)
+}
+
+async function buildExportedByIndex(sessionId: string): Promise<void> {
+  const codeGraph = await col<CodeGraphDoc>("codeGraph")
+  const rows = await codeGraph.findBy("session_id", sessionId)
 
   // Build reverse map: for each file, who imports it?
   const importedBy = new Map<string, string[]>()
-  for (const row of rows) {
+  for (const row of rows.map((entry) => entry.doc)) {
     const imports: string[] = JSON.parse(row.imports ?? "[]")
     for (const dep of imports) {
       if (!importedBy.has(dep)) importedBy.set(dep, [])
@@ -146,15 +187,14 @@ function buildExportedByIndex(sessionId: string): void {
   }
 
   // Update exported_by for all files in batch
-  for (const [filePath, importers] of importedBy.entries()) {
-    db.query(
-      "UPDATE code_graph SET exported_by = ? WHERE session_id = ? AND file_path = ?"
-    ).run(JSON.stringify(importers), sessionId, filePath)
+  for (const entry of rows) {
+    const importers = importedBy.get(entry.doc.file_path) ?? []
+    await codeGraph.put(entry.id, { ...entry.doc, exported_by: JSON.stringify(importers) }, { expectedVersion: entry.version })
   }
 }
 
 /**
- * Full index: scan all code files in workspace and populate code_graph.
+ * Full index: scan all code files in workspace and populate codeGraph.
  * Called at `hive-code init`.
  */
 export async function buildFullIndex(sessionId: string, workspace: string): Promise<{
@@ -180,30 +220,33 @@ export async function buildFullIndex(sessionId: string, workspace: string): Prom
   let indexed = 0
   let skipped = 0
 
-  // Clear previous FTS index for this session to avoid stale entries
-  const db = getDb()
-  db.query(`DELETE FROM code_fts WHERE session_id = ?`).run(sessionId)
+  // Clear previous HiveDB search index for this session to avoid stale entries
+  await deleteCapabilitiesByFilter("session_id", sessionId)
+  const codeFiles = await col<CodeFileDoc>("codeFiles")
+  const existingCodeFiles = await codeFiles.findBy("session_id", sessionId)
+  for (const e of existingCodeFiles) await codeFiles.delete(e.id)
+  const codeGraph = await col<CodeGraphDoc>("codeGraph")
+  const existingGraph = await codeGraph.findBy("session_id", sessionId)
+  for (const e of existingGraph) await codeGraph.delete(e.id)
 
   // Index in batches of 50 to avoid blocking
   const BATCH = 50
   for (let i = 0; i < files.length; i += BATCH) {
     const batch = files.slice(i, i + BATCH)
     const results = await Promise.all(batch.map(f => indexFile(f, workspace)))
-    // Use transaction for batch writes
-    db.transaction(() => {
-      for (const result of results) {
-        if (result) {
-          upsertFileIndex(sessionId, result)
-          indexed++
-        } else {
-          skipped++
-        }
+    for (const result of results) {
+      if (result) {
+        await upsertFileGraphIndex(sessionId, result)
+        indexed++
+      } else {
+        skipped++
       }
-    })()
+    }
+    await Promise.all(results.filter((r): r is FileIndex => !!r).map(r => upsertFileSearchIndex(sessionId, r)))
   }
 
   // Build reverse dependency map
-  buildExportedByIndex(sessionId)
+  await buildExportedByIndex(sessionId)
 
   // Build global project context summary for Bee (async, non-blocking)
   await buildProjectContext(sessionId, workspace)
@@ -222,53 +265,47 @@ export async function updateFileIndex(sessionId: string, filePath: string, works
   const result = await indexFile(filePath, workspace)
   if (!result) return
 
-  upsertFileIndex(sessionId, result)
-  buildExportedByIndex(sessionId)
+  await upsertFileIndex(sessionId, result)
+  await buildExportedByIndex(sessionId)
   log.info(`[code-indexer] Updated index for ${path.relative(workspace, filePath)}`)
 }
 
 /**
  * Query: who imports this file? Returns file paths that depend on it.
  */
-export function getDependents(sessionId: string, filePath: string): string[] {
-  const db = getDb()
-  const row = db.query<any, [string, string]>(
-    "SELECT exported_by FROM code_graph WHERE session_id = ? AND file_path = ?"
-  ).get(sessionId, filePath)
+export async function getDependents(sessionId: string, filePath: string): Promise<string[]> {
+  const row = await (await col<CodeGraphDoc>("codeGraph")).get(codeFileId(sessionId, filePath))
   if (!row) return []
-  return JSON.parse(row.exported_by ?? "[]")
+  return JSON.parse(row.doc.exported_by ?? "[]")
 }
 
 /**
  * Query: what does this file import? Returns file paths it depends on.
  */
-export function getDependencies(sessionId: string, filePath: string): string[] {
-  const db = getDb()
-  const row = db.query<any, [string, string]>(
-    "SELECT imports FROM code_graph WHERE session_id = ? AND file_path = ?"
-  ).get(sessionId, filePath)
+export async function getDependencies(sessionId: string, filePath: string): Promise<string[]> {
+  const row = await (await col<CodeGraphDoc>("codeGraph")).get(codeFileId(sessionId, filePath))
   if (!row) return []
-  return JSON.parse(row.imports ?? "[]")
+  return JSON.parse(row.doc.imports ?? "[]")
 }
 
 /**
  * Query: most imported files (highest centrality = most critical).
  */
-export function getMostCriticalFiles(sessionId: string, limit = 20): Array<{
+export async function getMostCriticalFiles(sessionId: string, limit = 20): Promise<Array<{
   filePath: string
   importCount: number
   complexity: number
-}> {
-  const db = getDb()
-  const rows = db.query<any, [string]>(
-    "SELECT file_path, exported_by, complexity FROM code_graph WHERE session_id = ? ORDER BY length(exported_by) DESC LIMIT 50"
-  ).all(sessionId)
+}>> {
+  const rows = (await (await col<CodeGraphDoc>("codeGraph")).findBy("session_id", sessionId))
+    .map((entry) => entry.doc)
+    .sort((a, b) => b.exported_by.length - a.exported_by.length)
+    .slice(0, 50)
 
   return rows
-    .map((r: any) => ({
-      filePath: r.file_path,
-      importCount: (JSON.parse(r.exported_by ?? "[]") as string[]).length,
-      complexity: r.complexity ?? 0,
+    .map((row) => ({
+      filePath: row.file_path,
+      importCount: (JSON.parse(row.exported_by ?? "[]") as string[]).length,
+      complexity: row.complexity ?? 0,
     }))
     .sort((a, b) => b.importCount - a.importCount)
     .slice(0, limit)
@@ -278,12 +315,11 @@ export function getMostCriticalFiles(sessionId: string, limit = 20): Array<{
  * Get the most recently active code session ID.
  * Used by hooks that don't have explicit session context.
  */
-export function getActiveSessionId(): string | null {
-  const db = getDb()
-  const row = db.query<any, []>(
-    "SELECT id FROM code_sessions WHERE status = 'active' ORDER BY last_active DESC LIMIT 1"
-  ).get()
-  return row?.id ?? null
+export async function getActiveSessionId(): Promise<string | null> {
+  const rows = (await (await col<CodeSessionDoc>("codeSessions")).findBy("status", "active"))
+    .map((entry) => entry.doc)
+    .sort((a, b) => b.last_active.localeCompare(a.last_active))
+  return rows[0]?.id ?? null
 }
 
 /**
@@ -296,28 +332,21 @@ export async function reconcileCodeIndex(sessionId: string, workspace: string): 
   durationMs: number
 }> {
   const t0 = performance.now()
-  const db = getDb()
 
   // 1. Find files in DB that no longer exist on disk → remove from both tables
-  const dbFiles = db.query<{ file_path: string }, [string]>(
-    "SELECT file_path FROM code_graph WHERE session_id = ?"
-  ).all(sessionId)
+  const codeGraph = await col<CodeGraphDoc>("codeGraph")
+  const dbFiles = (await codeGraph.findBy("session_id", sessionId)).map((entry) => entry.doc)
 
   let removed = 0
   for (const { file_path } of dbFiles) {
     if (!await Bun.file(file_path).exists()) {
-      db.query("DELETE FROM code_graph WHERE session_id = ? AND file_path = ?")
-        .run(sessionId, file_path)
-      db.query("DELETE FROM code_fts WHERE session_id = ? AND file_path = ?")
-        .run(sessionId, file_path)
+      await deleteFileSearchIndex(sessionId, file_path)
       removed++
     }
   }
 
   // 2. Find files whose mtime differs from last_modified in DB
-  const staleRows = db.query<{ file_path: string; last_modified: string }, [string]>(
-    "SELECT file_path, last_modified FROM code_graph WHERE session_id = ?"
-  ).all(sessionId)
+  const staleRows = (await codeGraph.findBy("session_id", sessionId)).map((entry) => entry.doc)
 
   const toReindex: string[] = []
   for (const row of staleRows) {
@@ -351,26 +380,23 @@ export async function reconcileCodeIndex(sessionId: string, workspace: string): 
   for (let i = 0; i < toReindex.length; i += BATCH) {
     const batch = toReindex.slice(i, i + BATCH)
     const results = await Promise.all(batch.map(f => indexFile(f, workspace)))
-    db.transaction(() => {
-      for (const result of results) {
-        if (result) {
-          upsertFileIndex(sessionId, result)
-          reindexed++
-        }
+    for (const result of results) {
+      if (result) {
+        await upsertFileGraphIndex(sessionId, result)
+        reindexed++
       }
-    })()
+    }
+    await Promise.all(results.filter((r): r is FileIndex => !!r).map(r => upsertFileSearchIndex(sessionId, r)))
   }
 
   // Rebuild reverse dependency map after reconciliation
   if (reindexed > 0 || removed > 0) {
-    buildExportedByIndex(sessionId)
+    await buildExportedByIndex(sessionId)
   }
 
   // Rebuild project context if anything changed (async, non-blocking)
   if (reindexed > 0 || removed > 0) {
-    const sessionRow = db.query<any, [string]>(
-      "SELECT project_path FROM code_sessions WHERE id = ?"
-    ).get(sessionId)
+    const sessionRow = (await (await col<CodeSessionDoc>("codeSessions")).get(sessionId))?.doc
     if (sessionRow?.project_path) {
       await buildProjectContext(sessionId, sessionRow.project_path)
     }

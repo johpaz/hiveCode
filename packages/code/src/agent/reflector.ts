@@ -1,32 +1,68 @@
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { callLLM, resolveProviderConfig } from "@johpaz/hivecode-core/agent/llm-client"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type {
+  CodeNarrativeDoc,
+  CodePlaybookDoc,
+  CodeReflectionDoc,
+  CodeTraceDoc,
+} from "@johpaz/hivecode-core/storage/collections"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 
 const REFLECTOR_TASK_INTERVAL = 5
-const REFLECTOR_TRACE_THRESHOLD = 20
-// Auto-run every 20 minutes if neither task nor trace threshold is met
 const REFLECTOR_TIME_INTERVAL_MS = 20 * 60 * 1000
 
 let _tasksSinceLastReflector = 0
 let _lastReflectorRun = 0
 let _cronTimer: ReturnType<typeof setInterval> | null = null
 
-/** Start the time-based reflector cron (call once at startup). */
+function nowIso(): string {
+  return new Date().toISOString()
+}
+
+async function scanDocs<T>(collection: string): Promise<T[]> {
+  return (await (await col<T>(collection)).scan()).map((entry) => entry.doc)
+}
+
+async function pendingTraceDocs(limit = 50): Promise<CodeTraceDoc[]> {
+  return (await (await col<CodeTraceDoc>("codeTraces")).findBy("analyzed", false))
+    .map((entry) => entry.doc)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .slice(0, limit)
+}
+
+async function upsertPlaybookRule(rule: string, coordinator: string | null, source: string, confidence: number): Promise<boolean> {
+  const playbook = await col<CodePlaybookDoc>("codePlaybook")
+  const rows = await playbook.scan()
+  const existing = rows.find((entry) => entry.doc.rule === rule)
+  const id = existing?.id ?? Bun.randomUUIDv7()
+  await playbook.put(id, {
+    id,
+    rule,
+    coordinator,
+    source,
+    helpful_count: existing?.doc.helpful_count ?? 0,
+    harmful_count: existing?.doc.harmful_count ?? 0,
+    confidence: existing ? Math.min(existing.doc.confidence + 0.1, 0.95) : confidence,
+    active: true,
+    created_at: existing?.doc.created_at ?? nowIso(),
+    last_applied: existing ? nowIso() : null,
+  }, { expectedVersion: existing?.version ?? 0 })
+  return !existing
+}
+
 export function startReflectorCron(): void {
   if (_cronTimer) return
   _cronTimer = setInterval(async () => {
-    const db = getDb()
-    const pending = (db.query("SELECT COUNT(*) as c FROM code_traces WHERE analyzed = 0").get() as any)?.c ?? 0
-    if (pending > 0) {
+    const pending = await pendingTraceDocs(1)
+    if (pending.length > 0) {
       try {
-        const result = await runReflector(db)
+        const result = await runReflector()
         if (result.rules > 0) logger.info(`[reflector] Cron run: ${result.rules} new rules`)
       } catch (err) {
         logger.warn("[reflector] Cron run failed:", (err as Error).message)
       }
     }
   }, REFLECTOR_TIME_INTERVAL_MS)
-  // Don't block process exit
   if (_cronTimer && typeof (_cronTimer as any).unref === "function") {
     ;(_cronTimer as any).unref()
   }
@@ -39,21 +75,15 @@ export function stopReflectorCron(): void {
   }
 }
 
-/**
- * Extract developer preferences from USER_OVERRIDEs and corrections in the narrative.
- * Stores extracted rules in code_playbook with coordinator='user', source='preferences'.
- */
-export async function extractDeveloperPreferences(db: ReturnType<typeof getDb>): Promise<number> {
-  // Read recent user overrides from narrative
-  const overrides = db.query<any, []>(`
-    SELECT entry, created_at FROM code_narrative
-    WHERE is_override = 1
-    ORDER BY id DESC LIMIT 30
-  `).all()
+export async function extractDeveloperPreferences(): Promise<number> {
+  const overrides = (await scanDocs<CodeNarrativeDoc>("codeNarrative"))
+    .filter((entry) => entry.is_override)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .slice(0, 30)
 
   if (overrides.length === 0) return 0
 
-  const overrideText = overrides.map((o: any) => `- ${o.entry}`).join("\n")
+  const overrideText = overrides.map((o) => `- ${o.entry}`).join("\n")
 
   let providerCfg: any
   try {
@@ -70,9 +100,9 @@ export async function extractDeveloperPreferences(db: ReturnType<typeof getDb>):
         content:
           "Eres un analizador de preferencias de desarrollador. " +
           "Analiza las instrucciones de override del usuario y extrae preferencias o reglas de estilo concretas. " +
-          "Cada preferencia debe ser una regla breve y accionable (máx 120 caracteres). " +
-          "Sólo extrae reglas que se repitan o que sean muy específicas del desarrollador. " +
-          "Formato: una regla por línea, sin numeración, sin markdown.",
+          "Cada preferencia debe ser una regla breve y accionable (max 120 caracteres). " +
+          "Solo extrae reglas que se repitan o que sean muy especificas del desarrollador. " +
+          "Formato: una regla por linea, sin numeracion, sin markdown.",
       },
       {
         role: "user",
@@ -90,14 +120,7 @@ export async function extractDeveloperPreferences(db: ReturnType<typeof getDb>):
   let inserted = 0
   for (const pref of prefs) {
     try {
-      db.query(`
-        INSERT INTO code_playbook (rule, coordinator, source, confidence, active)
-        VALUES (?, 'user', 'preferences', 0.7, 1)
-        ON CONFLICT(rule) DO UPDATE SET
-          confidence = MIN(confidence + 0.05, 0.95),
-          last_applied = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-      `).run(pref)
-      inserted++
+      if (await upsertPlaybookRule(pref, "user", "preferences", 0.7)) inserted++
     } catch { /* skip */ }
   }
 
@@ -107,21 +130,15 @@ export async function extractDeveloperPreferences(db: ReturnType<typeof getDb>):
   return inserted
 }
 
-export async function runReflector(db?: ReturnType<typeof getDb>): Promise<{ traces: number; rules: number }> {
-  const database = db || getDb()
-
-  const traces = database.query(`
-    SELECT task_id, agent_id, coordinator, tool_name, input_summary, output_summary, success, duration_ns
-    FROM code_traces WHERE analyzed = 0 ORDER BY id DESC LIMIT 50
-  `).all() as any[]
+export async function runReflector(_db?: unknown): Promise<{ traces: number; rules: number }> {
+  const traces = await pendingTraceDocs(50)
 
   if (traces.length === 0) {
-    // Still try to extract developer preferences even with no new traces
-    try { await extractDeveloperPreferences(database) } catch { /* optional */ }
+    try { await extractDeveloperPreferences() } catch { /* optional */ }
     return { traces: 0, rules: 0 }
   }
 
-  const byCoordinator: Record<string, any[]> = {}
+  const byCoordinator: Record<string, CodeTraceDoc[]> = {}
   for (const t of traces) {
     const key = t.coordinator || t.agent_id || "unknown"
     if (!byCoordinator[key]) byCoordinator[key] = []
@@ -141,7 +158,7 @@ export async function runReflector(db?: ReturnType<typeof getDb>): Promise<{ tra
   try {
     providerCfg = await resolveProviderConfig("", "")
   } catch {
-    database.query("UPDATE code_traces SET analyzed = 1 WHERE analyzed = 0").run()
+    await markTracesAnalyzed(traces)
     return { traces: traces.length, rules: 0 }
   }
 
@@ -151,10 +168,10 @@ export async function runReflector(db?: ReturnType<typeof getDb>): Promise<{ tra
       {
         role: "system",
         content:
-          "Eres un analista de patrones de ejecución de agentes de software. " +
-          "Analiza las trazas de ejecución y genera reglas de playbook concisas (1 por bloque de trazas). " +
-          "Cada regla debe ser una instrucción práctica que mejore el comportamiento futuro del coordinador. " +
-          "Formato de salida: una regla por línea, sin numeración, sin markdown.",
+          "Eres un analista de patrones de ejecucion de agentes de software. " +
+          "Analiza las trazas de ejecucion y genera reglas de playbook concisas. " +
+          "Cada regla debe ser una instruccion practica que mejore el comportamiento futuro del coordinador. " +
+          "Formato de salida: una regla por linea, sin numeracion, sin markdown.",
       },
       {
         role: "user",
@@ -173,42 +190,47 @@ export async function runReflector(db?: ReturnType<typeof getDb>): Promise<{ tra
   const firstCoord = Object.keys(byCoordinator)[0] || null
   for (const rule of rules) {
     try {
-      database.query(`
-        INSERT INTO code_playbook (rule, confidence, active, coordinator, source)
-        VALUES (?, 0.5, 1, ?, 'reflector')
-        ON CONFLICT(rule) DO UPDATE SET
-          confidence = MIN(confidence + 0.1, 0.95),
-          last_applied = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-      `).run(rule, firstCoord)
-      inserted++
+      if (await upsertPlaybookRule(rule, firstCoord, "reflector", 0.5)) inserted++
     } catch { /* skip */ }
   }
 
-  // Save reflection record
   try {
-    database.query(`
-      INSERT INTO code_reflections (traces_analyzed, insights)
-      VALUES (?, ?)
-    `).run(traces.length, rules.join("\n"))
+    const reflections = await col<CodeReflectionDoc>("codeReflections")
+    const id = Bun.randomUUIDv7()
+    await reflections.put(id, {
+      id,
+      traces_analyzed: traces.length,
+      insights: rules.join("\n"),
+      ethics_violation: false,
+      created_at: nowIso(),
+    }, { expectedVersion: 0 })
   } catch { /* optional */ }
 
-  database.query("UPDATE code_traces SET analyzed = 1 WHERE analyzed = 0").run()
+  await markTracesAnalyzed(traces)
   _lastReflectorRun = Date.now()
   _tasksSinceLastReflector = 0
 
-  // Also extract developer preferences on each full reflector run
-  try { await extractDeveloperPreferences(database) } catch { /* optional */ }
+  try { await extractDeveloperPreferences() } catch { /* optional */ }
 
   logger.info(`[reflector] ${traces.length} trazas analizadas, ${inserted} reglas generadas`)
   return { traces: traces.length, rules: inserted }
+}
+
+async function markTracesAnalyzed(traces: CodeTraceDoc[]): Promise<void> {
+  const traceCol = await col<CodeTraceDoc>("codeTraces")
+  for (const trace of traces) {
+    const existing = await traceCol.get(trace.id)
+    if (!existing) continue
+    await traceCol.put(trace.id, { ...existing.doc, analyzed: true }, { expectedVersion: existing.version })
+  }
 }
 
 export function incrementTaskCounter(): void {
   _tasksSinceLastReflector++
 }
 
-export function shouldRunReflector(db: ReturnType<typeof getDb>): boolean {
+export function shouldRunReflector(_db?: unknown): boolean {
   if (_tasksSinceLastReflector >= REFLECTOR_TASK_INTERVAL) return true
-  const pending = (db.query("SELECT COUNT(*) as c FROM code_traces WHERE analyzed = 0").get() as any)?.c ?? 0
-  return pending >= REFLECTOR_TRACE_THRESHOLD
+  if (Date.now() - _lastReflectorRun >= REFLECTOR_TIME_INTERVAL_MS) return true
+  return false
 }

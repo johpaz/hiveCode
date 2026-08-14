@@ -2,8 +2,8 @@
  * Shared types and utilities for LLM providers.
  */
 
-import type { LLMCallOptions, LLMMessage, LLMResponse, LLMToolCall, ContentPart } from "../llm-client"
-export type { LLMCallOptions, LLMMessage, LLMResponse, LLMToolCall, ContentPart }
+import type { LLMCallOptions, LLMMessage, LLMResponse, LLMToolCall, ContentPart, ThinkingBlock } from "../llm-client"
+export type { LLMCallOptions, LLMMessage, LLMResponse, LLMToolCall, ContentPart, ThinkingBlock }
 
 import { logger } from "../../utils/logger"
 const log = logger.child("llm-client")
@@ -25,13 +25,13 @@ export const OPENAI_COMPAT_BASE_URLS: Record<string, string> = {
   openrouter: "https://openrouter.ai/api/v1",
   deepseek: "https://api.deepseek.com/v1",
   kimi: "https://api.moonshot.ai/v1",
-  "local-llama": "http://localhost:8081/v1",
   nvidia: "https://integrate.api.nvidia.com/v1",
   qwen: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
   codex: "https://api.openai.com/v1",
   "opencode-go": "https://opencode.ai/zen/go/v1",
   minimax: "https://api.minimaxi.com/v1",
   "hivecode-free": `${(process.env.HIVE_FREE_API_URL || "http://localhost:4000").replace(/\/+$/, "")}/v1`,
+  hiveagents: "https://llm.hiveagents.io/v1",
 }
 
 // ─── Provider profiles ────────────────────────────────────────────────────────
@@ -69,11 +69,11 @@ export const PROVIDER_PROFILES: Record<string, ProviderProfile> = {
   openrouter: { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
   nvidia: { ...DEFAULT_PROFILE, normalizeToolNames: true },
   qwen: { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
-  "local-llama": { ...DEFAULT_PROFILE },
   codex: { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
   "opencode-go": { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
   minimax: { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
   "hivecode-free": { ...DEFAULT_PROFILE, normalizeToolNames: true },
+  hiveagents: { ...DEFAULT_PROFILE, retryWithoutToolsOnCodes: [400, 422] },
 }
 
 export function getProviderProfile(provider: string): ProviderProfile {
@@ -127,6 +127,21 @@ function deepStripSchema(obj: unknown): any {
     result[k] = deepStripSchema(v)
   }
   return result
+}
+
+// ─── Output token budget ───────────────────────────────────────────────────────
+
+const OUTPUT_RESERVE_RATIO = 0.15
+const MAX_OUTPUT_TOKENS_CEILING = 32768
+
+/**
+ * Derives the output token budget from the model's context_window. An explicit
+ * maxTokens always wins; the ceiling only protects against bad seed/config data.
+ */
+export function resolveMaxTokens(explicitMaxTokens?: number, contextWindow?: number): number | undefined {
+  if (explicitMaxTokens) return explicitMaxTokens
+  if (!contextWindow) return undefined
+  return Math.min(MAX_OUTPUT_TOKENS_CEILING, Math.floor(contextWindow * OUTPUT_RESERVE_RATIO))
 }
 
 // ─── Temperature constraints ──────────────────────────────────────────────────

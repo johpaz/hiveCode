@@ -1,11 +1,10 @@
-import { getDb } from "../../storage/sqlite"
+import { col } from "../../storage/hive"
+import type { ToolDoc } from "../../storage/collections"
 
 export async function handleGetTools(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
-  const tools = getDb().query(`
-    SELECT id, name, description, category, active, enabled
-    FROM tools
-    ORDER BY name
-  `).all() as Record<string, unknown>[]
+  const tools = (await (await col<ToolDoc>("tools")).scan())
+    .map((entry) => entry.doc)
+    .sort((a, b) => a.name.localeCompare(b.name))
 
   return addCorsHeaders(Response.json({
     tools: tools.map(t => ({
@@ -13,8 +12,8 @@ export async function handleGetTools(req: Request, addCorsHeaders: (r: Response,
       name: t.name,
       description: t.description,
       category: t.category,
-      active: t.active === 1,
-      enabled: t.enabled === 1,
+      active: t.active,
+      enabled: t.enabled,
     }))
   }), req)
 }
@@ -29,7 +28,11 @@ export async function handleActivateTool(req: Request, addCorsHeaders: (r: Respo
     return addCorsHeaders(Response.json({ success: false, error: "toolId required" }), req)
   }
 
-  getDb().query(`UPDATE tools SET active = ?, enabled = ? WHERE id = ?`).run(active ? 1 : 0, active ? 1 : 0, toolId)
+  const tools = await col<ToolDoc>("tools")
+  const existing = await tools.get(toolId)
+  if (existing) {
+    await tools.put(toolId, { ...existing.doc, active: !!active, enabled: !!active, updated_at: Date.now() }, { expectedVersion: existing.version })
+  }
 
   return addCorsHeaders(Response.json({ success: true, toolId, active }), req)
 }
@@ -43,17 +46,15 @@ export async function handleUpdateTool(req: Request, addCorsHeaders: (r: Respons
     return addCorsHeaders(Response.json({ success: false, error: "toolId required" }), req)
   }
 
-  const updates: string[] = []
-  const params: unknown[] = []
+  const tools = await col<ToolDoc>("tools")
+  const existing = await tools.get(toolId)
+  if (!existing) return addCorsHeaders(Response.json({ success: false, error: "Tool not found" }, { status: 404 }), req)
 
-  if (body.name !== undefined)        { updates.push("name = ?");        params.push(body.name) }
-  if (body.description !== undefined) { updates.push("description = ?"); params.push(body.description) }
-  if (body.category !== undefined)    { updates.push("category = ?");    params.push(body.category) }
+  const patch: Partial<ToolDoc> = {}
+  if (body.name !== undefined) patch.name = body.name
+  if (body.description !== undefined) patch.description = body.description
+  if (body.category !== undefined) patch.category = body.category
 
-  if (updates.length > 0) {
-    params.push(toolId)
-    getDb().query(`UPDATE tools SET ${updates.join(", ")} WHERE id = ?`).run(...params as any[])
-  }
-
+  await tools.put(toolId, { ...existing.doc, ...patch, updated_at: Date.now() }, { expectedVersion: existing.version })
   return addCorsHeaders(Response.json({ success: true }), req)
 }

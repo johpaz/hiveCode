@@ -2,7 +2,11 @@ import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveSpinner,
 } from "../cli-ui.ts"
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import { getHiveDbPath } from "@johpaz/hivecode-core/storage/hivedb"
+import type { AgentDoc, LearningProposalDoc, ProviderDoc, SkillDoc } from "@johpaz/hivecode-core/storage/collections"
+
+const SUPPORTED_LLM_PROVIDERS = new Set(["hiveagents", "openai", "anthropic", "gemini", "mistral", "deepseek", "kimi", "openrouter", "groq", "qwen", "nvidia", "codex", "opencode-go", "minimax", "hivecode-free"])
 
 interface DoctorCheck {
   name: string
@@ -28,24 +32,23 @@ export async function doctor(flags: string[] = []): Promise<void> {
     message: bunOk ? `v${bunVersion}` : `v${bunVersion} (recomendado >= 1.3.10)`,
   })
 
-  // Check 2: SQLite integrity
+  // Check 2: HiveDB availability
   const dbCheckSpinner = hiveSpinner("default")
-  dbCheckSpinner.start("Verificando SQLite...")
+  dbCheckSpinner.start("Verificando HiveDB...")
   try {
-    const db = getDb()
-    const journalMode = db.query("PRAGMA journal_mode").get() as any
-    const walEnabled = journalMode?.journal_mode === "wal"
-
-    dbCheckSpinner.stop(`SQLite ${walEnabled ? "WAL activo" : "WAL no activo"}`, walEnabled ? "done" : "error")
+    await col("meta")
+    const path = getHiveDbPath()
+    dbCheckSpinner.stop(`HiveDB activo · ${path}`)
     checks.push({
-      name: "SQLite",
-      status: walEnabled ? "pass" : "warn",
-      message: walEnabled ? "WAL activo" : "WAL no activo",
+      name: "HiveDB",
+      status: "pass",
+      message: "Disponible",
+      detail: path,
     })
   } catch (err) {
-    dbCheckSpinner.stop("SQLite no accesible", "error")
+    dbCheckSpinner.stop("HiveDB no accesible", "error")
     checks.push({
-      name: "SQLite",
+      name: "HiveDB",
       status: "fail",
       message: "No se pudo conectar a la base de datos",
       detail: (err as Error).message,
@@ -56,8 +59,9 @@ export async function doctor(flags: string[] = []): Promise<void> {
   const providerSpinner = hiveSpinner("default")
   providerSpinner.start("Verificando providers...")
   try {
-    const db = getDb()
-    const providers = db.query("SELECT id, name, enabled FROM providers WHERE enabled = 1").all() as any[]
+    const providers = (await (await col<ProviderDoc>("providers")).scan())
+      .map((entry) => entry.doc)
+      .filter((provider) => provider.enabled && SUPPORTED_LLM_PROVIDERS.has(provider.id))
     const providerNames = providers.map(p => p.name || p.id).join(", ")
 
     providerSpinner.stop(`${providers.length} provider(s) activo(s)`)
@@ -79,13 +83,9 @@ export async function doctor(flags: string[] = []): Promise<void> {
   const workerSpinner = hiveSpinner("default")
   workerSpinner.start("Verificando coordinadores...")
   try {
-    const db = getDb()
-    const coordCount = (db.query(
-      "SELECT COUNT(*) as c FROM agents WHERE role = 'coordinator' AND enabled = 1"
-    ).get() as any)?.c ?? 0
-    const workerCount = (db.query(
-      "SELECT COUNT(*) as c FROM agents WHERE role = 'worker'"
-    ).get() as any)?.c ?? 0
+    const agents = (await (await col<AgentDoc>("agents")).scan()).map((entry) => entry.doc)
+    const coordCount = agents.filter((agent) => agent.role === "coordinator" && agent.enabled).length
+    const workerCount = agents.filter((agent) => agent.role === "worker").length
 
     const ok = coordCount >= 6
     workerSpinner.stop(
@@ -113,9 +113,7 @@ export async function doctor(flags: string[] = []): Promise<void> {
   const skillsSpinner = hiveSpinner("default")
   skillsSpinner.start("Verificando skills...")
   try {
-    const db = getDb()
-    const skills = db.query("SELECT COUNT(*) as count FROM skills").get() as any
-    const count = skills?.count ?? 0
+    const count = (await (await col<SkillDoc>("skills")).scan()).length
 
     skillsSpinner.stop(`${count} skill(s) registrada(s)`)
     checks.push({
@@ -196,10 +194,9 @@ export async function doctor(flags: string[] = []): Promise<void> {
   const learningSpinner = hiveSpinner("default")
   learningSpinner.start("Verificando propuestas de aprendizaje...")
   try {
-    const db = getDb()
-    const pending = db.query(
-      "SELECT id, source_agent, proposal_type, description, created_at FROM learning_proposals WHERE status = 'pending' ORDER BY created_at DESC"
-    ).all() as any[]
+    const pending = (await (await col<LearningProposalDoc>("learningProposals")).findBy("status", "pending"))
+      .map((entry) => entry.doc)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
     learningSpinner.stop(
       pending.length > 0
         ? `${pending.length} propuesta(s) pendiente(s) de revisión`
@@ -217,7 +214,7 @@ export async function doctor(flags: string[] = []): Promise<void> {
         : undefined,
     })
   } catch {
-    learningSpinner.stop("Tabla learning_proposals no disponible", "warn")
+    learningSpinner.stop("Colección learningProposals no disponible", "warn")
     checks.push({
       name: "Learning Proposals",
       status: "warn",

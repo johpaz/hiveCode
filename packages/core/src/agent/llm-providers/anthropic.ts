@@ -1,4 +1,5 @@
 import { logger } from "../../utils/logger"
+import { resolveMaxTokens } from "./interface"
 import type { LLMCallOptions, LLMProvider, LLMResponse, LLMToolCall } from "./interface"
 import type { ContentPart, LLMMessage } from "../llm-client"
 
@@ -101,7 +102,7 @@ export class AnthropicProvider implements LLMProvider {
 
     const body: any = {
       model: options.model,
-      max_tokens: options.maxTokens ?? 16384,
+      max_tokens: resolveMaxTokens(options.maxTokens, options.contextWindow) ?? 16384,
       messages: anthropicMessages,
     }
     if (systemText) body.system = systemText

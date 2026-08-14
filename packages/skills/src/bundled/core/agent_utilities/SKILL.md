@@ -39,8 +39,9 @@ steps:
 
 rules:
   - "Use spawn_agent for isolated subtasks that need their own context — not for simple tool calls"
-  - "Use save_note for info that must survive context compression (> 50% context used)"
-  - "Use report_progress every time a significant milestone completes"
+  - "Use save_note only for info that must survive context compression (> 50% context used) — it is a scratchpad, not a progress log"
+  - "Never call save_note twice for the same fact: reuse the same key so the note is overwritten"
+  - "Use report_progress when a significant milestone completes, not on a fixed schedule"
   - "Call get_project_context at the start of a session instead of recursive fs_list"
   - "spawn_agent includes automatic retries and semantic evaluation — trust its result"
 
@@ -53,10 +54,10 @@ examples:
     expected_behavior: "spawn_agent({ task: 'Analyze module X and return summary', tools: ['fs_read', 'parse_ast'] })"
 
   - user_input: "guardá que la BD usa WAL mode para contextos futuros"
-    expected_behavior: "save_note({ title: 'SQLite WAL mode', content: 'La BD usa WAL pragmas para performance...' })"
+    expected_behavior: "save_note({ key: 'hivedb-wal-mode', value: 'La BD usa WAL pragmas para performance...' })"
 
   - user_input: "reportá que completamos el 60%"
-    expected_behavior: "report_progress({ percentage: 60, message: 'Completado: schema + tools. Pendiente: tests + deploy' })"
+    expected_behavior: "report_progress({ progress: 60, message: 'Completado: schema + tools. Pendiente: tests + deploy' })"
 ---
 
 # Agent Utilities Skill
@@ -94,10 +95,15 @@ spawn_agent({
 
 ```javascript
 save_note({
-  title: "Decisión: usar Bun.cron nativo",
-  content: "Decidimos no usar croner porque Bun.cron es suficiente y zero-deps. Ver ADR-042."
+  key: "decision-bun-cron",
+  value: "Decidimos no usar croner porque Bun.cron es suficiente y zero-deps. Ver ADR-042."
 })
 ```
+
+`key` es un identificador estable: volver a guardar con la misma clave **sobrescribe** la
+nota. Es un scratchpad para hechos que deben sobrevivir a la compactación, no un registro
+de avance — si sólo querés contar qué estás haciendo, usá `report_progress` o el texto de
+tu respuesta.
 
 **Cuándo usar save_note vs memory_write:**
 - `save_note` → nota rápida del turno actual, scratchpad temporal
@@ -106,10 +112,10 @@ save_note({
 ## `report_progress` — Progreso al Usuario
 
 ```javascript
-report_progress({ percentage: 75, message: "Completados: schema, tools, skills. Pendiente: tests" })
+report_progress({ progress: 75, message: "Completados: schema, tools, skills. Pendiente: tests" })
 ```
 
-Llamar en cada hito: 25%, 50%, 75%, 100%.
+Llamar cuando se completa un hito real, no en una cadencia fija.
 
 ## `get_project_context` — Orientarse en el Proyecto
 

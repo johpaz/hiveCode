@@ -55,29 +55,29 @@ export interface CronStatusEntry {
 
 export interface CronScheduler {
   /** Create a new scheduled task */
-  create(input: CronTaskInput): CronCreateResult;
+  create(input: CronTaskInput): Promise<CronCreateResult>;
 
   /** List all tasks, optionally filtered by status */
-  listTasks(status?: string): CronTask[];
+  listTasks(status?: string): Promise<CronTask[]>;
 
   /** Get a single task by ID */
-  getTask(taskId: string): CronTask | null;
+  getTask(taskId: string): Promise<CronTask | null>;
 
   /** Update a task */
-  update(taskId: string, changes: Record<string, unknown>): boolean;
+  update(taskId: string, changes: Record<string, unknown>): Promise<boolean>;
 
   /** Delete a task */
-  delete(taskId: string): boolean;
+  delete(taskId: string): Promise<boolean>;
 
   /** Pause a task */
-  pause(taskId: string): boolean;
+  pause(taskId: string): Promise<boolean>;
 
   /** Resume a paused task */
-  resume(taskId: string): boolean;
+  resume(taskId: string): Promise<boolean>;
 
   /** Manually trigger a task */
-  trigger(taskId: string): boolean;
+  trigger(taskId: string): Promise<boolean>;
 
   /** Get runtime status of all tasks */
-  getStatus(): CronStatusEntry[];
+  getStatus(): Promise<CronStatusEntry[]>;
 }

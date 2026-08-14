@@ -1,4 +1,4 @@
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { saveScratchpadNote } from "@johpaz/hivecode-core/agent/conversation-store"
 
 export async function github(subcommand?: string, args?: string[]): Promise<void> {
   switch (subcommand) {
@@ -51,8 +51,7 @@ export async function github(subcommand?: string, args?: string[]): Promise<void
     case "set-repo": {
       const repo = args?.[0]
       if (!repo) { console.log("Usage: hivecode github set-repo <owner/repo>"); return }
-      const db = getDb()
-      db.query("INSERT OR REPLACE INTO scratchpad (thread_id, key, value) VALUES ('github', 'repo', ?)").run(repo)
+      await saveScratchpadNote("github", "repo", repo, "cli")
       console.log(`✅ Repo set to: ${repo}`)
       break
     }

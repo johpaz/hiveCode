@@ -7,13 +7,21 @@
 
 import type { Config } from "../../config/loader.ts"
 import { logger } from "../../utils/logger.ts"
-import { getDb } from "../../storage/sqlite.ts"
 import { getAgentLoop } from "../agent-loop"
 import { resolveUserId, resolveAgentId } from "../../storage/onboarding"
 import type { ContentPart } from "../llm-client"
 import { sanitizeUserMessage } from "../prompt-guard.ts"
 
-export type Provider = "openai" | "anthropic" | "gemini" | "mistral" | "kimi" | "ollama" | "openrouter" | "deepseek" | "nvidia"
+export type Provider = "openai" | "anthropic" | "gemini" | "mistral" | "kimi" | "hiveagents" | "openrouter" | "deepseek" | "nvidia"
+
+/**
+ * Step ceiling for interactive (chat/gateway) runs.
+ *
+ * These call sites passed 15, but `generate()` never forwarded it, so they ran at the
+ * loop's 200 default. Now that the value is honored, 15 would be a hard cut for real
+ * coding work — this is the deliberate number, defined once instead of repeated.
+ */
+export const DEFAULT_INTERACTIVE_MAX_STEPS = 60
 
 export interface StepEvent {
   type: "text" | "plan" | "tool_call" | "tool_result"
@@ -30,6 +38,7 @@ export interface ModelOptions {
   system?: string
   messages: Array<{ role: string; content: string | ContentPart[] }>
   tools?: Record<string, any>
+  /** Per-run step ceiling. Defaults to DEFAULT_INTERACTIVE_MAX_STEPS at the call sites. */
   maxSteps?: number
   onToken?: (token: string) => void
   onStep?: (step: StepEvent) => Promise<void>
@@ -63,12 +72,11 @@ export class AgentRunner {
   }
 
   async generate(options: ModelOptions): Promise<ModelResponse> {
-    const db = getDb()
     // Resolve agentId from database (coordinator or first enabled)
-    const agentId = resolveAgentId() || "main"
+    const agentId = await resolveAgentId() || "main"
 
     // Resolve userId from database
-    const userId = options.userId || resolveUserId()
+    const userId = options.userId || await resolveUserId()
     if (!userId) {
       throw new Error("No userId provided. Please complete onboarding first.")
     }
@@ -109,6 +117,7 @@ export class AgentRunner {
             channel: options.channel,
             raw_user_message: options.rawUserMessage,
           },
+          maxSteps: options.maxSteps,
           signal: options.signal,
         }
       )

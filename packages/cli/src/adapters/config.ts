@@ -33,12 +33,11 @@ export function getHiveDir(customDir?: string): string {
  */
 export function getDefaultPaths(hiveDir?: string): InstallationPaths {
   const dir = getHiveDir(hiveDir);
-  const dataDir = path.join(dir, "data");
   const logsDir = path.join(dir, "logs");
   
   return {
     hiveDir: dir,
-    dbPath: path.join(dataDir, "hive.db"),
+    dbPath: path.resolve(process.cwd(), "hivecode"),
     logPath: path.join(logsDir, "gateway.log"),
     pidPath: path.join(dir, "gateway.pid"),
     uiDir: null, // Will be set by adapter

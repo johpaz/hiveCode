@@ -37,10 +37,14 @@ REGLAS:
 ACTIVACIÓN CONDICIONAL DE COORDINATORS POR TIPO DE PROYECTO:
 - web frontend puro → [frontend]
 - fullstack web → [backend, frontend] en paralelo
-- mobile → [mobile, backend] en paralelo
+- mobile → [frontend, backend] en paralelo (frontend cubre web y mobile — no hay coordinator separado)
 - ML/IA → [data_scientist, backend] en paralelo
 - fullstack ML → [data_scientist, backend, frontend] en paralelo
-- security, test, devops y reviewer van después de los engineers (con dependsOn explícitos)
+- security, test y devops van después de los engineers (con dependsOn explícitos)
+- verifier va después de devops (dependsOn devops) y reviewer después de verifier (dependsOn verifier) —
+  reviewer necesita la evidencia de verifier antes de emitir su veredicto
+- NO incluyas dba ni integration como coordinators — backend absorbe el modelo de datos,
+  reviewer absorbe el cruce de contratos entre módulos
 
 TOOLS DISPONIBLES:
 - fs_read, fs_list, fs_exists, fs_glob — explorar el codebase

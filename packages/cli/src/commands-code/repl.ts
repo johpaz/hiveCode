@@ -1,10 +1,10 @@
 import * as path from "node:path"
 import fs, { existsSync, mkdirSync, readFileSync } from "node:fs"
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { getHiveDir } from "@johpaz/hivecode-core/config/loader"
 import { loadConfig, startGateway, getChannelManager } from "@johpaz/hivecode-core/gateway"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
+import { maybeLoadHiveAgentsModelFromDb } from "@johpaz/hivecode-core/agent/hiveagents-loader"
 import {
   isCancel, hiveSelect, hiveNote, hiveOutro, hiveSpinner,
   runProviderSetupWizard,
@@ -12,7 +12,7 @@ import {
 } from "../cli-ui.ts"
 import { loadInitialState, saveMode } from "./repl-state"
 import type { ReplMode } from "./repl-state"
-import { parseInternalCommand, getCtx, renderSuggestions } from "@johpaz/hivecode-code/coordinator/command-parser"
+import { parseInternalCommand, getCtx } from "@johpaz/hivecode-code/coordinator/command-parser"
 import type { MenuItem } from "@johpaz/hivecode-code/coordinator/command-parser"
 import { plan as runPlan } from "./plan"
 import { run as runTask } from "./run"
@@ -21,6 +21,15 @@ import { extractHivetui } from "../embedded-hivetui"
 import { CoordinatorManager } from "@johpaz/hivecode-code/workers/coordinator-manager"
 import { reconcileCodeIndex } from "@johpaz/hivecode-code/agent/code-indexer"
 import { buildProjectContext, getProjectContext } from "@johpaz/hivecode-code/agent/context-retriever"
+import {
+  listEnabledCoordinatorNames,
+  listProviderIds,
+  modelExists,
+  setCoordinatorProviderModel,
+  setDefaultProvider,
+  setProviderModel,
+  upsertProvider,
+} from "./provider-store"
 
 const VERSION = "1.0.0"
 
@@ -151,46 +160,38 @@ async function ensureProvider(
   })
   if (isCancel(choice) || choice === "cancel") return null
 
-  const db = getDb()
-  const knownProviders = (
-    db.query("SELECT id FROM providers ORDER BY id").all() as { id: string }[]
-  ).map((r) => r.id)
+  const knownProviders = await listProviderIds()
 
   const result = await runProviderSetupWizard(knownProviders, VERSION)
   if (!result) return null
 
   await storeProviderApiKey(result.provider, result.apiKey)
 
-  // Upsert provider row without DELETE (INSERT OR REPLACE breaks FK refs from models table)
-  db.query(`
-    INSERT INTO providers (id, name, base_url, enabled)
-    VALUES (?, ?, ?, 1)
-    ON CONFLICT(id) DO UPDATE SET
-      base_url = excluded.base_url,
-      enabled = 1
-  `).run(
-    result.provider,
-    result.provider,
-    result.baseUrl || null,
-  )
+  await upsertProvider(result.provider, {
+    name: result.provider,
+    baseUrl: result.baseUrl || null,
+    enabled: true,
+  })
 
-  db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(result.provider)
+  await setDefaultProvider(result.provider)
   if (result.model) {
-    db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)").run(
-      `provider_model_${result.provider}`,
-      result.model,
-    )
+    await setProviderModel(result.provider, result.model)
   }
 
-  // Update all coordinator agents to use this provider/model
-  // Only set model_id if the model actually exists in models table (FK guard)
   const agentModelId = result.model
-    ? (db.query("SELECT 1 FROM models WHERE id = ?").get(result.model) ? result.model : null)
+    ? (await modelExists(result.model) ? result.model : null)
     : null
-  db.query(`
-    UPDATE agents SET provider_id = ?, model_id = ?
-    WHERE role = 'coordinator'
-  `).run(result.provider, agentModelId)
+  await setCoordinatorProviderModel(result.provider, agentModelId)
+
+  if (result.provider === "hiveagents" && agentModelId) {
+    hiveNote("HiveAgents", [`Cargando ${agentModelId}; se esperará hasta que esté listo...`])
+    const load = await maybeLoadHiveAgentsModelFromDb(result.provider, agentModelId)
+    if (!load.success) {
+      hiveNote("HiveAgents", [`No se pudo precargar ${agentModelId}: ${load.error}`])
+    } else {
+      hiveNote("HiveAgents", [`Modelo ${agentModelId} cargado y listo · ctx=${load.ctx}`])
+    }
+  }
 
   hiveOutro(`Provider ${result.provider} configurado`)
   return { provider: result.provider, model: result.model || "" }
@@ -280,10 +281,9 @@ async function handleInternalCommand(
   model: string,
   ui?: import("@johpaz/hivecode-code/coordinator/command-parser").UiCallbacks,
 ): Promise<{ output: string; newMode?: ReplMode; newProvider?: string; newModel?: string; quickMenu?: MenuItem[] }> {
-  const db = getDb()
-  const ctx = getCtx(db)
+  const ctx = await getCtx()
 
-  const result = await parseInternalCommand(input, db, {
+  const result = await parseInternalCommand(input, undefined, {
     ...ctx,
     activeMode: currentMode,
     activeProvider: provider,
@@ -311,11 +311,12 @@ export async function repl(): Promise<void> {
   process.env.HIVE_LOG_CONSOLE = "false"
   logger.setConsole(false)
 
-  await extractHivetui()   // extrae hivetui embebido al primer arranque
+  const isDev = process.env.HIVE_DEV === "true" || process.env.HIVE_DEV === "1"
+  if (!isDev) await extractHivetui() // solo el binario distribuido necesita extracción
   await ensureGateway()
   await ensureTuiBinary()
 
-  const init = loadInitialState()
+  const init = await loadInitialState()
 
   // Provider guard al arranque (antes de iniciar workers, para que tengan las claves)
   if (!init.provider) {
@@ -385,9 +386,7 @@ export async function repl(): Promise<void> {
     logger.info(`[repl] Project context build started for session ${sessionId}`)
   }
 
-  const activeWorkers: string[] = (getDb()
-    .query("SELECT name FROM agents WHERE role='coordinator' AND enabled=1")
-    .all() as any[]).map(r => r.name as string)
+  const activeWorkers = await listEnabledCoordinatorNames()
 
   // ── Rust/crossterm TUI (preferred) ─────────────────────────────────────────
   process.stderr.write(`[repl] tuiAvailable=${tuiAvailable()}\n`)
@@ -425,18 +424,29 @@ export async function repl(): Promise<void> {
     manager.setNarrativeCallback((chunk) => {
       const content = chunk.content
       const taskId = (chunk as any).taskId
+      const isReasoning = chunk.phase === "thinking" || chunk.phase === "reason"
       const contentType = chunk.phase === "thinking"
         ? "thinking"
         : isLikelyMarkdown(content) ? "markdown" : "plain"
-      tuiControl.send?.({
-        type: "narrative_chunk",
-        task_id: taskId,
-        coordinator: chunk.coordinator,
-        phase: chunk.phase,
-        content,
-        content_type: contentType,
-        stream_id: (chunk as any).streamId,
-      })
+      // Both land in the Bee panel, but the protocol distinguishes the source:
+      // thought_chunk is the agent reasoning, narrative_chunk is phase narration.
+      tuiControl.send?.(isReasoning
+        ? {
+            type: "thought_chunk",
+            task_id: taskId,
+            coordinator: chunk.coordinator,
+            phase: chunk.phase,
+            content,
+          }
+        : {
+            type: "narrative_chunk",
+            task_id: taskId,
+            coordinator: chunk.coordinator,
+            phase: chunk.phase,
+            content,
+            content_type: contentType,
+            stream_id: (chunk as any).streamId,
+          })
       // Also append non-thinking narratives to the main history feed so each agent appears as a separate message
       if (chunk.phase !== "thinking" && chunk.phase !== "reason" && content.trim().length > 2) {
         tuiControl.send?.({
@@ -458,10 +468,8 @@ export async function repl(): Promise<void> {
         test: "QAEngineer",
         devops: "DevOpsEngineer",
         product_manager: "ProductManager",
-        mobile: "MobileEngineer",
         data_scientist: "DataScientist",
-        dba: "DBA",
-        integration: "IntegrationEngineer",
+        verifier: "Verifier",
         reviewer: "CodeReviewer",
       }
       tuiControl.send?.({
@@ -535,11 +543,10 @@ export async function repl(): Promise<void> {
       tokenCount:      init.tokenCount,
       workers:         activeWorkers,
 
-      getSuggestions: (query) => renderSuggestions(query),
 
       onModeChange(mode) {
         currentMode = mode as ReplMode
-        saveMode(currentMode)
+        void saveMode(currentMode)
       },
 
       onExit() {
@@ -564,6 +571,10 @@ export async function repl(): Promise<void> {
       tuiControl,
 
       async onSubmit(input) {
+        if (input.trim().toLowerCase() === "/auto") {
+          return { output: "Navegación automática de layouts reactivada." }
+        }
+
         // ── Plan approval gate ─────────────────────────────────────────────
         if (pendingPlanTask) {
           const originalTask = pendingPlanTask
@@ -590,7 +601,7 @@ export async function repl(): Promise<void> {
             const out = await executeTask(originalTask, "approval", {
               suspend: tuiControl.suspend ?? undefined, resume: tuiControl.resume ?? undefined, manager, quiet: true,
             })
-            return { output: out, newTokenCount: loadInitialState().tokenCount, ...(guardResult && { newProvider: provider, newModel: model }) }
+            return { output: out, newTokenCount: (await loadInitialState()).tokenCount, ...(guardResult && { newProvider: provider, newModel: model }) }
           }
 
           // Auto approve (default, /approve auto, or any context text)
@@ -608,7 +619,7 @@ export async function repl(): Promise<void> {
           const output = await executeTask(taskWithContext, "auto", {
             suspend: tuiControl.suspend ?? undefined, resume: tuiControl.resume ?? undefined, manager, quiet: true,
           })
-          return { output, newTokenCount: loadInitialState().tokenCount, ...(guardResult && { newProvider: provider, newModel: model }) }
+          return { output, newTokenCount: (await loadInitialState()).tokenCount, ...(guardResult && { newProvider: provider, newModel: model }) }
         }
 
         if (input.startsWith("/")) {
@@ -646,7 +657,7 @@ export async function repl(): Promise<void> {
             newMode:     result.newMode,
             newProvider: result.newProvider,
             newModel:    result.newModel,
-            newTokenCount: loadInitialState().tokenCount,
+            newTokenCount: (await loadInitialState()).tokenCount,
           }
         }
 
@@ -681,7 +692,7 @@ export async function repl(): Promise<void> {
 
         return {
           output,
-          newTokenCount: loadInitialState().tokenCount,
+          newTokenCount: (await loadInitialState()).tokenCount,
           ...(guardResult && { newProvider: provider, newModel: model }),
         }
       },

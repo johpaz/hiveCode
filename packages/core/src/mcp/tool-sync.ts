@@ -1,20 +1,30 @@
 /**
- * MCP Tool Sync — Persist MCP tool definitions to DB and FTS5
+ * MCP Tool Sync — Persist MCP tool definitions to DB and the HiveDB index.
  *
- * When an MCP server connects, its tool definitions are persisted to
- * the mcp_tools table and indexed in mcp_tools_fts for search_knowledge.
- * When the server disconnects, all its tools are deleted from both.
- *
- * This enables:
- * 1. search_knowledge to find MCP tools via FTS5
- * 2. Tool definitions to survive across context compiler invocations
- * 3. Offline visibility of what MCP tools were available
+ * When an MCP server connects, its tool definitions are persisted to the
+ * `mcpTools` collection and indexed in the HiveDB capability index for
+ * search_knowledge. When the server disconnects, all its tools are deleted
+ * from both.
  */
 
-import { getDb } from "../storage/sqlite"
+import { col } from "../storage/hive"
+import type { McpToolDoc } from "../storage/collections"
 import { logger } from "../utils/logger"
+import { mcpToolFullName } from "../agent/tool-selector"
+import {
+    replaceCapabilityDocs,
+    deleteCapabilitiesByServer,
+    type CapabilityDoc,
+} from "../agent/capability-search"
 
 const log = logger.child("mcp:tool-sync")
+
+async function getMcpToolsCollection() {
+    const mcpToolsCol = await col<McpToolDoc>("mcpTools")
+    await mcpToolsCol.createIndex("server_id")
+    await mcpToolsCol.createIndex("active")
+    return mcpToolsCol
+}
 
 export interface MCPToolDefinition {
     name: string
@@ -24,153 +34,97 @@ export interface MCPToolDefinition {
 
 /**
  * Generate a stable ID for an MCP tool based on server + tool name.
- * Uses the same sanitization as mcpToolFullName for consistency.
+ *
+ * This must match the LLM function name exactly because agent-loop resolves
+ * search results against executors by this string.
  */
 export function mcpToolId(serverName: string, toolName: string): string {
-    const safe = (s: string) => s.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_.\-:]/g, '_')
-    const full = `${safe(serverName)}__${safe(toolName)}`
-    const trimmed = full.length > 64 ? full.substring(0, 64) : full
-    return /^[a-zA-Z_]/.test(trimmed) ? trimmed : `_${trimmed}`.substring(0, 64)
+    return mcpToolFullName(serverName, toolName)
 }
 
 /**
- * Persist MCP tool definitions to the mcp_tools table.
- * Called when a server connects or reconnects.
- * Deletes existing tools for the server first, then inserts fresh data.
+ * Persist MCP tool definitions to the `mcpTools` collection.
  */
-export function syncMCPToolsToDB(
+export async function syncMCPToolsToDB(
     serverId: string,
     serverName: string,
     tools: MCPToolDefinition[]
-): void {
-    const db = getDb()
-
+): Promise<void> {
     try {
-        const deleteExisting = db.prepare("DELETE FROM mcp_tools WHERE server_id = ?")
-        deleteExisting.run(serverId)
+        const mcpToolsCol = await getMcpToolsCollection()
+        const existing = await mcpToolsCol.findBy("server_id", serverId)
+        for (const e of existing) await mcpToolsCol.delete(e.id)
 
         if (tools.length === 0) {
             log.debug(`[mcp:tool-sync] No tools to persist for server ${serverName}`)
             return
         }
 
-        const insertTool = db.prepare(`
-            INSERT INTO mcp_tools(id, server_id, server_name, tool_name, description, category, active, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'mcp', 1, (unixepoch()), (unixepoch()))
-        `)
-
         let count = 0
         for (const tool of tools) {
             const id = mcpToolId(serverName, tool.name)
-            insertTool.run(id, serverId, serverName, tool.name, tool.description || "")
+            const now = Math.floor(Date.now() / 1000)
+            await mcpToolsCol.put(id, {
+                id,
+                server_id: serverId,
+                server_name: serverName,
+                tool_name: tool.name,
+                description: tool.description || "",
+                category: "mcp",
+                active: true,
+                created_at: now,
+                updated_at: now,
+            })
             count++
         }
 
-        log.info(`[mcp:tool-sync] Persisted ${count} MCP tools for server ${serverName} to mcp_tools`)
+        log.info(`[mcp:tool-sync] Persisted ${count} MCP tools for server ${serverName} to mcpTools`)
     } catch (err) {
         log.error(`[mcp:tool-sync] Failed to persist MCP tools for server ${serverName}:`, err)
     }
 }
 
 /**
- * Sync all active MCP tools from mcp_tools table to mcp_tools_fts.
- * Called after syncMCPToolsToDB or after startup to ensure FTS5 is in sync.
- *
- * This does a full clear + re-insert to avoid schema drift.
+ * Sync all active MCP tools from the `mcpTools` collection to the HiveDB
+ * capability index.
  */
-export async function syncMCPToolsToFTS(): Promise<void> {
-    const db = getDb()
-
+export async function syncMCPToolsToIndex(): Promise<void> {
     try {
-        const syncTransaction = db.transaction(() => {
-            // Verify table exists
-            const tableCheck = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='mcp_tools_fts'").get()
-            if (!tableCheck) {
-                throw new Error("mcp_tools_fts table does not exist!")
-            }
+        const mcpToolsCol = await getMcpToolsCollection()
+        const mcpTools = (await mcpToolsCol.scan({})).map(e => e.doc).filter(t => t.active)
 
-            // Clear existing FTS data
-            db.run("DELETE FROM mcp_tools_fts")
+        const splitCamel = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+        const docs: CapabilityDoc[] = mcpTools.map(tool => ({
+            type: "mcp" as const,
+            rawId: tool.id,
+            name: `${tool.tool_name} ${splitCamel(tool.tool_name)}`,
+            body: tool.description || tool.tool_name,
+            tags: tool.category ?? "",
+            extraFilters: [{ field: "server_id", value: tool.server_id }],
+        }))
 
-            // Re-populate from mcp_tools where active
-            const mcpTools = db.query(`
-                SELECT id, server_name, tool_name, description, category
-                FROM mcp_tools
-                WHERE active = 1
-            `).all() as Array<{ id: string; server_name: string; tool_name: string; description: string; category: string }>
+        await replaceCapabilityDocs("mcp", docs)
 
-            if (mcpTools.length === 0) {
-                log.debug(`[mcp:tool-sync] No MCP tools to sync to FTS5`)
-                return
-            }
-
-            const insert = db.prepare(`
-                INSERT INTO mcp_tools_fts(id, server_name, tool_name, description, category)
-                VALUES (?, ?, ?, ?, ?)
-            `)
-
-            for (const tool of mcpTools) {
-                insert.run(tool.id, tool.server_name, tool.tool_name, tool.description, tool.category)
-            }
-
-            log.info(`[mcp:tool-sync] Synced ${mcpTools.length} MCP tools to mcp_tools_fts`)
-        })
-
-        syncTransaction()
+        log.info(`[mcp:tool-sync] Synced ${mcpTools.length} MCP tools to HiveDB index`)
     } catch (err) {
-        log.error(`[mcp:tool-sync] Failed to sync MCP tools to FTS5:`, err)
+        log.error(`[mcp:tool-sync] Failed to sync MCP tools to HiveDB index:`, err)
     }
 }
 
 /**
- * Delete all MCP tool definitions for a server from both mcp_tools and mcp_tools_fts.
- * Called when a server disconnects or is removed.
+ * Delete all MCP tool definitions for a server from both the collection and
+ * the HiveDB capability index.
  */
-export function clearMCPToolsFromDB(serverId: string): void {
-    const db = getDb()
-
+export async function clearMCPToolsFromDB(serverId: string): Promise<void> {
     try {
-        // Delete from mcp_tools (CASCADE will handle FTS5 via trigger or manual sync)
-        const result = db.query("DELETE FROM mcp_tools WHERE server_id = ?").run(serverId)
+        const mcpToolsCol = await getMcpToolsCollection()
+        const existing = await mcpToolsCol.findBy("server_id", serverId)
+        for (const e of existing) await mcpToolsCol.delete(e.id)
+
+        await deleteCapabilitiesByServer(serverId)
 
         log.info(`[mcp:tool-sync] Cleared MCP tools for server_id=${serverId}`)
-
-        // Re-sync FTS5 to remove stale entries
-        syncMCPToolsToFTSSync()
     } catch (err) {
         log.error(`[mcp:tool-sync] Failed to clear MCP tools for server_id=${serverId}:`, err)
-    }
-}
-
-/**
- * Synchronous version of syncMCPToolsToFTS for use in clearMCPToolsFromDB.
- * Avoids async/await in transaction that was already started.
- */
-function syncMCPToolsToFTSSync(): void {
-    const db = getDb()
-
-    try {
-        db.run("DELETE FROM mcp_tools_fts")
-
-        const mcpTools = db.query(`
-            SELECT id, server_name, tool_name, description, category
-            FROM mcp_tools
-            WHERE active = 1
-        `).all() as Array<{ id: string; server_name: string; tool_name: string; description: string; category: string }>
-
-        if (mcpTools.length === 0) return
-
-        const insert = db.prepare(`
-            INSERT INTO mcp_tools_fts(id, server_name, tool_name, description, category)
-            VALUES (?, ?, ?, ?, ?)
-        `)
-
-        for (const tool of mcpTools) {
-            insert.run(tool.id, tool.server_name, tool.tool_name, tool.description, tool.category)
-        }
-
-        log.debug(`[mcp:tool-sync] Re-synced ${mcpTools.length} MCP tools to FTS5 after deletion`)
-    } catch (err) {
-        log.error(`[mcp:tool-sync] Failed to re-sync MCP tools to FTS5:`, err)
     }
 }

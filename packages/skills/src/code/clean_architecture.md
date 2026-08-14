@@ -23,5 +23,5 @@ Source code dependencies must point only inward, toward higher-level policies.
 
 ## In Bun/TypeScript
 - Use `interface` for contracts between layers
-- Keep framework imports (Bun.serve, sqlite) in outer layers only
-- Never import `bun:sqlite` in a use-case file
+- Keep framework imports (Bun.serve, hivedb) in outer layers only
+- Never import `@johpaz/hive-db` in a use-case file

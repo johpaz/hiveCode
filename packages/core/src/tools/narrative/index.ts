@@ -1,10 +1,24 @@
 import type { Tool } from "../types.ts";
-import { getDb } from "../../storage/sqlite.ts";
+import { col } from "../../storage/hive.ts";
 import { logger } from "../../utils/logger.ts";
+import type {
+  CodeDecisionDoc,
+  CodeFileSnapshotDoc,
+  CodeNarrativeDoc,
+  CodeTaskDoc,
+} from "../../storage/collections.ts";
 
 const log = logger.child("narrative");
 
-function mapEntry(r: any) {
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+async function scanDocs<T>(collection: string): Promise<T[]> {
+  return (await (await col<T>(collection)).scan()).map((entry) => entry.doc);
+}
+
+function mapEntry(r: CodeNarrativeDoc) {
   return {
     id: r.id,
     taskId: r.task_id,
@@ -12,13 +26,13 @@ function mapEntry(r: any) {
     coordinator: r.coordinator,
     phase: r.phase,
     entry: r.entry,
-    isDraft: r.is_draft === 1,
-    isOverride: r.is_override === 1,
+    isDraft: r.is_draft,
+    isOverride: r.is_override,
     createdAt: r.created_at,
   };
 }
 
-function mapDecision(r: any) {
+function mapDecision(r: CodeDecisionDoc) {
   return {
     id: r.id,
     taskId: r.task_id,
@@ -32,30 +46,16 @@ function mapDecision(r: any) {
   };
 }
 
-// ─── read_narrative ───────────────────────────────────────────────────────────
-
 export const readNarrativeTool: Tool = {
   name: "read_narrative",
-  description: "Read narrative entries from SQLite, optionally filtered by task or session. Returns the chronological story of what happened during coding sessions. Spanish keywords: leer narrativo, historial tarea, entradas narrativo, contexto tarea",
+  description: "Read narrative entries from HiveDB, optionally filtered by task or session. Returns the chronological story of what happened during coding sessions. Spanish keywords: leer narrativo, historial tarea, entradas narrativo, contexto tarea",
   parameters: {
     type: "object",
     properties: {
-      taskId: {
-        type: "string",
-        description: "Filter by task ID (optional)",
-      },
-      sessionId: {
-        type: "string",
-        description: "Filter by session ID (optional)",
-      },
-      last: {
-        type: "number",
-        description: "Number of most recent entries to return (default: 50)",
-      },
-      coordinator: {
-        type: "string",
-        description: "Filter by coordinator name (optional)",
-      },
+      taskId: { type: "string", description: "Filter by task ID (optional)" },
+      sessionId: { type: "string", description: "Filter by session ID (optional)" },
+      last: { type: "number", description: "Number of most recent entries to return (default: 50)" },
+      coordinator: { type: "string", description: "Filter by coordinator name (optional)" },
     },
   },
   async execute(params) {
@@ -65,19 +65,14 @@ export const readNarrativeTool: Tool = {
     const coordinator = params.coordinator as string | undefined;
 
     try {
-      const db = getDb();
-      let rows: any[];
-      const conditions: string[] = [];
-      const bindings: (string | number)[] = [];
-
-      if (taskId) { conditions.push("task_id = ?"); bindings.push(taskId); }
-      if (sessionId) { conditions.push("session_id = ?"); bindings.push(sessionId); }
-      if (coordinator) { conditions.push("coordinator = ?"); bindings.push(coordinator); }
-
-      const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-      bindings.push(last);
-      rows = db.query(`SELECT * FROM code_narrative ${where} ORDER BY id DESC LIMIT ?`).all(...bindings as [string | number, ...(string | number)[]]) as any[];
-      const entries = rows.reverse().map(mapEntry);
+      const entries = (await scanDocs<CodeNarrativeDoc>("codeNarrative"))
+        .filter((entry) => !taskId || entry.task_id === taskId)
+        .filter((entry) => !sessionId || entry.session_id === sessionId)
+        .filter((entry) => !coordinator || entry.coordinator === coordinator)
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .slice(0, last)
+        .reverse()
+        .map(mapEntry);
 
       return { ok: true, result: { count: entries.length, entries } };
     } catch (error) {
@@ -86,38 +81,18 @@ export const readNarrativeTool: Tool = {
   },
 };
 
-// ─── append_narrative ─────────────────────────────────────────────────────────
-
 export const appendNarrativeTool: Tool = {
   name: "append_narrative",
   description: "Append a new narrative entry to the story log. Only the main thread should write; workers propose entries. Use to record what happened, decisions made, and reasoning. Spanish keywords: agregar narrativo, escribir entrada, registrar accion, documentar decision",
   parameters: {
     type: "object",
     properties: {
-      taskId: {
-        type: "string",
-        description: "Task ID this entry belongs to",
-      },
-      sessionId: {
-        type: "string",
-        description: "Session ID (optional, uses current session if available)",
-      },
-      coordinator: {
-        type: "string",
-        description: "Coordinator name that produced this entry",
-      },
-      phase: {
-        type: "string",
-        description: "Phase name (optional)",
-      },
-      entry: {
-        type: "string",
-        description: "Narrative content in Markdown",
-      },
-      isDraft: {
-        type: "boolean",
-        description: "Mark as draft (not yet reviewed)",
-      },
+      taskId: { type: "string", description: "Task ID this entry belongs to" },
+      sessionId: { type: "string", description: "Session ID (optional, uses current session if available)" },
+      coordinator: { type: "string", description: "Coordinator name that produced this entry" },
+      phase: { type: "string", description: "Phase name (optional)" },
+      entry: { type: "string", description: "Narrative content in Markdown" },
+      isDraft: { type: "boolean", description: "Mark as draft (not yet reviewed)" },
     },
     required: ["taskId", "coordinator", "entry"],
   },
@@ -134,36 +109,35 @@ export const appendNarrativeTool: Tool = {
     }
 
     try {
-      const db = getDb();
-      const result = db.query(`
-        INSERT INTO code_narrative (task_id, session_id, coordinator, phase, entry, is_draft)
-        VALUES (?, ?, ?, ?, ?, ?) RETURNING id
-      `).get(taskId, sessionId, coordinator, phase, entry, isDraft ? 1 : 0) as { id: number };
+      const id = Bun.randomUUIDv7();
+      await (await col<CodeNarrativeDoc>("codeNarrative")).put(id, {
+        id,
+        task_id: taskId,
+        session_id: sessionId,
+        coordinator,
+        phase,
+        entry,
+        is_draft: isDraft,
+        is_override: false,
+        created_at: nowIso(),
+      }, { expectedVersion: 0 });
 
-      log.info(`[append_narrative] Entry #${result.id} by ${coordinator} for task ${taskId}`);
-      return { ok: true, result: { id: result.id, message: "Narrative entry saved" } };
+      log.info(`[append_narrative] Entry ${id} by ${coordinator} for task ${taskId}`);
+      return { ok: true, result: { id, message: "Narrative entry saved" } };
     } catch (error) {
       return { ok: false, error: `Failed to append narrative: ${(error as Error).message}` };
     }
   },
 };
 
-// ─── search_narrative ─────────────────────────────────────────────────────────
-
 export const searchNarrativeTool: Tool = {
   name: "search_narrative",
-  description: "Full-text search over all narrative entries using FTS5. Returns relevant entries with relevance scores. Spanish keywords: buscar narrativo, buscar en historial, fts5 narrativo, encontrar entrada",
+  description: "Text search over narrative entries stored in HiveDB. Spanish keywords: buscar narrativo, buscar en historial, encontrar entrada",
   parameters: {
     type: "object",
     properties: {
-      query: {
-        type: "string",
-        description: "Search query (supports FTS5 syntax: AND, OR, quotes for exact phrase)",
-      },
-      limit: {
-        type: "number",
-        description: "Maximum results (default: 20)",
-      },
+      query: { type: "string", description: "Search query" },
+      limit: { type: "number", description: "Maximum results (default: 20)" },
     },
     required: ["query"],
   },
@@ -174,23 +148,25 @@ export const searchNarrativeTool: Tool = {
     if (!query) return { ok: false, error: "Search query is required" };
 
     try {
-      const db = getDb();
-      const escaped = query.replace(/'/g, "''");
-      const rows = db.query(`
-        SELECT n.*, rank FROM code_narrative n
-        JOIN code_narrative_fts fts ON n.id = fts.rowid
-        WHERE code_narrative_fts MATCH ?
-        ORDER BY rank LIMIT ?
-      `).all(escaped, limit) as any[];
-
-      const entries = rows.map(mapEntry);
+      const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+      const entries = (await scanDocs<CodeNarrativeDoc>("codeNarrative"))
+        .map((entry) => ({
+          entry,
+          score: terms.reduce((score, term) => {
+            const haystack = `${entry.entry} ${entry.coordinator} ${entry.phase ?? ""}`.toLowerCase();
+            return score + (haystack.includes(term) ? 1 : 0);
+          }, 0),
+        }))
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score || b.entry.created_at.localeCompare(a.entry.created_at))
+        .slice(0, limit);
 
       return {
         ok: true,
         result: {
           count: entries.length,
           query,
-          entries: entries.map((e: any, i: number) => ({ ...e, score: rows[i]?.rank ?? 0 })),
+          entries: entries.map((item) => ({ ...mapEntry(item.entry), score: item.score })),
         },
       };
     } catch (error) {
@@ -199,23 +175,14 @@ export const searchNarrativeTool: Tool = {
   },
 };
 
-// ─── read_decisions ───────────────────────────────────────────────────────────
-
 export const readDecisionsTool: Tool = {
   name: "read_decisions",
   description: "List Architecture Decision Records (ADRs). Filter by status (active, superseded, deprecated) or task ID. Spanish keywords: leer decisiones, adrs, decisiones arquitectura, ver adr, decision records",
   parameters: {
     type: "object",
     properties: {
-      status: {
-        type: "string",
-        enum: ["active", "superseded", "deprecated"],
-        description: "Filter by ADR status (optional)",
-      },
-      taskId: {
-        type: "string",
-        description: "Filter by task ID (optional)",
-      },
+      status: { type: "string", enum: ["active", "superseded", "deprecated"], description: "Filter by ADR status (optional)" },
+      taskId: { type: "string", description: "Filter by task ID (optional)" },
     },
   },
   async execute(params) {
@@ -223,24 +190,18 @@ export const readDecisionsTool: Tool = {
     const taskId = params.taskId as string | undefined;
 
     try {
-      const db = getDb();
-      const conditions: string[] = [];
-      const bindings: (string | number)[] = [];
+      const decisions = (await scanDocs<CodeDecisionDoc>("codeDecisions"))
+        .filter((decision) => !status || decision.status === status)
+        .filter((decision) => !taskId || decision.task_id === taskId)
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .map(mapDecision);
 
-      if (status) { conditions.push("status = ?"); bindings.push(status); }
-      if (taskId) { conditions.push("task_id = ?"); bindings.push(taskId); }
-
-      const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-      const rows = db.query(`SELECT * FROM code_decisions ${where} ORDER BY created_at DESC`).all(...bindings as [string | number, ...(string | number)[]]) as any[];
-
-      return { ok: true, result: { count: rows.length, decisions: rows.map(mapDecision) } };
+      return { ok: true, result: { count: decisions.length, decisions } };
     } catch (error) {
       return { ok: false, error: `Failed to read decisions: ${(error as Error).message}` };
     }
   },
 };
-
-// ─── write_decision ───────────────────────────────────────────────────────────
 
 export const writeDecisionTool: Tool = {
   name: "write_decision",
@@ -248,35 +209,13 @@ export const writeDecisionTool: Tool = {
   parameters: {
     type: "object",
     properties: {
-      title: {
-        type: "string",
-        description: "ADR title (e.g., 'Use Bun.sqlite instead of PostgreSQL')",
-      },
-      context: {
-        type: "string",
-        description: "Context and motivation for the decision",
-      },
-      options: {
-        type: "string",
-        description: "Options considered (Markdown list)",
-      },
-      decision: {
-        type: "string",
-        description: "The decision made and why",
-      },
-      consequences: {
-        type: "string",
-        description: "Consequences of this decision (positive and negative)",
-      },
-      taskId: {
-        type: "string",
-        description: "Associated task ID (optional)",
-      },
-      status: {
-        type: "string",
-        enum: ["active", "superseded", "deprecated"],
-        description: "ADR status (default: active)",
-      },
+      title: { type: "string", description: "ADR title" },
+      context: { type: "string", description: "Context and motivation for the decision" },
+      options: { type: "string", description: "Options considered (Markdown list)" },
+      decision: { type: "string", description: "The decision made and why" },
+      consequences: { type: "string", description: "Consequences of this decision" },
+      taskId: { type: "string", description: "Associated task ID (optional)" },
+      status: { type: "string", enum: ["active", "superseded", "deprecated"], description: "ADR status (default: active)" },
     },
     required: ["title", "context", "options", "decision", "consequences"],
   },
@@ -288,20 +227,26 @@ export const writeDecisionTool: Tool = {
     const decision = params.decision as string;
     const consequences = params.consequences as string;
     const taskId = params.taskId as string | null;
-    const status = (params.status as string) ?? "active";
+    const status = (params.status as CodeDecisionDoc["status"]) ?? "active";
 
     if (!title || !context || !options || !decision || !consequences) {
       return { ok: false, error: "title, context, options, decision, and consequences are required" };
     }
 
     try {
-      const db = getDb();
-      db.query(`
-        INSERT INTO code_decisions (id, task_id, title, context, options, decision, consequences, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, taskId, title, context, options, decision, consequences, status);
+      await (await col<CodeDecisionDoc>("codeDecisions")).put(id, {
+        id,
+        task_id: taskId,
+        title,
+        context,
+        options,
+        decision,
+        consequences,
+        status,
+        created_at: nowIso(),
+      }, { expectedVersion: 0 });
 
-      log.info(`[write_decision] ADR saved: ${id} — ${title.slice(0, 60)}`);
+      log.info(`[write_decision] ADR saved: ${id} - ${title.slice(0, 60)}`);
       return { ok: true, result: { id, message: "ADR saved" } };
     } catch (error) {
       return { ok: false, error: `Failed to write decision: ${(error as Error).message}` };
@@ -309,18 +254,13 @@ export const writeDecisionTool: Tool = {
   },
 };
 
-// ─── get_task_context ─────────────────────────────────────────────────────────
-
 export const getTaskContextTool: Tool = {
   name: "get_task_context",
-  description: "Get the full context for a task: narrative entries, decisions, and file snapshots. One-stop shop for loading everything needed to understand a task's state. Spanish keywords: contexto tarea, estado tarea, informacion tarea, resumen tarea",
+  description: "Get the full context for a task: narrative entries, decisions, and file snapshots. Spanish keywords: contexto tarea, estado tarea, informacion tarea, resumen tarea",
   parameters: {
     type: "object",
     properties: {
-      taskId: {
-        type: "string",
-        description: "Task ID to get context for",
-      },
+      taskId: { type: "string", description: "Task ID to get context for" },
     },
     required: ["taskId"],
   },
@@ -329,25 +269,18 @@ export const getTaskContextTool: Tool = {
     if (!taskId) return { ok: false, error: "taskId is required" };
 
     try {
-      const db = getDb();
-
-      const taskInfo = db.query(
-        "SELECT id, session_id, description, status, mode, branch_name, pr_url, created_at, completed_at FROM code_tasks WHERE id = ?"
-      ).get(taskId) as any;
-
-      const narrativeRows = db.query(
-        "SELECT * FROM code_narrative WHERE task_id = ? ORDER BY id"
-      ).all(taskId) as any[];
-      const narrative = narrativeRows.map(mapEntry);
-
-      const decisionRows = db.query(
-        "SELECT * FROM code_decisions WHERE task_id = ? ORDER BY created_at DESC"
-      ).all(taskId) as any[];
-      const decisions = decisionRows.map(mapDecision);
-
-      const snapshotRows = db.query(
-        "SELECT id, task_id, file_path, hash, snapshot_at FROM code_file_snapshots WHERE task_id = ? ORDER BY id"
-      ).all(taskId) as any[];
+      const taskInfo = (await (await col<CodeTaskDoc>("codeTasks")).get(taskId))?.doc;
+      const narrative = (await (await col<CodeNarrativeDoc>("codeNarrative")).findBy("task_id", taskId))
+        .map((entry) => entry.doc)
+        .sort((a, b) => a.created_at.localeCompare(b.created_at))
+        .map(mapEntry);
+      const decisions = (await (await col<CodeDecisionDoc>("codeDecisions")).findBy("task_id", taskId))
+        .map((entry) => entry.doc)
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .map(mapDecision);
+      const snapshots = (await (await col<CodeFileSnapshotDoc>("codeFileSnapshots")).findBy("task_id", taskId))
+        .map((entry) => entry.doc)
+        .sort((a, b) => a.id.localeCompare(b.id));
 
       return {
         ok: true,
@@ -355,7 +288,10 @@ export const getTaskContextTool: Tool = {
           task: taskInfo ?? { id: taskId, description: "Unknown task" },
           narrative: { count: narrative.length, entries: narrative },
           decisions: { count: decisions.length, entries: decisions },
-          snapshots: { count: snapshotRows.length, files: snapshotRows.map((s: any) => ({ filePath: s.file_path, hash: s.hash, snapshotAt: s.snapshot_at })) },
+          snapshots: {
+            count: snapshots.length,
+            files: snapshots.map((s) => ({ filePath: s.file_path, hash: s.hash, snapshotAt: s.snapshot_at })),
+          },
         },
       };
     } catch (error) {

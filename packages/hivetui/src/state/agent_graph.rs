@@ -7,9 +7,9 @@ use crate::term::{Color, AMBER, AMBER_BRIGHT, BLUE, CYAN, GREEN, LAVENDER, PINK,
 pub enum AgentTier {
     Orchestrator = 0, // bee
     Planning     = 1, // architecture, product_manager
-    Engineering  = 2, // backend, frontend, mobile, data_scientist, dba, integration
+    Engineering  = 2, // backend (absorbs dba), frontend (absorbs mobile), data_scientist
     Quality      = 3, // security, test, devops
-    Gate         = 4, // reviewer
+    Gate         = 4, // verifier, reviewer (reviewer absorbs integration)
     OnDemand     = 5, // forensic, librarian
 }
 
@@ -43,9 +43,9 @@ pub fn tier_for(name: &str) -> AgentTier {
     match lower.as_str() {
         "bee" => AgentTier::Orchestrator,
         "architecture" | "product_manager" => AgentTier::Planning,
-        "backend" | "frontend" | "mobile" | "data_scientist" | "dba" | "integration" => AgentTier::Engineering,
+        "backend" | "frontend" | "data_scientist" => AgentTier::Engineering,
         "security" | "test" | "devops" => AgentTier::Quality,
-        "reviewer" => AgentTier::Gate,
+        "verifier" | "reviewer" => AgentTier::Gate,
         "forensic" | "forensic_agent" | "librarian" => AgentTier::OnDemand,
         _ => AgentTier::Engineering, // fallback para agentes custom
     }
@@ -62,10 +62,8 @@ pub fn display_name(name: &str) -> String {
         "test" => "QAEngineer".to_string(),
         "devops" => "DevOpsEngineer".to_string(),
         "product_manager" => "ProductManager".to_string(),
-        "mobile" => "MobileEngineer".to_string(),
         "data_scientist" => "DataScientist".to_string(),
-        "dba" => "DBA".to_string(),
-        "integration" => "IntegrationEngineer".to_string(),
+        "verifier" => "Verifier".to_string(),
         "reviewer" => "CodeReviewer".to_string(),
         "forensic" | "forensic_agent" => "ForensicAgent".to_string(),
         "librarian" => "Librarian".to_string(),
@@ -90,10 +88,8 @@ pub fn agent_color(name: &str) -> Color {
         ("test", YELLOW),
         ("devops", LAVENDER),
         ("product", GREEN),
-        ("mobile", RED),
         ("data", SECONDARY),
-        ("dba", SECONDARY),
-        ("integration", SECONDARY),
+        ("verifier", RED),
         ("reviewer", AMBER_BRIGHT),
         ("forensic", SECONDARY),
         ("librarian", AMBER),
@@ -113,22 +109,16 @@ const EDGES: &[(&str, &str)] = &[
     ("product_manager", "architecture"),
     ("architecture", "backend"),
     ("architecture", "frontend"),
-    ("architecture", "mobile"),
     ("architecture", "data_scientist"),
-    ("architecture", "dba"),
-    ("architecture", "integration"),
     ("backend", "test"),
     ("backend", "security"),
     ("frontend", "test"),
     ("frontend", "security"),
-    ("mobile", "test"),
-    ("mobile", "security"),
     ("data_scientist", "test"),
-    ("dba", "test"),
-    ("integration", "test"),
     ("test", "devops"),
     ("security", "devops"),
-    ("devops", "reviewer"),
+    ("devops", "verifier"),
+    ("verifier", "reviewer"),
     ("test", "reviewer"),
     ("reviewer", "bee"),
     ("reviewer", "librarian"),
@@ -170,6 +160,7 @@ mod tests {
         assert_eq!(tier_for("architecture"), AgentTier::Planning);
         assert_eq!(tier_for("backend"), AgentTier::Engineering);
         assert_eq!(tier_for("test"), AgentTier::Quality);
+        assert_eq!(tier_for("verifier"), AgentTier::Gate);
         assert_eq!(tier_for("reviewer"), AgentTier::Gate);
         assert_eq!(tier_for("librarian"), AgentTier::OnDemand);
     }

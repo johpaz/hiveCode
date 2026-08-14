@@ -1,19 +1,18 @@
 import type { Config } from "../config/loader";
 import { logger } from "../utils/logger";
-import { getDb, initializeDatabase, getDbPathLazy } from "../storage/sqlite";
-import { initializeMemoryDb } from "../storage/memory-db";
+import { col } from "../storage/hive";
+import type { AgentDoc, CodeConfigDoc, McpServerDoc, ProviderDoc, SkillDoc, UserDoc } from "../storage/collections";
 import { buildAgentLoop } from "../agent/agent-loop";
 import { AgentRunner } from "../agent/providers/index";
 import { ChannelManager } from "../channels/manager";
-import { syncToolsToFTS, syncSkillsToFTS, syncPlaybookToFTS } from "../agent/context-compiler";
-import { syncMCPToolsToFTS } from "../mcp/tool-sync";
+import { syncToolsToIndex, syncSkillsToIndex, syncPlaybookToIndex } from "../agent/context-compiler";
+import { syncMCPToolsToIndex } from "../mcp/tool-sync";
 import { AgentService, createAgentService } from "../agent/service";
 import { mkdirSync } from "node:fs";
 import * as path from "node:path";
 import { createMCPManager, type MCPClientManager } from "@johpaz/hivecode-mcp";
 import { setMCPManager } from "../mcp/singleton";
 import { startMCPHotReload } from "../mcp/hot-reload";
-import { resolveAgentId, runStartupMigrations } from "../storage/onboarding";
 import { getProviderApiKey } from "../storage/crypto";
 
 
@@ -23,28 +22,20 @@ const log = logger.child("gateway:init");
  * Verifica que exista al menos un usuario en la base de datos
  */
 export async function verifyDatabaseUsers(): Promise<void> {
-  // Setup mode: no DB yet — skip verification, gateway starts to serve the web setup
-  if (!(await Bun.file(getDbPathLazy()).exists())) {
-    log.info("Setup mode: no database found — gateway will serve web setup at /setup");
-    return;
-  }
-
   try {
-    initializeDatabase();
+    const users = await col<UserDoc>("users");
+    const userCount = await users.count();
 
-    const db = getDb();
-    const userCount = db.query("SELECT COUNT(*) as count FROM users").get() as { count: number };
-
-    if (userCount.count === 0) {
+    if (userCount === 0) {
       const error = new Error("No users found in the database. A valid user is required to start the Hive Gateway.");
       log.error(error.message);
       log.error("Please run the onboarding process or manually insert a user.");
       throw error;
     }
 
-    log.info(`Database verified: ${userCount.count} user(s) found`);
+    log.info(`HiveDB verified: ${userCount} user(s) found`);
   } catch (error) {
-    log.error(`Database verification failed: ${(error as Error).message}`);
+    log.error(`HiveDB verification failed: ${(error as Error).message}`);
     throw error;
   }
 }
@@ -75,32 +66,20 @@ export async function loadAgentConfigFromDB(
   const defaultModel = "gemini-2.5-flash";
 
   try {
-    const db = getDb();
+    const agents = await col<AgentDoc>("agents");
+    const coordinator = (await agents.findBy("role", "coordinator"))[0]?.doc;
 
-    // Get coordinator agent ID from database
-    const coordinatorAgentId = resolveAgentId();
+    let provider = coordinator?.provider_id;
+    let model = coordinator?.model_id;
 
-    // Obtener configuración del agente coordinador
-    const agentConfig = db.query(`
-      SELECT provider_id, model_id FROM agents
-      WHERE id = ? OR role = 'coordinator'
-      ORDER BY (CASE WHEN id = ? THEN 1 ELSE 0 END) DESC
-      LIMIT 1
-    `).get(coordinatorAgentId || "", coordinatorAgentId || "") as
-      { provider_id: string | null; model_id: string | null } | undefined;
-
-    let provider = agentConfig?.provider_id;
-    let model = agentConfig?.model_id;
-
-    // Fallback to code_config if agents table doesn't have provider/model
+    // Fallback to codeConfig if the agent document doesn't have provider/model
     if (!provider || !model) {
-      const defaultProviderRow = db.query(`SELECT value FROM code_config WHERE key = 'default_provider'`).get() as { value: string | null } | undefined;
-      const configuredProvider = defaultProviderRow?.value;
+      const codeConfig = await col<CodeConfigDoc>("codeConfig");
+      const configuredProvider = (await codeConfig.get("default_provider"))?.doc.value;
       if (configuredProvider) {
         provider = configuredProvider;
         const modelKey = `provider_model_${configuredProvider}`;
-        const modelRow = db.query(`SELECT value FROM code_config WHERE key = ?`).get(modelKey) as { value: string | null } | undefined;
-        model = modelRow?.value || defaultModel;
+        model = (await codeConfig.get(modelKey))?.doc.value || defaultModel;
       }
     }
 
@@ -109,15 +88,7 @@ export async function loadAgentConfigFromDB(
     model = model || defaultModel;
 
     // Cargar API keys de providers activos desde el keystore del sistema.
-    const providers = db.query(`
-      SELECT id, name, base_url
-      FROM providers
-      WHERE active = 1
-    `).all() as Array<{
-      id: string;
-      name: string;
-      base_url: string | null
-    }>;
+    const providers = (await (await col<ProviderDoc>("providers")).findBy("active", true)).map(entry => entry.doc);
 
     if (providers.length > 0) {
       config.models = config.models || {};
@@ -142,11 +113,11 @@ export async function loadAgentConfigFromDB(
       log.info(`Loaded ${loadedProviders} active provider key(s) from Bun.secrets`);
     }
 
-    log.info(`Agent config loaded from DB: ${provider}/${model}`);
+    log.info(`Agent config loaded from HiveDB: ${provider}/${model}`);
     return { provider, model };
 
   } catch (error) {
-    log.debug(`Could not read agent config from DB, using defaults: ${defaultProvider}/${defaultModel}`);
+    log.debug(`Could not read agent config from HiveDB, using defaults: ${defaultProvider}/${defaultModel}`);
     return { provider: defaultProvider, model: defaultModel };
   }
 }
@@ -215,11 +186,11 @@ export async function initializeGateway(
   config: Config,
   pidFile: string
 ): Promise<GatewayInitializationResult> {
-  // Setup mode: 0 usuarios (initializeDatabase() ya fue llamado antes en server.ts)
+  // Setup mode: 0 usuarios en HiveDB
   let setupMode = false;
   try {
-    const count = (getDb().query("SELECT COUNT(*) as count FROM users").get() as { count: number }).count;
-    setupMode = count === 0;
+    const users = await col<UserDoc>("users");
+    setupMode = (await users.count()) === 0;
   } catch {
     setupMode = true;
   }
@@ -244,17 +215,6 @@ export async function initializeGateway(
     // 2. Escribir archivo PID (no crítico)
     await writePidFile(pidFile);
 
-    // 2a. Initialize global memory DB (agent_memory between sessions)
-    try {
-      initializeMemoryDb();
-      log.info("[initialize] Memory DB initialized (agent_memory)");
-    } catch (err) {
-      log.warn(`[initialize] Memory DB initialization failed: ${(err as Error).message}`);
-    }
-
-    // 3a. Startup migrations (idempotent, version-keyed)
-    runStartupMigrations();
-
     // 3. Cargar configuración del agente desde DB
     const { provider, model } = await loadAgentConfigFromDB(config);
 
@@ -272,43 +232,47 @@ export async function initializeGateway(
         },
       })
       const allSkills = loader.loadAllSkills()
-      const db = getDb()
+      const skills = await col<SkillDoc>("skills")
+      const now = Date.now()
       for (const s of allSkills) {
-        db.query(`
-          INSERT OR REPLACE INTO skills
-            (id, name, description, version, author, icon, category,
-             permissions, dependencies, tools, triggers, preferred_agents,
-             body, version_num, active, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, (unixepoch()), (unixepoch()))
-        `).run(
-          s.name, s.name, s.description || "", s.version || "0.0.1",
-          s.author || "Anonymous", s.icon || "🧩", s.category || "general",
-          JSON.stringify(s.permissions || []),
-          JSON.stringify(s.dependencies || []),
-          (s.tools || []).join(","),
-          (s.triggers || []).join(","),
-          JSON.stringify(s.preferred_agents || []),
-          s.content || "",
-          1,
-        )
+        const existing = await skills.get(s.name)
+        await skills.put(s.name, {
+          id: s.name,
+          name: s.name,
+          description: s.description || "",
+          version: String(s.version || "0.0.1"),
+          author: s.author || "Anonymous",
+          icon: s.icon || "skill",
+          category: s.category || "general",
+          permissions: JSON.stringify(s.permissions || []),
+          dependencies: JSON.stringify(s.dependencies || []),
+          tools: (s.tools || []).join(","),
+          triggers: (s.triggers || []).join(","),
+          preferred_agents: JSON.stringify(s.preferred_agents || []),
+          body: s.content || "",
+          version_num: 1,
+          active: true,
+          created_at: existing?.doc.created_at ?? now,
+          updated_at: now,
+        }, { expectedVersion: existing?.version ?? 0 })
       }
       log.info(`[initialize] ✅ ${allSkills.length} skills sincronizados (bundled + externos)`)
     } catch (err) {
       log.warn(`[initialize] External skill sync failed: ${(err as Error).message}`)
     }
 
-    // 4. Sync FTS5 indexes (tools + skills + playbook + mcp_tools)
-    log.info("[initialize] Syncing FTS5 indexes (asynchronous & transactional)...")
+    // 4. Sync HiveDB capability indexes (tools + skills + playbook + MCP tools)
+    log.info("[initialize] Syncing HiveDB capability indexes...")
     try {
       await Promise.all([
-        syncToolsToFTS(),
-        syncSkillsToFTS(),
-        syncPlaybookToFTS(),
-        syncMCPToolsToFTS()
+        syncToolsToIndex(),
+        syncSkillsToIndex(),
+        syncPlaybookToIndex(),
+        syncMCPToolsToIndex()
       ]);
-      log.info("[initialize] ✅ FTS5 indexes synced (tools, skills, playbook, mcp_tools)")
+      log.info("[initialize] ✅ HiveDB capability indexes synced (tools, skills, playbook, MCP tools)")
     } catch (err) {
-      log.error(`[initialize] FTS5 sync failed during startup: ${(err as Error).message}`);
+      log.error(`[initialize] HiveDB capability index sync failed during startup: ${(err as Error).message}`);
       // Consider if we should throw or continue. For now, continue but log error.
     }
 
@@ -317,15 +281,15 @@ export async function initializeGateway(
     await agent.initialize();
 
     // 6. Inicializar MCP Manager y agent loop
-    // MCP se inicializa con los servidores de la config + DB
+    // MCP se inicializa con los servidores de la config + HiveDB
     let mcpManager: MCPClientManager | null = null;
 
-    // Load MCP servers from DB and merge with config
-    const db = getDb();
-    const dbServers = db.query(`SELECT * FROM mcp_servers WHERE enabled = 1`).all() as Record<string, any>[];
+    // Load MCP servers from HiveDB and merge with config
+    const dbServers = await (await col<McpServerDoc>("mcpServers")).findBy("enabled", true);
 
     const mcpServersFromDB: Record<string, any> = {};
-    for (const server of dbServers) {
+    for (const entry of dbServers) {
+      const server = entry.doc;
       try {
         const mcpServerConfig: any = {
           transport: server.transport,

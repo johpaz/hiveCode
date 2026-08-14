@@ -56,6 +56,43 @@ function estimateTokenCount(messages: LLMMessage[]): number {
   return Math.ceil(totalChars / 3.5)
 }
 
+const PRUNE_TRIGGER_RATIO = 0.6
+const PRUNE_KEEP_VERBATIM = 6
+const PRUNE_PLACEHOLDER_LEN = 200
+
+/**
+ * Fine-grained pruning of old tool_result content — a cheaper first line of
+ * defense than full compaction, applied at a lower threshold. Mirrors Anthropic's
+ * "context editing" pattern (trim tool_result bodies, keep everything else):
+ * the last PRUNE_KEEP_VERBATIM tool messages stay untouched; older ones are
+ * replaced with a short placeholder that says what was pruned, not silently
+ * dropped, so the model knows content was removed rather than never existed.
+ * Runs before compactMessagesIfNeeded so most sessions never need the heavier,
+ * structure-changing compaction below at all.
+ */
+export function pruneOldToolResults(messages: LLMMessage[], model: string): LLMMessage[] {
+  const maxTokens = getMaxContextTokens(model)
+  const triggerTokens = Math.floor(maxTokens * PRUNE_TRIGGER_RATIO)
+  if (estimateTokenCount(messages) <= triggerTokens) return messages
+
+  const toolIndexes = messages.reduce<number[]>((acc, m, i) => {
+    if (m.role === "tool" && typeof m.content === "string" && !m.content.startsWith("[pruned:")) acc.push(i)
+    return acc
+  }, [])
+  const prunable = toolIndexes.slice(0, Math.max(0, toolIndexes.length - PRUNE_KEEP_VERBATIM))
+  if (prunable.length === 0) return messages
+
+  return messages.map((m, i) => {
+    if (!prunable.includes(i) || typeof m.content !== "string") return m
+    const originalLen = m.content.length
+    if (originalLen <= PRUNE_PLACEHOLDER_LEN) return m
+    return {
+      ...m,
+      content: `[pruned: ${originalLen} chars of an earlier tool result — see the assistant's next message for what was done with it]\n${m.content.slice(0, PRUNE_PLACEHOLDER_LEN)}...`,
+    }
+  })
+}
+
 /**
  * Compact tool messages if context exceeds trigger ratio.
  * Preserves: system prompt, initial user message, last 4 messages, and any assistant messages.
@@ -293,7 +330,7 @@ const ARCHITECTURE_PLAN_TOOL: LLMToolDef = {
             type: "object",
             properties: {
               name: { type: "string" },
-              coordinator: { type: "string", description: "product_manager|backend|frontend|mobile|data_scientist|security|test|devops|dba|integration|reviewer" },
+              coordinator: { type: "string", description: "product_manager|backend|frontend|data_scientist|security|test|devops|verifier|reviewer" },
               description: { type: "string" },
               dependsOn: { type: "array", items: { type: "string" } },
             },
@@ -322,7 +359,56 @@ const ARCHITECTURE_PLAN_TOOL: LLMToolDef = {
   },
 }
 
-const DECISION_TOOL_NAMES = ["bee_make_decision", "create_architecture_plan"]
+/** Tool definition for the CodeReviewer's structured verdict (replaces free-text string-matching). */
+const REVIEW_VERDICT_TOOL: LLMToolDef = {
+  type: "function",
+  function: {
+    name: "submit_review_verdict",
+    description:
+      "Submit the final review verdict. Call this ONLY after checking every PRD acceptance criterion against real evidence " +
+      "(code_test/check_types results, not assumption) and cross-checking module contracts (endpoints vs consumption, schema vs queries, types vs imports). " +
+      "You may reason in free text before calling this tool.",
+    parameters: {
+      type: "object",
+      properties: {
+        verdict: { type: "string", enum: ["aprobado", "aprobado_con_observaciones", "rechazado"] },
+        criteria: {
+          type: "array",
+          description: "One entry per PRD acceptance criterion, cross-checked against real evidence — not the reviewer's assumption.",
+          items: {
+            type: "object",
+            properties: {
+              description: { type: "string" },
+              met: { type: "boolean" },
+              evidence: { type: "string", description: "What was actually run/checked to decide met/not-met (test name, file:line, command output)." },
+            },
+            required: ["description", "met"],
+          },
+        },
+        categories: {
+          type: "array",
+          description: "coherencia_adr | consistencia_modulos | calidad_codigo | security_findings | test_coverage | antipatrones",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              status: { type: "string", enum: ["ok", "warning", "blocking"] },
+              detail: { type: "string" },
+            },
+            required: ["name", "status"],
+          },
+        },
+        reasons: {
+          type: "string",
+          description: "Specific reasons with file:line. Required when verdict is 'rechazado'. If a test was weakened/removed to force a pass, that is itself a blocking reason.",
+        },
+      },
+      required: ["verdict", "criteria"],
+    },
+  },
+}
+
+const DECISION_TOOL_NAMES = ["bee_make_decision", "create_architecture_plan", "submit_review_verdict"]
 
 class WorkerAgent {
   private coordinatorName: string
@@ -357,6 +443,7 @@ class WorkerAgent {
     // Add spawn_subagent and coordinator-specific decision tool
     const decisionTool = this.coordinatorName === "bee" ? BEE_DECISION_TOOL
       : this.coordinatorName === "architecture" ? ARCHITECTURE_PLAN_TOOL
+      : this.coordinatorName === "reviewer" ? REVIEW_VERDICT_TOOL
       : null
     this.tools = [...tools, SPAWN_SUBAGENT_TOOL, ...(decisionTool ? [decisionTool] : [])]
     this.allTools = (task.allTools ?? []) as any[]
@@ -417,8 +504,11 @@ while (this.iterations < MAX_ITERATIONS) {
             : `🧠 ${this.coordinatorName} razonando (paso ${this.iterations})...`,
         } as WorkerToManagerMessage))
 
-        // Auto-compact context if it's getting too large
-        const compactedMessages = compactMessagesIfNeeded(this.messages, model)
+        // Auto-compact context if it's getting too large. Fine-grained pruning
+        // (cheaper, lower threshold) runs first; full compaction only kicks in
+        // if pruning alone wasn't enough.
+        const prunedMessages = pruneOldToolResults(this.messages, model)
+        const compactedMessages = compactMessagesIfNeeded(prunedMessages, model)
         if (compactedMessages.length < this.messages.length) {
           self.postMessage(JSON.stringify({
             type: "THINKING",
@@ -430,13 +520,18 @@ while (this.iterations < MAX_ITERATIONS) {
         }
         this.messages = compactedMessages
 
-        // Inject stopping signal when approaching limit
-        // This forces the LLM to produce a final response instead of more tool calls
+        // Force a final response as the loop nears its limit — WITHOUT telling the
+        // model how many iterations remain. Anthropic/Cognition ("context anxiety")
+        // found models given a visible countdown misjudge it and rush/abandon work
+        // prematurely; the harness enforces the limit silently, the model never sees it.
         const iterationsLeft = MAX_ITERATIONS - this.iterations
         if (iterationsLeft <= 3) {
           this.messages.push({
             role: "user",
-            content: `⚠️ STOPPING: You have ${iterationsLeft} iteration(s) left. You MUST produce your FINAL response now without any more tool calls. Summarize what you know and respond to the user.`,
+            // The "⚠️ STOPPING" marker is the one the system prompt tells the model to
+            // watch for; without it here that instruction referenced a signal that was
+            // never actually sent.
+            content: `⚠️ STOPPING: produce your FINAL response without any more tool calls. Summarize what you know and respond to the user.`,
           })
         }
 

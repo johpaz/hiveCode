@@ -1,9 +1,26 @@
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { runReflector } from "../agent/reflector"
 import { callLLM, resolveProviderConfig } from "@johpaz/hivecode-core/agent/llm-client"
 import { saveScratchpadNote, getScratchpad, deleteScratchpadNote } from "@johpaz/hivecode-core/agent/conversation-store"
 import { hasProviderApiKey, storeProviderApiKey, encryptConfig, isFreeProvider } from "@johpaz/hivecode-core/storage/crypto"
+import { col, nextId } from "@johpaz/hivecode-core/storage/hive"
+import type {
+  CodeConfigDoc,
+  CodeFileSnapshotDoc,
+  CodeNarrativeDoc,
+  CodePlaybookDoc,
+  CodeReflectionDoc,
+  CodeSessionDoc,
+  CodeSessionModeDoc,
+  CodeTaskDoc,
+  CodeTraceDoc,
+  CodeTurnDoc,
+  McpServerDoc,
+  ModelDoc,
+  ProviderDoc,
+  SkillDoc,
+  SummaryDoc,
+} from "@johpaz/hivecode-core/storage/collections"
 
 export interface ContextState {
   sessionId: string
@@ -55,30 +72,152 @@ export interface ProviderRow {
   id: string
   name: string
   base_url: string | null
-  enabled: number
+  enabled: boolean
 }
 
 const VERSION = "1.0.0"
 const GIT_HASH = process.env.GIT_HASH || "dev"
 
-function getCtx(db: ReturnType<typeof getDb>): ContextState {
-  const session = db.query(
-    "SELECT id FROM code_sessions ORDER BY id DESC LIMIT 1"
-  ).get() as { id: string } | undefined
+type DbCompat = unknown
 
+function nowIso(): string {
+  return new Date().toISOString()
+}
+
+async function scanDocs<T>(collection: string): Promise<T[]> {
+  return (await (await col<T>(collection)).scan()).map((entry) => entry.doc)
+}
+
+async function getDoc<T>(collection: string, id: string): Promise<T | null> {
+  return (await (await col<T>(collection)).get(id))?.doc ?? null
+}
+
+async function getVersionedDoc<T>(collection: string, id: string) {
+  return (await col<T>(collection)).get(id)
+}
+
+async function getCodeConfig(key: string): Promise<string> {
+  return (await getDoc<CodeConfigDoc>("codeConfig", key))?.value ?? ""
+}
+
+async function setCodeConfig(key: string, value: string | null): Promise<void> {
+  const codeConfig = await col<CodeConfigDoc>("codeConfig")
+  const existing = await codeConfig.get(key)
+  await codeConfig.put(key, { key, value, updated_at: Date.now() }, { expectedVersion: existing?.version ?? 0 })
+}
+
+async function deleteCodeConfig(key: string): Promise<void> {
+  await (await col<CodeConfigDoc>("codeConfig")).delete(key)
+}
+
+async function listProviderDocs(): Promise<ProviderDoc[]> {
+  return (await scanDocs<ProviderDoc>("providers")).sort((a, b) => a.id.localeCompare(b.id))
+}
+
+async function upsertProviderDoc(providerId: string, patch: Partial<ProviderDoc>): Promise<void> {
+  const providers = await col<ProviderDoc>("providers")
+  const existing = await providers.get(providerId)
+  const now = Date.now()
+  const doc: ProviderDoc = {
+    id: providerId,
+    name: patch.name ?? existing?.doc.name ?? providerId,
+    base_url: patch.base_url ?? existing?.doc.base_url ?? null,
+    category: patch.category ?? existing?.doc.category ?? "llm",
+    num_ctx: patch.num_ctx ?? existing?.doc.num_ctx ?? null,
+    num_gpu: patch.num_gpu ?? existing?.doc.num_gpu ?? -1,
+    enabled: patch.enabled ?? existing?.doc.enabled ?? true,
+    active: patch.active ?? existing?.doc.active ?? false,
+    is_free_tier: patch.is_free_tier ?? existing?.doc.is_free_tier ?? false,
+    created_at: existing?.doc.created_at ?? patch.created_at ?? now,
+  }
+  await providers.put(providerId, doc, { expectedVersion: existing?.version ?? 0 })
+}
+
+async function updateProviderDoc(providerId: string, patch: Partial<ProviderDoc>): Promise<void> {
+  const providers = await col<ProviderDoc>("providers")
+  const existing = await providers.get(providerId)
+  if (!existing) return
+  await providers.put(providerId, { ...existing.doc, ...patch }, { expectedVersion: existing.version })
+}
+
+async function upsertModelDoc(modelId: string, patch: Partial<ModelDoc> & { provider_id: string }): Promise<void> {
+  const models = await col<ModelDoc>("models")
+  const existing = await models.get(modelId)
+  const doc: ModelDoc = {
+    id: modelId,
+    provider_id: patch.provider_id,
+    name: patch.name ?? existing?.doc.name ?? modelId,
+    model_type: patch.model_type ?? existing?.doc.model_type ?? "llm",
+    context_window: patch.context_window ?? existing?.doc.context_window ?? 20000,
+    capabilities: patch.capabilities ?? existing?.doc.capabilities ?? null,
+    enabled: patch.enabled ?? existing?.doc.enabled ?? true,
+    active: patch.active ?? existing?.doc.active ?? false,
+  }
+  await models.put(modelId, doc, { expectedVersion: existing?.version ?? 0 })
+}
+
+async function findModelsByProvider(providerId: string): Promise<ModelDoc[]> {
+  return (await (await col<ModelDoc>("models")).findBy("provider_id", providerId))
+    .map((entry) => entry.doc)
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+async function upsertMcpServerDoc(id: string, patch: Partial<McpServerDoc> & { name: string; transport: string }): Promise<void> {
+  const servers = await col<McpServerDoc>("mcpServers")
+  const existing = await servers.get(id)
+  const doc: McpServerDoc = {
+    id,
+    name: patch.name,
+    transport: patch.transport,
+    command: patch.command ?? existing?.doc.command ?? null,
+    args: patch.args ?? existing?.doc.args ?? null,
+    env_encrypted: patch.env_encrypted ?? existing?.doc.env_encrypted ?? null,
+    env_iv: patch.env_iv ?? existing?.doc.env_iv ?? null,
+    headers_encrypted: patch.headers_encrypted ?? existing?.doc.headers_encrypted ?? null,
+    headers_iv: patch.headers_iv ?? existing?.doc.headers_iv ?? null,
+    url: patch.url ?? existing?.doc.url ?? null,
+    enabled: patch.enabled ?? existing?.doc.enabled ?? true,
+    active: patch.active ?? existing?.doc.active ?? false,
+    builtin: patch.builtin ?? existing?.doc.builtin ?? false,
+    status: patch.status ?? existing?.doc.status ?? "disconnected",
+    tools_count: patch.tools_count ?? existing?.doc.tools_count ?? 0,
+    user_id: patch.user_id ?? existing?.doc.user_id,
+  }
+  await servers.put(id, doc, { expectedVersion: existing?.version ?? 0 })
+}
+
+async function getActiveSession(): Promise<CodeSessionDoc | null> {
+  const sessions = await scanDocs<CodeSessionDoc>("codeSessions")
+  return sessions
+    .sort((a, b) => (b.last_active || b.created_at || b.id).localeCompare(a.last_active || a.created_at || a.id))[0] ?? null
+}
+
+async function getSessionTurns(sessionId: string): Promise<CodeTurnDoc[]> {
+  return (await (await col<CodeTurnDoc>("codeTurns")).findBy("session_id", sessionId))
+    .map((entry) => entry.doc)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at))
+}
+
+async function listRecentSessionsWithTurns(limit = 15): Promise<Array<CodeSessionDoc & { turns: number }>> {
+  const sessions = (await scanDocs<CodeSessionDoc>("codeSessions"))
+    .sort((a, b) => b.last_active.localeCompare(a.last_active))
+    .slice(0, limit)
+  const counts = await Promise.all(sessions.map(async (session) => ({
+    id: session.id,
+    turns: (await getSessionTurns(session.id)).length,
+  })))
+  const countMap = new Map(counts.map((entry) => [entry.id, entry.turns]))
+  return sessions.map((session) => ({ ...session, turns: countMap.get(session.id) ?? 0 }))
+}
+
+async function getCtx(): Promise<ContextState> {
+  const session = await getActiveSession()
   const sessionId = session?.id ?? "none"
-  const provider = (db.query(
-    "SELECT value FROM code_config WHERE key = 'default_provider'"
-  ).get() as any)?.value ?? ""
-  const model = provider ? (db.query(
-    "SELECT value FROM code_config WHERE key = ?"
-  ).get(`provider_model_${provider}`) as any)?.value ?? "" : ""
-  const mode = (db.query(
-    "SELECT value FROM code_config WHERE key = 'default_mode'"
-  ).get() as any)?.value ?? "auto"
-  const projectPath = (db.query(
-    "SELECT project_path FROM code_sessions ORDER BY id DESC LIMIT 1"
-  ).get() as any)?.project_path ?? process.cwd()
+  const provider = await getCodeConfig("default_provider")
+  const model = provider ? await getCodeConfig(`provider_model_${provider}`) : ""
+  const rawMode = await getCodeConfig("default_mode")
+  const mode = rawMode === "plan" || rawMode === "approval" || rawMode === "auto" ? rawMode : "approval"
+  const projectPath = session?.project_path ?? process.cwd()
 
   return {
     sessionId,
@@ -144,7 +283,7 @@ const ALL_COMMANDS = [
   { command: "/modelo set", category: "modelo", description: "cambiar modelo activo" },
   { command: "/modelo info", category: "modelo", description: "informacion del modelo" },
   { command: "/narrative show", category: "narrative", description: "mostrar entradas del narrativo" },
-  { command: "/narrative search", category: "narrative", description: "buscar en narrativo con fts5" },
+  { command: "/narrative search", category: "narrative", description: "buscar en narrativo con HiveDB" },
   { command: "/narrative export", category: "narrative", description: "exportar narrativo completo" },
   { command: "/provider list", category: "provider", description: "listar providers configurados" },
   { command: "/provider add", category: "provider", description: "agregar provider de ia" },
@@ -171,16 +310,9 @@ const ALL_COMMANDS = [
   { command: "/version", category: "system", description: "version de hivecode" },
 ]
 
-export function syncCommandsToFTS(db: ReturnType<typeof getDb>): void {
-  try {
-    db.run("DELETE FROM code_commands_fts")
-    const stmt = db.prepare("INSERT INTO code_commands_fts (command, category, description) VALUES (?, ?, ?)")
-    for (const cmd of ALL_COMMANDS) {
-      stmt.run(cmd.command, cmd.category, cmd.description)
-    }
-  } catch (err) {
-    logger.warn("[command-parser] Failed to sync commands to FTS:", (err as Error).message)
-  }
+export function syncCommandsToIndex(_db?: DbCompat): void {
+  // Kept as a compatibility export for older callers. Command suggestions now
+  // use the in-memory command catalog below.
 }
 
 function renderSuggestions(input: string): string[] {
@@ -189,30 +321,19 @@ function renderSuggestions(input: string): string[] {
     console.error(`[suggestions] empty prefix, returning first 20 commands`)
     return ALL_COMMANDS.slice(0, 20).map(c => c.command)
   }
-  try {
-    const db = getDb()
-    const rows = db.query(`
-      SELECT command FROM code_commands_fts
-      WHERE code_commands_fts MATCH ?
-      ORDER BY rank
-      LIMIT 20
-    `).all(`${prefix}*`) as { command: string }[]
-    if (rows.length > 0) {
-      console.error(`[suggestions] FTS match for "${prefix}*": ${rows.length} results`)
-      return rows.map(r => r.command)
-    }
-  } catch (e) {
-    console.error(`[suggestions] FTS error: ${(e as Error).message}`)
-    // Fallback to simple prefix match if FTS fails
-  }
-  const match = ALL_COMMANDS.filter(c => c.command.startsWith("/" + prefix))
+  const normalized = prefix.toLowerCase()
+  const match = ALL_COMMANDS.filter(c =>
+    c.command.toLowerCase().startsWith(`/${normalized}`) ||
+    c.description.toLowerCase().includes(normalized) ||
+    c.category.toLowerCase().includes(normalized)
+  )
   console.error(`[suggestions] prefix fallback for "${prefix}": ${match.length} results`)
   return match.slice(0, 20).map(c => c.command)
 }
 
 async function handleFreeCommand(
   args: string[],
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
   ctxState: ContextState,
   ui?: UiCallbacks
 ): Promise<CommandResult> {
@@ -221,11 +342,11 @@ async function handleFreeCommand(
 
   // /free set  — activate as default provider
   if (sub === "set" || sub === "set-default" || sub === "default") {
-    const rows = db.query("SELECT 1 FROM providers WHERE id = ?").all(FREE) as unknown[]
-    if (rows.length === 0) {
-      return { handled: true, output: `  ✗ provider '${FREE}' no existe. Ejecuta la migración inicial.` }
+    const provider = await getDoc<ProviderDoc>("providers", FREE)
+    if (!provider) {
+      return { handled: true, output: `  ✗ provider '${FREE}' no existe. Ejecuta el setup inicial.` }
     }
-    db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(FREE)
+    await setCodeConfig("default_provider", FREE)
     return {
       handled: true,
       output: `  ✓ ${FREE} es ahora el provider por defecto`,
@@ -257,13 +378,7 @@ async function handleFreeCommand(
     }
   } catch { /* ignore */ }
 
-  const models = db
-    .query<{ id: string; name: string; context_window: number; capabilities: string }, [string]>(
-      `SELECT id, name, context_window, capabilities FROM models
-       WHERE provider_id = ? AND model_type = 'llm' AND enabled = 1
-       ORDER BY name`
-    )
-    .all(FREE) as Array<{ id: string; name: string; context_window: number; capabilities: string }>
+  const models = (await findModelsByProvider(FREE)).filter((model) => model.model_type === "llm" && model.enabled)
 
   const lines: string[] = [
     "  hivecode-free — modelos vía tu API (Firebase Auth)",
@@ -273,7 +388,7 @@ async function handleFreeCommand(
     "",
     `  ${models.length} modelos disponibles:`,
     ...models.map((m) => {
-      const caps = (() => { try { return (JSON.parse(m.capabilities) as string[]).join(", ") } catch { return "" } })()
+      const caps = (() => { try { return (JSON.parse(m.capabilities ?? "[]") as string[]).join(", ") } catch { return "" } })()
       return `    · ${m.id.padEnd(50)} ctx=${m.context_window.toString().padStart(8)}  ${caps}`
     }),
     "",
@@ -290,7 +405,7 @@ async function handleFreeCommand(
 
 async function handleAuthCommand(
   args: string[],
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
   ctxState: ContextState,
   ui?: UiCallbacks
 ): Promise<CommandResult> {
@@ -340,7 +455,7 @@ async function handleAuthCommand(
   }
 }
 
-function runDoctor(db: ReturnType<typeof getDb>): string {
+async function runDoctor(_db: DbCompat): Promise<string> {
   const checks: string[] = []
   try {
     const bunVer = process.versions.bun ?? "unknown"
@@ -348,16 +463,16 @@ function runDoctor(db: ReturnType<typeof getDb>): string {
   } catch { checks.push("  \u2717 Bun version check failed") }
 
   try {
-    const providers = db.query("SELECT id, name FROM providers WHERE enabled = 1").all() as ProviderRow[]
+    const providers = (await (await col<ProviderDoc>("providers")).scan())
+      .map((entry) => entry.doc)
+      .filter((provider) => provider.enabled)
     checks.push(`  \u2713 Providers: ${providers.length} enabled`)
   } catch { checks.push("  \u2717 Provider check failed") }
 
   try {
-    const tables = db.query(
-      "SELECT name FROM sqlite_master WHERE type='table'"
-    ).all() as { name: string }[]
-    checks.push(`  \u2713 SQLite: ${tables.length} tables`)
-  } catch { checks.push("  \u2717 SQLite check failed") }
+    await col("meta")
+    checks.push("  \u2713 HiveDB disponible")
+  } catch { checks.push("  \u2717 HiveDB check failed") }
 
   return [
     "",
@@ -443,7 +558,7 @@ function renderHelp(topic?: string): string {
           lines.push("  /narrative search <query>")
           lines.push("")
           lines.push("  ARGUMENTOS")
-          lines.push("  <query>    texto a buscar (usa FTS5 con stemming)")
+          lines.push("  <query>    texto a buscar en HiveDB")
           lines.push("")
           lines.push("  EJEMPLOS")
           lines.push('  /narrative search JWT')
@@ -473,7 +588,7 @@ function renderHelp(topic?: string): string {
 
 async function handleProviderCommand(
   args: string[],
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
   ctx: ContextState,
   ui?: UiCallbacks,
 ): Promise<CommandResult> {
@@ -504,13 +619,19 @@ async function handleProviderCommand(
 
   switch (action) {
     case "list": {
-      const providers = db.query(
-        "SELECT * FROM providers ORDER BY CASE WHEN enabled = 1 THEN 0 ELSE 1 END, name"
-      ).all() as ProviderRow[]
-      const modelRows = db.query(
-        "SELECT key, value FROM code_config WHERE key LIKE 'provider_model_%'"
-      ).all() as { key: string; value: string }[]
-      const modelMap = new Map(modelRows.map(r => [r.key.replace("provider_model_", ""), r.value]))
+      const providers = (await listProviderDocs())
+        .sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.name.localeCompare(b.name))
+        .map((provider) => ({
+          id: provider.id,
+          name: provider.name,
+          base_url: provider.base_url,
+          enabled: provider.enabled,
+        }))
+      const modelMap = new Map(
+        (await scanDocs<CodeConfigDoc>("codeConfig"))
+          .filter((doc) => doc.key.startsWith("provider_model_") && doc.value)
+          .map((doc) => [doc.key.replace("provider_model_", ""), doc.value ?? ""])
+      )
       return { handled: true, output: renderProviderList(providers, ctx.activeProvider, modelMap) }
     }
     case "add": {
@@ -526,21 +647,13 @@ async function handleProviderCommand(
         if (!values) return { handled: true, output: "  Configuraci\u00f3n cancelada" }
         const providerId = values.id.trim().toLowerCase()
         await storeProviderApiKey(providerId, values.api_key)
-        db.query(`
-          INSERT INTO providers (id, name, base_url, enabled, category)
-          VALUES (?,?,?,1,?)
-          ON CONFLICT(id) DO UPDATE SET
-            name = excluded.name,
-            base_url = excluded.base_url,
-            enabled = 1,
-            category = excluded.category
-        `).run(
-          providerId,
-          values.name || providerId,
-          values.base_url || null,
-          values.category || "llm",
-        )
-        db.query("INSERT OR REPLACE INTO code_config (key,value) VALUES ('default_provider',?)").run(providerId)
+        await upsertProviderDoc(providerId, {
+          name: values.name || providerId,
+          base_url: values.base_url || null,
+          enabled: true,
+          category: (values.category || "llm") as ProviderDoc["category"],
+        })
+        await setCodeConfig("default_provider", providerId)
         return {
           handled: true,
           output: `  \u2713 Provider ${providerId} configurado`,
@@ -549,22 +662,20 @@ async function handleProviderCommand(
       }
       // Fallback: wizard if available, else non-interactive
       if (ui?.suspendTui && ui?.resumeTui && ui?.runProviderSetupWizard) {
-        const known = (db.query("SELECT id FROM providers ORDER BY id").all() as { id: string }[]).map(r => r.id)
+        const known = (await listProviderDocs()).map(r => r.id)
         await ui.suspendTui()
         try {
           const result = await ui.runProviderSetupWizard(known, VERSION)
           if (result) {
             await storeProviderApiKey(result.provider, result.apiKey)
-            db.query(`
-              INSERT INTO providers (id, name, base_url, enabled)
-              VALUES (?,?,?,1)
-              ON CONFLICT(id) DO UPDATE SET
-                base_url = excluded.base_url,
-                enabled = 1
-            `).run(result.provider, result.provider, result.baseUrl || null)
-            db.query("INSERT OR REPLACE INTO code_config (key,value) VALUES ('default_provider',?)").run(result.provider)
+            await upsertProviderDoc(result.provider, {
+              name: result.provider,
+              base_url: result.baseUrl || null,
+              enabled: true,
+            })
+            await setCodeConfig("default_provider", result.provider)
             if (result.model) {
-              db.query("INSERT OR REPLACE INTO code_config (key,value) VALUES (?,?)").run(`provider_model_${result.provider}`, result.model)
+              await setCodeConfig(`provider_model_${result.provider}`, result.model)
             }
             return {
               handled: true,
@@ -582,11 +693,11 @@ async function handleProviderCommand(
         handled: true,
         output: "uso: /provider add <nombre>\nejemplos: /provider add openai",
       }
-      const existing = db.query("SELECT id FROM providers WHERE id = ?").get(name) as any
+      const existing = await getDoc<ProviderDoc>("providers", name)
       if (existing) {
         return { handled: true, output: `  ${name} ya existe. Usa /provider set ${name} para activarlo.` }
       }
-      db.query("INSERT OR IGNORE INTO providers (id, name, enabled) VALUES (?, ?, 1)").run(name, name)
+      await upsertProviderDoc(name, { name, enabled: true })
       return {
         handled: true,
         output: `  \u2713 ${name} agregado\n\n  Configurar API key con: hivecode secret set provider.${name}\n  Activar con: /provider set ${name}`,
@@ -595,9 +706,10 @@ async function handleProviderCommand(
     case "set": {
       if (ui?.showConfigModal) {
         // Muestra TODOS los providers LLM \u2014 con y sin API key
-        const allProviders = db.query(
-          "SELECT id, name FROM providers WHERE category = 'llm' OR category IS NULL ORDER BY name"
-        ).all() as { id: string; name: string }[]
+        const allProviders = (await listProviderDocs())
+          .filter((provider) => provider.category === "llm")
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((provider) => ({ id: provider.id, name: provider.name }))
 
         if (allProviders.length === 0) {
           return { handled: true, output: "  No hay providers registrados.\n  Agrega uno con: /provider add" }
@@ -655,16 +767,16 @@ async function handleProviderCommand(
         if (newKey) {
           await storeProviderApiKey(selectedId, newKey)
         }
-        db.query("UPDATE providers SET enabled = 1 WHERE id = ?").run(selectedId)
-        db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(selectedId)
+        await updateProviderDoc(selectedId, { enabled: true })
+        await setCodeConfig("default_provider", selectedId)
 
         // Cambiar al primer modelo del nuevo provider para evitar 401 por modelo incompatible
-        const firstModel = db.query(
-          "SELECT id FROM models WHERE provider = ? ORDER BY id ASC LIMIT 1"
-        ).get(selectedId) as { id: string } | null
+        const firstModel = (await findModelsByProvider(selectedId))
+          .filter((model) => model.enabled)
+          .sort((a, b) => a.id.localeCompare(b.id))[0]
         const newModel = firstModel?.id ?? null
         if (newModel) {
-          db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_model', ?)").run(newModel)
+          await setCodeConfig(`provider_model_${selectedId}`, newModel)
         }
 
         const verb = newKey ? "configurado y activado" : "activado"
@@ -679,15 +791,15 @@ async function handleProviderCommand(
       // Sin modal (modo texto puro)
       const name = rest[0]
       if (!name) {
-        const providers = db.query("SELECT id FROM providers ORDER BY id").all() as { id: string }[]
+        const providers = await listProviderDocs()
         return {
           handled: true,
           output: "uso: /provider set <nombre>\ndisponibles: " + providers.map(p => p.id).join(", "),
         }
       }
-      const row = db.query("SELECT id FROM providers WHERE id = ?").get(name) as any
+      const row = await getDoc<ProviderDoc>("providers", name)
       if (!row) return { handled: true, output: `  Provider no encontrado: ${name}\n  Agrega con: /provider add ${name}` }
-      db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(name)
+      await setCodeConfig("default_provider", name)
       return {
         handled: true,
         output: `  \u2b22 Provider: ${name}`,
@@ -699,7 +811,7 @@ async function handleProviderCommand(
       if (!name) return { handled: true, output: "  No hay provider activo para probar." }
       try {
         const start = performance.now()
-        const row = db.query("SELECT base_url FROM providers WHERE id = ?").get(name) as any
+        const row = await getDoc<ProviderDoc>("providers", name)
         const baseUrl = row?.base_url || "https://api.anthropic.com"
         await fetch(`${baseUrl}/v1/models`, {
           method: "GET",
@@ -713,7 +825,12 @@ async function handleProviderCommand(
       }
     }
     case "status": {
-      const providers = db.query("SELECT * FROM providers").all() as ProviderRow[]
+      const providers = (await listProviderDocs()).map((provider) => ({
+        id: provider.id,
+        name: provider.name,
+        base_url: provider.base_url,
+        enabled: provider.enabled,
+      }))
       const lines = providers.map(p => {
         const icon = p.enabled ? "\u25cf" : "\u25cb"
         const active = p.id === ctx.activeProvider ? " [ACTIVO]" : ""
@@ -729,18 +846,9 @@ async function handleProviderCommand(
   }
 }
 
-interface ModelRow {
-  id: string
-  provider_id: string
-  name: string
-  model_type: string
-  context_window: number
-  enabled: number
-}
-
 async function handleModelCommand(
   args: string[],
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
   ctx: ContextState,
   ui?: UiCallbacks,
 ): Promise<CommandResult> {
@@ -774,8 +882,10 @@ async function handleModelCommand(
       const providerId = rest[0] || ctx.activeProvider
       const activeModel = ctx.activeModel
       const rows = providerId
-        ? (db.query("SELECT * FROM models WHERE provider_id = ? AND enabled = 1 ORDER BY name").all(providerId) as ModelRow[])
-        : (db.query("SELECT * FROM models WHERE enabled = 1 ORDER BY provider_id, name").all() as ModelRow[])
+        ? (await findModelsByProvider(providerId)).filter((model) => model.enabled)
+        : (await scanDocs<ModelDoc>("models"))
+            .filter((model) => model.enabled)
+            .sort((a, b) => a.provider_id.localeCompare(b.provider_id) || a.name.localeCompare(b.name))
 
       if (rows.length === 0) {
         return {
@@ -804,9 +914,10 @@ async function handleModelCommand(
 
     case "set": {
       if (ui?.showConfigModal) {
-        const enabledProviders = db.query(
-          "SELECT id FROM providers WHERE enabled = 1 ORDER BY id"
-        ).all() as { id: string }[]
+        const enabledProviders = (await listProviderDocs())
+          .filter((provider) => provider.enabled)
+          .sort((a, b) => a.id.localeCompare(b.id))
+          .map((provider) => ({ id: provider.id }))
         const providers = (await Promise.all(enabledProviders.map(async p => ({
           ...p,
           hasApiKey: await hasProviderApiKey(p.id),
@@ -816,14 +927,9 @@ async function handleModelCommand(
         }
         // Build combined options: "provider :: modelId" — solo providers con API key
         const providerIds = new Set(providers.map(p => p.id))
-        const dbModels = (db.query(`
-          SELECT m.id, m.provider_id
-          FROM models m
-          JOIN providers p ON m.provider_id = p.id
-          WHERE m.enabled = 1
-            AND p.enabled = 1
-          ORDER BY m.provider_id, m.id
-        `).all() as { id: string; provider_id: string }[]).filter(m => providerIds.has(m.provider_id))
+        const dbModels = (await scanDocs<ModelDoc>("models"))
+          .filter((model) => model.enabled && providerIds.has(model.provider_id))
+          .sort((a, b) => a.provider_id.localeCompare(b.provider_id) || a.id.localeCompare(b.id))
 
         const combinedOptions = dbModels.map(m => `${m.provider_id} :: ${m.id}`)
 
@@ -856,8 +962,8 @@ async function handleModelCommand(
           modelId    = values.model || ""
         }
         if (!modelId) return { handled: true, output: "  Modelo no especificado" }
-        db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)").run(`provider_model_${providerId}`, modelId)
-        db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)").run(providerId)
+        await setCodeConfig(`provider_model_${providerId}`, modelId)
+        await setCodeConfig("default_provider", providerId)
         return {
           handled: true,
           output: `  \u2b22 Modelo: ${modelId}  [${providerId}]`,
@@ -868,14 +974,14 @@ async function handleModelCommand(
       const provider = rest[0] || ctx.activeProvider
       const model = rest[1]
       if (!model) {
-        const rows = db.query("SELECT id FROM models WHERE provider_id = ? AND enabled = 1 ORDER BY id").all(provider) as { id: string }[]
+        const rows = (await findModelsByProvider(provider)).filter((entry) => entry.enabled).sort((a, b) => a.id.localeCompare(b.id))
         const hint = rows.length > 0 ? rows.map(r => r.id).join(", ") : "(ninguno en BD)"
         return {
           handled: true,
           output: `uso: /modelo set <provider> <modelo>\nDisponibles para ${provider}: ${hint}`,
         }
       }
-      db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES (?, ?)").run(`provider_model_${provider}`, model)
+      await setCodeConfig(`provider_model_${provider}`, model)
       return {
         handled: true,
         output: `  \u2b22 Modelo: ${model} [${provider}]`,
@@ -885,7 +991,10 @@ async function handleModelCommand(
 
     case "add": {
       if (ui?.showConfigModal) {
-        const providers = db.query("SELECT id FROM providers WHERE enabled = 1 ORDER BY id").all() as { id: string }[]
+        const providers = (await listProviderDocs())
+          .filter((provider) => provider.enabled)
+          .sort((a, b) => a.id.localeCompare(b.id))
+          .map((provider) => ({ id: provider.id }))
         if (providers.length === 0) {
           return { handled: true, output: "  No hay providers configurados. Agrega uno con: /provider add" }
         }
@@ -902,16 +1011,13 @@ async function handleModelCommand(
         const providerId  = values.provider_id
         const modelType   = values.model_type || "llm"
         const ctxWindow   = parseInt(values.context_window || "20000", 10) || 20000
-        db.query(`
-          INSERT INTO models (id, provider_id, name, model_type, context_window, enabled)
-          VALUES (?, ?, ?, ?, ?, 1)
-          ON CONFLICT(id) DO UPDATE SET
-            provider_id    = excluded.provider_id,
-            name           = excluded.name,
-            model_type     = excluded.model_type,
-            context_window = excluded.context_window,
-            enabled        = 1
-        `).run(modelId, providerId, modelName, modelType, ctxWindow)
+        await upsertModelDoc(modelId, {
+          provider_id: providerId,
+          name: modelName,
+          model_type: modelType as ModelDoc["model_type"],
+          context_window: ctxWindow,
+          enabled: true,
+        })
         return {
           handled: true,
           output: `  \u2713 Modelo ${modelId} (${modelType}) agregado a ${providerId}`,
@@ -922,15 +1028,16 @@ async function handleModelCommand(
       if (!modelId || !providerId) {
         return { handled: true, output: "uso: /modelo add <id> <provider>\nejemplo: /modelo add claude-sonnet-4-6 anthropic" }
       }
-      db.query("INSERT OR IGNORE INTO models (id, provider_id, name, model_type) VALUES (?,?,?,?)")
-        .run(modelId, providerId, modelId, "llm")
+      await upsertModelDoc(modelId, { provider_id: providerId, name: modelId, model_type: "llm" })
       return { handled: true, output: `  \u2713 Modelo ${modelId} agregado a ${providerId}` }
     }
 
     case "delete":
     case "remove": {
       if (ui?.showConfigModal) {
-        const rows = db.query("SELECT id, provider_id FROM models WHERE enabled = 1 ORDER BY provider_id, id").all() as { id: string; provider_id: string }[]
+        const rows = (await scanDocs<ModelDoc>("models"))
+          .filter((model) => model.enabled)
+          .sort((a, b) => a.provider_id.localeCompare(b.provider_id) || a.id.localeCompare(b.id))
         if (rows.length === 0) return { handled: true, output: "  No hay modelos en la BD." }
         const options = rows.map(m => `${m.provider_id} :: ${m.id}`)
         const values = await ui.showConfigModal("model_delete", "Eliminar Modelo", [
@@ -940,19 +1047,19 @@ async function handleModelCommand(
         const parts = values.combo.split(" :: ")
         const modelId = parts[1]?.trim()
         if (!modelId) return { handled: true, output: "  Selecci\u00f3n inv\u00e1lida" }
-        db.query("DELETE FROM models WHERE id = ?").run(modelId)
+        await (await col<ModelDoc>("models")).delete(modelId)
         return { handled: true, output: `  \u2713 Modelo ${modelId} eliminado` }
       }
       const modelId = rest[0]
       if (!modelId) return { handled: true, output: "uso: /modelo delete <id>" }
-      db.query("DELETE FROM models WHERE id = ?").run(modelId)
+      await (await col<ModelDoc>("models")).delete(modelId)
       return { handled: true, output: `  \u2713 Modelo ${modelId} eliminado` }
     }
 
     case "info": {
       const modelId = rest[0] || ctx.activeModel
       const row = modelId
-        ? (db.query("SELECT * FROM models WHERE id = ?").get(modelId) as ModelRow | undefined)
+        ? await getDoc<ModelDoc>("models", modelId)
         : undefined
       if (!row) {
         return {
@@ -987,7 +1094,7 @@ async function handleModelCommand(
 
 async function handleMcpCommand(
   args: string[],
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
   ctx: ContextState,
   ui?: UiCallbacks,
 ): Promise<CommandResult> {
@@ -1018,7 +1125,7 @@ async function handleMcpCommand(
 
   switch (action) {
     case "list": {
-      const rows = db.query("SELECT id, name, transport, url, command, enabled, status, tools_count FROM mcp_servers ORDER BY id").all() as any[]
+      const rows = (await scanDocs<McpServerDoc>("mcpServers")).sort((a, b) => a.id.localeCompare(b.id))
       if (rows.length === 0) {
         return { handled: true, output: "\n  No hay servidores MCP configurados.\n  Agrega uno con: /mcp add <url-o-nombre>\n" }
       }
@@ -1058,10 +1165,18 @@ async function handleMcpCommand(
             return { handled: true, output: "  Headers inv\u00e1lidos: debe ser JSON v\u00e1lido" }
           }
         }
-        db.query(`
-          INSERT OR REPLACE INTO mcp_servers (id, name, transport, url, command, headers_encrypted, headers_iv, enabled, active, builtin, status)
-          VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, 0, 'disconnected')
-        `).run(id, values.name || id, transport, url, command, headersEncrypted, headersIv)
+        await upsertMcpServerDoc(id, {
+          name: values.name || id,
+          transport,
+          url,
+          command,
+          headers_encrypted: headersEncrypted,
+          headers_iv: headersIv,
+          enabled: true,
+          active: false,
+          builtin: false,
+          status: "disconnected",
+        })
         return { handled: true, output: `  \u2713 MCP ${id} a\u00f1adido (${transport})\n  El hot-reload lo conectar\u00e1 autom\u00e1ticamente.` }
       }
       const input = rest[0]
@@ -1069,36 +1184,44 @@ async function handleMcpCommand(
       const id = input.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase()
       const isUrl = input.startsWith("http://") || input.startsWith("https://")
       const transport = isUrl ? "sse" : "stdio"
-      db.query(`
-        INSERT OR REPLACE INTO mcp_servers (id, name, transport, url, command, enabled, active, builtin, status)
-        VALUES (?, ?, ?, ?, ?, 1, 0, 0, 'disconnected')
-      `).run(id, input, transport, isUrl ? input : null, isUrl ? null : input)
+      await upsertMcpServerDoc(id, {
+        name: input,
+        transport,
+        url: isUrl ? input : null,
+        command: isUrl ? null : input,
+        enabled: true,
+        active: false,
+        builtin: false,
+        status: "disconnected",
+      })
       return { handled: true, output: `  \u2713 MCP ${id} a\u00f1adido (${transport})\n  El hot-reload lo conectar\u00e1 autom\u00e1ticamente.` }
     }
     case "enable": {
       const name = rest[0]
       if (!name) return { handled: true, output: "uso: /mcp enable <nombre>" }
-      db.query("UPDATE mcp_servers SET enabled = 1 WHERE id = ?").run(name)
+      const row = await getVersionedDoc<McpServerDoc>("mcpServers", name)
+      if (row) await (await col<McpServerDoc>("mcpServers")).put(name, { ...row.doc, enabled: true }, { expectedVersion: row.version })
       return { handled: true, output: `  \u2713 MCP ${name} habilitado` }
     }
     case "disable": {
       const name = rest[0]
       if (!name) return { handled: true, output: "uso: /mcp disable <nombre>" }
-      db.query("UPDATE mcp_servers SET enabled = 0 WHERE id = ?").run(name)
+      const row = await getVersionedDoc<McpServerDoc>("mcpServers", name)
+      if (row) await (await col<McpServerDoc>("mcpServers")).put(name, { ...row.doc, enabled: false }, { expectedVersion: row.version })
       return { handled: true, output: `  \u2713 MCP ${name} deshabilitado` }
     }
     case "remove": {
       const name = rest[0]
       if (!name) return { handled: true, output: "uso: /mcp remove <nombre>" }
-      const row = db.query("SELECT id FROM mcp_servers WHERE id = ?").get(name) as any
+      const row = await getDoc<McpServerDoc>("mcpServers", name)
       if (!row) return { handled: true, output: `  MCP no encontrado: ${name}` }
-      db.query("DELETE FROM mcp_servers WHERE id = ?").run(name)
+      await (await col<McpServerDoc>("mcpServers")).delete(name)
       return { handled: true, output: `  \u2713 MCP ${name} eliminado` }
     }
     case "inspect": {
       const name = rest[0]
       if (!name) return { handled: true, output: "uso: /mcp inspect <nombre>" }
-      const row = db.query("SELECT id, name, transport, url, command, args, enabled, status, tools_count FROM mcp_servers WHERE id = ?").get(name) as any
+      const row = await getDoc<McpServerDoc>("mcpServers", name)
       if (!row) return { handled: true, output: `  MCP no encontrado: ${name}` }
       const lines = [
         ``,
@@ -1116,7 +1239,7 @@ async function handleMcpCommand(
     case "test": {
       const name = rest[0]
       if (!name) return { handled: true, output: "uso: /mcp test <nombre>" }
-      const row = db.query("SELECT id, url, transport FROM mcp_servers WHERE id = ?").get(name) as any
+      const row = await getDoc<McpServerDoc>("mcpServers", name)
       if (!row) return { handled: true, output: `  MCP no encontrado: ${name}` }
       try {
         if (row.transport === "sse" && row.url) {
@@ -1146,10 +1269,17 @@ async function handleMcpCommand(
           const url = isUrl ? srv.url : null
           const command = !isUrl && srv.command ? srv.command : null
           const args = srv.args ? JSON.stringify(srv.args) : null
-          db.query(`
-            INSERT OR REPLACE INTO mcp_servers (id, name, transport, url, command, args, enabled, active, builtin, status)
-            VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, 'disconnected')
-          `).run(id, name, transport, url, command, args)
+          await upsertMcpServerDoc(id, {
+            name,
+            transport,
+            url,
+            command,
+            args,
+            enabled: true,
+            active: false,
+            builtin: false,
+            status: "disconnected",
+          })
           added++
         }
         return { handled: true, output: `  \u2713 ${added} servidores MCP cargados desde ${filePath}` }
@@ -1164,7 +1294,7 @@ async function handleMcpCommand(
 
 async function handleSkillCommand(
   args: string[],
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
 ): Promise<CommandResult> {
   const [action, ...rest] = args
 
@@ -1193,7 +1323,7 @@ async function handleSkillCommand(
 
   switch (action) {
     case "list": {
-      const rows = db.query("SELECT id, name, active, category FROM skills ORDER BY id").all() as any[]
+      const rows = (await scanDocs<SkillDoc>("skills")).sort((a, b) => a.id.localeCompare(b.id))
       if (rows.length === 0) return { handled: true, output: "\n  No hay skills registradas.\n" }
       const lines = rows.map(r => {
         const icon = r.active ? "\u25cf" : "\u25cb"
@@ -1204,19 +1334,21 @@ async function handleSkillCommand(
     case "enable": {
       const name = rest[0]
       if (!name) return { handled: true, output: "uso: /skill enable <nombre>" }
-      db.query("UPDATE skills SET active = 1 WHERE id = ?").run(name)
+      const row = await getVersionedDoc<SkillDoc>("skills", name)
+      if (row) await (await col<SkillDoc>("skills")).put(name, { ...row.doc, active: true, updated_at: Date.now() }, { expectedVersion: row.version })
       return { handled: true, output: `  \u2713 Skill ${name} habilitada` }
     }
     case "disable": {
       const name = rest[0]
       if (!name) return { handled: true, output: "uso: /skill disable <nombre>" }
-      db.query("UPDATE skills SET active = 0 WHERE id = ?").run(name)
+      const row = await getVersionedDoc<SkillDoc>("skills", name)
+      if (row) await (await col<SkillDoc>("skills")).put(name, { ...row.doc, active: false, updated_at: Date.now() }, { expectedVersion: row.version })
       return { handled: true, output: `  \u2713 Skill ${name} deshabilitada` }
     }
     case "info": {
       const name = rest[0]
       if (!name) return { handled: true, output: "uso: /skill info <nombre>" }
-      const row = db.query("SELECT * FROM skills WHERE id = ?").get(name) as any
+      const row = await getDoc<SkillDoc>("skills", name)
       if (!row) return { handled: true, output: `  Skill no encontrada: ${name}` }
       const preview = row.body ? row.body.slice(0, 300).replace(/\n/g, "\n  │    ") : "N/A"
       return {
@@ -1243,8 +1375,28 @@ async function handleSkillCommand(
         const nameMatch = content.match(/^#\s+(.+)/m)
         const skillName = nameMatch ? nameMatch[1].trim() : path.split("/").pop()?.replace(".md", "") || "custom"
         const id = skillName.toLowerCase().replace(/[^a-z0-9_-]/g, "_")
-        db.query("INSERT OR REPLACE INTO skills (id, name, description, body, active, category) VALUES (?, ?, ?, ?, 1, 'custom')")
-          .run(id, skillName, `Imported from ${path}`, content)
+        const skills = await col<SkillDoc>("skills")
+        const existing = await skills.get(id)
+        const now = Date.now()
+        await skills.put(id, {
+          id,
+          name: skillName,
+          description: `Imported from ${path}`,
+          version: existing?.doc.version ?? "0.0.1",
+          author: existing?.doc.author ?? "local",
+          icon: existing?.doc.icon ?? "skill",
+          category: "custom",
+          permissions: existing?.doc.permissions ?? JSON.stringify([]),
+          dependencies: existing?.doc.dependencies ?? JSON.stringify([]),
+          tools: existing?.doc.tools ?? "",
+          triggers: existing?.doc.triggers ?? "",
+          preferred_agents: existing?.doc.preferred_agents ?? JSON.stringify([]),
+          body: content,
+          version_num: existing?.doc.version_num ?? 1,
+          active: true,
+          created_at: existing?.doc.created_at ?? now,
+          updated_at: now,
+        }, { expectedVersion: existing?.version ?? 0 })
         return { handled: true, output: `  \u2713 Skill ${id} agregada desde ${path}` }
       } catch (err) {
         return { handled: true, output: `  \u2717 Error: ${(err as Error).message}` }
@@ -1257,7 +1409,7 @@ async function handleSkillCommand(
 
 async function handleModeCommand(
   args: string[],
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
   ctx: ContextState,
 ): Promise<CommandResult> {
   const [action, ...rest] = args
@@ -1289,7 +1441,7 @@ async function handleModeCommand(
       if (!mode || !["plan", "approval", "auto"].includes(mode)) {
         return { handled: true, output: "uso: /mode set <plan|approval|auto>" }
       }
-      db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_mode', ?)").run(mode)
+      await setCodeConfig("default_mode", mode)
       return {
         handled: true,
         output: `  \u2b22 Modo cambiado a: ${mode.toUpperCase()}`,
@@ -1297,9 +1449,9 @@ async function handleModeCommand(
       }
     }
     case "history": {
-      const rows = db.query(
-        "SELECT mode, changed_at FROM code_session_modes ORDER BY id DESC LIMIT 10"
-      ).all() as { mode: string; changed_at: string }[]
+      const rows = (await scanDocs<CodeSessionModeDoc>("codeSessionModes"))
+        .sort((a, b) => b.changed_at.localeCompare(a.changed_at))
+        .slice(0, 10)
       if (rows.length === 0) return { handled: true, output: "\n  No hay historial de cambios de modo.\n" }
       const lines = rows.map(r => `  \u00b7 ${r.mode.toUpperCase().padEnd(10)} ${r.changed_at}`)
       return { handled: true, output: "\n  Historial de cambios:\n\n" + lines.join("\n") + "\n" }
@@ -1311,7 +1463,7 @@ async function handleModeCommand(
 
 async function handleTaskCommand(
   args: string[],
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
 ): Promise<CommandResult> {
   const [action, ...rest] = args
 
@@ -1339,9 +1491,9 @@ async function handleTaskCommand(
   switch (action) {
     case "list": {
       const limit = Math.min(parseInt(rest[rest.indexOf("--limit") + 1] || "10", 10), 50)
-      const rows = db.query(
-        "SELECT id, description, status, created_at FROM code_tasks ORDER BY created_at DESC LIMIT ?"
-      ).all(limit) as { id: string; description: string; status: string; created_at: string }[]
+      const rows = (await scanDocs<CodeTaskDoc>("codeTasks"))
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .slice(0, limit)
       if (rows.length === 0) return { handled: true, output: "\n  No hay tareas.\n" }
       const lines = rows.map(r => `  \u25b8 ${r.id.slice(0, 8).padEnd(10)} ${r.status.padEnd(12)} ${r.description.slice(0, 50)}`)
       return { handled: true, output: "\n" + lines.join("\n") + "\n" }
@@ -1349,7 +1501,7 @@ async function handleTaskCommand(
     case "status": {
       const id = rest[0]
       if (!id) return { handled: true, output: "uso: /task status <id>" }
-      const row = db.query("SELECT * FROM code_tasks WHERE id = ?").get(id) as any
+      const row = await getDoc<CodeTaskDoc>("codeTasks", id)
       if (!row) return { handled: true, output: `  Tarea no encontrada: ${id}` }
       return {
         handled: true,
@@ -1367,17 +1519,19 @@ async function handleTaskCommand(
     case "cancel": {
       const id = rest[0]
       if (!id) return { handled: true, output: "uso: /task cancel <id>" }
-      db.query("UPDATE code_tasks SET status = 'cancelled' WHERE id = ?").run(id)
+      const task = await getVersionedDoc<CodeTaskDoc>("codeTasks", id)
+      if (task) await (await col<CodeTaskDoc>("codeTasks")).put(id, { ...task.doc, status: "cancelled" }, { expectedVersion: task.version })
       return { handled: true, output: `  \u2713 Tarea ${id.slice(0, 8)} cancelada` }
     }
     case "rollback": {
       const id = rest[0]
       if (!id) return { handled: true, output: "uso: /task rollback <id>" }
       try {
-        const task = db.query("SELECT * FROM code_tasks WHERE id = ?").get(id) as any
+        const task = await getVersionedDoc<CodeTaskDoc>("codeTasks", id)
         if (!task) return { handled: true, output: `  Tarea no encontrada: ${id}` }
 
-        const snapshots = db.query("SELECT file_path, content FROM code_file_snapshots WHERE task_id = ?").all(id) as { file_path: string; content: string }[]
+        const snapshots = (await (await col<CodeFileSnapshotDoc>("codeFileSnapshots")).findBy("task_id", id))
+          .map((entry) => entry.doc)
         if (snapshots.length === 0) {
           return { handled: true, output: `  No hay snapshots para la tarea ${id.slice(0, 8)}` }
         }
@@ -1392,19 +1546,19 @@ async function handleTaskCommand(
           }
         }
 
-        db.query("UPDATE code_tasks SET status = 'cancelled' WHERE id = ?").run(id)
+        await (await col<CodeTaskDoc>("codeTasks")).put(id, { ...task.doc, status: "cancelled" }, { expectedVersion: task.version })
 
         let gitMsg = ""
-        if (task.branch_name) {
+        if (task.doc.branch_name) {
           try {
             const proc = Bun.spawn({
-              cmd: ["git", "branch", "-D", task.branch_name],
+              cmd: ["git", "branch", "-D", task.doc.branch_name],
               stdout: "pipe",
               stderr: "pipe",
               cwd: process.cwd(),
             })
             await proc.exited
-            gitMsg = `\n  Rama ${task.branch_name} eliminada.`
+            gitMsg = `\n  Rama ${task.doc.branch_name} eliminada.`
           } catch {
             // ignore git errors
           }
@@ -1422,7 +1576,7 @@ async function handleTaskCommand(
 
 async function handleNarrativeCommand(
   args: string[],
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
 ): Promise<CommandResult> {
   const [action, ...rest] = args
 
@@ -1433,13 +1587,13 @@ async function handleNarrativeCommand(
         "",
         "  \u00bfQu\u00e9 quieres hacer?",
         "  \u25b8 show      \u2014 muestra \u00faltimas N entradas",
-        "  \u00b7 search    \u2014 busca en el narrativo por FTS5",
+        "  \u00b7 search    \u2014 busca en el narrativo con HiveDB",
         "  \u00b7 export    \u2014 exporta narrativo completo",
         "",
       ].join("\n"),
       menu: [
         { label: "show",   cmd: "/narrative show",   desc: "muestra \u00faltimas N entradas" },
-        { label: "search", cmd: "/narrative search", desc: "busca en el narrativo por FTS5" },
+        { label: "search", cmd: "/narrative search", desc: "busca en el narrativo con HiveDB" },
         { label: "export", cmd: "/narrative export", desc: "exporta narrativo completo" },
       ],
     }
@@ -1449,9 +1603,10 @@ async function handleNarrativeCommand(
     case "show": {
       const lastIdx = rest.indexOf("--last")
       const limit = lastIdx !== -1 ? parseInt(rest[lastIdx + 1] || "5", 10) : 5
-      const rows = db.query(
-        "SELECT coordinator, entry, created_at FROM code_narrative ORDER BY id DESC LIMIT ?"
-      ).all(limit) as { coordinator: string; entry: string; created_at: string }[]
+      const rows = (await (await col<CodeNarrativeDoc>("codeNarrative")).scan())
+        .map((entry) => entry.doc)
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .slice(0, limit)
       if (rows.length === 0) return { handled: true, output: "\n  No hay entradas en el narrativo.\n" }
       const lines = rows.map(r =>
         `  \u25b8 [${r.coordinator}] ${r.created_at}\n  │  ${r.entry.slice(0, 120)}`
@@ -1462,22 +1617,30 @@ async function handleNarrativeCommand(
       const query = rest.join(" ")
       if (!query) return { handled: true, output: "uso: /narrative search <query>" }
       try {
-        const rows = db.query(
-          `SELECT coordinator, entry, created_at FROM code_narrative_fts
-           WHERE code_narrative_fts MATCH ? ORDER BY rank LIMIT 5`
-        ).all(query) as { coordinator: string; entry: string; created_at: string }[]
+        const needle = query.toLowerCase()
+        const rows = (await (await col<CodeNarrativeDoc>("codeNarrative")).scan())
+          .map((entry) => entry.doc)
+          .filter((row) =>
+            row.entry.toLowerCase().includes(needle) ||
+            row.coordinator.toLowerCase().includes(needle) ||
+            (row.phase ?? "").toLowerCase().includes(needle)
+          )
+          .sort((a, b) => b.created_at.localeCompare(a.created_at))
+          .slice(0, 5)
         if (rows.length === 0) return { handled: true, output: `\n  Sin resultados para: ${query}\n` }
         const lines = rows.map(r =>
           `  \u25b8 [${r.coordinator}] ${r.created_at}\n  │  ${r.entry.slice(0, 120)}`
         )
         return { handled: true, output: "\n" + lines.join("\n\n") + "\n" }
       } catch {
-        return { handled: true, output: `  \u2717 Error en b\u00fasqueda FTS5.` }
+        return { handled: true, output: `  \u2717 Error en b\u00fasqueda HiveDB.` }
       }
     }
     case "export": {
       const fmt = rest.includes("--format") ? rest[rest.indexOf("--format") + 1] || "md" : "md"
-      const rows = db.query("SELECT * FROM code_narrative ORDER BY id").all() as any[]
+      const rows = (await (await col<CodeNarrativeDoc>("codeNarrative")).scan())
+        .map((entry) => entry.doc)
+        .sort((a, b) => a.created_at.localeCompare(b.created_at))
       const content = rows.map(r =>
         `[${r.coordinator} — ${r.created_at}] [${r.task_id || "none"}] [${r.phase || ""}]\n\n${r.entry}\n\n---\n`
       ).join("\n")
@@ -1492,7 +1655,7 @@ async function handleNarrativeCommand(
 
 async function handleAceCommand(
   args: string[],
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
 ): Promise<CommandResult> {
   const [action, ...rest] = args
 
@@ -1513,10 +1676,9 @@ async function handleAceCommand(
 
   switch (action) {
     case "status": {
-      const pending = (db.query("SELECT COUNT(*) as c FROM code_traces WHERE analyzed = 0").get() as any)?.c ?? 0
-      const lastReflection = db.query(
-        "SELECT insights, created_at FROM code_reflections ORDER BY id DESC LIMIT 1"
-      ).get() as { insights: string; created_at: string } | undefined
+      const pending = (await (await col<CodeTraceDoc>("codeTraces")).findBy("analyzed", false)).length
+      const lastReflection = (await scanDocs<CodeReflectionDoc>("codeReflections"))
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))[0]
       return {
         handled: true,
         output: [
@@ -1530,9 +1692,9 @@ async function handleAceCommand(
     }
     case "playbook": {
       if (rest[0] === "list") {
-        const rows = db.query(
-          "SELECT rule, confidence, active FROM code_playbook ORDER BY confidence DESC LIMIT 10"
-        ).all() as { rule: string; confidence: number; active: number }[]
+        const rows = (await scanDocs<CodePlaybookDoc>("codePlaybook"))
+          .sort((a, b) => b.confidence - a.confidence)
+          .slice(0, 10)
         if (rows.length === 0) return { handled: true, output: "\n  No hay reglas en el playbook.\n" }
         const lines = rows.map(r => {
           const icon = r.active ? "\u25cf" : "\u25cb"
@@ -1541,7 +1703,9 @@ async function handleAceCommand(
         return { handled: true, output: "\n" + lines.join("\n") + "\n" }
       }
       if (rest[0] === "reset") {
-        db.query("DELETE FROM code_playbook").run()
+        const playbook = await col<CodePlaybookDoc>("codePlaybook")
+        const rows = await playbook.scan()
+        for (const row of rows) await playbook.delete(row.id)
         return { handled: true, output: "  \u2713 Playbook reiniciado" }
       }
       return { handled: true, output: "uso: /ace playbook list | /ace playbook reset" }
@@ -1551,7 +1715,7 @@ async function handleAceCommand(
         return { handled: true, output: "uso: /ace reflector run" }
       }
       try {
-        const result = await runReflector(db)
+        const result = await runReflector()
         if (result.traces === 0) {
           return { handled: true, output: "  No hay trazas pendientes de an\u00e1lisis." }
         }
@@ -1570,7 +1734,7 @@ async function handleAceCommand(
 
 async function handleGithubCommand(
   args: string[],
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
   ui?: UiCallbacks,
 ): Promise<CommandResult> {
   const [action, ...rest] = args
@@ -1613,7 +1777,7 @@ async function handleGithubCommand(
           })
           if (!res.ok) return { handled: true, output: "  \u2717 Token inv\u00e1lido o expirado" }
           const user = await res.json() as { login?: string }
-          db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('github_token', ?)").run(token)
+          await setCodeConfig("github_token", token)
           return { handled: true, output: `  \u2713 GitHub conectado como ${user.login || "usuario"}` }
         } catch (err) {
           return { handled: true, output: `  \u2717 Error verificando token: ${(err as Error).message}` }
@@ -1632,11 +1796,11 @@ async function handleGithubCommand(
       }
     }
     case "disconnect": {
-      db.query("DELETE FROM code_config WHERE key = 'github_token'").run()
+      await deleteCodeConfig("github_token")
       return { handled: true, output: "  \u2713 GitHub desconectado" }
     }
     case "status": {
-      const token = (db.query("SELECT value FROM code_config WHERE key = 'github_token'").get() as any)?.value
+      const token = await getCodeConfig("github_token")
       return {
         handled: true,
         output: token
@@ -1645,7 +1809,7 @@ async function handleGithubCommand(
       }
     }
     case "whoami": {
-      const token = (db.query("SELECT value FROM code_config WHERE key = 'github_token'").get() as any)?.value
+      const token = await getCodeConfig("github_token")
       if (!token) return { handled: true, output: "  No hay token de GitHub configurado." }
       try {
         const res = await fetch("https://api.github.com/user", {
@@ -1660,7 +1824,7 @@ async function handleGithubCommand(
     case "set-repo": {
       const repo = rest[0]
       if (!repo) return { handled: true, output: "uso: /github set-repo <owner/repo>\nejemplo: /github set-repo johpaz/mi-app" }
-      db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_repo', ?)").run(repo)
+      await setCodeConfig("default_repo", repo)
       return { handled: true, output: `  \u2713 Repo vinculado: ${repo}` }
     }
     default:
@@ -1670,7 +1834,7 @@ async function handleGithubCommand(
 
 async function handleSessionCommand(
   args: string[],
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
   ctx: ContextState,
   ui?: UiCallbacks,
 ): Promise<CommandResult> {
@@ -1705,9 +1869,22 @@ async function handleSessionCommand(
       const projectPath = ctx.projectPath || process.cwd()
       const newId = Bun.randomUUIDv7()
       if (ctx.sessionId && ctx.sessionId !== "none") {
-        db.query("UPDATE code_sessions SET status = 'closed', last_active = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?").run(ctx.sessionId)
+        const existing = await getVersionedDoc<CodeSessionDoc>("codeSessions", ctx.sessionId)
+        if (existing) {
+          await (await col<CodeSessionDoc>("codeSessions")).put(ctx.sessionId, {
+            ...existing.doc,
+            status: "closed",
+            last_active: nowIso(),
+          }, { expectedVersion: existing.version })
+        }
       }
-      db.query("INSERT INTO code_sessions (id, project_path, status) VALUES (?, ?, 'active')").run(newId, projectPath)
+      await (await col<CodeSessionDoc>("codeSessions")).put(newId, {
+        id: newId,
+        project_path: projectPath,
+        status: "active",
+        created_at: nowIso(),
+        last_active: nowIso(),
+      }, { expectedVersion: 0 })
       return {
         handled: true,
         output: `  \u2713 Nueva sesi\u00f3n: ${newId.slice(0, 8)}...`,
@@ -1716,15 +1893,7 @@ async function handleSessionCommand(
     }
 
     case "list": {
-      const rows = db.query(`
-        SELECT s.id, s.project_path, s.status, s.created_at, s.last_active,
-               COUNT(t.id) AS turns
-        FROM code_sessions s
-        LEFT JOIN code_turns t ON t.session_id = s.id
-        GROUP BY s.id
-        ORDER BY s.last_active DESC
-        LIMIT 15
-      `).all() as { id: string; project_path: string; status: string; created_at: string; last_active: string; turns: number }[]
+      const rows = await listRecentSessionsWithTurns(15)
 
       if (!rows.length) return { handled: true, output: "  No hay sesiones registradas." }
 
@@ -1742,15 +1911,7 @@ async function handleSessionCommand(
     }
 
     case "resume": {
-      const sessions = db.query(`
-        SELECT s.id, s.project_path, s.status, s.last_active,
-               COUNT(t.id) AS turns
-        FROM code_sessions s
-        LEFT JOIN code_turns t ON t.session_id = s.id
-        GROUP BY s.id
-        ORDER BY s.last_active DESC
-        LIMIT 15
-      `).all() as { id: string; project_path: string; status: string; last_active: string; turns: number }[]
+      const sessions = await listRecentSessionsWithTurns(15)
 
       // Sin argumento: abrir modal de selecci\u00f3n si la TUI lo soporta
       if (!idArg) {
@@ -1769,23 +1930,37 @@ async function handleSessionCommand(
           const selectedId = values["session"]?.slice(0, 8)
           if (!selectedId) return { handled: true, output: "  \u2717 Selecci\u00f3n inv\u00e1lida." }
           // Re-invocar con el id como argumento
-          return handleSessionCommand(["resume", selectedId], db, ctx, ui)
+          return handleSessionCommand(["resume", selectedId], undefined, ctx, ui)
         }
         return { handled: true, output: "  uso: /session resume <id-prefix>" }
       }
 
-      const row = db.query(
-        "SELECT id, project_path, status FROM code_sessions WHERE id LIKE ? ORDER BY last_active DESC LIMIT 1"
-      ).get(`${idArg}%`) as { id: string; project_path: string; status: string } | null
+      const row = (await scanDocs<CodeSessionDoc>("codeSessions"))
+        .filter((session) => session.id.startsWith(idArg))
+        .sort((a, b) => b.last_active.localeCompare(a.last_active))[0] ?? null
 
       if (!row) return { handled: true, output: `  \u2717 No se encontr\u00f3 sesi\u00f3n con prefijo: ${idArg}` }
 
       if (ctx.sessionId && ctx.sessionId !== "none" && ctx.sessionId !== row.id) {
-        db.query("UPDATE code_sessions SET status = 'closed', last_active = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?").run(ctx.sessionId)
+        const current = await getVersionedDoc<CodeSessionDoc>("codeSessions", ctx.sessionId)
+        if (current) {
+          await (await col<CodeSessionDoc>("codeSessions")).put(ctx.sessionId, {
+            ...current.doc,
+            status: "closed",
+            last_active: nowIso(),
+          }, { expectedVersion: current.version })
+        }
       }
-      db.query("UPDATE code_sessions SET status = 'active', last_active = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?").run(row.id)
+      const target = await getVersionedDoc<CodeSessionDoc>("codeSessions", row.id)
+      if (target) {
+        await (await col<CodeSessionDoc>("codeSessions")).put(row.id, {
+          ...target.doc,
+          status: "active",
+          last_active: nowIso(),
+        }, { expectedVersion: target.version })
+      }
 
-      const turns = (db.query("SELECT COUNT(*) AS n FROM code_turns WHERE session_id = ?").get(row.id) as { n: number }).n
+      const turns = (await getSessionTurns(row.id)).length
       const project = row.project_path.split("/").pop() ?? row.project_path
       return {
         handled: true,
@@ -1798,13 +1973,11 @@ async function handleSessionCommand(
       const sid = ctx.sessionId
       if (!sid || sid === "none") return { handled: true, output: "  No hay sesi\u00f3n activa." }
 
-      const row = db.query(
-        "SELECT id, project_path, status, created_at, last_active FROM code_sessions WHERE id = ?"
-      ).get(sid) as { id: string; project_path: string; status: string; created_at: string; last_active: string } | null
+      const row = await getDoc<CodeSessionDoc>("codeSessions", sid)
 
       if (!row) return { handled: true, output: `  \u2717 Sesi\u00f3n no encontrada en DB: ${sid.slice(0, 8)}` }
 
-      const turns = (db.query("SELECT COUNT(*) AS n FROM code_turns WHERE session_id = ?").get(sid) as { n: number }).n
+      const turns = (await getSessionTurns(sid)).length
       return {
         handled: true,
         output: [
@@ -1826,7 +1999,7 @@ async function handleSessionCommand(
 }
 
 async function handleCompactCommand(
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
   ctx: ContextState,
 ): Promise<CommandResult> {
   const sessionId = ctx.sessionId
@@ -1834,9 +2007,7 @@ async function handleCompactCommand(
     return { handled: true, output: "  No hay sesi\u00f3n activa para compactar." }
   }
 
-  const rows = db.query(
-    "SELECT id, user_message, agent_response FROM code_turns WHERE session_id = ? AND completed_at IS NOT NULL ORDER BY created_at"
-  ).all(sessionId) as { id: string; user_message: string; agent_response: string }[]
+  const rows = (await getSessionTurns(sessionId)).filter((turn) => turn.completed_at)
 
   if (rows.length <= 10) {
     return { handled: true, output: `  Solo hay ${rows.length} turnos — no es necesario compactar.` }
@@ -1857,15 +2028,17 @@ async function handleCompactCommand(
     })
 
     const summary = summaryResponse.content.trim()
-    db.query(`
-      INSERT INTO summaries (thread_id, summary, messages_covered, last_message_id)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(thread_id) DO UPDATE SET
-        summary = excluded.summary,
-        messages_covered = excluded.messages_covered,
-        last_message_id = excluded.last_message_id,
-        updated_at = unixepoch()
-    `).run(sessionId, summary, rows.length, rows[rows.length - 1].id)
+    const summaries = await col<SummaryDoc>("summaries")
+    const existing = await summaries.get(sessionId)
+    const now = Date.now()
+    await summaries.put(sessionId, {
+      thread_id: sessionId,
+      summary,
+      messages_covered: rows.length,
+      last_message_id: rows[rows.length - 1]?.id ?? null,
+      created_at: existing?.doc.created_at ?? now,
+      updated_at: now,
+    }, { expectedVersion: existing?.version ?? 0 })
 
     return {
       handled: true,
@@ -1878,7 +2051,7 @@ async function handleCompactCommand(
 
 async function handleNoteCommand(
   args: string[],
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
   ctx: ContextState,
 ): Promise<CommandResult> {
   const [action, key, ...valueParts] = args
@@ -1905,16 +2078,26 @@ async function handleNoteCommand(
     const value = valueParts.join(" ")
     const isAce = value.startsWith("@ace:")
     const cleanValue = isAce ? value.slice(5).trim() : value
-    saveScratchpadNote(sessionId, key, cleanValue, isAce ? "user-ace" : "user")
+    await saveScratchpadNote(sessionId, key, cleanValue, isAce ? "user-ace" : "user")
 
     if (isAce) {
       // Propose as playbook rule with low confidence
       try {
-        db.query(`
-          INSERT INTO code_playbook (rule, confidence, active, coordinator, source)
-          VALUES (?, 0.3, 1, NULL, 'user-note')
-          ON CONFLICT(rule) DO UPDATE SET confidence = MIN(code_playbook.confidence + 0.05, 0.95)
-        `).run(cleanValue)
+        const playbook = await col<CodePlaybookDoc>("codePlaybook")
+        const id = await nextId("codePlaybook")
+        const now = new Date().toISOString()
+        await playbook.put(id, {
+          id,
+          rule: cleanValue,
+          coordinator: null,
+          source: "user-note",
+          helpful_count: 0,
+          harmful_count: 0,
+          confidence: 0.3,
+          active: true,
+          created_at: now,
+          last_applied: null,
+        }, { expectedVersion: 0 })
       } catch { /* ignore duplicate errors */ }
     }
 
@@ -1922,7 +2105,7 @@ async function handleNoteCommand(
   }
 
   if (action === "list") {
-    const notes = getScratchpad(sessionId)
+    const notes = await getScratchpad(sessionId)
     if (notes.length === 0) return { handled: true, output: "  No hay notas guardadas." }
     const lines = notes.map(n => `  \u25b8 ${n.key}: ${n.value.slice(0, 60)}`)
     return { handled: true, output: "\n  Notas:\n\n" + lines.join("\n") + "\n" }
@@ -1930,7 +2113,7 @@ async function handleNoteCommand(
 
   if (action === "delete") {
     if (!key) return { handled: true, output: "uso: /note delete <key>" }
-    deleteScratchpadNote(sessionId, key)
+    await deleteScratchpadNote(sessionId, key)
     return { handled: true, output: `  \u2713 Nota eliminada: ${key}` }
   }
 
@@ -1982,13 +2165,13 @@ async function handleLogsCommand(
 
 async function handleTelegramCommand(
   args: string[],
-  db: ReturnType<typeof getDb>,
+  _db: DbCompat,
   ui?: UiCallbacks,
 ): Promise<CommandResult> {
   const [action, ...rest] = args
 
   if (!action || action === "status") {
-    const row = db.query("SELECT * FROM channels WHERE id = 'telegram'").get() as any
+    const row = await getDoc<Record<string, any>>("channels", "telegram")
     if (!row || !row.active) {
       return {
         handled: true,
@@ -2019,7 +2202,11 @@ async function handleTelegramCommand(
 
   if (action === "disconnect") {
     try { await (Bun as any).secrets?.delete?.({ service: "hive-code", name: "telegram.bot_token" }) } catch {}
-    db.query("UPDATE channels SET enabled = 0, active = 0, status = 'disconnected' WHERE id = 'telegram'").run()
+    const channels = await col<Record<string, any>>("channels")
+    const row = await channels.get("telegram")
+    if (row) {
+      await channels.put("telegram", { ...row.doc, enabled: false, active: false, status: "disconnected" }, { expectedVersion: row.version })
+    }
     return { handled: true, output: "  \u2713 Telegram desconectado" }
   }
 
@@ -2041,10 +2228,17 @@ async function handleTelegramCommand(
         allowFrom: values.allow_from ? values.allow_from.split(",").map((s: string) => s.trim()).filter(Boolean) : [],
         enabled: true,
       })
-      db.query(`
-        INSERT OR REPLACE INTO channels (id, type, config_encrypted, active, enabled, status)
-        VALUES ('telegram', 'telegram', ?, 1, 1, 'connected')
-      `).run(configJson)
+      const channels = await col<Record<string, any>>("channels")
+      const existing = await channels.get("telegram")
+      await channels.put("telegram", {
+        ...(existing?.doc ?? {}),
+        id: "telegram",
+        type: "telegram",
+        config_encrypted: configJson,
+        active: true,
+        enabled: true,
+        status: "connected",
+      }, { expectedVersion: existing?.version ?? 0 })
       try {
         await ui.startChannel?.("telegram", "telegram", JSON.parse(configJson))
       } catch { /* channel start is best-effort */ }
@@ -2071,7 +2265,7 @@ async function handleTelegramCommand(
 
 export async function parseInternalCommand(
   input: string,
-  db: ReturnType<typeof getDb>,
+  db?: DbCompat,
   ctx?: ContextState,
   ui?: UiCallbacks,
 ): Promise<CommandResult> {
@@ -2079,7 +2273,7 @@ export async function parseInternalCommand(
     return { handled: false }
   }
 
-  const ctxState = ctx ?? getCtx(db)
+  const ctxState = ctx ?? await getCtx()
   const parts = input.slice(1).split(/\s+/)
   const cmd = parts[0]?.toLowerCase()
   const args = parts.slice(1)
@@ -2147,7 +2341,7 @@ export async function parseInternalCommand(
       return { handled: true, output: "  Uso: /plan <tarea> o escribe la tarea directamente" }
     }
     case "doctor": {
-      const output = runDoctor(db)
+      const output = await runDoctor(db)
       if (ui?.showInfoModal) {
         await ui.showInfoModal("Diagnóstico del sistema", output)
         return { handled: true, output: "" }

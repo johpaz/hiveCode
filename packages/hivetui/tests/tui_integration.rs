@@ -79,7 +79,7 @@ fn focus_shows_user_question_while_running_plan_mode() {
 
     // Bee empieza a razonar — aún sin workers
     state.apply_message(BunMessage::ThoughtChunk {
-        task_id: None,
+        task_id: Some("task-1".into()),
         coordinator: "bee".into(),
         phase: "planning".into(),
         content: "Analizando requerimientos de autenticación".into(),
@@ -109,7 +109,7 @@ fn focus_shows_workers_while_running_auto_mode() {
     let mut state = base_state();
     // Activar workers en estado Running
     state.apply_message(BunMessage::WorkerUpdate {
-        task_id: None,
+        task_id: Some("task-1".into()),
         worker: "backend".into(),
         phase: "escribiendo src/auth/jwt.ts".into(),
         status: "running".into(),
@@ -215,10 +215,10 @@ fn routing_plan_mode_waits_for_structured_plan() {
         "Cambiar a modo plan debe mantener Focus mientras el plan se genera");
 }
 
-// ── 5. Auto-routing: APPROVAL mode → Tab cambia a Review ─────────────────────
+// ── 5. Auto-routing: APPROVAL espera veredicto antes de abrir Review ─────────
 
 #[test]
-fn routing_approval_mode_navigates_to_review_tab() {
+fn routing_approval_mode_waits_for_reviewer_verdict() {
     let mut state = base_state();
     state.apply_message(BunMessage::StateUpdate {
         new_mode: Some("approval".into()),
@@ -227,8 +227,20 @@ fn routing_approval_mode_navigates_to_review_tab() {
         new_token_count: None,
     });
     assert_eq!(state.session.mode, ReplMode::Approval);
-    assert_eq!(state.active_tab, TabId::Review,
-        "Cambiar a modo approval debe navegar a Review tab");
+    assert_eq!(state.active_tab, TabId::Focus,
+        "Cambiar a modo approval no debe abrir Review sin veredicto");
+
+    state.apply_message(BunMessage::ReviewVerdictUpdate {
+        reviewer: Some("reviewer".into()),
+        status: "approval".into(),
+        summary: "aprobado".into(),
+        observations: Vec::new(),
+        requested_changes: Vec::new(),
+        affected_files: Vec::new(),
+        criteria: Vec::new(),
+        categories: Vec::new(),
+    });
+    assert_eq!(state.active_tab, TabId::Review);
 }
 
 // ── 6. Auto-routing: AUTO running → Code; AssistantDone → Focus ──────────────
@@ -240,7 +252,7 @@ fn routing_auto_mode_code_then_focus() {
 
     // Worker activo → debe ir a Code
     state.apply_message(BunMessage::ActivityUpdate {
-        task_id: None,
+        task_id: Some("task-1".into()),
         coordinator: "backend".into(),
         phase: "escribiendo archivos".into(),
         status: "running".into(),
@@ -260,12 +272,12 @@ fn routing_auto_mode_code_then_focus() {
     // Tarea terminada → debe volver a Focus
     state.apply_message(BunMessage::AssistantDone);
     assert!(!state.running, "running debe ser false tras AssistantDone");
-    assert!(!state.tab_locked, "tab_locked debe liberarse tras AssistantDone");
+    assert!(!state.tab_locked, "sin override manual el routing sigue automático");
     assert_eq!(state.active_tab, TabId::Focus,
         "AssistantDone en AUTO mode debe volver a Focus tab");
 }
 
-// ── 7. Manual tab lock: usuario elige tab → se mantiene hasta AssistantDone ──
+// ── 7. Manual tab lock: usuario elige tab → se mantiene hasta /auto ──────────
 
 #[test]
 fn manual_tab_lock_overrides_auto_routing() {
@@ -276,7 +288,7 @@ fn manual_tab_lock_overrides_auto_routing() {
 
     // Llega ActivityUpdate (normalmente iría a Code en AUTO mode)
     state.apply_message(BunMessage::ActivityUpdate {
-        task_id: None,
+        task_id: Some("task-1".into()),
         coordinator: "backend".into(),
         phase: "escribiendo".into(),
         status: "running".into(),
@@ -293,9 +305,13 @@ fn manual_tab_lock_overrides_auto_routing() {
     assert_eq!(state.active_tab, TabId::Review,
         "tab_locked=true debe impedir el auto-routing");
 
-    // AssistantDone libera el lock
+    // AssistantDone no libera el lock; sólo /auto lo hace.
     state.apply_message(BunMessage::AssistantDone);
-    assert!(!state.tab_locked, "AssistantDone debe liberar tab_locked");
+    assert!(state.tab_locked, "AssistantDone debe conservar tab_locked");
+    assert_eq!(state.active_tab, TabId::Review);
+    state.resume_auto_layout();
+    assert!(!state.tab_locked);
+    assert_eq!(state.active_tab, TabId::Focus);
 }
 
 // ── 8. Welcome screen: no muestra el widget de input ─────────────────────────
@@ -363,21 +379,34 @@ fn welcome_screen_exposes_harness_status() {
 }
 
 #[test]
-fn renderer_uses_immersive_layout_without_tab_hit_regions() {
+fn renderer_keeps_reference_chrome_on_all_five_screens() {
     let mut state = base_state();
     state.harness.approval_pending = true;
 
-    let mut canvas = make_canvas(120, 30);
-    renderer::render(&mut canvas, &mut state);
+    for tab in [
+        TabId::Focus,
+        TabId::Plan,
+        TabId::Code,
+        TabId::Review,
+        TabId::Dashboard,
+    ] {
+        state.active_tab = tab;
+        let mut canvas = make_canvas(120, 30);
+        renderer::render(&mut canvas, &mut state);
 
-    let frame = canvas.to_text_rows().join("\n");
-    assert!(frame.contains("⬡ hiveCode"));
-    assert!(frame.contains("CHECKPOINTS"));
-    assert!(state
-        .hit_map
-        .regions()
-        .iter()
-        .all(|region| !region.id.starts_with("tab:")));
+        let frame = canvas.to_text_rows().join("\n");
+        assert!(frame.contains("FOCUS"));
+        assert!(frame.contains("PLAN"));
+        assert!(frame.contains("CODE"));
+        assert!(frame.contains("REVIEW"));
+        assert!(frame.contains("DASHBOARD"));
+        assert!(frame.contains("CHECKPOINTS"));
+        assert!(state
+            .hit_map
+            .regions()
+            .iter()
+            .any(|region| region.id.starts_with("tab:")));
+    }
 }
 
 #[test]
@@ -410,7 +439,7 @@ fn renderer_registers_split_handle_hit_regions() {
 }
 
 #[test]
-fn renderer_does_not_register_legacy_chrome_resize_regions_in_immersive_layout() {
+fn renderer_registers_reference_chrome_resize_regions() {
     let mut state = base_state();
 
     let mut canvas = make_canvas(120, 30);
@@ -420,7 +449,7 @@ fn renderer_does_not_register_legacy_chrome_resize_regions_in_immersive_layout()
         .hit_map
         .regions()
         .iter()
-        .all(|region| !region.id.starts_with("chrome:")));
+        .any(|region| region.id.starts_with("chrome:")));
 }
 
 // ── 9. Code layout: split dinámico con 3+ workers activos ────────────────────
@@ -480,7 +509,7 @@ fn plan_layout_shows_adrs_in_plan_mode() {
     });
     // Añadir pensamiento para el panel izquierdo
     state.apply_message(BunMessage::ThoughtChunk {
-        task_id: None,
+        task_id: Some("task-1".into()),
         coordinator: "bee".into(),
         phase: "planning".into(),
         content: "Diseñando la arquitectura de auth".into(),
@@ -567,7 +596,7 @@ fn history_compact_renders_one_line_per_old_turn() {
 fn full_sequence_init_task_streaming_response() {
     let mut state = AppState::default();
 
-    // 1. Init desde SQLite snapshot (lo que envía tui-launcher.ts)
+    // 1. Init desde snapshot de sesión (lo que envía tui-launcher.ts)
     state.apply_message(BunMessage::Init {
         session_id: "sess-abc123".into(),
         workers: vec!["bee".into(), "backend".into()],
@@ -597,7 +626,7 @@ fn full_sequence_init_task_streaming_response() {
 
     // 4. Bee emite pensamiento
     state.apply_message(BunMessage::ThoughtChunk {
-        task_id: None,
+        task_id: Some("task-1".into()),
         coordinator: "bee".into(),
         phase: "planning".into(),
         content: "Voy a analizar jwt.ts primero".into(),
@@ -606,7 +635,7 @@ fn full_sequence_init_task_streaming_response() {
 
     // 5. Worker activo → routing a Code
     state.apply_message(BunMessage::ActivityUpdate {
-        task_id: None,
+        task_id: Some("task-1".into()),
         coordinator: "backend".into(),
         phase: "escribiendo tests".into(),
         status: "running".into(),

@@ -13,7 +13,7 @@ import { subscribeTask, subscribeSession, unsubscribeAll, subscribeDashboard, un
 import type { TelegramChannel } from "../channels/telegram.ts";
 import { ChannelManager } from "../channels/manager";
 import { AgentService } from "../agent/service";
-import { AgentRunner } from "../agent/providers/index";
+import { AgentRunner, DEFAULT_INTERACTIVE_MAX_STEPS } from "../agent/providers/index";
 import type { IncomingMessage } from "../channels/base";
 import { mkdirSync, rmSync, unlinkSync, watch, existsSync, writeFileSync, readFileSync } from "node:fs";
 import * as path from "node:path";
@@ -27,13 +27,14 @@ const _pkgVersion = (() => {
     return "0.0.27";
   }
 })();
-import { getDb, getDbPathLazy, initializeDatabase } from "../storage/sqlite";
-import { seedAllData, patchMissingData } from "../storage/seed";
+import { ensureHiveDb } from "../storage/bootstrap";
+import { col } from "../storage/hive";
+import type { AgentDoc, ChannelDoc, CodeBridgeDoc, EthicsDoc, McpServerDoc, UserDoc } from "../storage/collections";
 import { decryptConfig } from "../storage/crypto.ts";
 import { resolveContext } from "./resolver";
 import { initializeGateway, type GatewayInitializationResult } from "./initializer";
 import { handleGetAgents, handleCreateAgent, handleUpdateAgent, handleDeleteAgent } from "./routes/agents";
-import { handleGetProviders, handleCreateProvider, handleToggleProvider, handleUpdateProvider, handleSyncProviderModels } from "./routes/providers";
+import { handleGetProviders, handleCreateProvider, handleToggleProvider, handleUpdateProvider, handleSyncProviderModels, handleLoadHiveAgentsModel, handleGetHiveAgentsModelStatus } from "./routes/providers";
 import { handleGetUsers, handleCreateUser, handleUpdateUserSettings, handleGetUserChannels, handleLinkUserChannel } from "./routes/users";
 import { handleGetSkills, handleActivateSkill, handleUpdateSkill, handleDeleteSkill, handleCreateSkill } from "./routes/skills";
 import { handleGetEthics, handleActivateEthics, handleDeleteEthics } from "./routes/ethics";
@@ -136,6 +137,34 @@ async function connectMcpServer(
   });
 }
 
+async function getUserDoc(userId: string): Promise<UserDoc | null> {
+  return (await (await col<UserDoc>("users")).get(userId))?.doc ?? null;
+}
+
+async function getFirstUser(): Promise<UserDoc | null> {
+  return (await (await col<UserDoc>("users")).scan()).map((entry) => entry.doc)[0] ?? null;
+}
+
+async function getCoordinatorAgent(): Promise<AgentDoc | null> {
+  return (await (await col<AgentDoc>("agents")).findBy("role", "coordinator")).map((entry) => entry.doc)[0] ?? null;
+}
+
+async function findMcpServer(idOrName: string) {
+  const servers = await col<McpServerDoc>("mcpServers");
+  const byId = await servers.get(idOrName);
+  if (byId) return byId;
+  return (await servers.scan()).find((entry) => entry.doc.name === idOrName);
+}
+
+async function patchMcpServer(idOrName: string, patch: Partial<McpServerDoc>): Promise<McpServerDoc | null> {
+  const servers = await col<McpServerDoc>("mcpServers");
+  const entry = await findMcpServer(idOrName);
+  if (!entry) return null;
+  const doc = { ...entry.doc, ...patch };
+  await servers.put(entry.id, doc, { expectedVersion: entry.version });
+  return doc;
+}
+
 let _channelManager: ChannelManager | undefined;
 
 /** Returns the active ChannelManager once the gateway has started. */
@@ -217,19 +246,16 @@ export async function startGateway(config: Config): Promise<void> {
   });
   log.info(`Port ${port} bound (initializing gateway...)`);
 
-  // Inicializar DB siempre (en setup mode crea la DB vacía, los endpoints retornan [] en vez de 500)
+  // Inicializar HiveDB siempre (en setup mode crea colecciones vacías y catálogos base)
   try {
-    const db = initializeDatabase();
-    // Seed providers/models/hive_capabilities so setup wizard has data before onboarding completes
-    seedAllData();
-    patchMissingData();
+    await ensureHiveDb();
   } catch { /* si falla, los endpoints manejarán el error */ }
 
-  // Setup mode: no DB file OR DB existe pero tiene 0 usuarios (primera ejecución interrumpida)
+  // Setup mode: HiveDB existe pero tiene 0 usuarios
   let gatewaySetupMode = false;
   try {
-    const count = (getDb().query("SELECT COUNT(*) as count FROM users").get() as { count: number }).count;
-    gatewaySetupMode = count === 0;
+    const users = await col<UserDoc>("users");
+    gatewaySetupMode = (await users.count()) === 0;
   } catch {
     gatewaySetupMode = true;
   }
@@ -237,10 +263,21 @@ export async function startGateway(config: Config): Promise<void> {
   // Auto-onboarding para modo terminal-only: crea un usuario por defecto si no existe ninguno
   if (gatewaySetupMode) {
     try {
-      const db = getDb();
       const userId = crypto.randomUUID();
-      db.query(`INSERT INTO users (id, name, email, language, timezone, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-        .run(userId, "Hive User", "user@hive.local", "es", "UTC", new Date().toISOString());
+      const users = await col<UserDoc>("users");
+      await users.put(userId, {
+        id: userId,
+        name: "Hive User",
+        language: "es",
+        timezone: "UTC",
+        occupation: null,
+        notes: null,
+        master_key_hash: null,
+        email: "user@hive.local",
+        password_hash: null,
+        preferred_cron_channel: "auto",
+        created_at: Math.floor(Date.now() / 1000),
+      }, { expectedVersion: 0 });
       log.info("🐝 Auto-onboarding: usuario por defecto creado (terminal-only mode)");
       gatewaySetupMode = false;
     } catch (err) {
@@ -322,13 +359,11 @@ export async function startGateway(config: Config): Promise<void> {
     const cronScheduler = new BunCronScheduler(async (task) => {
       const channel = task.channel || "webchat";
       const sessionId = `cron-${task.id}`;
-      const { userId } = resolveContext({ channel, channelUserId: sessionId });
+      const { userId } = await resolveContext({ channel, channelUserId: sessionId });
       const now = new Date();
       let userTimezone = "UTC";
       try {
-        const userRow = getDb().query<any, [string]>(
-          "SELECT timezone FROM users WHERE id = ?"
-        ).get(userId);
+        const userRow = await getUserDoc(userId);
         if (userRow?.timezone) userTimezone = userRow.timezone;
       } catch { /* use UTC */ }
       const exactTime = now.toLocaleString("es-ES", {
@@ -343,7 +378,7 @@ export async function startGateway(config: Config): Promise<void> {
           rawUserMessage: task.task,
           maxTokens: 4096,
           tools: prepareTools(agent, sessionId),
-          maxSteps: 15,
+          maxSteps: DEFAULT_INTERACTIVE_MAX_STEPS,
           threadId: sessionId,
           userId,
           channel,
@@ -387,7 +422,7 @@ export async function startGateway(config: Config): Promise<void> {
 
     log.info(` Content: ${messageContent.substring(0, 150)}${messageContent.length > 150 ? "..." : ""}`);
 
-    const { userId } = resolveContext({
+    const { userId } = await resolveContext({
       channel: message.channel,
       channelUserId: message.sessionId,
     });
@@ -407,9 +442,7 @@ export async function startGateway(config: Config): Promise<void> {
     const userMetadata = { input_type: "text", channel: message.channel };
 
     // Obtener la zona horaria del usuario para el timestamp exacto
-    const userRow = getDb()
-      .query<any, [string]>("SELECT * FROM users WHERE id = ?")
-      .get(userId);
+    const userRow = await getUserDoc(userId);
     const userTimezone = userRow?.timezone || "UTC";
     const now = new Date();
     let exactTime = "";
@@ -435,7 +468,7 @@ export async function startGateway(config: Config): Promise<void> {
         rawUserMessage: messageContent,
         maxTokens: 4096,
         tools: prepareTools(agent, unifiedSessionId),
-        maxSteps: 15,
+        maxSteps: DEFAULT_INTERACTIVE_MAX_STEPS,
         threadId: unifiedSessionId,
         userId,
         channel: message.channel,
@@ -631,7 +664,7 @@ export async function startGateway(config: Config): Promise<void> {
             }
             // Token valid — resolve the real userId from DB
             try {
-              const user = getDb().query("SELECT id FROM users LIMIT 1").get() as { id: string } | undefined;
+              const user = await getFirstUser();
               if (user) sessionId = user.id;
             } catch { /* ignore */ }
           }
@@ -1041,9 +1074,7 @@ export async function startGateway(config: Config): Promise<void> {
         // Get/Update workspace files (soul, user, ethics)
         for (const wsType of ["soul", "user", "ethics"] as const) {
           if (url.pathname === `/api/workspace/${wsType}`) {
-            const coordinatorRow = getDb().query<{ workspace: string | null }, []>(
-              "SELECT workspace FROM agents WHERE role = 'coordinator' LIMIT 1"
-            ).get();
+            const coordinatorRow = await getCoordinatorAgent();
             const liveWorkspacePath = coordinatorRow?.workspace
               ? expandPath(coordinatorRow.workspace)
               : expandPath("~/.hivecode/workspace");
@@ -1110,6 +1141,14 @@ export async function startGateway(config: Config): Promise<void> {
           return await handleUpdateProvider(req, addCorsHeaders)
         }
 
+        // ── HiveAgents model loading ───────────────────────────────────────
+        if (url.pathname === "/api/providers/hiveagents/load-model" && req.method === "POST") {
+          return await handleLoadHiveAgentsModel(req, addCorsHeaders)
+        }
+        if (url.pathname === "/api/providers/hiveagents/model-status" && req.method === "GET") {
+          return await handleGetHiveAgentsModelStatus(req, addCorsHeaders)
+        }
+
         // ── Models API ───────────────────────────────────────────────────
         // GET /api/models?provider_id=xxx - Get models filtered by provider
         if (url.pathname === "/api/models" && req.method === "GET") {
@@ -1148,12 +1187,7 @@ export async function startGateway(config: Config): Promise<void> {
         }
 
         if (url.pathname === "/api/skills" && req.method === "POST") {
-          const body = await req.json().catch(() => ({}))
-          const { name, description, category, tools, triggers, preferred_agents, body: bodyContent } = body
-          if (!name) return addCorsHeaders(new Response("Missing name", { status: 400 }), req)
-          const id = crypto.randomUUID()
-          getDb().query(`INSERT INTO skills(id, name, description, category, tools, triggers, preferred_agents, body, version, version_num, active) VALUES(?, ?, ?, ?, ?, ?, ?, ?, '0.0.1', 1, 1)`).run(id, name, description || "", category || "", tools || "", triggers || "", typeof preferred_agents === 'object' ? JSON.stringify(preferred_agents || []) : (preferred_agents || "[]"), bodyContent || "")
-          return addCorsHeaders(Response.json({ success: true, id }), req)
+          return await handleCreateSkill(req, addCorsHeaders)
         }
 
         if (url.pathname.match(/^\/api\/skills\/[^/]+\/toggle$/) && req.method === "POST") {
@@ -1191,7 +1225,15 @@ export async function startGateway(config: Config): Promise<void> {
           const { name, description, content, is_default } = body
           if (!name || !content) return addCorsHeaders(Response.json({ success: false, error: "Missing name or content" }, { status: 400 }), req)
           const id = crypto.randomUUID()
-          getDb().query(`INSERT INTO ethics(id, name, description, content, is_default, enabled, active) VALUES(?, ?, ?, ?, ?, 1, 1)`).run(id, name, description || "", content, is_default ? 1 : 0)
+          await (await col<EthicsDoc>("ethics")).put(id, {
+            id,
+            name,
+            description: description || "",
+            content,
+            is_default: !!is_default,
+            enabled: true,
+            active: true,
+          })
           return addCorsHeaders(Response.json({ success: true, id }), req)
         }
 
@@ -1253,8 +1295,7 @@ export async function startGateway(config: Config): Promise<void> {
 
             log.info(`[MCP] Toggle connection for ${mcpName}, active=${active}`)
 
-            // Update DB
-            getDb().query(`UPDATE mcp_servers SET active = ?, enabled = ? WHERE id = ? OR name = ?`).run(active ? 1 : 0, active ? 1 : 0, mcpName, mcpName)
+            await patchMcpServer(mcpName, { active: !!active, enabled: !!active })
 
             // Connect/Disconnect MCP server in real-time (no restart needed)
             try {
@@ -1262,7 +1303,7 @@ export async function startGateway(config: Config): Promise<void> {
               if (mcp) {
                 log.info(`[MCP] Manager found, connecting ${mcpName}...`)
                 if (active) {
-                  const server = getDb().query(`SELECT * FROM mcp_servers WHERE id = ? OR name = ?`).get(mcpName, mcpName) as Record<string, any> | undefined;
+                  const server = (await findMcpServer(mcpName))?.doc;
                   if (server) {
                     log.info(`[MCP] Server config: transport=${server.transport}, url=${server.url}`)
                     await connectMcpServer(mcp, server, mcpName);
@@ -1271,13 +1312,13 @@ export async function startGateway(config: Config): Promise<void> {
                     // Get tools after connection
                     const tools = mcp.getServerTools(mcpName) || [];
                     log.info(`[MCP] Connected! Tools: ${tools.length}`)
-                    getDb().query(`UPDATE mcp_servers SET status = ?, tools_count = ? WHERE id = ? OR name = ?`).run("connected", tools.length, mcpName, mcpName);
+                    await patchMcpServer(mcpName, { status: "connected", tools_count: tools.length });
                   } else {
-                    log.error(`[MCP] Server not found in DB: ${mcpName}`)
+                    log.error(`[MCP] Server not found: ${mcpName}`)
                   }
                 } else {
                   await mcp.disconnectServer(mcpName);
-                  getDb().query(`UPDATE mcp_servers SET status = ? WHERE id = ? OR name = ?`).run("disconnected", mcpName, mcpName);
+                  await patchMcpServer(mcpName, { status: "disconnected", tools_count: 0 });
                 }
               } else {
                 log.error(`[MCP] No MCP Manager found`)
@@ -1310,15 +1351,14 @@ export async function startGateway(config: Config): Promise<void> {
               return addCorsHeaders(Response.json({ success: false, error: "Missing active field" }, { status: 400 }), req)
             }
 
-            // Update DB
-            getDb().query(`UPDATE mcp_servers SET active = ?, enabled = ? WHERE id = ? OR name = ?`).run(active ? 1 : 0, active ? 1 : 0, mcpName, mcpName)
+            await patchMcpServer(mcpName, { active: !!active, enabled: !!active })
 
             // Connect/Disconnect MCP server in real-time (no restart needed)
             try {
               const mcp = agent?.getMCPManager() ?? null;
               if (mcp) {
                 if (active) {
-                  const server = getDb().query(`SELECT * FROM mcp_servers WHERE id = ? OR name = ?`).get(mcpName, mcpName) as Record<string, any> | undefined;
+                  const server = (await findMcpServer(mcpName))?.doc;
                   if (server) {
                     log.info(`[MCP] Server config: transport=${server.transport}, url=${server.url}`)
                     await connectMcpServer(mcp, server, mcpName);
@@ -1328,14 +1368,13 @@ export async function startGateway(config: Config): Promise<void> {
                     const tools = mcp.getServerTools(mcpName) || [];
                     log.info(`[MCP] Connected! Tools: ${tools.length}`)
 
-                    // Update DB with status and tools
-                    getDb().query(`UPDATE mcp_servers SET status = ?, tools_count = ? WHERE id = ? OR name = ?`).run("connected", tools.length, mcpName, mcpName);
+                    await patchMcpServer(mcpName, { status: "connected", tools_count: tools.length });
                   } else {
-                    log.error(`[MCP] Server not found in DB: ${mcpName}`)
+                    log.error(`[MCP] Server not found: ${mcpName}`)
                   }
                 } else {
                   await mcp.disconnectServer(mcpName);
-                  getDb().query(`UPDATE mcp_servers SET status = ? WHERE id = ? OR name = ?`).run("disconnected", mcpName, mcpName);
+                  await patchMcpServer(mcpName, { status: "disconnected", tools_count: 0 });
                 }
               }
             } catch (error) {
@@ -1479,7 +1518,7 @@ export async function startGateway(config: Config): Promise<void> {
     },
 
     websocket: {
-      open(ws) {
+      async open(ws) {
         const data = ws.data;
 
         // ── /ui-ws client (React web UI) ─────────────────────────────────────
@@ -1523,15 +1562,14 @@ export async function startGateway(config: Config): Promise<void> {
 
         // Send welcome message with real user data
         try {
-          const db = getDb();
-          const user = db.query("SELECT id, name, language FROM users LIMIT 1").get() as { id: string; name: string; language: string } | undefined;
-          const agent = db.query("SELECT id, name, provider_id, model_id FROM agents WHERE role = 'coordinator' LIMIT 1").get() as { id: string; name: string; provider_id: string; model_id: string } | undefined;
-
-          // Get channels
-          const channels = db.query("SELECT id FROM channels WHERE active = 1").all() as Array<{ id: string }>;
-
-          // Get code bridge
-          const codeBridge = db.query("SELECT id FROM code_bridge WHERE enabled = 1").all() as Array<{ id: string }>;
+          const user = await getFirstUser();
+          const agent = await getCoordinatorAgent();
+          const channels = (await (await col<ChannelDoc>("channels")).scan())
+            .map((entry) => entry.doc)
+            .filter((channel) => channel.active);
+          const codeBridge = (await (await col<CodeBridgeDoc>("codeBridge")).scan())
+            .map((entry) => entry.doc)
+            .filter((bridge) => bridge.enabled);
 
           ws.send(JSON.stringify({
             type: "welcome",
@@ -1568,7 +1606,7 @@ export async function startGateway(config: Config): Promise<void> {
               laneQueue.enqueue(sessionId, async (_task, signal) => {
                 try {
                   broadcastUiMessage({ type: 'activity_update', coordinator: 'bee', phase: input, status: 'thinking' });
-                  const { userId } = resolveContext({ channel: 'webchat', channelUserId: sessionId });
+                  const { userId } = await resolveContext({ channel: 'webchat', channelUserId: sessionId });
                   let accumulated = '';
                   const t = new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
                   const response = await runner.generate({
@@ -1576,19 +1614,28 @@ export async function startGateway(config: Config): Promise<void> {
                     messages: [{ role: 'user' as const, content: input }],
                     maxTokens: 4096,
                     tools: prepareTools(agent, sessionId),
-                    maxSteps: 15,
+                    maxSteps: DEFAULT_INTERACTIVE_MAX_STEPS,
                     threadId: sessionId,
                     userId,
                     signal,
                     onToken: async (token: string) => {
                       if (signal.aborted) return;
                       accumulated += token;
-                      broadcastUiMessage({ type: 'narrative_chunk', coordinator: 'bee', phase: 'streaming', content: token });
+                      // The answer streams as assistant_chunk: consumers append it
+                      // to the current assistant entry. narrative_chunk would have
+                      // put the answer in the reasoning panel instead.
+                      broadcastUiMessage({ type: 'assistant_chunk', text: token, agent: 'bee', timestamp: t });
                     },
                   });
-                  const content = accumulated || response.content?.trim() || '';
-                  if (content) {
-                    broadcastUiMessage({ type: 'history_append', role: 'assistant', agent: 'bee', content, content_type: content.includes('```') ? 'markdown' : 'plain', timestamp: t });
+                  if (accumulated) {
+                    // Already rendered incrementally — assistant_done just closes it.
+                    broadcastUiMessage({ type: 'assistant_done' });
+                  } else {
+                    // Provider returned without streaming: fall back to one batch message.
+                    const content = response.content?.trim() || '';
+                    if (content) {
+                      broadcastUiMessage({ type: 'history_append', role: 'assistant', agent: 'bee', content, content_type: content.includes('```') ? 'markdown' : 'plain', timestamp: t });
+                    }
                   }
                   broadcastUiMessage({ type: 'activity_update', coordinator: '', phase: '', status: 'idle' });
                 } catch (err) {
@@ -1756,7 +1803,7 @@ export async function startGateway(config: Config): Promise<void> {
                 const messages = [{ role: "user" as const, content: messageContent }];
                 log.info(`Generating response for session ${unifiedSessionId}...`);
 
-                const { userId } = resolveContext({
+                const { userId } = await resolveContext({
                   channel: "webchat",
                   channelUserId: msg.sessionId,
                 });
@@ -1770,7 +1817,7 @@ export async function startGateway(config: Config): Promise<void> {
                   messages,
                   maxTokens: 4096,
                   tools: prepareTools(agent, unifiedSessionId),
-                  maxSteps: 15,
+                  maxSteps: DEFAULT_INTERACTIVE_MAX_STEPS,
                   threadId: unifiedSessionId,
                   userId,
                   onToken: async (token: string) => {
@@ -2013,7 +2060,7 @@ export async function startGateway(config: Config): Promise<void> {
 
               log.info(`Generating response for session ${unifiedSessionId} (multimodal: ${!!(msg.image || msg.document)})...`);
 
-              const { userId } = resolveContext({
+              const { userId } = await resolveContext({
                 channel: "webchat",
                 channelUserId: msg.sessionId,
               });
@@ -2027,7 +2074,7 @@ export async function startGateway(config: Config): Promise<void> {
                 messages,
                 maxTokens: 4096,
                 tools: prepareTools(agent, unifiedSessionId),
-                maxSteps: 15,
+                maxSteps: DEFAULT_INTERACTIVE_MAX_STEPS,
                 threadId: unifiedSessionId,
                 userId,
                 signal,

@@ -11,7 +11,8 @@
 
 import { EventEmitter } from "events";
 import { logger } from "../utils/logger";
-import { getDb } from "../storage/sqlite";
+import { col } from "../storage/hive";
+import type { AgentBusMessageDoc } from "../storage/collections";
 
 const log = logger.child("agent-bus");
 
@@ -107,26 +108,26 @@ export interface AgentBusEventHandler<K extends AgentBusEventKey> {
 // ─── Message Store - Persistencia de mensajes en BD ─────────────────────────
 
 export interface AgentBusMessage {
-  id: number;
+  id: string;
   event_type: string;
-  from_worker_id: string | null;
-  to_worker_id: string | null;
+  from_worker_id: string;
+  to_worker_id: string;
   topic: string | null;
   content: string;
   metadata: string | null;
   created_at: number;
-  read: number;
+  read: boolean;
 }
+
+const messageCache: AgentBusMessage[] = [];
 
 /**
  * Guarda un mensaje en la base de datos para persistencia
  */
 function persistMessage(event: AgentBusEventKey, data: any, metadata?: Record<string, unknown>): void {
-  const db = getDb();
-  
   // Extraer IDs de worker según el tipo de evento
-  let fromWorkerId: string | null = null;
-  let toWorkerId: string | null = null;
+  let fromWorkerId = "";
+  let toWorkerId = "";
   let topic: string | null = null;
   let content: string;
 
@@ -134,75 +135,77 @@ function persistMessage(event: AgentBusEventKey, data: any, metadata?: Record<st
     case "worker:task_started":
     case "worker:task_completed":
     case "worker:task_failed":
-      fromWorkerId = (data as any).workerId || null;
+      fromWorkerId = (data as any).workerId || "";
       topic = event;
       content = JSON.stringify(data);
       break;
     case "worker:help_request":
-      fromWorkerId = (data as any).fromWorkerId || null;
+      fromWorkerId = (data as any).fromWorkerId || "";
       topic = "help_request";
       content = (data as any).request || "";
       break;
     case "worker:help_response":
-      fromWorkerId = (data as any).fromWorkerId || null;
-      toWorkerId = (data as any).toWorkerId || null;
+      fromWorkerId = (data as any).fromWorkerId || "";
+      toWorkerId = (data as any).toWorkerId || "";
       topic = "help_response";
       content = (data as any).response || "";
       break;
     case "worker:blocked":
     case "worker:unblocked":
-      fromWorkerId = (data as any).workerId || null;
+      fromWorkerId = (data as any).workerId || "";
       topic = event;
       content = JSON.stringify(data);
       break;
     case "message:custom":
-      fromWorkerId = (data as any).fromWorkerId || null;
-      toWorkerId = (data as any).toWorkerId || null;
+      fromWorkerId = (data as any).fromWorkerId || "";
+      toWorkerId = (data as any).toWorkerId || "";
       topic = (data as any).topic || null;
       content = (data as any).content || "";
       break;
     default:
-      fromWorkerId = (data as any).workerId || (data as any).fromWorkerId || null;
+      fromWorkerId = (data as any).workerId || (data as any).fromWorkerId || "";
       topic = event;
       content = JSON.stringify(data);
   }
 
   try {
-    db.query(`
-      INSERT OR IGNORE INTO agent_bus_messages
-        (event_type, from_worker_id, to_worker_id, topic, content, metadata, created_at, read)
-      VALUES (?, ?, ?, ?, ?, ?, unixepoch(), 0)
-    `).run(
-      event,
-      fromWorkerId,
-      toWorkerId,
+    const message: AgentBusMessage = {
+      id: `bus_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`,
+      event_type: event,
+      from_worker_id: fromWorkerId,
+      to_worker_id: toWorkerId,
       topic,
       content,
-      metadata ? JSON.stringify(metadata) : null
-    );
+      metadata: metadata ? JSON.stringify(metadata) : null,
+      created_at: Date.now(),
+      read: false,
+    };
+    messageCache.push(message);
+    void persistMessageDoc(message);
   } catch (err) {
     log.warn(`Failed to persist message (non-critical): ${(err as Error).message}`);
   }
+}
+
+async function persistMessageDoc(message: AgentBusMessage): Promise<void> {
+  await (await col<AgentBusMessageDoc>("agentBusMessages")).put(message.id, message);
 }
 
 /**
  * Obtiene mensajes no leídos para un worker específico
  */
 export function getUnreadMessagesForWorker(workerId: string, limit: number = 50): AgentBusMessage[] {
-  const db = getDb();
-  
   try {
-    const messages = db.query<any, [string, number]>(`
-      SELECT * FROM agent_bus_messages 
-      WHERE (to_worker_id = ? OR to_worker_id IS NULL) AND read = 0
-      ORDER BY created_at ASC
-      LIMIT ?
-    `).all(workerId, limit);
+    const messages = messageCache
+      .filter((message) => !message.read)
+      .filter((message) => message.to_worker_id === workerId || message.to_worker_id === "")
+      .sort((a, b) => a.created_at - b.created_at)
+      .slice(0, limit);
 
     // Marcar como leídos
-    if (messages.length > 0) {
-      const ids = messages.map((m: AgentBusMessage) => m.id).join(",");
-      db.query(`UPDATE agent_bus_messages SET read = 1 WHERE id IN (${ids})`).run();
+    for (const message of messages) {
+      message.read = true;
+      void persistMessageDoc(message);
     }
 
     return messages;
@@ -216,33 +219,11 @@ export function getUnreadMessagesForWorker(workerId: string, limit: number = 50)
  * Obtiene el historial de mensajes de un proyecto
  */
 export function getProjectMessageHistory(projectId: string, limit: number = 100): AgentBusMessage[] {
-  const db = getDb();
-  
   try {
-    // Primero obtenemos los task_ids del proyecto
-    const tasks = db.query<any, [string]>(
-      "SELECT id FROM tasks WHERE project_id = ?"
-    ).all(projectId);
-
-    if (tasks.length === 0) return [];
-
-    // Obtenemos los agent_ids de las tareas
-    const agentIds = tasks
-      .map((t: any) => t.agent_id)
-      .filter((id: string | null) => id !== null);
-
-    if (agentIds.length === 0) return [];
-
-    // Obtenemos mensajes relacionados a estos agents
-    const placeholders = agentIds.map(() => "?").join(",");
-    const messages = db.query<any, any[]>(`
-      SELECT * FROM agent_bus_messages 
-      WHERE from_worker_id IN (${placeholders})
-      ORDER BY created_at DESC
-      LIMIT ?
-    `).all([...agentIds, limit]);
-
-    return messages;
+    return messageCache
+      .filter((message) => message.content.includes(projectId) || (message.metadata ?? "").includes(projectId))
+      .sort((a, b) => b.created_at - a.created_at)
+      .slice(0, limit);
   } catch (err) {
     log.error(`Failed to get project message history: ${(err as Error).message}`);
     return [];

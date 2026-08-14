@@ -4,13 +4,12 @@ use crate::{
     ui::{split_panes, Axis, Constraint, HitAction, MouseRegion, SplitPane},
     widgets::{
         activity_toast, checkpoint_bar, code_layout, command_popup, config_modal, conflict_bar,
-        dashboard_layout, focus_layout, header, info_modal, input, layout_chrome,
+        dashboard_layout, focus_layout, header, info_modal, input,
         plan_approval_modal, plan_layout, review_layout, settings_hub, statusbar, tabbar, welcome,
     },
 };
-
 #[cfg(not(test))]
-use arboard::Clipboard;
+use crate::clipboard;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ChromeAreas {
@@ -21,14 +20,6 @@ pub struct ChromeAreas {
     pub conflict: Rect,
     pub input: Rect,
     pub status: Rect,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct ImmersiveAreas {
-    header: Rect,
-    content: Rect,
-    input: Rect,
-    footer: Rect,
 }
 
 pub fn layout_areas(area: Rect, panels: &PanelLayoutState) -> ChromeAreas {
@@ -91,9 +82,7 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
             if !text.is_empty() {
                 #[cfg(not(test))]
                 {
-                    if let Ok(mut clipboard) = Clipboard::new() {
-                        let _ = clipboard.set_text(text);
-                    }
+                    let _ = clipboard::copy_text(&text);
                 }
             }
         }
@@ -127,23 +116,10 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
         ModalState::None         => {}
     }
 
-    if state.active_tab == TabId::Dashboard || state.active_tab != TabId::Focus {
-        (0, 0)
-    } else {
-        cursor_position(state, input_area)
-    }
+    cursor_position(state, input_area)
 }
 
 fn render_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {
-    if state.active_tab == TabId::Dashboard {
-        canvas.with_clip(area, |canvas| dashboard_layout::render(canvas, area, state));
-        return Rect::new(0, 0, 0, 0);
-    }
-
-    if matches!(state.active_tab, TabId::Focus | TabId::Plan | TabId::Code | TabId::Review) {
-        return render_immersive_main(canvas, area, state);
-    }
-
     let areas = layout_areas(area, &state.panels);
 
     canvas.with_clip(areas.header, |canvas| header::render(canvas, areas.header, state));
@@ -178,60 +154,8 @@ fn render_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {
     areas.input
 }
 
-fn render_immersive_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {
-    let areas = immersive_areas(area, state);
-    canvas.with_clip(areas.header, |canvas| layout_chrome::render_header(canvas, areas.header, state));
-    canvas.with_clip(areas.content, |canvas| match state.active_tab {
-        TabId::Focus => focus_layout::render(canvas, areas.content, state),
-        TabId::Plan => plan_layout::render(canvas, areas.content, state),
-        TabId::Code => code_layout::render(canvas, areas.content, state),
-        TabId::Review => review_layout::render(canvas, areas.content, state),
-        TabId::Dashboard => dashboard_layout::render(canvas, areas.content, state),
-    });
-    if areas.input.h > 0 {
-        canvas.with_clip(areas.input, |canvas| input::render(canvas, areas.input, state));
-    }
-    canvas.with_clip(areas.footer, |canvas| layout_chrome::render_footer(canvas, areas.footer, state));
-
-    areas.input
-}
-
-fn immersive_areas(area: Rect, state: &AppState) -> ImmersiveAreas {
-    let header_h = area.h.min(1);
-    let footer_h = area.h.saturating_sub(header_h).min(2);
-    let input_h = if state.active_tab == TabId::Focus {
-        area.h
-            .saturating_sub(header_h + footer_h)
-            .min(state.panels.input_height.clamp(2, 4))
-    } else {
-        0
-    };
-    let content_h = area.h.saturating_sub(header_h + footer_h + input_h);
-    let header = Rect::new(area.x, area.y, area.w, header_h);
-    let content = Rect::new(area.x, area.y + header_h, area.w, content_h);
-    let input = Rect::new(area.x, area.y + header_h + content_h, area.w, input_h);
-    let footer = Rect::new(area.x, area.bottom().saturating_sub(footer_h), area.w, footer_h);
-    ImmersiveAreas { header, content, input, footer }
-}
-
 fn register_hit_regions(state: &mut AppState, area: Rect) {
     state.hit_map.clear();
-    if state.active_tab == TabId::Dashboard {
-        return;
-    }
-    if matches!(state.active_tab, TabId::Focus | TabId::Plan | TabId::Code | TabId::Review) {
-        let areas = immersive_areas(area, state);
-        state.hit_map.push(MouseRegion::new(
-            format!("scroll:{}", state.active_tab.label().to_ascii_lowercase()),
-            areas.content,
-            0,
-            HitAction::Scroll {
-                target: state.active_tab.label().to_ascii_lowercase(),
-            },
-        ));
-        register_split_regions(state, areas.content);
-        return;
-    }
     let areas = layout_areas(area, &state.panels);
 
     register_chrome_regions(state, areas);
@@ -433,11 +357,7 @@ fn apply_selection_highlight(canvas: &mut Canvas, state: &AppState) {
 }
 
 fn content_area_for_popup(area: Rect, _state: &AppState) -> Rect {
-    if matches!(_state.active_tab, TabId::Focus | TabId::Plan | TabId::Code | TabId::Review) {
-        immersive_areas(area, _state).content
-    } else {
-        layout_areas(area, &_state.panels).content
-    }
+    layout_areas(area, &_state.panels).content
 }
 
 fn cursor_position(state: &AppState, input_area: Rect) -> (u16, u16) {

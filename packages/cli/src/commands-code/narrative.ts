@@ -1,31 +1,27 @@
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
-  hiveNote, hiveText, isCancel,
+  hiveNote,
 } from "../cli-ui.ts"
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { CodeNarrativeDoc, CodeTaskDoc } from "@johpaz/hivecode-core/storage/collections"
+
+async function listNarrative(): Promise<CodeNarrativeDoc[]> {
+  return (await (await col<CodeNarrativeDoc>("codeNarrative")).scan())
+    .map((entry) => entry.doc)
+}
 
 export async function narrativeShow(args: string[]): Promise<void> {
   const taskFlag = args.find(a => a.startsWith("--task="))
   const taskId = taskFlag ? taskFlag.split("=")[1] : undefined
   const lastFlag = args.find(a => a.startsWith("--last="))
-  const lastN = lastFlag ? parseInt(lastFlag.split("=")[1]) : 10
+  const lastN = lastFlag ? parseInt(lastFlag.split("=")[1] ?? "10", 10) : 10
 
   hiveIntro("hivecode · Narrativo")
 
-  const db = getDb()
-
-  let query = "SELECT * FROM code_narrative"
-  const params: any[] = []
-
-  if (taskId) {
-    query += " WHERE task_id = ?"
-    params.push(taskId)
-  }
-
-  query += " ORDER BY id DESC LIMIT ?"
-  params.push(lastN)
-
-  const rows = db.query(query).all(...params) as any[]
+  const rows = (await listNarrative())
+    .filter((entry) => !taskId || entry.task_id === taskId)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .slice(0, lastN)
 
   if (rows.length === 0) {
     hiveNote("Sin entradas", ["No hay entradas en el narrativo para los criterios dados."])
@@ -33,9 +29,8 @@ export async function narrativeShow(args: string[]): Promise<void> {
     return
   }
 
-  // Show task info if filtering by task
   if (taskId && rows.length > 0) {
-    const taskRow = db.query("SELECT description, status FROM code_tasks WHERE id = ?").get(taskId) as any
+    const taskRow = (await (await col<CodeTaskDoc>("codeTasks")).get(taskId))?.doc
     if (taskRow) {
       process.stdout.write(`  │  Tarea: ${taskRow.description}\n`)
       process.stdout.write(`  │  Estado: ${taskRow.status}\n`)
@@ -43,24 +38,18 @@ export async function narrativeShow(args: string[]): Promise<void> {
     }
   }
 
-  // Show entries (reverse to show chronological order)
   const entries = rows.reverse()
   for (const entry of entries) {
-    const coordinator = entry.coordinator
-    const isDraft = entry.is_draft === 1
-    const isOverride = entry.is_override === 1
-
     const badges = []
-    if (isDraft) badges.push("DRAFT")
-    if (isOverride) badges.push("OVERRIDE")
+    if (entry.is_draft) badges.push("DRAFT")
+    if (entry.is_override) badges.push("OVERRIDE")
 
     const date = new Date(entry.created_at).toLocaleString("es-CO", {
       hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short",
     })
 
-    hivePhaseComplete(coordinator, `[${date}] ${coordinator}${badges.length > 0 ? ` · ${badges.join(" ")}` : ""}`)
+    hivePhaseComplete(entry.coordinator, `[${date}] ${entry.coordinator}${badges.length > 0 ? ` · ${badges.join(" ")}` : ""}`)
 
-    // Show entry content (truncated)
     const lines = entry.entry.split("\n").slice(0, 8)
     for (const line of lines) {
       process.stdout.write(`  │    ${line}\n`)
@@ -75,7 +64,6 @@ export async function narrativeShow(args: string[]): Promise<void> {
 }
 
 export async function narrativeSearch(args: string[]): Promise<void> {
-
   const query = args[0]
 
   if (!query) {
@@ -85,12 +73,15 @@ export async function narrativeSearch(args: string[]): Promise<void> {
 
   hiveIntro("hivecode · Buscar en Narrativo")
 
-  const db = getDb()
-  const rows = db.query(
-    `SELECT n.* FROM code_narrative n
-     JOIN code_narrative_fts fts ON n.id = fts.rowid
-     WHERE code_narrative_fts MATCH ? ORDER BY rank LIMIT 20`
-  ).all(query) as any[]
+  const needle = query.toLowerCase()
+  const rows = (await listNarrative())
+    .filter((entry) =>
+      entry.entry.toLowerCase().includes(needle) ||
+      entry.coordinator.toLowerCase().includes(needle) ||
+      (entry.phase ?? "").toLowerCase().includes(needle)
+    )
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .slice(0, 20)
 
   if (rows.length === 0) {
     hiveNote("Sin resultados", [`No se encontraron entradas para: "${query}"`])
@@ -109,14 +100,12 @@ export async function narrativeSearch(args: string[]): Promise<void> {
 }
 
 export async function narrativeExport(args: string[]): Promise<void> {
-
   const formatFlag = args.find(a => a.startsWith("--format="))
   const format = formatFlag ? formatFlag.split("=")[1] : "md"
 
   hiveIntro("hivecode · Exportar Narrativo")
 
-  const db = getDb()
-  const rows = db.query("SELECT * FROM code_narrative ORDER BY id ASC").all() as any[]
+  const rows = (await listNarrative()).sort((a, b) => a.created_at.localeCompare(b.created_at))
 
   if (format === "json") {
     console.log(JSON.stringify(rows, null, 2))

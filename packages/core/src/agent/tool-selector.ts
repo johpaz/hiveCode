@@ -1,10 +1,10 @@
 /**
- * FTS5-based Dynamic Tool Selector Module
+ * HiveDB-based Dynamic Tool Selector Module
  * 
  * Context Compiler Level 3 - Intelligent Tool Selection
  * 
  * This module intercepts each message BEFORE calling the LLM and uses
- * SQLite FTS5 bm25() scoring to select the most relevant tools (0-4).
+ * HiveDB BM25 scoring to select the most relevant tools.
  * 
  * DESIGN DECISIONS:
  * 
@@ -15,17 +15,16 @@
  * 2. Maximum 4 tools per turn: Keeps token count low and prevents overwhelming
  *    the LLM with irrelevant tools. Forces prioritization.
  * 
- * 3. Relevance threshold: If highest bm25 score < MIN_RELEVANCE_THRESHOLD,
- *    the message is considered conversational and returns empty array.
- *    Rationale: Prevents false positives on generic messages like "hola" or
- *    "cómo estás?" which should not trigger any tools.
+ * 3. Relative relevance cutoff: HiveDB BM25 scores are positive and
+ *    corpus-dependent, so hits are kept only when they are close enough to
+ *    the top match.
  * 
  * 4. Atomic over orchestration: When ambiguous, prefer individual tools over
  *    compound/manager tools. Rationale: Atomic tools are more predictable and
  *    the LLM can combine them as needed.
  * 
- * 5. Performance: Must complete in under 50ms. FTS5 queries are typically
- *    <5ms for small tool catalogs (<100 tools).
+ * 5. Performance: Must complete in under 50ms. HiveDB/tantivy queries are
+ *    sub-millisecond for small tool catalogs.
  * 
  * 6. Tool categorization: Tools are categorized by semantic domain:
  *    - scheduling (cron tools)
@@ -39,9 +38,16 @@
  *    - core (notify, report_progress, save_note)
  */
 
-import { getDb } from "../storage/sqlite"
+import { col } from "../storage/hive"
+import type { ToolDoc } from "../storage/collections"
 import { logger } from "../utils/logger"
 import { getExecutionMode, filterToolsByMode } from "./execution-mode"
+import {
+    searchCapabilities,
+    applyRelativeCutoff,
+    replaceCapabilityDocs,
+    type CapabilityDoc,
+} from "./capability-search"
 
 const log = logger.child("tool-selector")
 
@@ -74,18 +80,13 @@ export interface ToolSelectorResult {
 const MAX_TOOLS_PER_TURN = 12
 
 /**
- * Minimum bm25 score threshold. Below this = conversational, no tools needed.
- *
- * CRITICAL: bm25() returns NEGATIVE scores where closer to 0 = more relevant.
- * - Score of -5 is MORE relevant than -20
- * - We use -30 as threshold to filter noise while allowing valid matches
- *
- * Previous values: -25 (too strict), -100 (too permissive)
- * New value: -30 (balanced filtering, FTS5 MATCH handles the heavy lifting)
+ * Relative relevance cutoff: keep a hit only if it scores at least this
+ * fraction of the top hit. HiveDB BM25 scores are positive (higher = better)
+ * but corpus-dependent, so absolute thresholds do not transfer.
  */
-const MIN_RELEVANCE_THRESHOLD = -30
+const RELEVANCE_RATIO = 0.3
 
-/** Stopwords to filter out before FTS5 query construction */
+/** Stopwords used by conversational filtering before capability search */
 const STOPWORDS = new Set([
     "que", "con", "para", "por", "una", "uno", "los", "las", "del",
     "como", "esta", "esto", "ese", "eso", "the", "and", "for",
@@ -112,11 +113,11 @@ const CONVERSATIONAL_PATTERNS = [
 //
 // These tools cover the full native toolset. Each has:
 // - name: unique identifier
-// - description: what the tool does (used for FTS5 matching)
+// - description: what the tool does (used for HiveDB BM25 matching)
 // - category: semantic domain for grouping
 // - abstractionLevel: atomic (single operation) vs orchestration (manages multiple)
 //
-// The descriptions are enriched with Spanish/English keywords for better FTS5 matching.
+// The descriptions are enriched with Spanish/English keywords for better HiveDB matching.
 
 export const CORE_TOOL_CATALOG: ToolDescriptor[] = [
     // Cron tools (cron.*)
@@ -203,7 +204,7 @@ export const CORE_TOOL_CATALOG: ToolDescriptor[] = [
     { name: "search_in_files", description: "Search for string or regex pattern in files using ripgrep/grep, returns matching lines with numbers. Spanish keywords: buscar en archivos, grep, buscar patrón, encontrar texto en código, buscar código", category: "filesystem", abstractionLevel: "atomic" },
 
     // Core discovery and context
-    { name: "search_knowledge", description: "FTS5 search over native tools, MCP tools, skills, playbook rules, and project code. The primary discovery mechanism. Spanish keywords: buscar herramienta, encontrar skill, qué herramienta usar, descubrir capacidad, buscar conocimiento", category: "core", abstractionLevel: "atomic" },
+    { name: "search_knowledge", description: "HiveDB search over native tools, MCP tools, skills, playbook rules, and project code. The primary discovery mechanism. Spanish keywords: buscar herramienta, encontrar skill, qué herramienta usar, descubrir capacidad, buscar conocimiento", category: "core", abstractionLevel: "atomic" },
     { name: "get_project_context", description: "Get cached project structure summary: key files, modules, active ADRs. Faster than recursive fs_list. Spanish keywords: contexto del proyecto, estructura del proyecto, resumen del proyecto", category: "core", abstractionLevel: "atomic" },
 
     // Git (advanced)
@@ -213,7 +214,7 @@ export const CORE_TOOL_CATALOG: ToolDescriptor[] = [
 
     // Code analysis (advanced)
     { name: "parse_ast", description: "Analyze TypeScript/JavaScript AST: imports, exports, functions, cyclomatic complexity. Spanish keywords: analizar código, AST, árbol sintáctico, estructura de código, imports del archivo", category: "code", abstractionLevel: "atomic" },
-    { name: "find_imports", description: "Find all files importing a given module via the code_graph SQLite table. Spanish keywords: quién importa, dependencias inversas, importadores, dependientes del módulo", category: "code", abstractionLevel: "atomic" },
+    { name: "find_imports", description: "Find all files importing a given module via the indexed code graph. Spanish keywords: quién importa, dependencias inversas, importadores, dependientes del módulo", category: "code", abstractionLevel: "atomic" },
     { name: "check_types", description: "Run TypeScript type checking (bun tsc --noEmit). Returns errors, warnings, duration. Spanish keywords: typecheck, verificar tipos, tsc, errores typescript, validar tipos", category: "code", abstractionLevel: "atomic" },
     { name: "run_script", description: "Execute TypeScript/JavaScript file in isolated subprocess (60s timeout). Spanish keywords: ejecutar script, correr archivo, run script, ejecutar código aislado", category: "code", abstractionLevel: "atomic" },
     { name: "code_test_parallel", description: "Run multiple test suites concurrently and aggregate pass/fail results. Spanish keywords: tests paralelos, suites en paralelo, ejecutar tests múltiples", category: "code", abstractionLevel: "atomic" },
@@ -225,7 +226,7 @@ export const CORE_TOOL_CATALOG: ToolDescriptor[] = [
     // Narrative — story log and architectural decisions
     { name: "read_narrative", description: "Read narrative entries for session/task in chronological order. Spanish keywords: leer narrativa, historial de tarea, log de trabajo, qué se hizo, historia del proyecto", category: "narrative", abstractionLevel: "atomic" },
     { name: "append_narrative", description: "Append entry to the narrative log (markdown). Spanish keywords: agregar narrativa, escribir log, documentar progreso, guardar avance", category: "narrative", abstractionLevel: "atomic" },
-    { name: "search_narrative", description: "FTS5 full-text search over narrative entries with relevance scores. Spanish keywords: buscar en narrativa, buscar en historial, encontrar en log", category: "narrative", abstractionLevel: "atomic" },
+    { name: "search_narrative", description: "Full-text search over narrative entries with relevance scores. Spanish keywords: buscar en narrativa, buscar en historial, encontrar en log", category: "narrative", abstractionLevel: "atomic" },
     { name: "read_decisions", description: "List Architecture Decision Records (ADRs) by status or task. Spanish keywords: leer decisiones, ver ADRs, decisiones arquitecturales, historial de decisiones", category: "narrative", abstractionLevel: "atomic" },
     { name: "write_decision", description: "Save ADR with context, options, decision and consequences. Spanish keywords: guardar decisión, crear ADR, documentar decisión, registrar ADR", category: "narrative", abstractionLevel: "atomic" },
     { name: "get_task_context", description: "Full context for a task: narrative + decisions + file snapshots. Spanish keywords: contexto completo de tarea, todo sobre la tarea, estado completo", category: "narrative", abstractionLevel: "atomic" },
@@ -269,27 +270,6 @@ function isConversational(message: string): boolean {
 }
 
 /**
- * Build FTS5 query from user message
- * 
- * Strips stopwords, special characters, and limits to 8 keywords.
- * Uses OR operator for flexible matching.
- */
-function buildFTSQuery(message: string): string {
-    log.info(`[tool-selector] Building FTS query from message: "${message}"`)
-    const words = message
-        .toLowerCase()
-        .replace(/[^\p{L}\p{N}\s]/gu, " ")
-        .split(/\s+/)
-        .filter((w) => w.length > 2 && !STOPWORDS.has(w))
-        .slice(0, 8)
-
-    if (words.length === 0) return ""
-
-    // Use prefix matching for better recall (e.g., "gener*" matches "generar", "generando", "generación")
-    return words.map(w => `${w}*`).join(" OR ")
-}
-
-/**
  * Determine abstraction level preference
  * 
  * Returns 'atomic' to prefer individual tools, 'orchestration' to prefer
@@ -303,7 +283,7 @@ function getAbstractionPreference(): "atomic" | "orchestration" {
 // ─── Main Selection Function ─────────────────────────────────────────────────
 
 /**
- * Select tools for a given user message using FTS5 bm25() scoring
+ * Select tools for a given user message using HiveDB BM25 scoring
  * 
  * @param userMessage - The raw user message
  * @param fullToolList - Full list of available tools (for validation/filtering)
@@ -311,17 +291,16 @@ function getAbstractionPreference(): "atomic" | "orchestration" {
  * 
  * ALGORITHM:
  * 1. If conversational → return []
- * 2. Build FTS5 query from message keywords
- * 3. Query tools_fts with bm25() scoring
- * 4. Filter results below MIN_RELEVANCE_THRESHOLD
+ * 2. Query the HiveDB capability index with the raw message
+ * 3. Keep hits scoring at least RELEVANCE_RATIO of the top hit
  * 5. If ambiguous → prefer atomic over orchestration
  * 6. Return top maxTools results (default: MAX_TOOLS_PER_TURN)
  */
-export function selectTools(
+export async function selectTools(
     userMessage: string,
     fullToolList: ToolDescriptor[] = CORE_TOOL_CATALOG,
     maxTools: number = MAX_TOOLS_PER_TURN
-): ToolDescriptor[] {
+): Promise<ToolDescriptor[]> {
     const startTime = performance.now()
 
     // Log incoming user message for debugging/validation
@@ -333,59 +312,43 @@ export function selectTools(
         return []
     }
 
-    // Step 2: Build FTS5 query
-    const ftsQuery = buildFTSQuery(userMessage)
-    if (!ftsQuery) {
-        log.debug(`[tool-selector] No valid FTS query terms, returning empty array`)
+    // Step 2: Query the HiveDB capability index with the raw user text.
+    let hits
+    try {
+        hits = await searchCapabilities(userMessage, {
+            types: ["tool"],
+            k: maxTools * 2,
+        })
+    } catch (err) {
+        log.error(`[tool-selector] Capability search failed:`, err)
         return []
     }
 
-    log.debug(`[tool-selector] FTS query: "${ftsQuery}"`)
-
-    // Step 3: Execute FTS5 query with bm25 scoring
-    const db = getDb()
-
-    // Use bm25() with column weights for relevance scoring
-    // FTS5 table columns: tool_name, name, description, category
-    // Weights: tool_name=1.0, name=5.0, description=3.0, category=1.0
-    // Higher weight on name (5.0) for exact tool name matching
-    // Get more initially (maxTools * 2) for filtering, then limit to maxTools
-    const ftsResults = db.query(`
-      SELECT tool_name, bm25(tools_fts, 1.0, 5.0, 3.0, 1.0) as bm25_score
-      FROM tools_fts
-      WHERE tools_fts MATCH ?
-      ORDER BY bm25_score ASC
-      LIMIT ?
-    `).all(ftsQuery, maxTools * 2) as { tool_name: string; bm25_score: number }[]
-
-    if (ftsResults.length === 0) {
-        log.debug(`[tool-selector] No FTS matches, returning empty array`)
+    if (hits.length === 0) {
+        log.debug(`[tool-selector] No matches, returning empty array`)
         return []
     }
 
-    // Log raw scores for debugging
-    log.info(`[tool-selector] Raw FTS scores: ${ftsResults.slice(0, 10).map(r => `${r.tool_name}=${r.bm25_score.toFixed(2)}`).join(", ")}`)
+    log.info(`[tool-selector] Raw scores: ${hits.slice(0, 10).map(h => `${h.rawId}=${h.score.toFixed(2)}`).join(", ")}`)
 
-    // Step 4: Apply relevance threshold filter
-    // bm25() returns negative scores; threshold is -0.5 (loosened from typical -5)
-    const relevantResults = ftsResults.filter(r => r.bm25_score >= MIN_RELEVANCE_THRESHOLD)
-
-    if (relevantResults.length === 0) {
-        log.debug(`[tool-selector] All results below threshold ${MIN_RELEVANCE_THRESHOLD}, returning empty`)
+    // Step 3: Keep only hits close enough to the best match
+    const relevantHits = applyRelativeCutoff(hits, RELEVANCE_RATIO)
+    if (relevantHits.length === 0) {
+        log.debug(`[tool-selector] All results below ratio cutoff, returning empty`)
         return []
     }
 
-    // Step 5: Map to tool descriptors with additional metadata
+    // Step 4: Map to tool descriptors with additional metadata
     const toolMap = new Map(fullToolList.map(t => [t.name, t]))
 
     const scoredTools: SelectedTool[] = []
 
-    for (const result of relevantResults) {
-        const tool = toolMap.get(result.tool_name)
+    for (const hit of relevantHits) {
+        const tool = toolMap.get(hit.rawId)
         if (tool) {
             scoredTools.push({
                 name: tool.name,
-                score: result.bm25_score,
+                score: hit.score,
                 category: tool.category,
             })
         }
@@ -397,12 +360,10 @@ export function selectTools(
 
     if (scoredTools.length > MAX_TOOLS_PER_TURN) {
         // Sort by score first, then by abstraction level preference
-        // CRITICAL FIX: bm25() returns NEGATIVE scores where closer to 0 = more relevant
-        // So we sort ASCENDING (a.score - b.score) to put -8.02 before -5.11
         scoredTools.sort((a, b) => {
-            // First by score (ascending for bm25 - closer to 0 is better)
+            // First by score (descending: HiveDB scores are positive, higher = better)
             if (Math.abs(a.score - b.score) > 0.1) {
-                return a.score - b.score  // ✅ Fixed: ascending for negative bm25 scores
+                return b.score - a.score
             }
             // Then by abstraction preference (preferred type first)
             const aTool = toolMap.get(a.name)
@@ -440,20 +401,17 @@ export function selectTools(
     return result
 }
 
-// ─── Sync Tools to FTS5 ─────────────────────────────────────────────────────
+// ─── Sync Tools to HiveDB ───────────────────────────────────────────────────
 
 /**
- * Sync tool catalog to FTS5 virtual table
+ * Sync tool catalog to the HiveDB capability index.
  *
- * Called on initialization from gateway/initializer.ts to populate the FTS5 index.
- * Assumes the tools_fts table already exists (created by CONTEXT_ENGINE_SCHEMA).
+ * Called on initialization from gateway/initializer.ts to populate the HiveDB index.
  * Descriptions are enriched with bilingual keywords for better matching.
  *
  * @param tools - Optional array of tools to sync. If not provided, fetches from DB.
  */
-export async function syncToolCatalogToFTS(tools?: ToolDescriptor[]): Promise<void> {
-    const db = getDb()
-
+export async function syncToolCatalogToIndex(tools?: ToolDescriptor[]): Promise<void> {
     try {
         // Step 1: Build full catalog = CORE_TOOL_CATALOG + any tools in DB not already covered
         // CORE_TOOL_CATALOG has bilingual keywords; DB tools may be dynamically registered
@@ -461,8 +419,9 @@ export async function syncToolCatalogToFTS(tools?: ToolDescriptor[]): Promise<vo
             CORE_TOOL_CATALOG.map(t => [t.name, t])
         )
 
-        // Merge in any tools from the DB that are missing from the static catalog
-        const dbTools = db.query("SELECT name, description, category FROM tools").all() as Array<{ name: string; description: string | null; category: string | null }>
+        // Merge in any tools from HiveDB that are missing from the static catalog
+        const toolsCol = await col<ToolDoc>("tools")
+        const dbTools = (await toolsCol.scan({})).map(e => e.doc)
         for (const row of dbTools) {
             if (!catalogByName.has(row.name)) {
                 catalogByName.set(row.name, {
@@ -483,38 +442,21 @@ export async function syncToolCatalogToFTS(tools?: ToolDescriptor[]): Promise<vo
 
         const toolCatalog = Array.from(catalogByName.values())
 
-        // Step 2: Atomic transaction for FTS5 sync
-        // We use a transaction to ensure that if sync fails, we don't end up with an empty FTS table
-        const syncTransaction = db.transaction(() => {
-            // Verify table exists inside transaction (optional but safer)
-            const tableCheck = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='tools_fts'").get()
-            if (!tableCheck) {
-                throw new Error("tools_fts table does not exist!")
-            }
+        // Step 2: Replace all tool documents in the HiveDB capability index
+        const docs: CapabilityDoc[] = toolCatalog.map(tool => ({
+            type: "tool" as const,
+            rawId: tool.name,
+            name: tool.name,
+            body: enrichToolDescription(tool),
+            tags: tool.category,
+        }))
 
-            // A: Clear existing data
-            db.run("DELETE FROM tools_fts")
+        await replaceCapabilityDocs("tool", docs)
 
-            // B: Prepare insertion
-            const insert = db.prepare(`
-                INSERT INTO tools_fts(tool_name, name, description, category)
-                VALUES (?, ?, ?, ?)
-            `)
-
-            // C: Re-populate
-            for (const tool of toolCatalog) {
-                const enriched = enrichToolDescription(tool)
-                insert.run(tool.name, tool.name, enriched, tool.category)
-            }
-        })
-
-        // Execute transaction
-        syncTransaction()
-
-        log.info(`[tool-selector] Atomic sync complete: ${toolCatalog.length} tools indexed in FTS5`)
+        log.info(`[tool-selector] Sync complete: ${toolCatalog.length} tools indexed in HiveDB`)
 
     } catch (err) {
-        log.error(`[tool-selector] Transactional sync failed:`, err)
+        log.error(`[tool-selector] Tool index sync failed:`, err)
         throw err // Re-throw to inform initializer
     }
 }
@@ -522,7 +464,7 @@ export async function syncToolCatalogToFTS(tools?: ToolDescriptor[]): Promise<vo
 /**
  * Enrich tool description with category-specific keywords
  * 
- * This improves FTS5 matching for both English and Spanish queries.
+ * This improves HiveDB matching for both English and Spanish queries.
  */
 function enrichToolDescription(tool: ToolDescriptor): string {
     const keywordsByCategory: Record<string, string> = {
@@ -563,12 +505,12 @@ export function mcpToolFullName(serverName: string, toolName: string): string {
 /**
  * Initialize the tool selector
  *
- * DEPRECATED: syncToolCatalogToFTS() is now called from gateway/initializer.ts
+ * DEPRECATED: syncToolCatalogToIndex() is now called from gateway/initializer.ts
  * This function is kept for backward compatibility but is no longer needed
  */
 export function initializeToolSelector(): void {
     log.info(`[tool-selector] Initializing (deprecated - sync is done in gateway/initializer.ts)`)
-    // syncToolCatalogToFTS() - No longer needed here, done in gateway/initializer.ts
+    // syncToolCatalogToIndex() - No longer needed here, done in gateway/initializer.ts
 }
 
 // ─── Debug/Test Helpers ─────────────────────────────────────────────────────

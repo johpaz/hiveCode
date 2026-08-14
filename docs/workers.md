@@ -1,6 +1,10 @@
 # Los Workers de hiveCode
 
-hiveCode opera con **13 coordinadores principales** más **2 workers on-demand** y **18 sub-agentes especializados**. Cada worker es un **Bun Worker independiente** — proceso JS separado con su propio heap — y se comunica con el `CoordinatorManager` exclusivamente por paso de mensajes. Los workers nunca se comunican entre sí directamente; el blackboard SQLite es el único medio de coordinación.
+> **Documento histórico del pipeline de compatibilidad.** El roster vigente es BEE, Scout, Builder, Verifier y Reviewer; los dominios son skills y ningún worker se inicia de forma persistente. Consulta [Agent Harness](./agent-harness.md).
+
+hiveCode opera con **11 coordinadores principales** más **2 workers on-demand** y **18 sub-agentes especializados**. Cada worker es un **Bun Worker independiente** — proceso JS separado con su propio heap — y se comunica con el `CoordinatorManager` exclusivamente por paso de mensajes. Los workers nunca se comunican entre sí directamente; el blackboard HiveDB es el único medio de coordinación.
+
+**Roster consolidado**: antes había 13 coordinadores. DBA se fusionó en BackendEngineer (el schema es parte del contrato de datos del backend, no un dominio aparte), MobileEngineer se fusionó en FrontendEngineer (mismo trabajo de UI de cliente contra un único contrato de API), e Integration se fusionó en CodeReviewer (la validación read-only de contratos entre módulos solapa con el reviewer de contexto limpio). Se sumó **Verifier**, un coordinador nuevo que reproduce los criterios de aceptación del PRD contra el sistema real — el hueco de verificación que ni QA (escribe tests) ni Reviewer (lee código) cubrían. La razón de fondo: los coordinadores que **leen** en paralelo escalan bien; los que **escriben** en paralelo sobre el mismo dominio generan costuras de conflicto y gastan tokens de forma redundante sin dividir trabajo real del LLM. Ver el detalle de cada fusión en su sección correspondiente más abajo.
 
 ---
 
@@ -25,26 +29,30 @@ Usuario escribe mensaje
               Nivel 1: Architecture   — ADR + plan de fases + contratos
               │
               Nivel 2 (en paralelo según el tipo de proyecto):
-              │     ├── BackendEngineer   ──┐
-              │     ├── FrontendEngineer    │ Promise.all()
-              │     ├── MobileEngineer      │
+              │     ├── BackendEngineer   ──┐  (absorbe DBA: modelo de datos incluido)
+              │     ├── FrontendEngineer    │  Promise.all()  (absorbe Mobile: web + mobile)
               │     ├── DataScientist       │
               │     └── Security (transversal, siempre)
               │
               Nivel 3 (en paralelo):
               │     ├── QAEngineer
-              │     └── DBA
+              │     └── Security (dedicado)
               │
-              Nivel 4 (en paralelo):
-              │     ├── Integration       — valida contratos entre módulos
+              Nivel 4:
               │     └── DevOps            — CI/CD, Docker, PR
               │
               Nivel 5:
+              │     └── Verifier          — reproduce los criterios de aceptación del PRD
+              │                              contra el sistema real, independiente de QA/Reviewer
+              │
+              Nivel 6:
                     └── CodeReviewer      — gate final, modelo máximo
+                                             (absorbe Integration: cruza contratos entre módulos)
 
 On-demand (fuera del pipeline):
   ├── Librarian      — post-sesión aprobada por CodeReviewer
-  └── ForensicAgent  — cuando un worker agota sus iteraciones
+  └── ForensicAgent  — cuando un worker agota sus iteraciones, o cuando una tarea
+                        agota sus reintentos automáticos sin resolverse
 ```
 
 ### Modos de operación y qué puede hacer BEE en cada uno
@@ -88,7 +96,7 @@ Cada worker opera en modo **lectura-acción**: primero lee el estado real del pr
 
 ---
 
-## Los 13 coordinadores
+## Los 11 coordinadores
 
 ---
 
@@ -196,15 +204,15 @@ Solo diseña — **nunca escribe código de implementación**. Lee el PRD que Pr
 
 **Activación condicional de coordinadores por tipo de proyecto:**
 
-| Tipo de proyecto | Coordinadores nivel 1 |
+| Tipo de proyecto | Coordinadores nivel 2 |
 |-----------------|----------------------|
 | Web frontend puro | `[frontend]` |
 | Fullstack web | `[backend, frontend]` en paralelo |
-| Mobile | `[mobile, backend]` en paralelo |
+| Mobile | `[frontend, backend]` en paralelo (frontend cubre web y mobile) |
 | ML/IA | `[data_scientist, backend]` en paralelo |
 | Fullstack ML | `[data_scientist, backend, frontend]` en paralelo |
 
-`security`, `test`, `devops` y `reviewer` **siempre** van después de los engineers, con `dependsOn` explícitos.
+`security`, `test` y `devops` **siempre** van después de los engineers, con `dependsOn` explícitos. `verifier` va después de `devops`, y `reviewer` después de `verifier` (necesita su evidencia antes del veredicto).
 
 **Sub-agentes disponibles (en paralelo):**
 - `diagram-agent` — genera diagramas Mermaid de la arquitectura propuesta
@@ -220,24 +228,26 @@ Solo diseña — **nunca escribe código de implementación**. Lee el PRD que Pr
 ### 4. BackendEngineer
 
 **Archivo:** `packages/code/src/workers/backend.worker.ts`
-**Rol en el pipeline:** Nivel 1, en paralelo con Frontend/Mobile/DataScientist.
+**Rol en el pipeline:** Nivel 2, en paralelo con Frontend/DataScientist.
 
 Implementa APIs, lógica de negocio y acceso a datos en **TypeScript para Bun runtime**. Lee el ADR y los contratos de interfaces del blackboard antes de escribir una línea de código.
 
+**Absorbe el rol de DBA** (fusionado): el schema de datos es parte del contrato de backend, no un dominio aparte — separarlo creaba una costura de escritor sin dividir trabajo real del LLM (el schema y las queries que lo consumen dependen fuertemente entre sí). El sub-agente `db-agent` sigue existiendo como especialización de diseño de datos.
+
 **Flujo de trabajo:**
 1. Lee el plan de Architecture del blackboard
-2. Si va a modificar schemas: verifica si existe un ADR que requiera migration script previo
+2. Diseña el modelo de datos: colecciones HiveDB, índices, migraciones idempotentes (bootstrap sin asumir datos previos)
 3. Implementa — verifica con `fs_read` antes de escribir cualquier archivo
-4. Al terminar: escribe en el blackboard los endpoints implementados con sus contratos exactos
+4. Al terminar: escribe en el blackboard (`write_decision`, scope='schema') el modelo de datos y los endpoints implementados con sus contratos exactos
 
-**Coordinación:** Los endpoints escritos en el blackboard son consumidos por Frontend, Mobile y DataScientist. Si hay incompatibilidad, IntegrationAgent la detectará antes del CodeReviewer.
+**Coordinación:** Los endpoints y el modelo de datos escritos en el blackboard son consumidos por Frontend y DataScientist. El CodeReviewer cruza esos contratos antes del veredicto final (responsabilidad absorbida de IntegrationAgent).
 
 **Sub-agentes disponibles (pueden correr en paralelo):**
 - `api-agent` — diseña e implementa endpoints HTTP (Bun.serve, Zod, rate limiting)
-- `db-agent` — schema, migraciones y queries (SQLite WAL, PostgreSQL, drizzle-orm)
+- `db-agent` — diseña el modelo de datos: colecciones HiveDB, índices, migraciones idempotentes
 - `integration-agent` — integraciones con servicios externos (fetch nativo, retry, backoff)
 
-**Herramientas:** `fs_read/write/edit/delete`, `fs_list/exists/glob`, `git_status/diff/commit/branch`, `code_search`, `code_build/test/lint`, `parse_ast`, `check_types`, `run_script`, `read_narrative`, `append_narrative`, `shell_executor`.
+**Herramientas:** `fs_read/write/edit/delete`, `fs_list/exists/glob`, `git_status/diff/commit/branch`, `code_search`, `code_build/test/lint`, `parse_ast`, `check_types`, `run_script`, `read_narrative`, `append_narrative`, `write_decision`, `shell_executor`.
 
 **Reglas de seguridad:** credenciales siempre vía `Bun.secrets`, nunca hardcodeadas. Errores async con stack traces completos (Bun 1.3+).
 
@@ -246,63 +256,46 @@ Implementa APIs, lógica de negocio y acceso a datos en **TypeScript para Bun ru
 ### 5. FrontendEngineer
 
 **Archivo:** `packages/code/src/workers/frontend.worker.ts`
-**Rol en el pipeline:** Nivel 1, en paralelo con Backend.
+**Rol en el pipeline:** Nivel 2, en paralelo con Backend/DataScientist.
 
-Implementa componentes UI y los verifica visualmente con `Bun.WebView`. **Ningún componente se marca como completo sin screenshot de confirmación.**
+Implementa UI de cliente — **web y mobile**. Determina el modo al iniciar (según el plan de Architecture o el stack existente en el repo) y opera con dos ciclos de verificación distintos.
 
-**Ciclo obligatorio por componente:**
+**Absorbe el rol de MobileEngineer** (fusionado): es el mismo trabajo de UI de cliente contra un único contrato de API — separarlo en dos coordinadores generaba una costura de escritor sobre el mismo contrato sin dividir trabajo real del LLM, y ambos rara vez están activos a la vez.
+
+**Modo web** — **ningún componente se marca completo sin screenshot de confirmación**:
 1. Lee el contrato de API del Backend del narrativo
 2. Spawna `component-agent` para implementar el componente
 3. Usa `browser_screenshot` para verificar visualmente (screenshot + errores de consola)
 4. Si hay errores de consola → corrección → vuelve al paso 2
 5. Solo completa cuando hay screenshot limpio sin errores de consola
 
-**Si un endpoint que necesita aún no está definido en el blackboard:** escribe la pregunta dirigida a Backend y continúa implementando las partes independientes.
+**Modo mobile** (React Native, Expo, iOS/SwiftUI, Android/Jetpack Compose) — no hay verificación visual automática, el ciclo de confirmación es build+test:
+1. Lee el contrato de API del Backend del narrativo
+2. Implementa el componente/pantalla con el stack del plan
+3. Usa `code_build` para verificar que compila; si falla, corrige antes de continuar
+4. Usa `code_test` para los tests mobile que existan
+
+Principios mobile: `FlatList` en vez de `ScrollView+map` para listas largas, `React.memo`/`useCallback` para evitar re-renders, no bloquear el JS thread, cache local para estado offline (AsyncStorage, MMKV, HiveDB), y manejar siempre los 4 estados (`loading`, `error`, `empty`, `data`).
+
+**Si un endpoint que necesita aún no está definido en el blackboard (ambos modos):** escribe la pregunta dirigida a Backend y continúa implementando las partes independientes.
+
+**Al terminar:** escribe en el narrativo qué componentes creó y qué endpoints consume — el CodeReviewer lo usa para validar consistencia de contratos.
 
 **Sub-agentes disponibles:**
-- `component-agent` — implementa componentes UI (React, Vue, Svelte, Web Components)
-- `style-agent` — tokens de diseño, CSS, Tailwind config (WCAG AA, mobile-first)
-- `ui-debug-agent` — verifica visualmente via Bun.WebView a 1280×720 y 375×667 (mobile)
+- `component-agent` — implementa componentes UI (React, Vue, Svelte, Web Components, React Native)
+- `style-agent` — tokens de diseño, CSS, Tailwind config (WCAG AA, mobile-first) — modo web
+- `ui-debug-agent` — verifica visualmente via Bun.WebView a 1280×720 y 375×667 (mobile) — modo web
 
 **Herramientas:** `fs_read/write/edit/delete`, `fs_list/exists/glob`, `git_status/diff/commit`, `code_search`, `code_build/test/lint`, `parse_ast`, `check_types`, `run_script`, `read_narrative`, `append_narrative`, `shell_executor`.
 
-**Regla:** los errores de consola son blockers — no se ignoran.
+**Regla (modo web):** los errores de consola son blockers — no se ignoran.
 
 ---
 
-### 6. MobileEngineer
-
-**Archivo:** `packages/code/src/workers/mobile.worker.ts`
-**Rol en el pipeline:** Nivel 1, en paralelo con Backend.
-
-Implementa aplicaciones mobile: **React Native, Expo, iOS (Swift/SwiftUI), Android (Kotlin/Jetpack Compose)**. Su dominio es fundamentalmente diferente al FrontendEngineer — APIs de plataforma nativa, compiladores nativos, ciclos build-test-debug autónomos, y gestión de estado offline.
-
-**Principios de implementación:**
-- `FlatList` en lugar de `ScrollView+map` para listas de más de 10 items
-- `React.memo` y `useCallback` para componentes que se re-renderizan frecuentemente
-- No bloquear el JS thread — operaciones pesadas en workers nativos o via JSI
-- Estado offline: implementar cache local (AsyncStorage, MMKV, SQLite)
-- Siempre manejar los 4 estados: `loading`, `error`, `empty`, `data`
-
-**Coordinación con Backend:** escribe en el blackboard los contratos que necesita:
-```
-MOBILE_REQUEST: necesito endpoint GET /users/:id que retorne { id, name, avatarUrl }
-```
-
-**Si un endpoint no está definido:** escribe la solicitud en el blackboard y continúa con las partes independientes.
-
-**Al terminar:** escribe en el blackboard qué componentes creó y qué endpoints consume para que el CodeReviewer valide la consistencia.
-
-**Herramientas:** `fs_read/write/edit`, `fs_list/exists/glob`, `code_search`, `parse_ast`, `code_build`, `code_test`, `run_script`, `read_narrative`, `append_narrative`, `shell_executor`.
-
-**No tiene sub-agentes propios** — delega partes específicas al BackendEngineer vía blackboard.
-
----
-
-### 7. DataScientist
+### 6. DataScientist
 
 **Archivo:** `packages/code/src/workers/data-scientist.worker.ts`
-**Rol en el pipeline:** Nivel 1, en paralelo con Backend.
+**Rol en el pipeline:** Nivel 2, en paralelo con Backend/Frontend.
 
 Implementa modelos ML, pipelines de datos, agentes de IA y análisis estadístico. **Dominio distinto al BackendEngineer** — PyTorch, scikit-learn, transformers, pipelines de entrenamiento, evaluación de modelos y MLOps.
 
@@ -326,15 +319,15 @@ DS_CONTRACT: POST /predict recibe { input: InputType } y retorna { result: Resul
 
 ---
 
-### 8. SecurityAuditor
+### 7. SecurityAuditor
 
 **Archivo:** `packages/code/src/workers/security.worker.ts`
-**Rol en el pipeline:** Nivel 1 (transversal, en paralelo con engineers) + Nivel 2 (dedicado).
+**Rol en el pipeline:** Nivel 2 (transversal, en paralelo con engineers) + Nivel 3 (dedicado).
 
 Revisa código ya escrito. **No implementa, no modifica código.** Opera en dos modos simultáneos:
 
-- **Transversal (nivel 1):** corre en paralelo con Backend/Frontend/Mobile/DataScientist. Detecta hallazgos CRITICAL y escribe constraints en el blackboard antes de que los workers afectados continúen.
-- **Dedicado (nivel 2):** análisis completo del código producido por todos los engineers.
+- **Transversal (nivel 2):** corre en paralelo con Backend/Frontend/DataScientist. Detecta hallazgos CRITICAL y escribe constraints en el blackboard antes de que los workers afectados continúen.
+- **Dedicado (nivel 3):** análisis completo del código producido por todos los engineers.
 
 **Categorías auditadas siempre:**
 - Inyecciones: SQL, command injection, path traversal
@@ -362,10 +355,10 @@ Fix: db.query("SELECT * FROM users WHERE email = ?", [email])
 
 ---
 
-### 9. QAEngineer (Test)
+### 8. QAEngineer (Test)
 
 **Archivo:** `packages/code/src/workers/test.worker.ts`
-**Rol en el pipeline:** Nivel 2, en paralelo con Security dedicado.
+**Rol en el pipeline:** Nivel 3, en paralelo con Security dedicado.
 
 Su trabajo **no termina hasta que los tests pasen o hasta 3 ciclos de retry**. Lee los criterios de aceptación del PRD de ProductManager para escribir casos verificables. El Context Compiler le inyecta `forensic_lessons` de sesiones anteriores para evitar repetir casos que ya causaron problemas.
 
@@ -390,10 +383,10 @@ Su trabajo **no termina hasta que los tests pasen o hasta 3 ciclos de retry**. L
 
 ---
 
-### 10. DevOpsEngineer
+### 9. DevOpsEngineer
 
 **Archivo:** `packages/code/src/workers/devops.worker.ts`
-**Rol en el pipeline:** Nivel 3, después de QA y Security.
+**Rol en el pipeline:** Nivel 4, después de QA y Security.
 
 Solo actúa cuando el código está aprobado por Security y Test. Lee el blackboard para entender qué cambios hicieron los otros workers y actualiza la infraestructura para soportarlos.
 
@@ -417,100 +410,69 @@ Solo actúa cuando el código está aprobado por Security y Test. Lee el blackbo
 
 ---
 
-### 11. DBA — Database Administrator
+### 10. Verifier
 
-**Archivo:** `packages/code/src/workers/dba.worker.ts`
-**Rol en el pipeline:** Nivel 2, en paralelo con QAEngineer.
+**Archivo:** `packages/code/src/workers/verifier.worker.ts`
+**Rol en el pipeline:** Nivel 5, después de DevOps y antes de CodeReviewer.
 
-Diseña y optimiza el schema de datos. **Nunca escribe código de lógica de negocio.**
+Coordinador nuevo (no existía en el roster de 13). Su única responsabilidad es **reproducir, de forma independiente, los criterios de aceptación del PRD** contra el sistema real — no confía en que QA escribió los tests correctos ni en que el código "parece" correcto. **Nunca modifica código.**
 
-**Flujo:**
-1. Lee las entidades de dominio definidas por Architecture del blackboard
-2. Diseña schema SQLite con tablas, columnas, tipos, índices y constraints
-3. Escribe migration scripts (no modifica schemas existentes directamente)
-4. Escribe el schema resultante en el blackboard — es la fuente de verdad que Backend, Frontend e IntegrationAgent consumen
-5. Optimiza queries existentes si detecta uso subóptimo
+**Por qué existe:** el hueco de verificación #1 en un enjambre multiagente es que QA puede escribir tests que pasan afirmando lo incorrecto, y el Reviewer lee código y diseño sin necesariamente ejecutar el sistema. Verifier es el chequeo que no confía en el reporte de nadie — toma cada criterio del PRD como una afirmación a probar, no como un hecho.
 
-**Reglas de diseño:**
-- `INTEGER PRIMARY KEY AUTOINCREMENT` para IDs
-- Todas las tablas requieren `created_at`, `updated_at` con DEFAULT
-- Índices en columnas usadas en WHERE, ORDER BY o JOIN
-- FTS5 virtual tables para columnas de búsqueda textual
-- CHECK constraints para enums en lugar de tablas de lookup pequeñas
-- Migrations idempotentes: `CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`
-- Nunca DROP o ALTER destructivamente sin migration reversible
+**Protocolo de trabajo:**
+1. Lee el PRD de ProductManager en el blackboard y extrae los criterios de aceptación (binarios: cumple/no cumple)
+2. Para cada criterio: identifica cómo reproducirlo de forma determinística — levantar el build/servidor, ejecutar el flujo real — y lo ejecuta
+3. Prioriza siempre evidencia determinística (`code_test`, `code_build`, `shell_executor` con el comando exacto) sobre juicio propio
+4. Si un criterio no es reproducible en el entorno, lo dice explícitamente — "no reproducible" no es lo mismo que "cumple"
+5. Registra cada resultado en el blackboard (`write_decision`, scope='acceptance_verification')
 
-**Output en el blackboard (write_decision):**
-- Schema SQL completo con tablas e índices
-- Migrations necesarias
-- Queries tipo esperadas para orientar al Backend
+**Output:** lista completa de criterios del PRD con veredicto individual (cumple / no cumple / no reproducible) y evidencia concreta. El CodeReviewer lee este resultado antes de emitir su veredicto final.
 
-**Herramientas:** `fs_read/write/edit`, `fs_list/exists/glob`, `code_search`, `parse_ast`, `read_narrative`, `write_decision`, `append_narrative`, `shell_executor`.
+**Herramientas:** `fs_read`, `fs_list/exists/glob`, `code_search`, `parse_ast`, `code_test`, `code_build`, `shell_executor`, `run_script`, `read_narrative`, `write_decision`. **No modifica código.**
 
 ---
 
-### 12. Integration — Validador de Contratos
-
-**Archivo:** `packages/code/src/workers/integration.worker.ts`
-**Rol en el pipeline:** Nivel 3, en paralelo con DevOps.
-
-Su única responsabilidad es encontrar incompatibilidades entre módulos **antes** del CodeReviewer. **Nunca modifica código.**
-
-**Qué cruza:**
-
-| Par | Qué verifica |
-|-----|-------------|
-| Backend (endpoints) vs Frontend (consumo) | ¿Coinciden rutas, métodos HTTP, tipos? |
-| DBA (schema) vs Backend (queries) | ¿Coinciden nombres de tablas y columnas? |
-| Tipos TypeScript de backend vs imports de frontend | ¿Coinciden interfaces, campos, nullability? |
-| Cobertura de tests vs código implementado | ¿Hay endpoints o funciones sin test? |
-
-**Severidades de hallazgos:**
-- **CRÍTICO**: tipos incompatibles que causarán errores en runtime
-- **ALTO**: endpoint definido pero no consumido (o viceversa)
-- **MEDIO**: convenciones inconsistentes (camelCase vs snake_case)
-- **BAJO**: cobertura de tests incompleta en rutas secundarias
-
-**Si no hay incompatibilidades:** confirma explícitamente que los contratos están alineados.
-
-**Herramientas:** `fs_read`, `fs_list/exists/glob`, `code_search`, `parse_ast`, `read_narrative`, `write_decision`, `append_narrative`. **Solo lectura del workspace.**
-
----
-
-### 13. CodeReviewer — Gate de Calidad Final
+### 11. CodeReviewer — Gate de Calidad Final
 
 **Archivo:** `packages/code/src/workers/reviewer.worker.ts`
-**Rol en el pipeline:** Nivel 4, último antes de cerrar la tarea.
+**Rol en el pipeline:** Nivel 6, último antes de cerrar la tarea.
 
 Siempre usa el **modelo de mayor capacidad disponible**, independientemente del modelo configurado para los otros workers. El Context Compiler le inyecta **toda** la `agent_memory` del proyecto — llega con el historial completo de lo que funcionó y lo que no. **Nunca modifica código.**
+
+**Absorbe el rol de Integration** (fusionado): además del gate de calidad, cruza contratos entre módulos — endpoints (backend) vs consumo (frontend), modelo de datos vs queries, tipos exportados vs importados, cobertura de tests vs código implementado. La validación read-only de contratos y el review de contexto limpio son el mismo patrón de "quien juzga, no quien actúa" — separarlos en dos coordinadores no dividía trabajo real.
 
 **Proceso de revisión:**
 1. `read_narrative` → contexto completo de la sesión
 2. `git_diff` → qué cambió exactamente
 3. Lectura de archivos críticos → implementación vs diseño
-4. Cruza hallazgos de Security e Integration con el código real
-5. Verifica que los tests cubran los casos de borde identificados
-6. Emite veredicto
+4. Corre `check_types`/`code_test` él mismo — no asume que "pasaron" porque otro worker lo dijo
+5. Cruza hallazgos de Security con el código real
+6. **Cruce de contratos entre módulos** (responsabilidad absorbida de IntegrationAgent): endpoints↔consumo, modelo de datos↔queries, tipos↔imports, cobertura de tests↔código
+7. Verifica que los tests cubran los casos de borde identificados
+8. Emite el veredicto invocando la tool **`submit_review_verdict`** — nunca texto libre
 
 **Criterios de rechazo:**
 - Hallazgo de Security con severidad CRITICAL sin fix confirmado
-- Incompatibilidad CRÍTICA de IntegrationAgent no resuelta
+- Incompatibilidad CRÍTICA de contratos entre módulos no resuelta (paso 6)
 - Código implementado que contradice el ADR sin justificación
 - Tests fallidos sin resolución documentada
 - Funciones críticas en producción sin ningún test
+- **Un test debilitado o eliminado para poder aprobar** — rechazo automático, sin excepción. Un agente que relaja sus propios criterios de verificación no puede auto-certificarse.
 
-**Veredicto (una de 3 opciones exactas):**
+**Veredicto — `submit_review_verdict` (tool estructurada, no texto libre):**
+
 ```
-APROBADO
-APROBADO_CON_OBSERVACIONES
-RECHAZADO: {razones específicas con archivo:línea}
+verdict: aprobado | aprobado_con_observaciones | rechazado
+criteria: [{ description, met: boolean, evidence }]   — uno por criterio del PRD, cruzado con evidencia real
+categories: [{ name, status: ok|warning|blocking, detail }]
+reasons: string   — obligatorio si rechazado, con archivo:línea
 ```
 
-"El código no está bien" no es razón válida. "backend/auth.ts:47 usa SQL concatenado (hallazgo CRITICAL de Security)" sí lo es.
+Prioridad de evidencia: determinística (`code_test`/`check_types`) > visual > juicio propio. "El código no está bien" no es razón válida. "backend/auth.ts:47 usa SQL concatenado (hallazgo CRITICAL de Security)" sí lo es. Si el modelo no invoca la tool (p.ej. un modelo más débil), hay un fallback de string-matching sobre el texto libre — pero el camino primario y confiable es el veredicto estructurado.
 
 **Si rechaza:** BEE relanza los workers afectados con los constraints del rechazo.
 
-**Herramientas:** `fs_read`, `fs_list/exists/glob`, `code_search`, `parse_ast`, `git_status/diff/log`, `read_narrative`, `write_decision`, `check_types`, `code_test`. **Sin herramientas de escritura.**
+**Herramientas:** `fs_read`, `fs_list/exists/glob`, `code_search`, `parse_ast`, `git_status/diff/log`, `read_narrative`, `write_decision`, `check_types`, `code_test`. **Sin herramientas de escritura de código.**
 
 ---
 
@@ -531,11 +493,11 @@ Destila el conocimiento de la sesión en memoria persistente (`agent_memory.db`)
 
 | Tipo | Ejemplo |
 |------|---------|
-| `pattern` | "Las queries en este proyecto usan prepared statements con db.query() de Bun SQLite" |
+| `pattern` | "Las queries en este proyecto usan prepared statements con db.query() de Bun HiveDB" |
 | `antipattern` | "Agregar dependencias externas de caché viola el ADR-003 de este proyecto" |
 | `contract` | "El endpoint /auth/refresh recibe { refreshToken: string } y devuelve { accessToken, refreshToken }" |
 | `convention` | "Los campos en respuestas de API usan camelCase, no snake_case" |
-| `forensic_lesson` | "Backend falla en loops cuando modifica queries sin leer el schema de DBA del blackboard primero" |
+| `forensic_lesson` | "Backend falla en loops cuando modifica queries sin leer el modelo de datos que escribió antes en el blackboard" |
 
 **Reglas de destilación:**
 - Un registro = un hecho accionable (no narrativos largos)
@@ -551,7 +513,7 @@ Destila el conocimiento de la sesión en memoria persistente (`agent_memory.db`)
 ### ForensicAgent
 
 **Archivo:** `packages/code/src/workers/forensic.worker.ts`
-**Activación:** Exclusivamente cuando un worker alcanza su límite de iteraciones sin completar.
+**Activación:** dos condiciones — (1) un worker alcanza su límite de iteraciones sin completar, o (2) una tarea agota sus reintentos automáticos (`FailureRecoveryScheduler`, con backoff exponencial) sin resolverse. En el caso (2) el análisis forense se adjunta a la escalación a revisión humana, en vez de escalar solo con el mensaje de error crudo.
 
 El CoordinatorManager **nunca relanza** un worker que falló por límite sin esperar el análisis del ForensicAgent. **Nunca modifica código.**
 
@@ -598,7 +560,7 @@ BEE puede delegar a **cualquier** sub-agente de cualquier coordinador.
 | Sub-agente | Qué produce |
 |-----------|------------|
 | `api-agent` | Endpoints HTTP con Bun.serve o Elysia, validación Zod, rate limiting, JSDoc, tests básicos |
-| `db-agent` | Schema + migraciones versionadas (SQLite WAL / PostgreSQL / drizzle-orm), seed data para tests |
+| `db-agent` | Schema + migraciones versionadas (HiveDB WAL / PostgreSQL / drizzle-orm), seed data para tests |
 | `integration-agent` | Clientes tipados para servicios externos con retry exponencial, cache, rate limit handling |
 
 ### Sub-agentes de Frontend
@@ -637,24 +599,24 @@ BEE puede delegar a **cualquier** sub-agente de cualquier coordinador.
 
 ## Tabla de herramientas por coordinador
 
-| Tool | BEE | Arch | PM | Back | Front | Mobile | DS | Sec | Test | DevOps | DBA | Integ | Rev | Lib | Forensic |
-|------|:---:|:----:|:--:|:----:|:-----:|:------:|:--:|:---:|:----:|:------:|:---:|:-----:|:---:|:---:|:--------:|
-| `fs_read` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `fs_write` | ✓ | — | — | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | — | — | — |
-| `fs_edit` | ✓ | — | — | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | — | — | — |
-| `fs_delete` | ✓ | — | — | ✓ | ✓ | — | — | — | — | — | — | — | — | — | — |
-| `code_search` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ |
-| `parse_ast` | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ |
-| `git_*` | ✓ | — | — | partial | partial | — | — | — | partial | full | — | — | partial | — | — |
-| `git_create_pr` | — | — | — | — | — | — | — | — | — | ✓ | — | — | — | — | — |
-| `code_build` | ✓ | — | — | ✓ | ✓ | ✓ | — | — | ✓ | ✓ | — | — | — | — | — |
-| `code_test` | ✓ | — | — | ✓ | ✓ | ✓ | — | — | ✓ | ✓ | — | — | ✓ | — | — |
-| `check_types` | ✓ | ✓ | — | ✓ | ✓ | — | — | — | ✓ | — | ✓ | — | ✓ | — | — |
-| `shell_executor` | ✓ | — | — | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | — | — | — |
-| `run_script` | ✓ | — | — | ✓ | ✓ | ✓ | ✓ | — | ✓ | — | — | — | — | — | — |
-| `write_decision` | ✓ | ✓ | ✓ | — | — | — | — | — | — | — | ✓ | ✓ | ✓ | — | — |
-| `write_memory` | — | — | — | — | — | — | — | — | — | — | — | — | — | ✓ | — |
-| `check_dependencies` | — | — | — | — | — | — | — | ✓ | — | — | — | — | — | — | — |
+| Tool | BEE | Arch | PM | Back | Front | DS | Sec | Test | DevOps | Ver | Rev | Lib | Forensic |
+|------|:---:|:----:|:--:|:----:|:-----:|:--:|:---:|:----:|:------:|:---:|:---:|:---:|:--------:|
+| `fs_read` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `fs_write` | ✓ | — | — | ✓ | ✓ | ✓ | — | ✓ | ✓ | — | — | — | — |
+| `fs_edit` | ✓ | — | — | ✓ | ✓ | ✓ | — | ✓ | ✓ | — | — | — | — |
+| `fs_delete` | ✓ | — | — | ✓ | ✓ | — | — | — | — | — | — | — | — |
+| `code_search` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | — | ✓ |
+| `parse_ast` | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | — | ✓ |
+| `git_*` | ✓ | — | — | partial | partial | — | — | partial | full | — | partial | — | — |
+| `git_create_pr` | — | — | — | — | — | — | — | — | ✓ | — | — | — | — |
+| `code_build` | ✓ | — | — | ✓ | ✓ | — | — | ✓ | ✓ | ✓ | — | — | — |
+| `code_test` | ✓ | — | — | ✓ | ✓ | — | — | ✓ | ✓ | ✓ | ✓ | — | — |
+| `check_types` | ✓ | ✓ | — | ✓ | ✓ | — | — | ✓ | — | — | ✓ | — | — |
+| `shell_executor` | ✓ | — | — | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | — | — |
+| `run_script` | ✓ | — | — | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | — | — | — |
+| `write_decision` | ✓ | ✓ | ✓ | ✓ | — | — | — | — | — | ✓ | ✓ | — | — |
+| `write_memory` | — | — | — | — | — | — | — | — | — | — | — | ✓ | — |
+| `check_dependencies` | — | — | — | — | — | — | ✓ | — | — | — | — | — | — |
 
 **En modo `plan`:** las herramientas de escritura (`fs_write`, `fs_edit`, `fs_delete`, `git_commit`, `git_branch`, `git_create_pr`, `git_rollback`, `append_narrative`, `write_decision`) están deshabilitadas para todos los coordinadores.
 
@@ -663,30 +625,32 @@ BEE puede delegar a **cualquier** sub-agente de cualquier coordinador.
 ## Flujo de conocimiento entre workers
 
 ```
-ProductManager → ADR blackboard
+ProductManager → ADR blackboard (PRD, criterios de aceptación)
                     ↓
 Architecture → Lee PRD + escribe ADR + contratos TypeScript
                     ↓
-Backend → Lee contratos + escribe endpoints en blackboard
-DBA     → Lee entidades + escribe schema en blackboard ─────────────────┐
-Mobile  → Lee contratos de backend + escribe MOBILE_REQUEST en blackboard│
+Backend → Lee contratos + diseña modelo de datos + escribe endpoints y schema en blackboard
+                                                                          ┐
+Frontend (web+mobile) → Lee contratos de backend + implementa cliente    │ Promise.all()
 DS      → Lee plan + escribe DS_CONTRACT para backend                   │
-                    ↓                                                    │
-Security → Lee todo el código escrito                                    │
-Test    → Lee código + criterios PRD (del ProductManager)               │
-                    ↓                                                    │
-Integration → Cruza: endpoints ↔ consumo / schema ↔ queries / tipos ↔ imports
+                    ↓                                                    ┘
+Security → Lee todo el código escrito
+Test    → Lee código + criterios PRD (del ProductManager)
                     ↓
 DevOps  → Lee blackboard completo + git history
                     ↓
-Reviewer → Lee TODA la sesión + git diff + ejecuta check_types + code_test
+Verifier → Lee criterios de aceptación del PRD + los reproduce contra el sistema real
+           (independiente de lo que QA/Backend/Frontend reportaron)
+                    ↓
+Reviewer → Lee TODA la sesión + git diff + evidencia de Verifier + ejecuta check_types/code_test
+           + cruza contratos entre módulos (endpoints↔consumo, schema↔queries, tipos↔imports)
                     ↓
          ┌─────────┴───────────┐
          APROBADO           RECHAZADO
               ↓                  ↓
          Librarian          Workers relanzados
          (destila →         con constraints del
-          agent_memory)     CodeReviewer
+          agentMemory)      CodeReviewer
 ```
 
-El flujo de conocimiento es unidireccional: cada worker lee lo que dejaron los anteriores en el blackboard y añade su propio aporte. IntegrationAgent es el único que cruza información de múltiples fuentes para detectar discrepancias.
+El flujo de conocimiento es unidireccional: cada worker lee lo que dejaron los anteriores en el blackboard y añade su propio aporte. Verifier y Reviewer son los que cruzan información de múltiples fuentes — Verifier contra el sistema real, Reviewer contra los contratos declarados entre módulos.

@@ -16,6 +16,7 @@ mod modal;
 mod panels;
 mod plan;
 mod review;
+mod routing;
 mod session;
 mod tasks;
 mod thought;
@@ -26,7 +27,7 @@ pub use agent_graph::{AgentTier, agent_color, all_edges, display_name as agent_d
 pub use checkpoint::{Checkpoint, CheckpointState};
 pub use conflicts::{AgentConflict, ConflictState};
 pub use dashboard::{
-    BlackboardEvent, DashboardLevel, DashboardLevelStatus, DashboardState, HaltState, SecurityState,
+    BlackboardEvent, DashboardLevel, DashboardLevelStatus, DashboardState, HaltState, ResumeInfo, SecurityState,
 };
 pub use diff::DiffState;
 pub use crate::ipc::DiffLine;
@@ -39,11 +40,12 @@ pub use logs::{LogEntry, LogState};
 pub use modal::{
     ConfigModalState, InfoModalState, ModalField, ModalFieldKind, ModalState,
     PlanApprovalState, ReviewAction, ReviewConfirmState, SettingsHubState, SettingsMcp,
-    SettingsProvider, SettingsSkill, SettingsTab,
+    SettingsAgent, SettingsProvider, SettingsSkill, SettingsTab,
 };
 pub use panels::PanelLayoutState;
 pub use plan::{ApiContract, PlanEntry, PlanPhase, PlanRisk, PlanState};
-pub use review::{ReviewState, ReviewVerdict};
+pub use review::{ReviewCategory, ReviewCriterion, ReviewState, ReviewVerdict};
+pub use routing::{LayoutRoutingState, LayoutStage};
 pub use session::{ReplMode, SessionState, TabId};
 pub use tasks::{TaskProjection, TaskProjectionState};
 pub use thought::{ThoughtChunk, ThoughtStreamState};
@@ -83,6 +85,7 @@ pub struct AppState {
     pub review: ReviewState,
     pub tasks: TaskProjectionState,
     pub harness: HarnessState,
+    pub routing: LayoutRoutingState,
     pub modal: ModalState,
     pub logs: LogState,
     pub dirty: DirtyFlags,
@@ -121,7 +124,7 @@ pub struct AppState {
     pub anim_tick: u8,
     /// Contador lento para el bob de la bee del welcome (avanza cada tick, ciclo 30 = 3.6s).
     pub slow_tick: u16,
-    /// true cuando el usuario navegó manualmente (1-5), inhibe auto-routing hasta AssistantDone.
+    /// true cuando el usuario navegó manualmente (1-5); sólo `/auto` lo libera.
     pub tab_locked: bool,
     /// Text selection state for mouse drag-to-select copying.
     pub selection: Option<Selection>,
@@ -164,15 +167,17 @@ fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
         BunMessage::PlanDraftUpdate { .. } => "plan_draft_update",
         BunMessage::PlanApprovalRequest => "plan_approval_request",
         BunMessage::ReviewVerdictUpdate { .. } => "review_verdict_update",
+        BunMessage::ResumeAvailable { .. } => "resume_available",
+        BunMessage::PhaseRetry { .. } => "phase_retry",
         BunMessage::TaskUpdate { .. } => "task_update",
         BunMessage::WorkersSnapshot { .. } => "workers_snapshot",
         BunMessage::FilesSnapshot { .. } => "files_snapshot",
-        BunMessage::Suggestions { .. } => "suggestions",
         BunMessage::QuickMenu { .. } => "quick_menu",
-        BunMessage::ShellOutput { .. } => "shell_output",
         BunMessage::Suspend => "suspend",
         BunMessage::Resume => "resume",
         BunMessage::ContextUpdate { .. } => "context_update",
+        BunMessage::LibrarianProgress { .. } => "librarian_progress",
+        BunMessage::MemoryUpdate { .. } => "memory_update",
         BunMessage::SettingsData { .. } => "settings_data",
         BunMessage::Unknown => "unknown",
     }
@@ -203,7 +208,10 @@ fn is_focus_phase(phase: &str, activity: Option<&str>) -> bool {
 }
 
 fn is_l2_worker(name: &str) -> bool {
-    matches!(tier_for(name), AgentTier::Engineering)
+    !name.starts_with("worker-")
+        && !name.starts_with("tool-")
+        && !name.starts_with("forensic:")
+        && matches!(tier_for(name), AgentTier::Engineering)
 }
 
 fn status_to_worker_status(status: &str) -> WorkerStatus {
@@ -293,73 +301,114 @@ fn dashboard_levels_from_phases(phases: &[PlanPhase]) -> Vec<DashboardLevel> {
 }
 
 impl AppState {
-    fn running_worker_count(&self) -> usize {
-        self.workers
-            .workers
+    fn active_execution_workers(&self) -> Vec<&str> {
+        let Some(task_id) = self.tasks.active_task_id.as_deref() else {
+            return Vec::new();
+        };
+        let Some(task) = self.tasks.tasks.iter().find(|task| task.task_id == task_id) else {
+            return Vec::new();
+        };
+        let active_level = task
+            .active_workers
             .iter()
-            .filter(|worker| matches!(worker.status, WorkerStatus::Running))
-            .count()
+            .filter_map(|name| {
+                self.workers.workers.iter().find(|worker| worker.name == *name)
+            })
+            .filter(|worker| is_l2_worker(&worker.name) && !worker.transversal)
+            .filter_map(|worker| worker.level)
+            .min();
+
+        task.active_workers
+            .iter()
+            .filter_map(|name| {
+                if !is_l2_worker(name) {
+                    return None;
+                }
+                let worker = self.workers.workers.iter().find(|worker| worker.name == *name);
+                if worker.is_some_and(|worker| worker.transversal) {
+                    return None;
+                }
+                if active_level.is_some()
+                    && worker.and_then(|worker| worker.level).is_some()
+                    && worker.and_then(|worker| worker.level) != active_level
+                {
+                    return None;
+                }
+                Some(name.as_str())
+            })
+            .collect()
     }
 
-    fn route_to(&mut self, tab: TabId) {
-        if self.tab_locked {
-            return;
-        }
-        if self.active_tab != tab {
-            self.active_tab = tab;
+    fn recommend_layout(&mut self, tab: TabId, stage: LayoutStage, reason: impl Into<String>) {
+        self.routing.recommend(tab, stage, reason);
+        if !self.tab_locked {
+            let changed = self.active_tab != self.routing.recommended_tab;
+            self.active_tab = self.routing.recommended_tab;
             self.history_nav_mode = false;
             self.history_hscroll = 0;
-            self.dirty.full = true;
+            if changed {
+                self.dirty.full = true;
+            }
         }
+    }
+
+    pub fn resume_auto_layout(&mut self) {
+        self.tab_locked = false;
+        self.active_tab = self.routing.recommended_tab;
+        self.history_nav_mode = false;
+        self.history_hscroll = 0;
+        self.dirty.full = true;
+    }
+
+    pub fn tick_layout_transition(&mut self) {
+        self.routing.tick();
     }
 
     fn route_after_worker_activity(&mut self, worker: &str, phase: &str, status: &str, activity: Option<&str>) {
-        if self.tab_locked {
-            return;
-        }
-
-        if is_bee(worker) && is_focus_phase(phase, activity) {
-            self.route_to(TabId::Focus);
+        if is_bee(worker) {
+            let reason = if is_focus_phase(phase, activity) {
+                "Bee responde -> Focus"
+            } else {
+                "Bee clasifica solicitud -> Focus"
+            };
+            self.recommend_layout(TabId::Focus, LayoutStage::Classifying, reason);
             return;
         }
 
         if is_architect(worker) && matches!(status, "running" | "thinking" | "draft" | "planning") {
-            self.route_to(TabId::Plan);
+            self.recommend_layout(TabId::Plan, LayoutStage::Planning, "Architect activo -> Plan");
             return;
         }
 
         if is_reviewer(worker) && (self.session.mode == ReplMode::Approval || status == "done") {
-            self.route_to(TabId::Review);
+            self.recommend_layout(TabId::Review, LayoutStage::Reviewing, "Reviewer completo -> Review");
             return;
         }
 
-        if self.running_worker_count() >= 2 {
-            self.route_to(TabId::Dashboard);
+        let execution_workers = self.active_execution_workers();
+        if execution_workers.len() >= 2 {
+            self.recommend_layout(
+                TabId::Dashboard,
+                LayoutStage::Executing,
+                format!("{} workers activos -> Dashboard", execution_workers.len()),
+            );
             return;
         }
 
-        if status == "running" && is_l2_worker(worker) {
-            self.route_to(TabId::Code);
+        if status == "running" && is_l2_worker(worker) && !execution_workers.is_empty() {
+            self.recommend_layout(TabId::Code, LayoutStage::Executing, "1 worker activo -> Code");
             return;
-        }
-
-        if status == "running" && worker != "bee" && self.session.mode != ReplMode::Plan {
-            self.route_to(match self.session.mode {
-                ReplMode::Approval => TabId::Review,
-                ReplMode::Auto => TabId::Code,
-                ReplMode::Plan => TabId::Plan,
-            });
         }
     }
 
     fn route_after_diff(&mut self) {
-        if self.tab_locked || self.session.mode == ReplMode::Plan {
+        if self.session.mode == ReplMode::Plan {
             return;
         }
-        if self.running_worker_count() >= 2 {
-            self.route_to(TabId::Dashboard);
+        if self.active_execution_workers().len() >= 2 {
+            self.recommend_layout(TabId::Dashboard, LayoutStage::Executing, "workers paralelos -> Dashboard");
         } else {
-            self.route_to(TabId::Code);
+            self.recommend_layout(TabId::Code, LayoutStage::Executing, "diff activo -> Code");
         }
     }
 
@@ -506,12 +555,11 @@ impl AppState {
                     self.harness.active_task_status = Some("idle".to_string());
                 }
                 self.history.scroll = 0;
-                self.tab_locked = false;
-                self.active_tab = if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
-                    TabId::Plan
+                if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
+                    self.recommend_layout(TabId::Plan, LayoutStage::Planning, "plan listo -> Plan");
                 } else {
-                    TabId::Focus
-                };
+                    self.recommend_layout(TabId::Focus, LayoutStage::Completed, "tarea completa -> Focus");
+                }
                 self.dirty.full = true;
                 self.dirty.history = true;
             }
@@ -529,12 +577,10 @@ impl AppState {
                     // No esperar a Status{running:false}; tui-launcher los envía en orden
                     // pero queremos el cambio de estado en el mismo frame.
                     self.running = false;
-                    if !self.tab_locked {
-                        self.active_tab = if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
-                            TabId::Plan
-                        } else {
-                            TabId::Focus
-                        };
+                    if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
+                        self.recommend_layout(TabId::Plan, LayoutStage::Planning, "plan listo -> Plan");
+                    } else {
+                        self.recommend_layout(TabId::Focus, LayoutStage::Completed, "respuesta completa -> Focus");
                     }
                     self.dirty.full = true;
                 }
@@ -551,32 +597,23 @@ impl AppState {
                 }
                 // Cuando la tarea termina (running: true → false) ir a Focus igual que AssistantDone.
                 // Esto maneja el protocolo del tui-launcher que usa Status en vez de AssistantDone.
-                if was_running && !running && !self.tab_locked {
-                    self.active_tab = if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
-                        TabId::Plan
+                if was_running && !running {
+                    if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
+                        self.recommend_layout(TabId::Plan, LayoutStage::Planning, "plan listo -> Plan");
                     } else {
-                        TabId::Focus
-                    };
-                    self.tab_locked = false;
-                    self.dirty.full = true;
+                        self.recommend_layout(TabId::Focus, LayoutStage::Completed, "tarea finalizada -> Focus");
+                    }
                 }
                 self.dirty.session = true;
             }
             BunMessage::StateUpdate { new_mode, new_provider, new_model, new_token_count } => {
                 if let Some(m) = new_mode {
                     self.session.mode = ReplMode::from(m.as_str());
-                    // Al cambiar de modo, navegar al layout correspondiente
-                    if !self.tab_locked {
-                        self.active_tab = match self.session.mode {
-                            ReplMode::Plan     => {
-                                self.plan.current = None;
-                                self.plan.scroll = 0;
-                                TabId::Focus
-                            }
-                            ReplMode::Approval => TabId::Review,
-                            ReplMode::Auto     => TabId::Focus,
-                        };
+                    if self.session.mode == ReplMode::Plan {
+                        self.plan.current = None;
+                        self.plan.scroll = 0;
                     }
+                    self.recommend_layout(TabId::Focus, LayoutStage::Idle, "modo actualizado -> Focus");
                     self.dirty.full = true;
                 }
                 if let Some(p) = new_provider { self.session.provider = p; }
@@ -626,8 +663,8 @@ impl AppState {
                     transversal,
                     None,
                 );
-                self.route_after_worker_activity(&worker, &phase, &status, activity.as_deref());
                 self.note_task_worker(task_id, &worker, &status);
+                self.route_after_worker_activity(&worker, &phase, &status, activity.as_deref());
                 self.dirty.workers = true;
             }
             // Legado: activity_update → actualiza coordinator activo
@@ -674,8 +711,8 @@ impl AppState {
                     transversal,
                     None,
                 );
-                self.route_after_worker_activity(&coordinator, &phase, &status, activity.as_deref());
                 self.note_task_worker(task_id, &coordinator, &status);
+                self.route_after_worker_activity(&coordinator, &phase, &status, activity.as_deref());
                 self.dirty.workers = true;
             }
 
@@ -732,11 +769,39 @@ impl AppState {
                     self.dashboard.halt.reason = halt.reason;
                     self.dashboard.halt.checkpoint_id = halt.checkpoint_id;
                 }
-                if self.running_worker_count() >= 2 {
-                    self.route_to(TabId::Dashboard);
-                }
+                // Los snapshots hidratan la UI, pero nunca deciden navegación.
                 self.dirty.full = true;
                 self.dirty.workers = true;
+            }
+            BunMessage::LibrarianProgress { status, records_written } => {
+                let content = if status == "done" {
+                    format!("memoria destilada: {records_written} registros")
+                } else {
+                    "destilando memoria del proyecto".to_string()
+                };
+                self.harness.last_agent = Some("librarian".to_string());
+                self.harness.last_phase = Some(status.clone());
+                self.harness.last_activity = Some(short_event_text(&content));
+                self.dashboard.push_blackboard_event(BlackboardEvent {
+                    timestamp: self.clock.clone(),
+                    agent: "librarian".to_string(),
+                    event_type: "LIBRARIAN".to_string(),
+                    content,
+                });
+                self.dirty.full = true;
+            }
+            BunMessage::MemoryUpdate { records_added, records_updated, records_deprecated } => {
+                let content = format!(
+                    "memoria: +{records_added} nuevos, {records_updated} actualizados, {records_deprecated} obsoletos"
+                );
+                self.harness.last_activity = Some(short_event_text(&content));
+                self.dashboard.push_blackboard_event(BlackboardEvent {
+                    timestamp: self.clock.clone(),
+                    agent: "librarian".to_string(),
+                    event_type: "MEMORY".to_string(),
+                    content,
+                });
+                self.dirty.full = true;
             }
             BunMessage::BlackboardEvent { timestamp, agent, event_type, content } => {
                 self.dashboard.push_blackboard_event(BlackboardEvent {
@@ -797,7 +862,7 @@ impl AppState {
                     event_type: "FORENSIC".to_string(),
                     content: short_event_text(&analysis),
                 });
-                self.route_to(TabId::Dashboard);
+                self.recommend_layout(TabId::Dashboard, LayoutStage::Failed, "análisis forense -> Dashboard");
                 self.dirty.full = true;
             }
             BunMessage::SecurityStatusUpdate { status, findings } => {
@@ -816,7 +881,7 @@ impl AppState {
                         event_type: "HALT".to_string(),
                         content: reason.unwrap_or_else(|| "HALT emitido".to_string()),
                     });
-                    self.route_to(TabId::Dashboard);
+                    self.recommend_layout(TabId::Dashboard, LayoutStage::Failed, "HALT activo -> Dashboard");
                 }
                 self.dirty.full = true;
             }
@@ -965,11 +1030,19 @@ impl AppState {
             }
 
             // ── Settings Hub ───────────────────────────────────────────────────
-            BunMessage::SettingsData { providers, mcp, skills, github_connected, github_repo, telegram_active } => {
+            BunMessage::SettingsData { providers, agents, mcp, skills, github_connected, github_repo, telegram_active } => {
                 if let ModalState::Settings(hub) = &mut self.modal {
                     hub.providers = providers.into_iter().map(|p| SettingsProvider {
                         id: p.id, name: p.name, model: p.model,
                         is_active: p.is_active, has_key: p.has_key,
+                    }).collect();
+                    hub.agents = agents.into_iter().map(|a| SettingsAgent {
+                        id: a.id, name: a.name, provider: a.provider, model: a.model,
+                        effort: a.effort, max_turns: a.max_turns,
+                        max_input_tokens: a.max_input_tokens,
+                        max_output_tokens: a.max_output_tokens,
+                        max_cost_usd: a.max_cost_usd,
+                        permission_profile: a.permission_profile,
                     }).collect();
                     hub.mcp = mcp.into_iter().map(|m| SettingsMcp {
                         id: m.id, name: m.name, url: m.url, enabled: m.enabled, has_headers: m.has_headers,
@@ -1022,9 +1095,7 @@ impl AppState {
                 self.history.scroll = 0;
                 self.running = false;
                 self.status_msg = "Error".to_string();
-                if !self.tab_locked {
-                    self.active_tab = TabId::Focus;
-                }
+                self.recommend_layout(TabId::Focus, LayoutStage::Failed, "error -> Focus");
                 self.logs.entries.push(LogEntry {
                     timestamp: "ERR".to_string(),
                     level: "error".to_string(),
@@ -1077,9 +1148,7 @@ impl AppState {
                     self.history.selected = Some(self.history.entries.len().saturating_sub(1));
                     self.history.scroll = 0;
                     self.status_msg = "Error de plan".to_string();
-                    if !self.tab_locked {
-                        self.active_tab = TabId::Focus;
-                    }
+                    self.recommend_layout(TabId::Focus, LayoutStage::Failed, "plan incompleto -> Focus");
                     self.dirty.history = true;
                     self.dirty.full = true;
                     return;
@@ -1114,11 +1183,7 @@ impl AppState {
                 if let Some(plan) = self.plan.current.as_ref() {
                     self.dashboard.levels = dashboard_levels_from_phases(&plan.phases);
                 }
-                if !self.tab_locked {
-                    self.active_tab = TabId::Plan;
-                    self.history_nav_mode = false;
-                    self.history_hscroll = 0;
-                }
+                self.recommend_layout(TabId::Plan, LayoutStage::Planning, "plan estructurado -> Plan");
                 self.dirty.full = true;
             }
             BunMessage::PlanDraftUpdate { task_id, adr_title, adr_content, phases, risks, api_contracts } => {
@@ -1165,11 +1230,11 @@ impl AppState {
                 if let Some(plan) = self.plan.current.as_ref() {
                     self.dashboard.levels = dashboard_levels_from_phases(&plan.phases);
                 }
-                self.route_to(TabId::Plan);
+                self.recommend_layout(TabId::Plan, LayoutStage::Planning, "Architect construye plan -> Plan");
                 self.dirty.full = true;
             }
 
-            BunMessage::ReviewVerdictUpdate { reviewer, status, summary, observations, requested_changes, affected_files } => {
+            BunMessage::ReviewVerdictUpdate { reviewer, status, summary, observations, requested_changes, affected_files, criteria, categories } => {
                 let reviewer = reviewer.unwrap_or_else(|| "reviewer".to_string());
                 self.harness.last_agent = Some(reviewer.clone());
                 self.harness.active_task_status = Some(status.clone());
@@ -1180,8 +1245,53 @@ impl AppState {
                     observations,
                     requested_changes,
                     affected_files,
+                    criteria: criteria
+                        .into_iter()
+                        .map(|c| ReviewCriterion { description: c.description, met: c.met, evidence: c.evidence })
+                        .collect(),
+                    categories: categories
+                        .into_iter()
+                        .map(|c| ReviewCategory { name: c.name, status: c.status, detail: c.detail })
+                        .collect(),
                 });
-                self.route_to(TabId::Review);
+                self.recommend_layout(TabId::Review, LayoutStage::Reviewing, "Reviewer emitió veredicto -> Review");
+                self.dirty.full = true;
+            }
+
+            BunMessage::ResumeAvailable { task_id, checkpoint_id, reason } => {
+                self.dashboard.resume = Some(ResumeInfo { task_id, checkpoint_id, reason: reason.clone() });
+                self.dashboard.push_blackboard_event(BlackboardEvent {
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    agent: "system".to_string(),
+                    event_type: "RESUME".to_string(),
+                    content: short_event_text(&reason),
+                });
+                self.recommend_layout(TabId::Dashboard, LayoutStage::Failed, "checkpoint disponible para reanudar -> Dashboard");
+                self.dirty.full = true;
+            }
+
+            BunMessage::PhaseRetry { worker, attempt, max_attempts, reason } => {
+                self.upsert_worker(
+                    worker.clone(),
+                    None,
+                    WorkerStatus::Warn,
+                    None,
+                    Some(format!("retry {attempt}/{max_attempts}")),
+                    None,
+                    None,
+                    Some(short_event_text(&reason)),
+                    None,
+                    Some(attempt),
+                    Some(max_attempts),
+                    None,
+                    None,
+                );
+                self.dashboard.push_blackboard_event(BlackboardEvent {
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    agent: worker,
+                    event_type: "RETRY".to_string(),
+                    content: format!("intento {attempt}/{max_attempts}: {}", short_event_text(&reason)),
+                });
                 self.dirty.full = true;
             }
 
@@ -1198,7 +1308,6 @@ impl AppState {
                 isolated,
                 integration_status,
             } => {
-                let active_worker_count = active_workers.as_ref().map(|workers| workers.len()).unwrap_or(0);
                 self.harness.active_task_id = Some(task_id.clone());
                 if let Some(title) = title.as_ref().filter(|title| !title.trim().is_empty()) {
                     self.harness.active_task_title = Some(title.clone());
@@ -1219,7 +1328,7 @@ impl AppState {
                 self.tasks.upsert(
                     task_id,
                     title,
-                    status,
+                    status.clone(),
                     mode,
                     active_workers,
                     workspace_id,
@@ -1229,8 +1338,17 @@ impl AppState {
                     integration_status,
                 );
                 self.session.task_count = self.session.task_count.max(self.tasks.tasks.len() as u32);
-                if active_worker_count >= 2 {
-                    self.route_to(TabId::Dashboard);
+                if matches!(status.as_str(), "completed" | "done" | "cancelled") {
+                    self.recommend_layout(TabId::Focus, LayoutStage::Completed, "tarea completa -> Focus");
+                } else if status == "failed" {
+                    self.recommend_layout(TabId::Focus, LayoutStage::Failed, "tarea fallida -> Focus");
+                } else {
+                    let count = self.active_execution_workers().len();
+                    if count >= 2 {
+                        self.recommend_layout(TabId::Dashboard, LayoutStage::Executing, format!("{count} workers activos -> Dashboard"));
+                    } else if count == 1 {
+                        self.recommend_layout(TabId::Code, LayoutStage::Executing, "1 worker activo -> Code");
+                    }
                 }
                 self.dirty.session = true;
                 self.dirty.full = true;
@@ -1241,10 +1359,7 @@ impl AppState {
                 self.harness.approval_pending = true;
                 self.harness.active_task_status = Some("approval".to_string());
                 self.modal = ModalState::PlanApproval(PlanApprovalState { selected: 0 });
-                // Always switch to Plan tab so the approval strip is inline and
-                // the plan content is readable — never show as a floating overlay on Focus.
-                self.active_tab = TabId::Plan;
-                self.tab_locked = false;
+                self.recommend_layout(TabId::Plan, LayoutStage::Planning, "plan esperando aprobación -> Plan");
                 self.dirty.full = true;
             }
 
@@ -1262,7 +1377,7 @@ impl AppState {
                 self.dirty.full = true;
             }
 
-            // ── Snapshots de inicio (SQLite → IPC) ─────────────────────────────
+            // ── Snapshots de inicio (storage → IPC) ────────────────────────────
             BunMessage::WorkersSnapshot { workers } => {
                 for w in workers {
                     let status = status_to_worker_status(&w.status);
@@ -1282,9 +1397,7 @@ impl AppState {
                         w.replaces_worker,
                     );
                 }
-                if self.running_worker_count() >= 2 {
-                    self.route_to(TabId::Dashboard);
-                }
+                // Igual que DashboardSnapshot: hidratar sin cambiar de layout.
                 self.dirty.workers = true;
             }
             BunMessage::FilesSnapshot { files } => {
@@ -1305,33 +1418,8 @@ impl AppState {
                 self.dirty.filemap = true;
             }
 
-            // ── Shell output de workers ────────────────────────────────────────
-            BunMessage::ShellOutput { stdout, stderr, exit_code } => {
-                let combined = match (stdout.is_empty(), stderr.is_empty()) {
-                    (false, false) => format!("{stdout}\n[stderr] {stderr}"),
-                    (false, true)  => stdout,
-                    (true,  false) => format!("[stderr] {stderr}"),
-                    (true,  true)  => return,
-                };
-                let phase = if exit_code == 0 { "shell".to_string() } else { format!("exit:{exit_code}") };
-                for line in combined.lines().take(10) {
-                    if line.trim().is_empty() { continue; }
-                    self.thought.chunks.push(ThoughtChunk {
-                        coordinator: "shell".to_string(),
-                        phase: phase.clone(),
-                        content: line.to_string(),
-                    });
-                }
-                if self.thought.chunks.len() > 100 {
-                    let excess = self.thought.chunks.len() - 100;
-                    self.thought.chunks.drain(0..excess);
-                }
-                self.dirty.thought = true;
-            }
-
             // ── No-ops ─────────────────────────────────────────────────────────
-            BunMessage::Suggestions { .. }
-            | BunMessage::QuickMenu { .. }
+            BunMessage::QuickMenu { .. }
             | BunMessage::Suspend
             | BunMessage::Resume
             | BunMessage::ContextUpdate { .. } => {}
@@ -1431,7 +1519,7 @@ mod tests {
             title: Some("Corregir login".to_string()),
             status: "running".to_string(),
             mode: Some("auto".to_string()),
-            active_workers: Some(vec!["backend".to_string(), "test".to_string()]),
+            active_workers: Some(vec!["backend".to_string(), "frontend".to_string()]),
             workspace_id: Some("worktree:task-1".to_string()),
             workspace_path: Some("/tmp/task-1".to_string()),
             branch_name: Some("hivecode/task-task-1".to_string()),
@@ -1573,6 +1661,76 @@ mod tests {
     }
 
     #[test]
+    fn bee_and_unscoped_tool_workers_stay_in_focus() {
+        let mut state = AppState::default();
+
+        state.apply_message(BunMessage::ActivityUpdate {
+            task_id: Some("task-1".to_string()),
+            coordinator: "bee".to_string(),
+            phase: "thinking".to_string(),
+            status: "running".to_string(),
+            display_name: None,
+            activity: Some("clasificando solicitud".to_string()),
+            token_count: None,
+            level: None,
+            current_action: None,
+            current_file: None,
+            iteration_current: None,
+            iteration_total: None,
+            transversal: None,
+        });
+        state.apply_message(BunMessage::ActivityUpdate {
+            task_id: None,
+            coordinator: "worker-0".to_string(),
+            phase: "fs_read".to_string(),
+            status: "running".to_string(),
+            display_name: None,
+            activity: Some("executing fs_read".to_string()),
+            token_count: None,
+            level: None,
+            current_action: None,
+            current_file: None,
+            iteration_current: None,
+            iteration_total: None,
+            transversal: None,
+        });
+
+        assert_eq!(state.active_tab, TabId::Focus);
+        assert_eq!(state.routing.recommended_tab, TabId::Focus);
+    }
+
+    #[test]
+    fn manual_layout_override_persists_until_auto_is_resumed() {
+        let mut state = AppState::default();
+        state.active_tab = TabId::Review;
+        state.tab_locked = true;
+
+        for worker in ["backend", "frontend"] {
+            state.apply_message(BunMessage::WorkerUpdate {
+                task_id: Some("task-1".to_string()),
+                worker: worker.to_string(),
+                phase: "editing".to_string(),
+                status: "running".to_string(),
+                display_name: None,
+                activity: None,
+                token_count: None,
+                level: Some(2),
+                current_action: None,
+                current_file: None,
+                iteration_current: None,
+                iteration_total: None,
+                transversal: None,
+            });
+        }
+
+        assert_eq!(state.active_tab, TabId::Review);
+        assert_eq!(state.routing.recommended_tab, TabId::Dashboard);
+        state.resume_auto_layout();
+        assert_eq!(state.active_tab, TabId::Dashboard);
+        assert!(!state.tab_locked);
+    }
+
+    #[test]
     fn review_verdict_routes_to_review_and_stores_summary() {
         let mut state = AppState::default();
         state.active_tab = TabId::Code;
@@ -1584,6 +1742,8 @@ mod tests {
             observations: vec!["Cobertura suficiente".to_string()],
             requested_changes: vec!["Ajustar copy".to_string()],
             affected_files: vec!["src/app.ts".to_string()],
+            criteria: vec![],
+            categories: vec![],
         });
 
         assert_eq!(state.active_tab, TabId::Review);

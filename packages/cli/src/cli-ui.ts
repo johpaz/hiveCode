@@ -1,6 +1,11 @@
 import { createInterface } from "node:readline/promises"
 import { stdin, stdout } from "node:process"
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { ModelDoc } from "@johpaz/hivecode-core/storage/collections"
+import {
+  HIVEAGENTS_MODEL_ID,
+  HIVEAGENTS_OPENAI_BASE_URL,
+} from "@johpaz/hivecode-core/agent/hiveagents-loader"
 
 const CANCEL = Symbol.for("hive.cancel")
 
@@ -252,12 +257,15 @@ export interface ProviderSetupResult {
   model: string
 }
 
-function getModelsForProvider(providerId: string): { value: string; label: string }[] {
+async function getModelsForProvider(providerId: string): Promise<{ value: string; label: string }[]> {
   try {
-    const rows = getDb()
-      .query("SELECT id, name FROM models WHERE provider_id = ? AND model_type = 'llm' ORDER BY name")
-      .all(providerId) as { id: string; name: string }[]
-    return rows.map((row) => ({ value: row.id, label: row.name }))
+    const models = await col<ModelDoc>("models")
+    const rows = await models.findBy("provider_id", providerId)
+    return rows
+      .map((entry) => entry.doc)
+      .filter((model) => model.model_type === "llm" && model.enabled)
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((model) => ({ value: model.id, label: model.name }))
   } catch {
     return []
   }
@@ -266,18 +274,19 @@ function getModelsForProvider(providerId: string): { value: string; label: strin
 export async function runProviderSetupWizard(
   knownProviders: string[] = [],
   version = "1.0.0",
+  preferredProvider?: string,
 ): Promise<ProviderSetupResult | null> {
   hiveIntro(`hivecode v${version} · Configurar provider`)
 
-  let provider = ""
-  if (knownProviders.length > 0) {
+  let provider = preferredProvider?.trim() ?? ""
+  if (!provider && knownProviders.length > 0) {
     const selected = await hiveSelect({
       message: "Provider:",
       options: knownProviders.map((value) => ({ value, label: value })),
     })
     if (isCancel(selected)) return null
     provider = selected as string
-  } else {
+  } else if (!provider) {
     const input = await hiveText({ message: "Nombre del provider", placeholder: "anthropic, openai, groq..." })
     if (isCancel(input) || !input) return null
     provider = input
@@ -305,11 +314,24 @@ export async function runProviderSetupWizard(
   })
   if (isCancel(apiKey)) return null
 
+  if (provider === "hiveagents") {
+    hiveNote("Preset HiveAgents", [
+      `Modelo: ${HIVEAGENTS_MODEL_ID}`,
+      `Endpoint: ${HIVEAGENTS_OPENAI_BASE_URL}`,
+    ])
+    return {
+      provider,
+      apiKey,
+      baseUrl: HIVEAGENTS_OPENAI_BASE_URL,
+      model: HIVEAGENTS_MODEL_ID,
+    }
+  }
+
   const baseUrl = await hiveText({ message: "Base URL opcional", placeholder: "https://api.anthropic.com" })
   if (isCancel(baseUrl)) return null
 
   let model = ""
-  const dbModels = getModelsForProvider(provider)
+  const dbModels = await getModelsForProvider(provider)
   if (dbModels.length > 0) {
     const selected = await hiveSelect({
       message: `Modelo para ${provider}:`,

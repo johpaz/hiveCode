@@ -67,6 +67,7 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &mut AppState, regist
         if let ModalState::Settings(hub) = &mut state.modal {
             let total = match hub.active_tab {
                 SettingsTab::Providers | SettingsTab::Models => hub.providers.len(),
+                SettingsTab::Agents    => hub.agents.len(),
                 SettingsTab::Mcp       => hub.mcp.len(),
                 SettingsTab::Skills    => hub.skills.len(),
                 _ => 0,
@@ -84,6 +85,7 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &mut AppState, regist
         match hub.active_tab {
             SettingsTab::Providers => render_providers(canvas, content_area, state, register_hits),
             SettingsTab::Models    => render_models(canvas, content_area, state, register_hits),
+            SettingsTab::Agents    => render_agents(canvas, content_area, state, register_hits),
             SettingsTab::Mcp       => render_mcp(canvas, content_area, state, register_hits),
             SettingsTab::Skills    => render_skills(canvas, content_area, state, register_hits),
             SettingsTab::Github    => render_github(canvas, content_area, state),
@@ -106,6 +108,38 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &mut AppState, regist
             HitAction::Custom("settings:noop".into()),
         ));
     }
+}
+
+fn render_agents(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hits: bool) {
+    let ModalState::Settings(hub) = &state.modal else { return };
+    canvas.print(area.x, area.y, "Agente", Style::new().fg(DIM));
+    canvas.print(area.x + 15, area.y, "Provider/Modelo", Style::new().fg(DIM));
+    canvas.print(area.x + 48, area.y, "Límite", Style::new().fg(DIM));
+    canvas.print(area.x + 60, area.y, "Permisos", Style::new().fg(DIM));
+    let visible = area.h.saturating_sub(1) as usize;
+    for (i, agent) in hub.agents.iter().enumerate().skip(hub.scroll_offset).take(visible) {
+        let y = area.y + 1 + (i - hub.scroll_offset) as u16;
+        let selected = hub.selected_row == i;
+        if selected {
+            canvas.fill_rect(Rect { x: area.x, y, w: area.w, h: 1 }, ' ', Style::new().fg(WHITE));
+            canvas.print(area.x, y, "▶ ", Style::new().fg(AMBER).bold());
+        }
+        let style = if selected { Style::new().fg(WHITE).bold() } else { Style::new().fg(SECONDARY) };
+        let provider_model = format!("{}/{}", agent.provider, agent.model);
+        canvas.print(area.x + 2, y, &truncate(&agent.name, 12), style);
+        canvas.print(area.x + 15, y, &truncate(&provider_model, 31), style);
+        canvas.print(area.x + 48, y, &format!("{}t {}", agent.max_turns, agent.effort), style);
+        canvas.print(area.x + 60, y, &truncate(&agent.permission_profile, 16), Style::new().fg(DIM));
+        if register_hits {
+            state.hit_map.push(MouseRegion::new(
+                format!("settings:row:{i}"),
+                Rect { x: area.x, y, w: area.w, h: 1 },
+                HUB_Z,
+                HitAction::Custom(format!("settings:row:{i}")),
+            ));
+        }
+    }
+    draw_scrollbar(canvas, area, hub.scroll_offset, hub.agents.len(), visible);
 }
 
 fn render_providers(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hits: bool) {

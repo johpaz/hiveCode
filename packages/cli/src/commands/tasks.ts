@@ -1,21 +1,33 @@
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type {
+  CodeFileSnapshotDoc,
+  CodeNarrativeDoc,
+  CodeTaskDoc,
+  CodeTaskPhaseDoc,
+} from "@johpaz/hivecode-core/storage/collections"
+
+function nowIso(): string {
+  return new Date().toISOString()
+}
+
+async function findTask(id: string): Promise<{ id: string; doc: CodeTaskDoc; version: number } | null> {
+  const tasks = await col<CodeTaskDoc>("codeTasks")
+  const exact = await tasks.get(id)
+  if (exact) return { id, doc: exact.doc, version: exact.version }
+  const rows = await tasks.scan()
+  const match = rows.find((entry) => entry.id.startsWith(id) || entry.id.includes(id))
+  return match ? { id: match.id, doc: match.doc, version: match.version } : null
+}
 
 export async function tasks(subcommand?: string, args?: string[]): Promise<void> {
-  const db = getDb()
-
-  try {
-    db.query("SELECT 1 FROM code_tasks LIMIT 1").get()
-  } catch {
-    console.log("No code_tasks table found. Run 'hivecode migrate' first.")
-    return
-  }
-
   switch (subcommand) {
     case "list": {
       const status = args?.[0]
-      const rows = (status
-        ? db.query("SELECT * FROM code_tasks WHERE status = ? ORDER BY created_at DESC LIMIT 20").all(status)
-        : db.query("SELECT * FROM code_tasks ORDER BY created_at DESC LIMIT 20").all()) as any[]
+      const rows = (await (await col<CodeTaskDoc>("codeTasks")).scan())
+        .map((entry) => entry.doc)
+        .filter((task) => !status || task.status === status)
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .slice(0, 20)
       if (rows.length === 0) { console.log("No tasks found."); return }
       console.log("Tasks:")
       for (const r of rows) {
@@ -32,18 +44,20 @@ export async function tasks(subcommand?: string, args?: string[]): Promise<void>
     case "status": {
       const id = args?.[0]
       if (!id) { console.log("Usage: hivecode task status <id>"); return }
-      const task = db.query("SELECT * FROM code_tasks WHERE id LIKE ?").get(`%${id}%`) as any
+      const task = await findTask(id)
       if (!task) { console.log("Task not found."); return }
-      console.log(`\nTask: ${task.id}`)
-      console.log(`Description: ${task.description}`)
-      console.log(`Status: ${task.status}`)
-      console.log(`Mode: ${task.mode}`)
-      if (task.branch_name) console.log(`Branch: ${task.branch_name}`)
-      if (task.pr_url) console.log(`PR: ${task.pr_url}`)
-      console.log(`Created: ${task.created_at}`)
-      if (task.completed_at) console.log(`Completed: ${task.completed_at}`)
+      console.log(`\nTask: ${task.doc.id}`)
+      console.log(`Description: ${task.doc.description}`)
+      console.log(`Status: ${task.doc.status}`)
+      console.log(`Mode: ${task.doc.mode}`)
+      if (task.doc.branch_name) console.log(`Branch: ${task.doc.branch_name}`)
+      if (task.doc.pr_url) console.log(`PR: ${task.doc.pr_url}`)
+      console.log(`Created: ${task.doc.created_at}`)
+      if (task.doc.completed_at) console.log(`Completed: ${task.doc.completed_at}`)
 
-      const phases = db.query("SELECT * FROM code_task_phases WHERE task_id = ? ORDER BY id").all(task.id) as any[]
+      const phases = (await (await col<CodeTaskPhaseDoc>("codeTaskPhases")).findBy("task_id", task.doc.id))
+        .map((entry) => entry.doc)
+        .sort((a, b) => a.id.localeCompare(b.id))
       if (phases.length > 0) {
         console.log("\nPhases:")
         for (const p of phases) {
@@ -52,7 +66,10 @@ export async function tasks(subcommand?: string, args?: string[]): Promise<void>
         }
       }
 
-      const narrative = db.query("SELECT * FROM code_narrative WHERE task_id = ? ORDER BY id DESC LIMIT 5").all(task.id) as any[]
+      const narrative = (await (await col<CodeNarrativeDoc>("codeNarrative")).findBy("task_id", task.doc.id))
+        .map((entry) => entry.doc)
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .slice(0, 5)
       if (narrative.length > 0) {
         console.log("\nRecent narrative:")
         for (const n of narrative.reverse()) {
@@ -64,14 +81,21 @@ export async function tasks(subcommand?: string, args?: string[]): Promise<void>
     case "cancel": {
       const id = args?.[0]
       if (!id) { console.log("Usage: hivecode task cancel <id>"); return }
-      db.query("UPDATE code_tasks SET status = 'cancelled', completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id LIKE ?").run(`%${id}%`)
+      const task = await findTask(id)
+      if (task) {
+        await (await col<CodeTaskDoc>("codeTasks")).put(task.id, { ...task.doc, status: "cancelled", completed_at: nowIso() }, { expectedVersion: task.version })
+      }
       console.log("✅ Task cancelled.")
       break
     }
     case "rollback": {
       const id = args?.[0]
       if (!id) { console.log("Usage: hivecode task rollback <id>"); return }
-      const snapshots = db.query("SELECT * FROM code_file_snapshots WHERE task_id LIKE ? ORDER BY id DESC").all(`%${id}%`) as any[]
+      const task = await findTask(id)
+      if (!task) { console.log("Task not found."); return }
+      const snapshots = (await (await col<CodeFileSnapshotDoc>("codeFileSnapshots")).findBy("task_id", task.doc.id))
+        .map((entry) => entry.doc)
+        .sort((a, b) => b.id.localeCompare(a.id))
       if (snapshots.length === 0) { console.log("No snapshots found for this task."); return }
       console.log(`Rolling back ${snapshots.length} file(s)...`)
       for (const snap of snapshots) {
@@ -82,15 +106,19 @@ export async function tasks(subcommand?: string, args?: string[]): Promise<void>
           console.log(`  ❌ Failed to restore ${snap.file_path}: ${(err as Error).message}`)
         }
       }
-      db.query("DELETE FROM code_file_snapshots WHERE task_id LIKE ?").run(`%${id}%`)
-      db.query("UPDATE code_tasks SET status = 'cancelled', completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id LIKE ?").run(`%${id}%`)
+      const snapshotCol = await col<CodeFileSnapshotDoc>("codeFileSnapshots")
+      for (const snap of snapshots) await snapshotCol.delete(snap.id)
+      await (await col<CodeTaskDoc>("codeTasks")).put(task.id, { ...task.doc, status: "cancelled", completed_at: nowIso() }, { expectedVersion: task.version })
       console.log("✅ Rollback complete.")
       break
     }
     case "resume": {
       const id = args?.[0]
       if (!id) { console.log("Usage: hivecode task resume <id>"); return }
-      db.query("UPDATE code_tasks SET status = 'running' WHERE id LIKE ? AND status IN ('paused', 'pending')").run(`%${id}%`)
+      const task = await findTask(id)
+      if (task && (task.doc.status === "paused" || task.doc.status === "pending")) {
+        await (await col<CodeTaskDoc>("codeTasks")).put(task.id, { ...task.doc, status: "running" }, { expectedVersion: task.version })
+      }
       console.log("✅ Task resumed.")
       break
     }

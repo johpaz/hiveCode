@@ -39,5 +39,5 @@ When passing work to next phase:
 
 ## Reading the Narrative
 - Use `read_narrative(taskId, lastN)` for context
-- Search with FTS5: `search_narrative("auth JWT")`
+- Search with HiveDB index: `search_narrative("auth JWT")`
 - Export for PR body: `narrative_export()`

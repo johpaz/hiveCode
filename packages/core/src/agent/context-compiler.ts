@@ -21,20 +21,21 @@
  * TODOS los datos se formatean en TOON para ahorro de tokens.
  */
 
-import { getDb } from "../storage/sqlite"
 import { logger } from "../utils/logger"
 import type { LLMMessage, LLMToolDef, ContentPart } from "./llm-client"
 import type { MCPClientManager } from "@johpaz/hivecode-mcp"
-import { syncToolCatalogToFTS, mcpToolFullName } from "./tool-selector"
-import { syncSkillsToFTS, getMinimalSkills, selectSkills, type SkillDescriptor } from "./skill-selector"
-import { syncPlaybookToFTS } from "./playbook-selector"
+import { syncToolCatalogToIndex, mcpToolFullName } from "./tool-selector"
+import { syncSkillsToIndex, getMinimalSkills, selectSkills, type SkillDescriptor } from "./skill-selector"
+import { syncPlaybookToIndex } from "./playbook-selector"
 import { getRecentMessages, getSummary, getScratchpad, toAPIMessages } from "./conversation-store"
 import { formatContext, estimateTokens } from "../utils/toon"
 import { buildSystemPromptWithProjects } from "./prompt-builder"
 import { createAllTools } from "../tools/index"
 import { getMCPManager as getSingletonMCPManager } from "../mcp/singleton"
-import { syncMCPToolsToDB, syncMCPToolsToFTS } from "../mcp/tool-sync"
+import { syncMCPToolsToDB, syncMCPToolsToIndex } from "../mcp/tool-sync"
 import { getUserDate, getUserTime } from "../utils/date"
+import { col } from "../storage/hive"
+import type { AgentDoc, CodePlaybookDoc, McpServerDoc, ProjectDoc, SkillDoc, TaskDoc } from "../storage/collections"
 
 const log = logger.child("context-compiler")
 
@@ -53,10 +54,25 @@ const MINIMAL_TOOLS = new Set([
 
 // MINIMAL SKILL SET — fixed always-available skills
 // These skills are ALWAYS in context - the agent uses them to discover everything else
+//
+// Only skills whose tools are actually in the loadout belong here. `memory_manager` used
+// to be pinned but declares memory_write/memory_read/…, none of which are in
+// MINIMAL_TOOLS — so it advertised capabilities the model did not have and pushed its
+// note-taking intent onto save_note. It stays discoverable via search_knowledge, which
+// its triggers already cover.
 const MINIMAL_SKILL_NAMES = [
-  "busqueda_fts5",   // Core: how to find tools, skills, MCP, playbook via search_knowledge
-  "memory_manager",  // Persistent notes that survive context compression
+  "busqueda_hivedb", // Discovery central: tools, skills, MCP, playbook via search_knowledge
 ]
+
+function parseStringList(value: string | null | undefined): string[] {
+  if (!value) return []
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : []
+  } catch {
+    return value.split(",").map(item => item.trim()).filter(Boolean)
+  }
+}
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -95,7 +111,6 @@ export async function compileContext(opts: {
   taskContext?: string | ContentPart[]
   mcpManager?: MCPClientManager | null
 }): Promise<CompiledContext> {
-  const db = getDb()
   const { agentId, threadId, mcpManager, userMessage, isolated, taskContext } = opts
 
   // Fallback: Get MCP Manager from singleton if not provided
@@ -113,11 +128,9 @@ export async function compileContext(opts: {
 
   // [STEP-1] Load agent config
   log.info(`[context-compiler] [STEP-1] Loading agent config for id=${agentId}`)
-  let agent: any
+  let agent: AgentDoc | null
   try {
-    agent = db.query<any, [string]>(
-      "SELECT * FROM agents WHERE id = ?"
-    ).get(agentId)
+    agent = (await (await col<AgentDoc>("agents")).get(agentId))?.doc ?? null
   } catch (err) {
     log.error(`[context-compiler] [STEP-1] ❌ FAILED loading agent: ${JSON.stringify(err)}`)
     throw err
@@ -132,9 +145,9 @@ export async function compileContext(opts: {
 
   // [STEP-2] STRATEGY 1: WRITE — Load scratchpad (persistent notes)
   log.info(`[context-compiler] [STEP-2] Loading scratchpad...`)
-  let scratchpadNotes: ReturnType<typeof getScratchpad> = []
+  let scratchpadNotes: Awaited<ReturnType<typeof getScratchpad>> = []
   try {
-    scratchpadNotes = getScratchpad(threadId)
+    scratchpadNotes = await getScratchpad(threadId)
     log.info(`[context-compiler] [STEP-2] ✅ Loaded ${scratchpadNotes.length} scratchpad notes`)
   } catch (err) {
     log.error(`[context-compiler] [STEP-2] ❌ FAILED loading scratchpad: ${JSON.stringify(err)}`)
@@ -147,9 +160,8 @@ export async function compileContext(opts: {
 
   if (effectiveMcpManager) {
     try {
-      const dbServers = db.query<any, []>(
-        "SELECT id, name, status FROM mcp_servers WHERE enabled = 1"
-      ).all()
+      const mcpServers = await col<McpServerDoc>("mcpServers")
+      const dbServers = (await mcpServers.findBy("enabled", true)).map((entry) => entry.doc)
 
       for (const server of dbServers) {
         // Try ID first (normalized), then name
@@ -185,7 +197,7 @@ export async function compileContext(opts: {
 
       log.info(`[context-compiler] [STEP-3c] ✅ Loaded ${mcpToolExecutors.length} MCP tools`)
 
-      // Persist MCP tool definitions to DB for search_knowledge and FTS5 search
+      // Persist MCP tool definitions to HiveDB for search_knowledge
       if (mcpToolExecutors.length > 0) {
         try {
           for (const server of dbServers) {
@@ -194,11 +206,11 @@ export async function compileContext(opts: {
               serverTools = effectiveMcpManager!.getServerTools(server.name)
             }
             if (serverTools && serverTools.length > 0) {
-              syncMCPToolsToDB(server.id || server.name, server.name, serverTools)
+              await syncMCPToolsToDB(server.id || server.name, server.name, serverTools)
             }
           }
-          await syncMCPToolsToFTS();
-          log.info(`[context-compiler] [STEP-3c] ✅ Persisted MCP tools to DB + FTS5`)
+          await syncMCPToolsToIndex();
+          log.info(`[context-compiler] [STEP-3c] ✅ Persisted MCP tools to HiveDB`)
         } catch (syncErr) {
           log.warn(`[context-compiler] [STEP-3c] ⚠️ Failed to persist MCP tools to DB: ${(syncErr as Error).message}`)
         }
@@ -223,11 +235,37 @@ export async function compileContext(opts: {
     execute: t.execute,
   }))
 
-  const allTools = [...nativeTools, ...mcpToolExecutors]
+  // Core profiles use an immutable capability envelope. User configuration may
+  // change model/budgets/instructions, but cannot silently grant more tools.
+  const configuredToolNames = new Set(parseStringList(agent.tools_json))
+  const isCoreProfile = !!agent.agent_type
+  const allTools = isCoreProfile
+    ? [...nativeTools, ...mcpToolExecutors].filter(tool => configuredToolNames.has(tool.name))
+    : [...nativeTools, ...mcpToolExecutors]
 
-  // Only native minimal tools in LLM context
-  // MCP tools are discovered dynamically via search_knowledge(type="mcp")
-  const filteredNativeTools: ContextTool[] = nativeTools.filter(t => MINIMAL_TOOLS.has(t.name))
+  // Loadout policy, by role:
+  //
+  //  - BEE (coordinator): minimal set + Spec Kit. It orchestrates rather than works,
+  //    and search_knowledge already covers discovery over tools, skills, MCP, playbook
+  //    and project code. SDD is a mandatory planning contract, not optional discovery.
+  //  - Other core profiles (scout/builder/verifier/reviewer): their own curated,
+  //    permission-bounded envelope from agent-profiles.ts, in full. They are specialists;
+  //    withholding their tools left them unable to act and reduced to writing notes.
+  //  - Generic agents: the minimal set, discovering the rest via search_knowledge.
+  //
+  // MCP tools are always discovered dynamically via search_knowledge(type="mcp").
+  const isCoordinator = agent.agent_type === "bee"
+  const isSpecialistProfile = isCoreProfile && !isCoordinator
+
+  const initialToolNames = new Set(MINIMAL_TOOLS)
+  if (isCoordinator) {
+    for (const name of configuredToolNames) {
+      if (name.startsWith("speckit_")) initialToolNames.add(name)
+    }
+  } else if (isSpecialistProfile) {
+    for (const name of configuredToolNames) initialToolNames.add(name)
+  }
+  const filteredNativeTools: ContextTool[] = allTools.filter(t => initialToolNames.has(t.name))
 
   const nativeToolsForLLM: LLMToolDef[] = filteredNativeTools.map(t => ({
     type: "function" as const,
@@ -240,7 +278,10 @@ export async function compileContext(opts: {
 
   const toolsForLLM: LLMToolDef[] = nativeToolsForLLM
 
-  log.info(`[context-compiler] [STEP-4] Minimal native tool set: ${filteredNativeTools.length} tools`)
+  const loadoutKind = isCoordinator ? "coordinator (minimal + speckit)"
+    : isSpecialistProfile ? `specialist envelope (${agent.agent_type})`
+      : "minimal"
+  log.info(`[context-compiler] [STEP-4] Native tool loadout [${loadoutKind}]: ${filteredNativeTools.length} tools`)
   log.info(`[context-compiler] [STEP-4b] MCP tools available via search_knowledge: ${mcpToolExecutors.length} (not injected)`)
   log.info(`[context-compiler] [STEP-8] ✅ Combined tools: ${allTools.length} total executors, ${toolsForLLM.length} in LLM context`)
 
@@ -248,13 +289,36 @@ export async function compileContext(opts: {
   log.info(`[context-compiler] [STEP-8b] Building skill loadout...`)
   let minimalSkills: SkillDescriptor[] = []
   let discoveredSkills: SkillDescriptor[] = []
+  let configuredSkills: SkillDescriptor[] = []
 
   try {
     // Load minimal skills (always available)
-    minimalSkills = getMinimalSkills()
+    minimalSkills = await getMinimalSkills()
     log.info(`[context-compiler] [STEP-8b] ✅ Loaded ${minimalSkills.length} minimal skills`)
 
-    // Discover additional skills via FTS5 (coordinator only)
+    const configuredSkillNames = new Set(parseStringList(agent.skills_json))
+    if (configuredSkillNames.size > 0) {
+      const skillsCol = await col<SkillDoc>("skills")
+      configuredSkills = (await skillsCol.scan())
+        .map(entry => entry.doc)
+        .filter(skill => skill.active && configuredSkillNames.has(skill.name))
+        .map(skill => ({
+          id: skill.id,
+          name: skill.name,
+          description: skill.description ?? "",
+          category: skill.category,
+          tools: skill.tools,
+          triggers: skill.triggers,
+          preferred_agents: skill.preferred_agents,
+          body: skill.body,
+          version: skill.version,
+          version_num: skill.version_num,
+          active: skill.active,
+        }))
+      log.info(`[context-compiler] [STEP-8b] ✅ Loaded ${configuredSkills.length} profile skills`)
+    }
+
+    // Discover additional skills via HiveDB capability search (coordinator only)
     if (!isWorker) {
       const inputForSkills = taskContext || userMessage
       const textMessage = typeof inputForSkills === "string"
@@ -262,8 +326,8 @@ export async function compileContext(opts: {
         : Array.isArray(inputForSkills)
           ? inputForSkills.filter(p => p.type === "text").map(p => (p as any).text).join("\n")
           : String(inputForSkills)
-      discoveredSkills = selectSkills(textMessage)
-      log.info(`[context-compiler] [STEP-8b] ✅ Discovered ${discoveredSkills.length} additional skills via FTS5`)
+      discoveredSkills = await selectSkills(textMessage)
+      log.info(`[context-compiler] [STEP-8b] ✅ Discovered ${discoveredSkills.length} additional skills via HiveDB`)
     }
   } catch (err) {
     log.warn(`[context-compiler] [STEP-8b] ⚠️ Skill loadout failed: ${(err as Error).message}`)
@@ -272,6 +336,9 @@ export async function compileContext(opts: {
   // Combine skills (minimal + discovered, avoiding duplicates)
   const skillMap = new Map<string, SkillDescriptor>()
   for (const skill of minimalSkills) {
+    skillMap.set(skill.name, skill)
+  }
+  for (const skill of configuredSkills) {
     skillMap.set(skill.name, skill)
   }
   for (const skill of discoveredSkills) {
@@ -283,9 +350,9 @@ export async function compileContext(opts: {
 
   // [STEP-9] STRATEGY 3: COMPRESS — Load history with compaction
   log.info(`[context-compiler] [STEP-9] Loading conversation history...`)
-  let recentMessages: ReturnType<typeof getRecentMessages> = []
+  let recentMessages: Awaited<ReturnType<typeof getRecentMessages>> = []
   try {
-    recentMessages = getRecentMessages(threadId, KEEP_LAST_N_MESSAGES)
+    recentMessages = await getRecentMessages(threadId, KEEP_LAST_N_MESSAGES)
     log.info(`[context-compiler] [STEP-9] ✅ Loaded ${recentMessages.length} recent messages`)
   } catch (err) {
     log.error(`[context-compiler] [STEP-9] ❌ FAILED loading history: ${JSON.stringify(err)}`)
@@ -293,9 +360,9 @@ export async function compileContext(opts: {
   }
 
   // Check if we need to use summary (conversation is long)
-  let summary: ReturnType<typeof getSummary> = null
+  let summary: Awaited<ReturnType<typeof getSummary>> = null
   try {
-    summary = getSummary(threadId)
+    summary = await getSummary(threadId)
   } catch (err) {
     log.error(`[context-compiler] [STEP-9b] ❌ FAILED loading summary: ${JSON.stringify(err)}`)
     throw err
@@ -348,28 +415,24 @@ export async function compileContext(opts: {
   // Inject active/recent project state from DB (coordinator only)
   if (!isWorker) {
     try {
-      const recentProjects = db.query<any, []>(`
-        SELECT p.id, p.name, p.status, p.progress, p.description,
-               COUNT(t.id) as total_tasks,
-               SUM(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as done_tasks
-        FROM projects p
-        LEFT JOIN tasks t ON t.project_id = p.id
-        WHERE p.status IN ('active', 'pending', 'paused')
-        GROUP BY p.id
-        ORDER BY p.updated_at DESC
-        LIMIT 10
-      `).all()
+      const projects = await col<ProjectDoc>("projects")
+      const tasksCol = await col<TaskDoc>("tasks")
+      const recentProjects = (await projects.scan())
+        .map((entry) => entry.doc)
+        .filter((project) => ["active", "pending", "paused"].includes(project.status))
+        .sort((a, b) => b.updated_at - a.updated_at)
+        .slice(0, 10)
 
       if (recentProjects.length > 0) {
         let projectSection = `\n\n# ESTADO DE PROYECTOS\n`
         for (const proj of recentProjects) {
-          projectSection += `\n## ${proj.name} [${proj.status.toUpperCase()}] (${proj.done_tasks}/${proj.total_tasks} tareas, ${proj.progress ?? 0}%)\n`
+          const tasks = (await tasksCol.findBy("project_id", proj.id))
+            .map((entry) => entry.doc)
+            .sort((a, b) => a.id.localeCompare(b.id))
+          const doneTasks = tasks.filter((task) => task.status === "completed").length
+          projectSection += `\n## ${proj.name} [${proj.status.toUpperCase()}] (${doneTasks}/${tasks.length} tareas, ${proj.progress ?? 0}%)\n`
           if (proj.description) projectSection += `> ${proj.description}\n`
 
-          // Load tasks for this project
-          const tasks = db.query<any, [string]>(
-            "SELECT name, status, progress, result FROM tasks WHERE project_id = ? ORDER BY id ASC"
-          ).all(proj.id)
           for (const task of tasks) {
             const resultSummary = task.result
               ? ` → ${task.result.substring(0, 120)}${task.result.length > 120 ? "…" : ""}`
@@ -421,29 +484,14 @@ export async function compileContext(opts: {
       `4. Las herramientas se inyectan dinamicamente vía search_knowledge — NO están en tu contexto por defecto\n`
 
 
-    // Inject available skills (minimal + discovered)
-    if (allSkills.length > 0) {
-      let skillsSection = `\n\n# SKILLS ACTIVAS\n`
-      skillsSection += `Usá estas skills como guía cuando sea relevante:\n\n`
-
-      for (const skill of allSkills) {
-        const isMinimal = MINIMAL_SKILL_NAMES.includes(skill.name)
-        const badge = isMinimal ? "[SIEMPRE]" : "[DISCOVERED]"
-        const desc = skill.description ? ` — ${skill.description}` : ""
-        skillsSection += `- **${skill.name}** ${badge}${desc}\n`
-      }
-
-      systemPrompt += skillsSection
-      log.info(`[context-compiler] [STEP-10d] Injected ${allSkills.length} skills (${minimalSkills.length} minimal, ${discoveredSkills.length} discovered)`)
-    }
-
     // Inject developer preferences from ACE reflector (coordinator only)
     try {
-      const devPrefs = db.query<any, []>(`
-        SELECT rule FROM code_playbook
-        WHERE source = 'preferences' AND coordinator = 'user' AND active = 1
-        ORDER BY confidence DESC LIMIT 10
-      `).all()
+      const codePlaybook = await col<CodePlaybookDoc>("codePlaybook")
+      const devPrefs = (await codePlaybook.scan())
+        .map((entry) => entry.doc)
+        .filter((rule) => rule.source === "preferences" && rule.coordinator === "user" && rule.active)
+        .sort((a, b) => b.confidence - a.confidence)
+        .slice(0, 10)
       if (devPrefs.length > 0) {
         let prefsSection = `\n\n# PREFERENCIAS DEL DESARROLLADOR\nEl desarrollador ha expresado estas preferencias en sesiones anteriores:\n\n`
         for (const p of devPrefs) {
@@ -453,9 +501,23 @@ export async function compileContext(opts: {
         log.info(`[context-compiler] [STEP-10e] Injected ${devPrefs.length} developer preferences`)
       }
     } catch {
-      // code_playbook may not be initialized yet — skip silently
+      // codePlaybook may not be initialized yet — skip silently
     }
 
+  }
+
+  // Profile skills are executable operating instructions, so their bodies must
+  // be present for workers as well as BEE. This also makes spec-kit mandatory
+  // for BEE without relying on probabilistic trigger matching.
+  if (allSkills.length > 0) {
+    const skillBodies = allSkills
+      .map(skill => `## Skill: ${skill.name}\n${skill.body}`)
+      .join("\n\n")
+    systemPrompt += `\n\n# SKILLS ACTIVAS\n${skillBodies}`
+    log.info(
+      `[context-compiler] [STEP-10d] Injected ${allSkills.length} skill bodies ` +
+      `(${minimalSkills.length} minimal, ${configuredSkills.length} profile, ${discoveredSkills.length} discovered)`
+    )
   }
 
   // For isolated workers, add task context + tool discovery instruction
@@ -469,7 +531,7 @@ export async function compileContext(opts: {
   }
 
   log.info(
-    `[context-compiler] ✅ DONE: ${allTools.length} total tools, ` +
+    `[context-compiler] ✅ DONE: ${allTools.length} permitted tools, ` +
     `${toolsForLLM.length} selected tools, ${messages.length} messages, ` +
     `${allSkills.length} skills (${minimalSkills.length} minimal, ${discoveredSkills.length} discovered), ` +
     `isolated=${isWorker}`
@@ -486,7 +548,7 @@ export async function compileContext(opts: {
 
 // Re-export sync functions for gateway/initializer
 export {
-  syncToolCatalogToFTS as syncToolsToFTS,
-  syncSkillsToFTS,
-  syncPlaybookToFTS,
+  syncToolCatalogToIndex as syncToolsToIndex,
+  syncSkillsToIndex,
+  syncPlaybookToIndex,
 }

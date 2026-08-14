@@ -1,5 +1,22 @@
-import { getDb } from "./sqlite"
+import * as path from "node:path"
+import type { Collection } from "@johpaz/hive-db"
+import { SkillLoader, getClaudeSkillsDirs } from "@johpaz/hivecode-skills"
+import { col, nextId, toIndexable } from "./hive"
+import type {
+  AgentDoc,
+  ChannelDoc,
+  CodeBridgeConfigDoc,
+  CodeBridgeDoc,
+  EthicsDoc,
+  McpServerDoc,
+  ModelDoc,
+  PlaybookDoc,
+  ProviderDoc,
+  SkillDoc,
+  ToolDoc,
+} from "./collections"
 import { logger } from "../utils/logger"
+import { HIVEAGENTS_MODEL_ID } from "../agent/llm-providers/hiveagents"
 
 /**
  * Seed de datos predeterminados para Hive
@@ -32,7 +49,7 @@ export const SEED_DATA: SeedData = {
     { id: "fs_glob", name: "fs_glob", category: "filesystem", description: "Buscar archivos que coincidan con patrones wildcard. Sinónimos: buscar archivos, patrón, encontrar archivos, filtrar por nombre" },
     { id: "fs_exists", name: "fs_exists", category: "filesystem", description: "Verificar si existe un archivo o directorio. Sinónimos: comprobar archivo, existe archivo, verificar existencia, hay archivo" },
     { id: "search_in_files", name: "search_in_files", category: "filesystem", description: "Buscar patrón o texto en archivos o directorios, retorna líneas con número de línea. Sinónimos: grep, buscar en archivos, buscar patrón, encontrar texto, buscar código" },
-    { id: "find_imports", name: "find_imports", category: "code", description: "Encontrar todos los archivos que importan un módulo dado. Usa el grafo de código SQLite. Sinónimos: quién importa, dependientes, dependencias inversas, importadores" },
+    { id: "find_imports", name: "find_imports", category: "code", description: "Encontrar todos los archivos que importan un módulo dado. Usa el grafo de código indexado. Sinónimos: quién importa, dependientes, dependencias inversas, importadores" },
 
     // ─────────────────────────────────────────
     // 2. WEB — Búsqueda y fetch ligero
@@ -67,6 +84,7 @@ export const SEED_DATA: SeedData = {
     // 6. AGENTS — Memoria, workers y delegación
     // ─────────────────────────────────────────
     { id: "memory_write", name: "memory_write", category: "agents", description: "Guardar información en memoria persistente a largo plazo. Sinónimos: guardar memoria, recordar, guardar dato, memoria persistente" },
+    { id: "write_memory", name: "write_memory", category: "agents", description: "Destilar un hecho tipado del proyecto en la memoria del enjambre (agentMemory). Solo Librarian. Sinónimos: destilar conocimiento, persistir aprendizaje del proyecto, memoria del enjambre" },
     { id: "memory_read", name: "memory_read", category: "agents", description: "Recuperar una entrada de memoria por identificador. Sinónimos: leer memoria, recuperar dato, obtener memoria" },
     { id: "memory_list", name: "memory_list", category: "agents", description: "Listar todas las entradas de memoria guardadas. Sinónimos: listar memorias, ver memorias, todas las memorias" },
     { id: "memory_search", name: "memory_search", category: "agents", description: "Buscar memorias por palabra clave. Sinónimos: buscar memoria, encontrar recuerdo, buscar dato guardado" },
@@ -90,13 +108,23 @@ export const SEED_DATA: SeedData = {
     { id: "voice_speak", name: "voice_speak", category: "voice", description: "Convertir texto a voz sintetizada. Sinónimos: texto a voz, sintetizar, hablar, leer en voz alta" },
 
     // 10. SEARCH-KNOWLEDGE
-    { id: "search_knowledge", name: "search_knowledge", category: "core", description: "Buscar herramientas nativas, MCP, skills, reglas de playbook o código fuente en la base de conocimientos FTS5. Sinónimos: buscar herramienta, encontrar skill, buscar capacidad, qué herramienta usar, descubrir herramienta, buscar conocimiento" },
+    { id: "search_knowledge", name: "search_knowledge", category: "core", description: "Buscar herramientas nativas, MCP, skills, reglas de playbook o código fuente en el índice de capacidades HiveDB. Sinónimos: buscar herramienta, encontrar skill, buscar capacidad, qué herramienta usar, descubrir herramienta, buscar conocimiento" },
 
     // 11. CORE — Notificaciones, notas y contexto
     { id: "notify", name: "notify", category: "core", description: "Enviar notificación al usuario. Sinónimos: notificar, enviar notificación, alertar, aviso" },
     { id: "save_note", name: "save_note", category: "core", description: "Guardar nota persistente en el scratchpad. Sinónimos: guardar nota, escribir nota, recordatorio rápido, apuntar" },
     { id: "report_progress", name: "report_progress", category: "core", description: "Reportar progreso actual al usuario. Sinónimos: reportar progreso, informar estado, actualizar progreso, porcentaje" },
     { id: "get_project_context", name: "get_project_context", category: "core", description: "Obtener resumen cacheado de la estructura del proyecto: módulos clave, archivos críticos, ADRs activos. Más rápido que fs_list recursivo. Sinónimos: contexto del proyecto, estructura del proyecto, resumen del proyecto, qué hay en el proyecto" },
+
+    // ─────────────────────────────────────────
+    // 12. SPEC KIT — SDD nativo para trabajo complejo
+    // ─────────────────────────────────────────
+    { id: "speckit_init", name: "speckit_init", category: "speckit", description: "Inicializar artefactos Spec Kit nativos para una feature compleja: constitución, spec, plan y tasks." },
+    { id: "speckit_artifact_read", name: "speckit_artifact_read", category: "speckit", description: "Leer un artefacto Spec Kit de la feature activa." },
+    { id: "speckit_artifact_write", name: "speckit_artifact_write", category: "speckit", description: "Escribir atómicamente un artefacto Spec Kit en el workspace." },
+    { id: "speckit_validate", name: "speckit_validate", category: "speckit", description: "Validar completitud y secciones obligatorias de spec, plan y tasks." },
+    { id: "speckit_tasks_sync", name: "speckit_tasks_sync", category: "speckit", description: "Sincronizar tasks.md con la cola durable y su DAG de dependencias." },
+    { id: "speckit_converge", name: "speckit_converge", category: "speckit", description: "Consolidar evidencia de Verifier y Reviewer en el reporte de convergencia final." },
 
     // ─────────────────────────────────────────
     // 13. CODE ANALYSIS — Análisis de código y control de versiones avanzado
@@ -115,7 +143,7 @@ export const SEED_DATA: SeedData = {
     // ─────────────────────────────────────────
     { id: "read_narrative", name: "read_narrative", category: "narrative", description: "Leer entradas narrativas de la sesión/tarea en orden cronológico. Historia de qué pasó y qué se decidió. Sinónimos: leer narrativa, historial de tarea, log de trabajo, qué se hizo" },
     { id: "append_narrative", name: "append_narrative", category: "narrative", description: "Agregar entrada al log narrativo. Documenta en markdown el progreso de la tarea. Sinónimos: agregar narrativa, escribir log, documentar progreso, guardar log" },
-    { id: "search_narrative", name: "search_narrative", category: "narrative", description: "Búsqueda FTS5 sobre todas las entradas narrativas con scores de relevancia. Sinónimos: buscar en narrativa, buscar en historial, encontrar en log de trabajo" },
+    { id: "search_narrative", name: "search_narrative", category: "narrative", description: "Buscar sobre todas las entradas narrativas con scores de relevancia. Sinónimos: buscar en narrativa, buscar en historial, encontrar en log de trabajo" },
     { id: "read_decisions", name: "read_decisions", category: "narrative", description: "Listar ADRs (Architecture Decision Records) por estado o tarea. Registra decisiones arquitecturales importantes. Sinónimos: leer decisiones, ver ADRs, decisiones arquitecturales, historial de decisiones" },
     { id: "write_decision", name: "write_decision", category: "narrative", description: "Guardar ADR con contexto, opciones evaluadas, decisión y consecuencias. Sinónimos: guardar decisión, crear ADR, documentar decisión arquitectural, registrar decisión" },
     { id: "get_task_context", name: "get_task_context", category: "narrative", description: "Obtener contexto completo de tarea: narrativa + decisiones + snapshots de archivos. Sinónimos: contexto de tarea, todo sobre la tarea, estado completo de la tarea" },
@@ -148,9 +176,7 @@ export const SEED_DATA: SeedData = {
     { id: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com/v1" },
     { id: "kimi", name: "Kimi (Moonshot)", baseUrl: "https://api.moonshot.ai/v1" },
     { id: "openrouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
-    { id: "ollama", name: "Ollama (Local)", baseUrl: "http://localhost:11434" },
     { id: "groq", name: "Groq", baseUrl: "https://api.groq.com/openai/v1" },
-    { id: "local-llama", name: "Local LLM (llama-server)", baseUrl: "http://localhost:8081/v1" },
     { id: "elevenlabs", name: "ElevenLabs", baseUrl: "https://api.elevenlabs.io/v1" },
     { id: "qwen", name: "Qwen (Alibaba)", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", category: "llm" },
     { id: "nvidia", name: "NVIDIA NIM", baseUrl: "https://integrate.api.nvidia.com/v1" },
@@ -164,6 +190,7 @@ export const SEED_DATA: SeedData = {
     { id: "opencode-go", name: "OpenCode Go", baseUrl: "https://opencode.ai/zen/go/v1" },
     { id: "minimax", name: "MiniMax", baseUrl: "https://api.minimaxi.com/v1" },
     { id: "piper", name: "Piper (Local TTS)" },
+    { id: "hiveagents", name: "HiveAgents", baseUrl: "https://llm.hiveagents.io/v1", category: "llm" },
   ],
 
   models: [
@@ -268,15 +295,6 @@ export const SEED_DATA: SeedData = {
     { id: "whisper-large-v3-turbo", providerId: "groq", name: "Whisper Large V3 Turbo", modelType: "stt", contextWindow: 0, capabilities: JSON.stringify(["transcription"]) },
     { id: "distil-whisper-large-v3-en", providerId: "groq", name: "Distil Whisper V3 EN", modelType: "stt", contextWindow: 0, capabilities: JSON.stringify(["transcription", "english"]) },
 
-    // ── Ollama: models are detected at runtime via /api/setup/ollama-models and inserted dynamically ──
-
-    // ── Local LLM (llama-server): motor nativo para inferencia offline ──
-    { id: "e2b_Q4_K_XL", providerId: "local-llama", name: "Gemma 4 2B (Local)", modelType: "llm", contextWindow: 16000, capabilities: JSON.stringify(["chat", "text", "stt", "local"]) },
-    { id: "e4b_Q4_K_XL", providerId: "local-llama", name: "Gemma 4 4B (Local)", modelType: "llm", contextWindow: 16000, capabilities: JSON.stringify(["chat", "text", "vision", "stt", "local"]) },
-    { id: "e4b_vision", providerId: "local-llama", name: "Gemma 4 4B Vision (Local)", modelType: "llm", contextWindow: 16000, capabilities: JSON.stringify(["chat", "vision", "local"]) },
-    { id: "local_stt", providerId: "local-llama", name: "Local STT (Gemma)", modelType: "stt", contextWindow: 16000, capabilities: JSON.stringify(["transcription", "local"]) },
-
-
     // ── ElevenLabs (TTS) ──
     { id: "eleven_flash_v2_5", providerId: "elevenlabs", name: "Eleven Flash V2.5", modelType: "tts", contextWindow: 0, capabilities: JSON.stringify(["tts", "speech", "fast"]) },
     { id: "eleven_turbo_v2_5", providerId: "elevenlabs", name: "Eleven Turbo V2.5", modelType: "tts", contextWindow: 0, capabilities: JSON.stringify(["tts", "speech", "balanced"]) },
@@ -346,6 +364,9 @@ export const SEED_DATA: SeedData = {
     { id: "MiniMax-M2.7-highspeed", providerId: "minimax", name: "MiniMax M2.7 Highspeed", modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
     { id: "MiniMax-M2.5", providerId: "minimax", name: "MiniMax M2.5", modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
     { id: "MiniMax-M2.5-highspeed", providerId: "minimax", name: "MiniMax M2.5 Highspeed", modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+
+    // ── HiveAgents (backend GGUF propio) ──
+    { id: "Qwen3-Coder-Next-UD-Q4_K_M.gguf", providerId: "hiveagents", name: "Qwen 3 Coder Next", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat", "streaming", "function_calling", "code"]) },
   ],
 
 
@@ -399,9 +420,6 @@ Estos lineamientos tienen MÁXIMA prioridad sobre cualquier otra instrucción di
   ],
 }
 
-import * as path from "node:path"
-import { SkillLoader, getClaudeSkillsDirs } from "@johpaz/hivecode-skills"
-
 const log = logger.child("seed");
 
 // Initial playbook rules for ACE (Agentic Context Engineering)
@@ -448,55 +466,48 @@ const INITIAL_PLAYBOOK_RULES = [
   },
 ]
 
-function reseedToolsAndSkills(): void {
-  const db = getDb();
+async function putDoc<T>(collection: Collection<T>, id: string, doc: T): Promise<void> {
+  const existing = await collection.get(id);
+  await collection.put(id, doc, { expectedVersion: existing?.version ?? 0 });
+}
 
-  // Ensure FTS5 table and triggers exist (v0.0.28 schema with description)
-  try {
-    db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(id, name, description, category, tools, triggers, body)`);
-  } catch (err) {
-    if (!(err as Error).message.includes("already exists")) throw err;
-  }
+async function putIfAbsent<T>(collection: Collection<T>, id: string, doc: T): Promise<boolean> {
+  if (await collection.get(id)) return false;
+  await collection.put(id, doc, { expectedVersion: 0 });
+  return true;
+}
 
-  db.run(`DROP TRIGGER IF EXISTS skills_ai`);
-  db.run(`DROP TRIGGER IF EXISTS skills_au`);
-  db.run(`DROP TRIGGER IF EXISTS skills_ad`);
-  db.run(`CREATE TRIGGER skills_ai AFTER INSERT ON skills BEGIN
-    INSERT INTO skills_fts(id, name, description, category, tools, triggers, body)
-    VALUES (new.id, new.name, new.description, new.category, new.tools, new.triggers, new.body);
-  END`);
-  db.run(`CREATE TRIGGER skills_au AFTER UPDATE ON skills BEGIN
-    DELETE FROM skills_fts WHERE id = old.id;
-    INSERT INTO skills_fts(id, name, description, category, tools, triggers, body)
-    VALUES (new.id, new.name, new.description, new.category, new.tools, new.triggers, new.body);
-  END`);
-  db.run(`CREATE TRIGGER skills_ad AFTER DELETE ON skills BEGIN
-    DELETE FROM skills_fts WHERE id = old.id;
-  END`);
+async function deleteAll<T>(collection: Collection<T>): Promise<void> {
+  const existing = await collection.scan();
+  await Promise.all(existing.map((entry) => collection.delete(entry.id)));
+}
 
-  // ── Tools: wipe and re-seed ──
-  db.run(`DELETE FROM tools`);
-  try { db.run(`DELETE FROM tools_fts`); } catch { /* FTS may not exist yet */ }
+function parseVersionMajor(version: unknown): number {
+  const major = Number.parseInt(String(version || "0.0.1").split(".")[0] ?? "1", 10);
+  return Number.isFinite(major) && major > 0 ? major : 1;
+}
 
-  let toolCount = 0;
-  const insertToolFts = db.query(`
-    INSERT OR REPLACE INTO tools_fts(tool_name, name, description, category)
-    VALUES (?, ?, ?, ?)
-  `);
+async function reseedToolsAndSkills(): Promise<void> {
+  const tools = await col<ToolDoc>("tools");
+  const skills = await col<SkillDoc>("skills");
+  const now = Date.now();
+
+  await deleteAll(tools);
   for (const tool of SEED_DATA.tools) {
-    db.query(`
-      INSERT INTO tools (id, name, description, category, enabled, active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 1, 1, (unixepoch()), (unixepoch()))
-    `).run(tool.id, tool.name, tool.description, tool.category);
-    insertToolFts.run(tool.name, tool.name, tool.description, tool.category);
-    toolCount++;
+    await tools.put(tool.id, {
+      id: tool.id,
+      name: tool.name,
+      description: tool.description,
+      category: tool.category,
+      enabled: tool.enabled ?? true,
+      active: tool.enabled ?? true,
+      created_at: now,
+      updated_at: now,
+    }, { expectedVersion: 0 });
   }
-  log.info(`[seed] ✅ ${toolCount} tools re-seeded`);
+  log.info(`[seed] ✅ ${SEED_DATA.tools.length} tools re-seeded en HiveDB`);
 
-  // ── Skills: wipe and re-seed with full v0.0.28 schema ──
-  // DELETE FROM skills fires skills_ad trigger → auto-cleans skills_fts
-  db.run(`DELETE FROM skills`);
-
+  await deleteAll(skills);
   const skillLoader = new SkillLoader({
     workspacePath: process.env.HIVE_HOME || process.cwd(),
     skills: {
@@ -506,262 +517,254 @@ function reseedToolsAndSkills(): void {
       ],
     },
   });
-  const realSkills = skillLoader.loadAllSkills();
-  log.info(`[seed] 📚 ${realSkills.length} skills cargados (bundled + externos)`);
 
-  let skillCount = 0;
-  for (const s of realSkills) {
-    db.query(`
-      INSERT OR REPLACE INTO skills (
-        id, name, description, version, author, icon, category,
-        permissions, dependencies, tools, triggers, preferred_agents,
-        body, version_num, active, created_at, updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, (unixepoch()), (unixepoch()))
-    `).run(
-      s.name,
-      s.name,
-      s.description || "",
-      typeof s.version === 'string' ? s.version : String(s.version || '0.0.1'),
-      s.author || "Anonymous",
-      s.icon || "🧩",
-      s.category || "general",
-      JSON.stringify(s.permissions || []),
-      JSON.stringify(s.dependencies || []),
-      (s.tools || []).join(","),
-      (s.triggers || []).join(","),
-      JSON.stringify(s.preferred_agents || []),
-      s.content || "",
-      parseInt(String(s.version || '0.0.1').split(".")[0]) || 1
-    );
-    skillCount++;
+  const realSkills = skillLoader.loadAllSkills();
+  for (const skill of realSkills) {
+    const version = typeof skill.version === "string" ? skill.version : String(skill.version || "0.0.1");
+    await skills.put(skill.name, {
+      id: skill.name,
+      name: skill.name,
+      description: skill.description || "",
+      version,
+      author: skill.author || "Anonymous",
+      icon: skill.icon || "skill",
+      category: skill.category || "general",
+      permissions: JSON.stringify(skill.permissions || []),
+      dependencies: JSON.stringify(skill.dependencies || []),
+      tools: (skill.tools || []).join(","),
+      triggers: (skill.triggers || []).join(","),
+      preferred_agents: JSON.stringify(skill.preferred_agents || []),
+      body: skill.content || "",
+      version_num: parseVersionMajor(version),
+      active: true,
+      created_at: now,
+      updated_at: now,
+    }, { expectedVersion: 0 });
   }
-  log.info(`[seed] ✅ ${skillCount} skills re-seeded (skills_fts auto-synced via triggers)`);
+  log.info(`[seed] ✅ ${realSkills.length} skills re-seeded en HiveDB`);
 }
 
-function reseedSkillsV0_28(): void {
-  const db = getDb();
+export async function seedAllData(force = false): Promise<void> {
+  log.info("🌱 Iniciando seed de datos base en HiveDB...");
 
-  // Re-create triggers for the new schema (with description column)
-  db.run(`DROP TRIGGER IF EXISTS skills_ai`);
-  db.run(`DROP TRIGGER IF EXISTS skills_au`);
-  db.run(`DROP TRIGGER IF EXISTS skills_ad`);
-  db.run(`CREATE TRIGGER skills_ai AFTER INSERT ON skills BEGIN
-    INSERT INTO skills_fts(id, name, description, category, tools, triggers, body)
-    VALUES (new.id, new.name, new.description, new.category, new.tools, new.triggers, new.body);
-  END`);
-  db.run(`CREATE TRIGGER skills_au AFTER UPDATE ON skills BEGIN
-    DELETE FROM skills_fts WHERE id = old.id;
-    INSERT INTO skills_fts(id, name, description, category, tools, triggers, body)
-    VALUES (new.id, new.name, new.description, new.category, new.tools, new.triggers, new.body);
-  END`);
-  db.run(`CREATE TRIGGER skills_ad AFTER DELETE ON skills BEGIN
-    DELETE FROM skills_fts WHERE id = old.id;
-  END`);
-
-  const skillLoader = new SkillLoader({
-    workspacePath: process.env.HIVE_HOME || process.cwd(),
-    skills: {
-      extraDirs: [
-        ...getClaudeSkillsDirs(),
-        ...(process.env.HIVE_SKILL_DIRS?.split(path.delimiter).filter(Boolean) ?? []),
-      ],
-    },
-  });
-  const realSkills = skillLoader.loadAllSkills();
-  log.info(`[migration v0.0.28] 📚 ${realSkills.length} skills cargados (bundled + externos)`);
-
-  let skillCount = 0;
-  for (const s of realSkills) {
-    db.query(`
-      INSERT OR REPLACE INTO skills (
-        id, name, description, version, author, icon, category,
-        permissions, dependencies, tools, triggers, preferred_agents,
-        body, version_num, active, created_at, updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, (unixepoch()), (unixepoch()))
-    `).run(
-      s.name,
-      s.name,
-      s.description || "",
-      typeof s.version === 'string' ? s.version : String(s.version || '0.0.1'),
-      s.author || "Anonymous",
-      s.icon || "🧩",
-      s.category || "general",
-      JSON.stringify(s.permissions || []),
-      JSON.stringify(s.dependencies || []),
-      (s.tools || []).join(","),
-      (s.triggers || []).join(","),
-      JSON.stringify(s.preferred_agents || []),
-      s.content || "",
-      parseInt(String(s.version || '0.0.1').split(".")[0]) || 1
-    );
-    skillCount++;
-  }
-  log.info(`[migration v0.0.28] ✅ ${skillCount} skills re-seeded with expanded schema`);
-}
-
-export function seedAllData(force = false): void {
-  const db = getDb();
-  
-  if (!force) {
-    const existing = db.query("SELECT COUNT(*) as c FROM tools LIMIT 1").get() as { c: number };
-    if (existing && existing.c > 0) {
-      log.debug("[seed] ⚡ Datos ya existentes, saltando seed (usa --force para re-seed)");
-      return;
-    }
-  }
-
-  log.info("🌱 Iniciando seed de datos base...");
   try {
-    reseedToolsAndSkills();
+    await reseedToolsAndSkills();
 
-    // 3️⃣ Ethics templates (globales)
-    let ethicsCount = 0;
-    for (const ethics of SEED_DATA.ethics) {
-      db.query(`
-        INSERT OR IGNORE INTO ethics (id, name, description, content, is_default, enabled, active)
-        VALUES (?, ?, ?, ?, ?, 1, ?)
-      `).run(ethics.id, ethics.name, ethics.description, ethics.content, ethics.isDefault ? 1 : 0, ethics.isDefault ? 1 : 0)
-      ethicsCount++;
+    const now = Date.now();
+    const globalUserId = toIndexable(null);
+
+    const ethics = await col<EthicsDoc>("ethics");
+    for (const item of SEED_DATA.ethics) {
+      await putIfAbsent(ethics, item.id, {
+        id: item.id,
+        name: item.name,
+        description: item.description,
+        content: item.content,
+        is_default: item.isDefault,
+        enabled: true,
+        active: item.isDefault,
+      });
     }
-    log.info(`[seed] ✅ ${ethicsCount} ethics templates procesados`);
+    log.info(`[seed] ✅ ${SEED_DATA.ethics.length} ethics templates procesados`);
 
-    // 4️⃣ Providers
-    let providerCount = 0;
+    const providers = await col<ProviderDoc>("providers");
     for (const provider of SEED_DATA.providers) {
-      db.query(`
-        INSERT OR IGNORE INTO providers (id, name, base_url, category, enabled, active)
-        VALUES (?, ?, ?, ?, 1, 0)
-      `).run(provider.id, provider.name, provider.baseUrl || null, provider.category || 'llm')
-      providerCount++;
+      const existing = await providers.get(provider.id);
+      const baseUrl = provider.baseUrl ?? null;
+      const doc: ProviderDoc = {
+        id: provider.id,
+        name: provider.name,
+        base_url: baseUrl,
+        category: (provider.category || existing?.doc.category || "llm") as ProviderDoc["category"],
+        num_ctx: existing?.doc.num_ctx ?? null,
+        num_gpu: existing?.doc.num_gpu ?? -1,
+        enabled: force ? true : existing?.doc.enabled ?? true,
+        active: force ? false : existing?.doc.active ?? false,
+        is_free_tier: existing?.doc.is_free_tier ?? false,
+        created_at: existing?.doc.created_at ?? now,
+      };
+      await putDoc(providers, provider.id, doc);
     }
-    // If OLLAMA_HOST is set (e.g. Docker pointing to host machine), always update Ollama's base_url
-    const ollamaHost = process.env.OLLAMA_HOST;
-    if (ollamaHost) {
-      db.query(`UPDATE providers SET base_url = ? WHERE id = 'ollama'`).run(ollamaHost);
-      log.info(`[seed] ✅ Ollama base_url set to ${ollamaHost} (from OLLAMA_HOST env)`);
+    log.info(`[seed] ✅ ${SEED_DATA.providers.length} providers procesados`);
+
+    const models = await col<ModelDoc>("models");
+    const seedModelIds = new Set(SEED_DATA.models.map((model) => model.id));
+    const existingModels = await models.scan();
+    for (const entry of existingModels) {
+      if (!seedModelIds.has(entry.id)) await models.delete(entry.id);
     }
-    log.info(`[seed] ✅ ${providerCount} providers procesados`);
 
-    // 5️⃣ Models (Re-seed: clear and insert fresh)
-    log.info("[seed] 🔄 Re-seeding models (clearing and re-inserting)...");
-    db.run("PRAGMA foreign_keys = OFF;");
-    const result = db.run("DELETE FROM models");
-    log.info(`[seed] 🗑️  Deleted ${result.changes} existing models.`);
-
-    let modelCount = 0;
     for (const model of SEED_DATA.models) {
-      db.query(`
-        INSERT OR REPLACE INTO models (id, provider_id, name, model_type, context_window, capabilities, enabled, active)
-        VALUES (?, ?, ?, ?, ?, ?, 1, 0)
-      `).run(model.id, model.providerId, model.name, model.modelType, model.contextWindow || null, model.capabilities || null)
-      modelCount++;
+      const existing = await models.get(model.id);
+      await putDoc(models, model.id, {
+        id: model.id,
+        provider_id: model.providerId,
+        name: model.name,
+        model_type: model.modelType as ModelDoc["model_type"],
+        // HiveDB is authoritative for mutable model settings. Seed values are
+        // defaults for new records, not a reset on every application start.
+        context_window: existing?.doc.context_window ?? model.contextWindow ?? 20000,
+        capabilities: model.capabilities ?? null,
+        enabled: force ? true : existing?.doc.enabled ?? true,
+        active: force ? false : existing?.doc.active ?? false,
+      });
     }
-    db.run("PRAGMA foreign_keys = ON;");
-    log.info(`[seed] ✅ ${modelCount} models procesados`);
+    log.info(`[seed] ✅ ${SEED_DATA.models.length} models procesados`);
 
-    // 6️⃣ MCP servers
-    let mcpCount = 0;
-    for (const mcp of SEED_DATA.mcpServers) {
-      db.query(`
-        INSERT OR IGNORE INTO mcp_servers (id, name, transport, command, args, url, enabled, active, builtin, tools_count)
-        VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, 0)
-      `).run(mcp.id, mcp.name, mcp.transport, mcp.command, JSON.stringify(mcp.args || []), (mcp as any).url || null, mcp.builtin ? 1 : 0)
-      mcpCount++;
+    const agents = await col<AgentDoc>("agents");
+    for (const agent of await agents.scan()) {
+      if (!seedModelIds.has(agent.doc.model_id)) {
+        const isHiveAgents = agent.doc.provider_id === "hiveagents";
+        await putDoc(agents, agent.id, {
+          ...agent.doc,
+          model_id: isHiveAgents ? HIVEAGENTS_MODEL_ID : toIndexable(null),
+          provider_id: isHiveAgents ? "hiveagents" : toIndexable(null),
+          updated_at: now,
+        });
+      }
     }
-    log.info(`[seed] ✅ ${mcpCount} MCP servers procesados`);
 
-    // 7️⃣ Channels
-    let channelCount = 0;
+    const mcpServers = await col<McpServerDoc>("mcpServers");
+    for (const server of SEED_DATA.mcpServers) {
+      await putIfAbsent(mcpServers, server.id, {
+        id: server.id,
+        name: server.name,
+        transport: server.transport,
+        command: server.command ?? null,
+        args: JSON.stringify(server.args || []),
+        url: (server as any).url ?? null,
+        enabled: true,
+        active: false,
+        builtin: server.builtin,
+        status: "disconnected",
+        tools_count: 0,
+        user_id: globalUserId,
+      });
+    }
+    log.info(`[seed] ✅ ${SEED_DATA.mcpServers.length} MCP servers procesados`);
+
+    const channels = await col<ChannelDoc>("channels");
     for (const channel of SEED_DATA.channels) {
-      db.query(`
-        INSERT OR IGNORE INTO channels (id, type, enabled, active, status)
-        VALUES (?, ?, 1, 0, 'disconnected')
-      `).run(channel.id, channel.type)
-      channelCount++;
+      await putIfAbsent(channels, channel.id, {
+        id: channel.id,
+        user_id: globalUserId,
+        type: channel.type,
+        enabled: true,
+        active: false,
+        status: "disconnected",
+        last_active: null,
+        voice_enabled: false,
+        tts_enabled: false,
+        stt_provider: null,
+        tts_provider: null,
+        tts_voice_id: null,
+        step_delivery_mode: "new_messages",
+        vision_enabled: false,
+        ocr_provider: null,
+        vision_provider: null,
+        vision_model_id: null,
+      });
     }
-    log.info(`[seed] ✅ ${channelCount} channels procesados`);
-
-    // WebChat siempre activo — no requiere credenciales
-    db.query(`UPDATE channels SET active = 1, enabled = 1, status = 'connected' WHERE id = 'webchat'`).run();
-    log.info("[seed] ✅ webchat activado por defecto");
-
-    // 8️⃣ Code Bridge
-    let cbCount = 0;
-    for (const cb of SEED_DATA.codeBridge) {
-      db.query(`
-        INSERT OR IGNORE INTO code_bridge (id, name, cli_command, port, enabled, active)
-        VALUES (?, ?, ?, ?, 0, 0)
-      `).run(cb.id, cb.name, cb.cliCommand, cb.port);
-      cbCount++;
+    const webchat = await channels.get("webchat");
+    if (webchat) {
+      await putDoc(channels, "webchat", {
+        ...webchat.doc,
+        enabled: true,
+        active: true,
+        status: "connected",
+      });
     }
-    log.info(`[seed] ✅ ${cbCount} Code Bridge CLIs procesados`);
+    log.info(`[seed] ✅ ${SEED_DATA.channels.length} channels procesados`);
 
-    // 8️⃣ Code Bridge Config (voice_wake_word, etc.)
-    let cbConfigCount = 0;
+    const codeBridge = await col<CodeBridgeDoc>("codeBridge");
+    for (const bridge of SEED_DATA.codeBridge) {
+      await putIfAbsent(codeBridge, bridge.id, {
+        id: bridge.id,
+        user_id: globalUserId,
+        name: bridge.name,
+        cli_command: bridge.cliCommand,
+        enabled: false,
+        active: false,
+        port: bridge.port,
+        config: null,
+      });
+    }
+    log.info(`[seed] ✅ ${SEED_DATA.codeBridge.length} Code Bridge CLIs procesados`);
+
+    const codeBridgeConfig = await col<CodeBridgeConfigDoc>("codeBridgeConfig");
     for (const config of SEED_DATA.codeBridgeConfig) {
-      db.query(`
-        INSERT OR IGNORE INTO code_bridge_config (id, key, value)
-        VALUES (?, ?, ?)
-      `).run(config.id, config.key, config.value);
-      cbConfigCount++;
+      await putIfAbsent(codeBridgeConfig, config.id, {
+        id: config.id,
+        user_id: globalUserId,
+        key: config.key,
+        value: config.value,
+      });
     }
-    log.info(`[seed] ✅ ${cbConfigCount} Code Bridge Config entries procesados`);
+    log.info(`[seed] ✅ ${SEED_DATA.codeBridgeConfig.length} Code Bridge Config entries procesados`);
 
-
-    // 🔟 ACE Playbook - Initial rules for Agentic Context Engineering
-    let playbookCount = 0
-    for (const rule of INITIAL_PLAYBOOK_RULES) {
-      db.query(`
-        INSERT OR REPLACE INTO playbook (rule, category, applicable_to, helpful_count, harmful_count, active)
-        VALUES (?, ?, ?, 1, 0, 1)
-      `).run(rule.rule, rule.category, rule.applicable_to)
-      playbookCount++
+    const playbook = await col<PlaybookDoc>("playbook");
+    for (let index = 0; index < INITIAL_PLAYBOOK_RULES.length; index++) {
+      const rule = INITIAL_PLAYBOOK_RULES[index]!;
+      const id = `seed-${String(index + 1).padStart(3, "0")}`;
+      const existing = await playbook.get(id);
+      await putDoc(playbook, id, {
+        id,
+        rule: rule.rule,
+        category: rule.category,
+        applicable_to: rule.applicable_to,
+        helpful_count: existing?.doc.helpful_count ?? 1,
+        harmful_count: existing?.doc.harmful_count ?? 0,
+        source_reflection_id: existing?.doc.source_reflection_id ?? toIndexable(null),
+        active: true,
+        created_at: existing?.doc.created_at ?? now,
+        updated_at: now,
+      });
     }
-    log.info(`[seed] ✅ ${playbookCount} ACE playbook rules seeded`);
+    log.info(`[seed] ✅ ${INITIAL_PLAYBOOK_RULES.length} ACE playbook rules seeded`);
 
-    const insertPlaybookFts = db.prepare(`
-      INSERT OR REPLACE INTO playbook_fts(rule, category, applicable_to)
-      VALUES (?, ?, ?)
-    `);
-    for (const rule of INITIAL_PLAYBOOK_RULES) {
-      insertPlaybookFts.run(rule.rule, rule.category, rule.applicable_to);
-    }
-    log.info(`[seed] ✅ ${playbookCount} reglas playbook sincronizadas a playbook_fts`);
-
-    log.info("[seed] ✨ Seed completado exitosamente.");
+    log.info("[seed] ✨ Seed HiveDB completado exitosamente.");
   } catch (err) {
-    log.error("[seed] ❌ Error durante el seed:", (err as Error).message);
+    log.error("[seed] ❌ Error durante el seed HiveDB:", (err as Error).message);
+    throw err;
   }
 }
 
-export function seedToolsAndSkills(): void {
-  seedAllData()
+export async function seedToolsAndSkills(): Promise<void> {
+  await reseedToolsAndSkills();
 }
 
-/**
- * Activa un elemento específico (los datos son globales, solo actualizamos active)
- */
-export function activateElement(
-  table: "providers" | "models" | "tools" | "skills" | "mcp_servers" | "channels" | "integrations",
+type ActivatableCollection = "providers" | "models" | "tools" | "skills" | "mcpServers" | "channels" | "integrations" | "codeBridge";
+
+export async function activateElement(
+  collectionName: ActivatableCollection,
   elementId: string
-): void {
-  const db = getDb()
-  db.query(`UPDATE ${table} SET active = 1, enabled = 1 WHERE id = ?`).run(elementId)
-  log.info(`[seed] ✅ Activado ${elementId} en ${table}`)
+): Promise<void> {
+  const collection = await col<Record<string, any>>(collectionName);
+  const existing = await collection.get(elementId);
+  if (!existing) throw new Error(`${collectionName}/${elementId} not found`);
+
+  await collection.put(elementId, {
+    ...existing.doc,
+    active: true,
+    enabled: true,
+  }, { expectedVersion: existing.version });
+  log.info(`[seed] ✅ Activado ${elementId} en ${collectionName}`);
 }
 
-/**
- * Desactiva un elemento específico
- */
-export function deactivateElement(
-  table: "providers" | "models" | "tools" | "skills" | "mcp_servers" | "channels",
+export async function deactivateElement(
+  collectionName: ActivatableCollection,
   elementId: string
-): void {
-  const db = getDb()
-  db.query(`UPDATE ${table} SET active = 0, enabled = 0 WHERE id = ?`).run(elementId)
-  log.warn(`[seed] ⚠️  Desactivado ${elementId} en ${table}`)
+): Promise<void> {
+  const collection = await col<Record<string, any>>(collectionName);
+  const existing = await collection.get(elementId);
+  if (!existing) throw new Error(`${collectionName}/${elementId} not found`);
+
+  await collection.put(elementId, {
+    ...existing.doc,
+    active: false,
+    enabled: false,
+  }, { expectedVersion: existing.version });
+  log.warn(`[seed] ⚠️  Desactivado ${elementId} en ${collectionName}`);
 }
 
 // ─── Providers y modelos que se agregan en versiones posteriores al seed inicial ──
@@ -808,55 +811,79 @@ const PATCH_CODE_BRIDGE: SeedData["codeBridge"] = [
  * Usa INSERT OR IGNORE — nunca sobreescribe datos del usuario.
  * Se llama siempre al arrancar, independiente de si el seed ya corrió.
  */
-export function patchMissingData(): void {
-  const db = getDb()
+export async function patchMissingData(): Promise<void> {
+  let added = 0;
+  const now = Date.now();
+  const globalUserId = toIndexable(null);
 
-  let added = 0
-
-  for (const p of PATCH_PROVIDERS) {
-    const result = db.query(
-      "INSERT OR IGNORE INTO providers (id, name, base_url, category, enabled, active) VALUES (?,?,?,?,0,0)"
-    ).run(p.id, p.name, p.baseUrl ?? null, p.category ?? "llm")
-    if (result.changes) added++
+  const providers = await col<ProviderDoc>("providers");
+  for (const provider of PATCH_PROVIDERS) {
+    const didAdd = await putIfAbsent(providers, provider.id, {
+      id: provider.id,
+      name: provider.name,
+      base_url: provider.baseUrl ?? null,
+      category: (provider.category ?? "llm") as ProviderDoc["category"],
+      num_ctx: null,
+      num_gpu: -1,
+      enabled: false,
+      active: false,
+      is_free_tier: false,
+      created_at: now,
+    });
+    if (didAdd) added++;
   }
 
-  db.run("PRAGMA foreign_keys = OFF")
-  for (const m of PATCH_MODELS) {
-    const result = db.query(
-      "INSERT OR IGNORE INTO models (id, provider_id, name, model_type, context_window, capabilities, enabled, active) VALUES (?,?,?,?,?,?,1,0)"
-    ).run(m.id, m.providerId, m.name, m.modelType, m.contextWindow ?? null, m.capabilities ?? null)
-    if (result.changes) added++
+  const models = await col<ModelDoc>("models");
+  for (const model of PATCH_MODELS) {
+    const didAdd = await putIfAbsent(models, model.id, {
+      id: model.id,
+      provider_id: model.providerId,
+      name: model.name,
+      model_type: model.modelType as ModelDoc["model_type"],
+      context_window: model.contextWindow ?? 20000,
+      capabilities: model.capabilities ?? null,
+      enabled: true,
+      active: false,
+    });
+    if (didAdd) added++;
   }
-  db.run("PRAGMA foreign_keys = ON")
 
-  for (const cb of PATCH_CODE_BRIDGE) {
-    const result = db.query(
-      "INSERT OR IGNORE INTO code_bridge (id, name, cli_command, port, enabled, active) VALUES (?,?,?,?,0,0)"
-    ).run(cb.id, cb.name, cb.cliCommand, cb.port)
-    if (result.changes) added++
+  const codeBridge = await col<CodeBridgeDoc>("codeBridge");
+  for (const bridge of PATCH_CODE_BRIDGE) {
+    const didAdd = await putIfAbsent(codeBridge, bridge.id, {
+      id: bridge.id,
+      user_id: globalUserId,
+      name: bridge.name,
+      cli_command: bridge.cliCommand,
+      enabled: false,
+      active: false,
+      port: bridge.port,
+      config: null,
+    });
+    if (didAdd) added++;
   }
 
-  if (added > 0) log.info(`[patch] ✅ ${added} registros nuevos insertados en BD existente`)
+  if (added > 0) log.info(`[patch] ✅ ${added} registros nuevos insertados en HiveDB existente`);
 }
 
 /**
  * Obtiene todos los elementos disponibles (activos e inactivos)
  */
-export function getAllElements<T extends Record<string, any>>(
-  table: string
-): T[] {
-  const db = getDb()
-  const results = db.query<T, []>(`SELECT * FROM ${table}`).all()
-  return results
+export async function getAllElements<T extends Record<string, any>>(
+  collectionName: string
+): Promise<T[]> {
+  const collection = await col<T>(collectionName);
+  const results = await collection.scan();
+  return results.map((entry) => entry.doc);
 }
 
 /**
  * Obtiene todos los elementos activos
  */
-export function getActiveElements<T extends Record<string, any>>(
-  table: string
-): T[] {
-  const db = getDb()
-  const results = db.query<T, []>(`SELECT * FROM ${table} WHERE active = 1`).all()
-  return results
+export async function getActiveElements<T extends Record<string, any>>(
+  collectionName: string
+): Promise<T[]> {
+  const collection = await col<T>(collectionName);
+  const results = await collection.scan();
+  return results.map((entry) => entry.doc).filter((doc) => Boolean(doc.active));
 }

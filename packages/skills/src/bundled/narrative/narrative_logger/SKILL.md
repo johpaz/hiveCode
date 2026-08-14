@@ -55,8 +55,8 @@ output_format:
   max_length: "Concise but complete — capture the WHY not just the WHAT"
 
 examples:
-  - user_input: "documentá que migramos la BD a SQLite WAL"
-    expected_behavior: "append_narrative({ content: '## Migración a SQLite WAL\\n...', phase: 'database' })"
+  - user_input: "documentá que migramos la BD a HiveDB WAL"
+    expected_behavior: "append_narrative({ content: '## Migración a HiveDB WAL\\n...', phase: 'database' })"
 
   - user_input: "guardá la decisión de usar Bun.cron en vez de Croner"
     expected_behavior: "write_decision({ title: 'Usar Bun.cron nativo', context: '...', options: [...], decision: '...', consequences: '...' })"

@@ -10,6 +10,8 @@
 
 import { describe, test, expect } from "bun:test"
 import * as path from "node:path"
+import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
 
 const CLI = path.resolve(import.meta.dir, "../../src/index.ts")
 
@@ -19,12 +21,19 @@ async function runCli(
   args: string[],
   opts: { timeoutMs?: number; stdin?: string } = {},
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const hiveHome = mkdtempSync(path.join(tmpdir(), "hivecode-cli-smoke-"))
   const proc = Bun.spawn({
     cmd: ["bun", CLI, ...args],
     stdout: "pipe",
     stderr: "pipe",
     stdin: opts.stdin ? new TextEncoder().encode(opts.stdin) : "ignore",
-    env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+    env: {
+      ...process.env,
+      HIVE_HOME: hiveHome,
+      HIVE_DB_PATH: path.join(hiveHome, "hivedb"),
+      NO_COLOR: "1",
+      FORCE_COLOR: "0",
+    },
   })
 
   const timeout = opts.timeoutMs ?? 15_000
@@ -70,8 +79,8 @@ describe("smoke: doctor", () => {
     // NOTAR
     expect(exitCode).toBe(0)
     expect(stdout).toContain("Bun runtime")
-    expect(stdout).toContain("SQLite")
-  })
+    expect(stdout).toContain("HiveDB")
+  }, 15_000)
 
   test("reporta providers LLM disponibles", async () => {
     const { stdout } = await runCli(["doctor"])

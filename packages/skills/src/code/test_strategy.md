@@ -30,7 +30,7 @@ describe("Auth", () => {
 ## Mocking in Bun
 - `jest.mock` equivalent: use `bun:test` mock functions
 - Mock `fetch` for external API calls
-- Use in-memory SQLite for DB tests
+- Use in-memory HiveDB for DB tests
 
 ## Coverage Goals
 - Hive-Code target: 80% minimum

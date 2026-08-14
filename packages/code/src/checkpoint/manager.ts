@@ -1,20 +1,18 @@
 import { randomBytes } from "node:crypto"
-import type { Database } from "bun:sqlite"
-import { CheckpointsRepo } from "@johpaz/hivecode-core/db/repos/checkpoints"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { CheckpointDoc, CheckpointFileDoc } from "@johpaz/hivecode-core/storage/collections"
 import type { IpcEmitter } from "../context/ipc-emitter.ts"
 import { snapshotFiles } from "./snapshot.ts"
 import { restoreFiles } from "./rollback.ts"
 
 export class CheckpointManager {
-  private repo: CheckpointsRepo
+  private checkpointCache: CheckpointDoc[] = []
 
   constructor(
-    private db: Database,
+    _db: unknown,
     private sessionId: string,
     private ipc: IpcEmitter,
-  ) {
-    this.repo = new CheckpointsRepo(db)
-  }
+  ) {}
 
   /**
    * Crea un checkpoint antes de que los workers escriban archivos.
@@ -31,22 +29,31 @@ export class CheckpointManager {
     createdBy: string = "bee",
   ): Promise<string> {
     const id = `cp_${Date.now()}_${randomBytes(2).toString("hex")}`
-    const entries = await snapshotFiles(filePaths, filesToCreate, this.repo)
+    const entries = await snapshotFiles(filePaths, filesToCreate)
+    const now = Date.now()
+    const checkpoints = await col<CheckpointDoc>("checkpoints")
+    const checkpointFiles = await col<CheckpointFileDoc>("checkpointFiles")
 
-    this.repo.createCheckpoint({
+    const checkpoint: CheckpointDoc = {
       id,
       session_id: this.sessionId,
       created_by: createdBy,
       description,
       file_count: entries.length,
-      created_at: Date.now(),
-    })
+      git_stash_ref: null,
+      created_at: now,
+      restored_at: null,
+    }
+    this.checkpointCache.push(checkpoint)
+    await checkpoints.put(id, checkpoint)
 
-    for (const e of entries) {
-      this.repo.addFile({
+    for (const [index, e] of entries.entries()) {
+      const fileId = `${id}:${String(index).padStart(5, "0")}`
+      await checkpointFiles.put(fileId, {
+        id: fileId,
         checkpoint_id: id,
         file_path: e.path,
-        content: e.content,
+        content: e.content.toString("base64"),
         content_hash: e.hash,
         operation: e.operation,
       })
@@ -56,7 +63,7 @@ export class CheckpointManager {
       id,
       description,
       files: entries.map(e => e.path),
-      created_at: Date.now(),
+      created_at: now,
     })
 
     return id
@@ -64,10 +71,28 @@ export class CheckpointManager {
 
   /** Restaura el workspace al estado del checkpoint dado */
   async rollback(checkpointId: string): Promise<void> {
-    const files = this.repo.getFiles(checkpointId)
+    const checkpointFiles = await col<CheckpointFileDoc>("checkpointFiles")
+    const files = (await checkpointFiles.findBy("checkpoint_id", checkpointId)).map(entry => ({
+      checkpoint_id: entry.doc.checkpoint_id,
+      file_path: entry.doc.file_path,
+      content: Buffer.from(entry.doc.content, "base64"),
+      content_hash: entry.doc.content_hash,
+      operation: entry.doc.operation,
+    }))
     const restored = await restoreFiles(files)
 
-    this.repo.markRestored(checkpointId)
+    const checkpoints = await col<CheckpointDoc>("checkpoints")
+    const checkpoint = await checkpoints.get(checkpointId)
+    if (checkpoint) {
+      this.checkpointCache = this.checkpointCache.map(entry =>
+        entry.id === checkpointId ? { ...entry, restored_at: Date.now() } : entry,
+      )
+      await checkpoints.put(
+        checkpointId,
+        { ...checkpoint.doc, restored_at: Date.now() },
+        { expectedVersion: checkpoint.version },
+      )
+    }
 
     this.ipc.emit("rollback_complete", {
       checkpoint_id: checkpointId,
@@ -76,8 +101,10 @@ export class CheckpointManager {
   }
 
   /** Lista los últimos N checkpoints de la sesión */
-  list(limit = 50) {
-    return this.repo.list(this.sessionId, limit)
+  list(limit = 50): CheckpointDoc[] {
+    return this.checkpointCache
+      .sort((a, b) => b.created_at - a.created_at)
+      .slice(0, limit)
   }
 
   /** Crea un checkpoint de HALT — congela el estado actual antes de detener */

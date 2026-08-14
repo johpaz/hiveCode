@@ -1,19 +1,26 @@
 /**
- * FTS5-based Playbook Rules Selector (ACE Curator)
+ * HiveDB-based Playbook Rules Selector (ACE Curator)
  * 
  * This module allows the Context Compiler to inject relevant evolved rules
  * into the agent prompt based on semantic relevance to the current message.
  */
 
-import { getDb } from "../storage/sqlite"
+import { col } from "../storage/hive"
+import type { PlaybookDoc } from "../storage/collections"
 import { logger } from "../utils/logger"
+import {
+    searchCapabilities,
+    applyRelativeCutoff,
+    replaceCapabilityDocs,
+    type CapabilityDoc,
+} from "./capability-search"
 
 const log = logger.child("playbook-selector")
 
 // ─── Types ───────────────────────────────────────────────────────────────────────
 
 export interface PlaybookRule {
-    id: number
+    id: string
     rule: string
     category: string
     applicable_to?: string
@@ -24,55 +31,41 @@ export interface PlaybookRule {
 /** Maximum rules to inject per context window */
 const MAX_RULES_PER_TURN = 5
 
-/** Minimum bm25 score threshold for rules */
-const MIN_RELEVANCE_THRESHOLD = -10 // Relaxed for better matching
+/**
+ * Relative relevance cutoff: keep a hit only if it scores at least this
+ * fraction of the top hit.
+ */
+const RELEVANCE_RATIO = 0.3
 
 // ─── Selection Logic ───────────────────────────────────────────────────────────
 
 /**
  * Select relevant rules from the Playbook based on semantic matching
  */
-export function selectPlaybookRules(message: string): PlaybookRule[] {
-    const db = getDb()
+export async function selectPlaybookRules(message: string): Promise<PlaybookRule[]> {
     const startTime = performance.now()
 
-    // Clean query — use prefix matching for consistency with skill-selector and tool-selector
-    const keywords = message
-        .toLowerCase()
-        // Keep only letters, numbers, spaces (strips ALL FTS5 special syntax)
-        .replace(/[^\p{L}\p{N}\s]/gu, " ")
-        .split(/\s+/)
-        .filter(w => w.length > 3)
-        .slice(0, 5)
-
-    if (keywords.length === 0) return []
-
-    // Use prefix matching for better recall (e.g., "program*" matches "programar", "programación")
-    const ftsQuery = keywords.map(w => `${w}*`).join(" OR ")
+    if (!message.trim()) return []
 
     try {
-        // Query FTS table
-        const ftsResults = db.query(`
-            SELECT rowid, bm25(playbook_fts) as score
-            FROM playbook_fts
-            WHERE playbook_fts MATCH ?
-            ORDER BY score ASC
-            LIMIT ?
-        `).all(ftsQuery, MAX_RULES_PER_TURN) as Array<{ rowid: number; score: number }>
+        const hits = await searchCapabilities(message, {
+            types: ["playbook"],
+            k: MAX_RULES_PER_TURN,
+        })
 
-        const relevantIds = ftsResults
-            .filter(r => r.score >= MIN_RELEVANCE_THRESHOLD)
-            .map(r => r.rowid)
-
+        const relevantIds = applyRelativeCutoff(hits, RELEVANCE_RATIO).map(h => h.rawId)
         if (relevantIds.length === 0) return []
 
-        // Fetch full rules
-        const rules = db.query(`
-            SELECT id, rule, category, applicable_to
-            FROM playbook
-            WHERE id IN (${relevantIds.map(() => '?').join(',')})
-            AND active = 1
-        `).all(...relevantIds) as PlaybookRule[]
+        const playbookCol = await col<PlaybookDoc>("playbook")
+        const entries = await Promise.all(relevantIds.map(id => playbookCol.get(id)))
+        const rules: PlaybookRule[] = entries
+            .filter((e): e is NonNullable<typeof e> => !!e && e.doc.active)
+            .map(e => ({
+                id: e.id,
+                rule: e.doc.rule,
+                category: e.doc.category,
+                applicable_to: e.doc.applicable_to ?? undefined,
+            }))
 
         const timing = performance.now() - startTime
         log.info(`[playbook-selector] Selected ${rules.length} rules in ${timing.toFixed(2)}ms`)
@@ -90,58 +83,31 @@ export function selectPlaybookRules(message: string): PlaybookRule[] {
 // ─── Sync Logic ───────────────────────────────────────────────────────────────
 
 /**
- * Sync active playbook rules to FTS5 virtual table
+ * Sync active playbook rules to the HiveDB capability index.
  */
-export async function syncPlaybookToFTS(): Promise<void> {
-    const db = getDb()
-
+export async function syncPlaybookToIndex(): Promise<void> {
     try {
         // Step 1: Get active rules
-        const rules = db.query(`
-            SELECT id, rule, category, applicable_to
-            FROM playbook
-            WHERE active = 1
-        `).all() as Array<{
-            id: number
-            rule: string
-            category: string
-            applicable_to: string
-        }>
+        const playbookCol = await col<PlaybookDoc>("playbook")
+        const rules = (await playbookCol.scan({})).map(e => e.doc).filter(r => r.active)
 
         if (rules.length === 0) {
             log.debug(`[playbook-selector] No rules in playbook to sync`)
         }
 
-        // Step 2: Atomic transaction for FTS5 sync
-        const syncTransaction = db.transaction(() => {
-            // Verify table exists
-            const tableCheck = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='playbook_fts'").get()
-            if (!tableCheck) {
-                throw new Error("playbook_fts table does not exist!")
-            }
+        const docs: CapabilityDoc[] = rules.map(item => ({
+            type: "playbook" as const,
+            rawId: item.id,
+            body: item.rule,
+            tags: [item.category, item.applicable_to].filter(Boolean).join(" "),
+        }))
 
-            // A: Clear existing data
-            db.run("DELETE FROM playbook_fts")
+        await replaceCapabilityDocs("playbook", docs)
 
-            // B: Prepare insertion
-            const insert = db.prepare(`
-                INSERT INTO playbook_fts(rowid, rule, category, applicable_to)
-                VALUES (?, ?, ?, ?)
-            `)
-
-            // C: Re-populate
-            for (const item of rules) {
-                insert.run(item.id, item.rule, item.category, item.applicable_to)
-            }
-        })
-
-        // Execute transaction
-        syncTransaction()
-
-        log.info(`[playbook-selector] Atomic sync complete: ${rules.length} rules indexed in FTS5`)
+        log.info(`[playbook-selector] Sync complete: ${rules.length} rules indexed in HiveDB`)
 
     } catch (err) {
-        log.error(`[playbook-selector] Transactional sync failed:`, err)
+        log.error(`[playbook-selector] Playbook index sync failed:`, err)
         throw err
     }
 }

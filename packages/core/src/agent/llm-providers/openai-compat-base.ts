@@ -2,11 +2,50 @@ import { logger } from "../../utils/logger"
 import {
   sanitizeMessages, requiresTemperature1, OPENAI_COMPAT_BASE_URLS,
   getProviderProfile, modelSupportsTools, normalizeToolName, normalizeToolSchema,
+  resolveMaxTokens,
 } from "./interface"
 import type { LLMCallOptions, LLMProvider, LLMResponse, LLMToolCall } from "./interface"
 import type { ContentPart, LLMMessage } from "../llm-client"
 
 const log = logger.child("llm-client")
+
+/** Matches both generic context overflow phrasing and llama.cpp's exceed_context_size_error shape. */
+function isContextOverflowError(err: any, errMsg: string): boolean {
+  const status = err?.status ?? err?.response?.status
+  if (status !== 400) return false
+  if (err?.error?.type === "exceed_context_size_error" || err?.type === "exceed_context_size_error") return true
+  return errMsg.includes("context length") || errMsg.includes("input_tokens")
+    || errMsg.includes("maximum input length") || errMsg.includes("context size")
+}
+
+/** llama.cpp-style errors report the server's real context size in n_ctx. */
+function extractRealContextSize(err: any): number | undefined {
+  return err?.error?.n_ctx ?? err?.n_ctx
+}
+
+/** Keeps the system prompt and the last third of messages, then shrinks max_tokens. */
+function compactBodyForContextOverflow(body: any, err: any): void {
+  const kept: any[] = []
+  let systemMsg: any = null
+  for (const m of body.messages) {
+    if (m.role === "system") {
+      systemMsg = m
+      continue
+    }
+    kept.push(m)
+  }
+
+  const keepRatio = Math.max(1, Math.floor(kept.length / 3))
+  const trimmed = kept.slice(-keepRatio)
+  body.messages = systemMsg ? [systemMsg, ...trimmed] : trimmed
+
+  const realCtx = extractRealContextSize(err)
+  if (realCtx) {
+    body.max_tokens = Math.min(body.max_tokens ?? realCtx, Math.floor(realCtx * 0.25))
+  } else if (body.max_tokens) {
+    body.max_tokens = Math.min(body.max_tokens, 4096)
+  }
+}
 
 export abstract class OpenAICompatBase implements LLMProvider {
   constructor(protected readonly providerName: string) {}
@@ -31,6 +70,25 @@ export abstract class OpenAICompatBase implements LLMProvider {
     return _response
   }
 
+  /**
+   * Hook called after tools are prepared when sendTools is true.
+   * Override for providers/models that need text-based tool-call instructions.
+   */
+  protected injectToolsIntoPrompt(_body: any, _preparedTools: any[]): void {
+    // no-op by default
+  }
+
+  /** Override to add provider-specific fields to the request body. */
+  protected modifyRequestBody(body: any, _options: LLMCallOptions): any {
+    return body
+  }
+
+  /** Override to customize the OpenAI client (e.g. strip unwanted headers, add custom fetch). */
+  protected async resolveOpenAIClient(apiKey: string, baseURL: string | undefined): Promise<any> {
+    const { default: OpenAI } = await import("openai")
+    return new OpenAI({ apiKey, baseURL })
+  }
+
   // ─── Content conversion ─────────────────────────────────────────────────────
 
   private _convertContentPart(part: ContentPart): any {
@@ -42,7 +100,8 @@ export abstract class OpenAICompatBase implements LLMProvider {
       case "image_base64":
         return { type: "image_url", image_url: { url: `data:${part.mimeType};base64,${part.base64}` } }
       case "document":
-        return { type: "text", text: `[Document: ${part.fileName || "file"}] (base64 content not displayed)` }
+        log.warn(`[llm-client] ${this.providerName}: document content parts are not supported — content will be omitted`)
+        return { type: "text", text: `[Document: ${part.fileName || "file"}] (content not supported for this provider)` }
       default:
         return { type: "text", text: JSON.stringify(part) }
     }
@@ -58,21 +117,16 @@ export abstract class OpenAICompatBase implements LLMProvider {
   // ─── Main call ──────────────────────────────────────────────────────────────
 
   async call(options: LLMCallOptions): Promise<LLMResponse> {
-    const { default: OpenAI } = await import("openai")
-
     const baseURL = options.baseUrl?.trim() || OPENAI_COMPAT_BASE_URLS[this.providerName] || undefined
-    const isLocal = this.isLocalProvider() ||
-      !!(baseURL?.includes("localhost") || baseURL?.includes("127.0.0.1") || baseURL?.includes("::1"))
-
     await this.beforeCall(options)
 
-    const apiKey = options.apiKey || (isLocal ? "ollama" : undefined)
+    const apiKey = options.apiKey
 
     if (!apiKey) {
-      throw new Error(`API key missing for provider: ${options.provider}. Configure it in Settings → Providers.`)
+      throw new Error(`API key missing for provider: ${this.providerName}. Configure it in Settings → Providers.`)
     }
 
-    const client = new OpenAI({ apiKey, baseURL })
+    const client = await this.resolveOpenAIClient(apiKey, baseURL)
     const needsReasoning = this.needsReasoningRoundtrip()
 
     const sanitized = sanitizeMessages(options.messages)
@@ -81,19 +135,20 @@ export abstract class OpenAICompatBase implements LLMProvider {
       : sanitized.map(({ reasoning_content: _rc, ...rest }) => rest as typeof sanitized[number])
     const messagesForProvider = rawMessages.map(m => this._convertMessage(m))
 
-    const providerPrefix = new RegExp(`^${options.provider}\\/`, "i")
+    const providerPrefix = new RegExp(`^${this.providerName}\\/`, "i")
     const body: any = {
       model: options.model.replace(providerPrefix, ""),
       messages: messagesForProvider,
-      temperature: requiresTemperature1(options.provider, options.model) ? 1 : (options.temperature ?? 0.7),
+      temperature: requiresTemperature1(this.providerName, options.model) ? 1 : (options.temperature ?? 0.7),
     }
-    if (options.maxTokens) body.max_tokens = options.maxTokens
-    if (options.numCtx && isLocal) body.num_ctx = options.numCtx
-
+    const maxTokens = resolveMaxTokens(options.maxTokens, options.contextWindow)
+    if (maxTokens) body.max_tokens = maxTokens
     const profile = getProviderProfile(this.providerName)
-    const sendTools = modelSupportsTools(options.provider, options.model) && !!(options.tools?.length)
+    const sendTools = modelSupportsTools(this.providerName, options.model) && !!(options.tools?.length)
 
     const toolNameMap = new Map<string, string>()
+    // Canonical tool names, used by the text fallback to accept a bare JSON tool call.
+    const knownToolNames = new Set<string>(options.tools?.map(t => t.function.name) ?? [])
 
     if (sendTools) {
       const preparedTools = options.tools!.map((t) => {
@@ -115,36 +170,35 @@ export abstract class OpenAICompatBase implements LLMProvider {
       body.tool_choice = profile.toolChoiceAuto
       if (profile.disableParallelToolCalls) body.parallel_tool_calls = false
 
-      if (isLocal) {
-        const toolDescriptions = preparedTools.map(t => JSON.stringify(t.function)).join("\n")
-        const instruction = `You have access to the following tools. To call a tool, output a JSON block like: <tool_call>{"name": "tool_name", "arguments": {"arg1": "value"}}</tool_call>\n\nTools:\n${toolDescriptions}`
-        const sysMsg = body.messages.find((m: any) => m.role === "system")
-        if (sysMsg) {
-          sysMsg.content += "\n\n" + instruction
-        } else {
-          body.messages.unshift({ role: "system", content: instruction })
-        }
-      }
+      this.injectToolsIntoPrompt(body, preparedTools)
     }
 
-    log.info(`[llm-client] ${options.provider}/${body.model} — ${options.messages.length} msgs, ${options.tools?.length ?? 0} tools${sendTools ? "" : " (tools suppressed)"}`)
+    log.info(`[llm-client] ${this.providerName}/${body.model} — ${options.messages.length} msgs, ${options.tools?.length ?? 0} tools${sendTools ? "" : " (tools suppressed)"}`)
 
     if (options.onToken) {
-      return this._streamCall(client, body, options, toolNameMap, sendTools, profile)
+      return this._streamCall(client, body, options, toolNameMap, sendTools, profile, knownToolNames)
     }
 
     let response
     try {
-      response = await client.chat.completions.create(body)
+      response = await client.chat.completions.create(this.modifyRequestBody(body, options), { signal: options.signal })
     } catch (err: any) {
       const status = err?.status ?? err?.response?.status
-      if (sendTools && profile.retryWithoutToolsOnCodes.includes(status)) {
-        log.warn(`[llm-client] ${options.provider}: tools rejected (HTTP ${status}) — retrying without tools`)
+      const errMsg = (err?.error?.message ?? err?.message ?? "").toLowerCase()
+
+      if (isContextOverflowError(err, errMsg)) {
+        log.warn(`[llm-client] ${this.providerName}: context overflow — compacting messages and retrying`)
+        const originalCount = body.messages.length
+        compactBodyForContextOverflow(body, err)
+        log.info(`[llm-client] ${this.providerName}: compacted ${originalCount} msgs → ${body.messages.length} msgs, max_tokens=${body.max_tokens}`)
+        response = await client.chat.completions.create(this.modifyRequestBody(body, options), { signal: options.signal })
+      } else if (sendTools && profile.retryWithoutToolsOnCodes.includes(status)) {
+        log.warn(`[llm-client] ${this.providerName}: tools rejected (HTTP ${status}) — retrying without tools`)
         const bodyNoTools = { ...body }
         delete bodyNoTools.tools
         delete bodyNoTools.tool_choice
         delete bodyNoTools.parallel_tool_calls
-        response = await client.chat.completions.create(bodyNoTools)
+        response = await client.chat.completions.create(this.modifyRequestBody(bodyNoTools, options), { signal: options.signal })
       } else {
         throw err
       }
@@ -165,21 +219,23 @@ export abstract class OpenAICompatBase implements LLMProvider {
     let final_content = msg.content ?? ""
 
     if (sendTools && (!final_tool_calls || final_tool_calls.length === 0) && final_content) {
-      const extracted = extractToolCallsFromText(final_content, toolNameMap)
+      const extracted = extractToolCallsFromText(final_content, toolNameMap, knownToolNames)
       if (extracted.tool_calls.length > 0) {
         final_tool_calls = extracted.tool_calls
         final_content = extracted.content
       }
     }
 
+    final_tool_calls = ensureToolCallIds(final_tool_calls)
+
     const result: LLMResponse = {
       content: final_content,
       tool_calls: final_tool_calls,
       reasoning_content: (msg as any).reasoning_content ?? undefined,
-      stop_reason:
-        choice.finish_reason === "tool_calls" ? "tool_calls"
-          : choice.finish_reason === "length" ? "max_tokens"
-            : "stop",
+      // Tool calls win over finish_reason. Servers that recover calls from text — or
+      // that report "stop" alongside native tool_calls, as llama.cpp and LM Studio do
+      // for several templates — would otherwise have their calls dropped by the caller.
+      stop_reason: resolveStopReason(choice.finish_reason, final_tool_calls),
       usage: response.usage ? {
         input_tokens: response.usage.prompt_tokens,
         output_tokens: response.usage.completion_tokens,
@@ -198,19 +254,31 @@ export abstract class OpenAICompatBase implements LLMProvider {
     toolNameMap: Map<string, string>,
     sendTools: boolean,
     profile: ReturnType<typeof getProviderProfile>,
+    knownToolNames: Set<string>,
   ): Promise<LLMResponse> {
+    // llama.cpp and other local servers only report usage when explicitly asked.
+    // Without it the loop's token/cost ceilings never see anything to measure.
+    const streamBody = { ...this.modifyRequestBody(body, options), stream: true, stream_options: { include_usage: true } }
     let stream
     try {
-      stream = await client.chat.completions.create({ ...body, stream: true })
+      stream = await client.chat.completions.create(streamBody, { signal: options.signal })
     } catch (err: any) {
       const status = err?.status ?? err?.response?.status
-      if (sendTools && profile.retryWithoutToolsOnCodes.includes(status)) {
-        log.warn(`[llm-client] ${options.provider}: tools rejected (HTTP ${status}) — retrying stream without tools`)
+      const errMsg = (err?.error?.message ?? err?.message ?? "").toLowerCase()
+
+      if (isContextOverflowError(err, errMsg)) {
+        log.warn(`[llm-client] ${this.providerName}: context overflow — compacting messages and retrying stream`)
+        const originalCount = body.messages.length
+        compactBodyForContextOverflow(body, err)
+        log.info(`[llm-client] ${this.providerName}: compacted ${originalCount} msgs → ${body.messages.length} msgs, max_tokens=${body.max_tokens}`)
+        stream = await client.chat.completions.create({ ...this.modifyRequestBody(body, options), stream: true, stream_options: { include_usage: true } }, { signal: options.signal })
+      } else if (sendTools && profile.retryWithoutToolsOnCodes.includes(status)) {
+        log.warn(`[llm-client] ${this.providerName}: tools rejected (HTTP ${status}) — retrying stream without tools`)
         const bodyNoTools = { ...body }
         delete bodyNoTools.tools
         delete bodyNoTools.tool_choice
         delete bodyNoTools.parallel_tool_calls
-        stream = await client.chat.completions.create({ ...bodyNoTools, stream: true })
+        stream = await client.chat.completions.create({ ...this.modifyRequestBody(bodyNoTools, options), stream: true, stream_options: { include_usage: true } }, { signal: options.signal })
       } else {
         throw err
       }
@@ -234,17 +302,29 @@ export abstract class OpenAICompatBase implements LLMProvider {
       }
       if (delta.reasoning_content) {
         reasoning_content += delta.reasoning_content
+        options.onReasoningToken?.(delta.reasoning_content)
       }
       if (delta.tool_calls) {
         for (const tc of delta.tool_calls) {
-          const idx: number = tc.index
+          // llama.cpp with --jinja frequently omits `index`. Falling back to a shared
+          // key would collapse every call of the turn into one entry, concatenating
+          // their arguments into unparseable JSON. Start a new slot when a chunk
+          // carries a fresh name or id instead, and only then reuse the last one.
+          const idx: number = typeof tc.index === "number"
+            ? tc.index
+            : resolveMissingToolCallIndex(toolCallMap, tc)
+
           if (!toolCallMap.has(idx)) {
             toolCallMap.set(idx, { id: tc.id ?? "", name: tc.function?.name ?? "", arguments: "" })
           }
           const entry = toolCallMap.get(idx)!
           if (tc.id) entry.id = tc.id
           if (tc.function?.name) entry.name = tc.function.name
-          if (tc.function?.arguments) entry.arguments += tc.function.arguments
+          if (tc.function?.arguments) {
+            // Some builds re-emit the complete arguments string on the finalizing
+            // chunk. Appending it verbatim would double the JSON.
+            entry.arguments = appendToolCallArguments(entry.arguments, tc.function.arguments)
+          }
         }
       }
       if (choice.finish_reason) finish_reason = choice.finish_reason
@@ -268,21 +348,20 @@ export abstract class OpenAICompatBase implements LLMProvider {
     let final_content = content
 
     if (sendTools && !final_tool_calls && final_content) {
-      const extracted = extractToolCallsFromText(final_content, toolNameMap)
+      const extracted = extractToolCallsFromText(final_content, toolNameMap, knownToolNames)
       if (extracted.tool_calls.length > 0) {
         final_tool_calls = extracted.tool_calls
         final_content = extracted.content
       }
     }
 
+    final_tool_calls = ensureToolCallIds(final_tool_calls)
+
     const result: LLMResponse = {
       content: final_content,
       tool_calls: final_tool_calls,
       reasoning_content: reasoning_content || undefined,
-      stop_reason:
-        finish_reason === "tool_calls" ? "tool_calls"
-          : finish_reason === "length" ? "max_tokens"
-            : "stop",
+      stop_reason: resolveStopReason(finish_reason, final_tool_calls),
       usage: input_tokens > 0 || output_tokens > 0
         ? { input_tokens, output_tokens }
         : undefined,
@@ -293,10 +372,91 @@ export abstract class OpenAICompatBase implements LLMProvider {
 }
 
 /**
- * Extrae tool_calls del texto cuando el modelo falla en generar tool_calls nativos.
- * Soporta formatos comunes de Gemma, Qwen y otros modelos locales.
+ * Deriva stop_reason dando prioridad a la presencia de tool calls.
+ *
+ * `finish_reason` no es confiable para decidir si hay trabajo pendiente: llama.cpp y
+ * LM Studio devuelven "stop" junto a tool_calls nativos en varias plantillas, y cuando
+ * los tool calls se recuperan del texto el finish_reason siempre es "stop". Quien
+ * consume esto corta el loop si no ve "tool_calls", así que la señal fuerte manda.
  */
-function extractToolCallsFromText(content: string, toolNameMap: Map<string, string>): { content: string, tool_calls: LLMToolCall[] } {
+export function resolveStopReason(
+  finishReason: string | null | undefined,
+  toolCalls: LLMToolCall[] | undefined,
+): LLMResponse["stop_reason"] {
+  if (toolCalls?.length) return "tool_calls"
+  if (finishReason === "tool_calls") return "tool_calls"
+  if (finishReason === "length") return "max_tokens"
+  return "stop"
+}
+
+/**
+ * Garantiza que cada tool call lleve un id no vacío.
+ *
+ * Sin id, el resultado vuelve con `tool_call_id: ""`, que `sanitizeMessages` trata como
+ * falsy: se saltea la detección de huérfanos y N llamadas colapsan en una sola entrada
+ * del Set de ids. El modelo no puede correlacionar resultados y repite las llamadas.
+ */
+export function ensureToolCallIds(toolCalls: LLMToolCall[] | undefined): LLMToolCall[] | undefined {
+  if (!toolCalls?.length) return toolCalls
+  return toolCalls.map(tc => (tc.id ? tc : { ...tc, id: crypto.randomUUID() }))
+}
+
+/**
+ * Elige el slot de un delta de tool call cuando el servidor no manda `index`.
+ *
+ * En el protocolo de streaming de OpenAI, `function.name` sólo aparece en el primer
+ * chunk de cada llamada: un chunk con nombre, cuando el slot abierto ya tiene uno,
+ * es una llamada nueva — incluso si es la misma herramienta. Un id distinto también.
+ * Los fragmentos de argumentos sin metadata continúan la última llamada abierta.
+ *
+ * Se exige además que los argumentos acumulados ya parseen, para tolerar servidores
+ * que repiten el nombre en cada chunk: si el JSON está a medio armar, es continuación.
+ */
+function resolveMissingToolCallIndex(
+  toolCallMap: Map<number, { id: string; name: string; arguments: string }>,
+  tc: any,
+): number {
+  if (toolCallMap.size === 0) return 0
+  const lastIdx = Math.max(...toolCallMap.keys())
+  const last = toolCallMap.get(lastIdx)!
+  const startsNewCall =
+    (tc.id && last.id && tc.id !== last.id) ||
+    (tc.function?.name && last.name && isCompleteJSON(last.arguments))
+  return startsNewCall ? lastIdx + 1 : lastIdx
+}
+
+function isCompleteJSON(text: string): boolean {
+  if (!text.trim()) return false
+  try {
+    JSON.parse(text)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Concatena un fragmento de argumentos evitando duplicar el payload completo.
+ *
+ * Varias builds de llama.cpp reemiten la cadena entera en el chunk final; anexarla
+ * produciría `{"a":1}{"a":1}`, que no parsea.
+ */
+function appendToolCallArguments(current: string, chunk: string): string {
+  if (!current) return chunk
+  if (chunk === current) return current
+  if (chunk.startsWith(current)) return chunk
+  return current + chunk
+}
+
+/**
+ * Extrae tool_calls del texto cuando el modelo falla en generar tool_calls nativos.
+ * Soporta formatos comunes de Gemma, Qwen y otros modelos que emiten JSON embebido.
+ */
+export function extractToolCallsFromText(
+  content: string,
+  toolNameMap: Map<string, string>,
+  knownToolNames?: Set<string>,
+): { content: string; tool_calls: LLMToolCall[] } {
   const tool_calls: LLMToolCall[] = []
   let extractedContent = content
 
@@ -311,41 +471,56 @@ function extractToolCallsFromText(content: string, toolNameMap: Map<string, stri
     while ((match = regex.exec(content)) !== null) {
       try {
         const json = JSON.parse(match[1])
-        if (json.name) {
+        const calls = Array.isArray(json) ? json : [json]
+        for (const call of calls) {
+          if (!call) continue
+          const fn = call.function || call
+          const name = fn.name ?? call.name
+          const args = fn.arguments ?? call.arguments ?? call.parameters
+          if (!name) continue
           tool_calls.push({
             id: crypto.randomUUID(),
             type: "function",
             function: {
-              name: toolNameMap.get(json.name) ?? json.name,
-              arguments: typeof json.arguments === 'object' ? JSON.stringify(json.arguments) : (json.arguments || "{}")
-            }
+              name: toolNameMap.get(name) ?? name,
+              arguments: typeof args === "object" ? JSON.stringify(args) : (args || "{}"),
+            },
           })
           extractedContent = extractedContent.replace(match[0], "").trim()
         }
-      } catch (e) {
+      } catch {
         // ignore parse errors
       }
     }
   }
 
-  // Fallback: Si el output entero es un JSON con 'name' y 'arguments' (a veces pasa sin markdown wrapper)
-  if (tool_calls.length === 0) {
+  // Fallback: bare JSON tool call, accepted only when it names a known tool.
+  if (tool_calls.length === 0 && knownToolNames && knownToolNames.size > 0) {
     try {
-      const json = JSON.parse(content.trim())
-      if (json.name && (json.arguments || json.parameters)) {
-        const args = json.arguments || json.parameters
-        tool_calls.push({
-          id: crypto.randomUUID(),
-          type: "function",
-          function: {
-            name: toolNameMap.get(json.name) ?? json.name,
-            arguments: typeof args === 'object' ? JSON.stringify(args) : (args || "{}")
-          }
-        })
-        extractedContent = ""
+      const trimmed = content.trim()
+      const jsonText = trimmed.replace(/^```(?:json|tool_call)?\s*|\s*```$/g, "").trim()
+      const json = JSON.parse(jsonText)
+      const calls = Array.isArray(json) ? json : [json]
+      for (const call of calls) {
+        if (!call) continue
+        const fn = call.function || call
+        const name = fn.name ?? call.name
+        const args = fn.arguments ?? call.arguments ?? call.parameters
+        const resolvedName = toolNameMap.get(name) ?? name
+        if (name && knownToolNames.has(resolvedName) && (args !== undefined || calls.length === 1)) {
+          tool_calls.push({
+            id: crypto.randomUUID(),
+            type: "function",
+            function: {
+              name: resolvedName,
+              arguments: typeof args === "object" ? JSON.stringify(args) : (args || "{}"),
+            },
+          })
+          extractedContent = ""
+        }
       }
-    } catch (e) {
-      // no es json puro
+    } catch {
+      // not valid JSON
     }
   }
 

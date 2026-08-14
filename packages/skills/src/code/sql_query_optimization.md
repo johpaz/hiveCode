@@ -6,7 +6,7 @@
 - **Missing indexes**: Add indexes on WHERE, JOIN, ORDER BY columns.
 - **Unbounded queries**: Always add LIMIT.
 
-## SQLite in Bun
+## HiveDB in Bun
 ```typescript
 // Use prepared statements for repeated queries
 const stmt = db.query("SELECT * FROM users WHERE id = ?")

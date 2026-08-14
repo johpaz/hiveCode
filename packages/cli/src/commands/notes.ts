@@ -1,12 +1,11 @@
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { deleteScratchpadNote, getScratchpad, saveScratchpadNote } from "@johpaz/hivecode-core/agent/conversation-store"
 
 export async function notes(subcommand?: string, args?: string[]): Promise<void> {
-  const db = getDb()
   const threadId = process.env.HIVE_THREAD_ID || "cli-default"
 
   switch (subcommand) {
     case "list": {
-      const rows = db.query("SELECT * FROM scratchpad WHERE thread_id = ? ORDER BY updated_at DESC").all(threadId) as any[]
+      const rows = await getScratchpad(threadId)
       if (rows.length === 0) { console.log("No notes for this thread."); return }
       console.log("Notes:")
       for (const r of rows) console.log(`  ${r.key}: ${r.value.slice(0, 120)}`)
@@ -16,16 +15,14 @@ export async function notes(subcommand?: string, args?: string[]): Promise<void>
       const key = args?.[0]
       const value = args?.slice(1).join(" ")
       if (!key || !value) { console.log("Usage: hivecode note add <key> <value>"); return }
-      db.query(
-        "INSERT OR REPLACE INTO scratchpad (thread_id, key, value, updated_at) VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"
-      ).run(threadId, key, value)
+      await saveScratchpadNote(threadId, key, value, "cli")
       console.log(`✅ Note saved: ${key}`)
       break
     }
     case "get": {
       const key = args?.[0]
       if (!key) { console.log("Usage: hivecode note get <key>"); return }
-      const row = db.query("SELECT value FROM scratchpad WHERE thread_id = ? AND key = ?").get(threadId, key) as any
+      const row = (await getScratchpad(threadId)).find((entry) => entry.key === key)
       if (row) console.log(row.value)
       else console.log(`Note '${key}' not found.`)
       break
@@ -33,7 +30,7 @@ export async function notes(subcommand?: string, args?: string[]): Promise<void>
     case "delete": {
       const key = args?.[0]
       if (!key) { console.log("Usage: hivecode note delete <key>"); return }
-      db.query("DELETE FROM scratchpad WHERE thread_id = ? AND key = ?").run(threadId, key)
+      await deleteScratchpadNote(threadId, key)
       console.log(`✅ Note '${key}' deleted.`)
       break
     }

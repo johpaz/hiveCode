@@ -5,7 +5,7 @@ import { upgrade } from "./commands-code/extras"
 import { repl } from "./commands-code/repl"
 import { freeDispatch } from "./commands-code/free"
 import { login, logout, whoami } from "./commands-code/auth"
-import { agentList, agentInspect, agentEdit, agentReset } from "./commands-code/agent"
+import { agentList, agentInspect, agentEdit, agentReset, agentConfigure } from "./commands-code/agent"
 import { providerList, providerAdd, providerRemove, providerEdit, providerSetDefault, providerSetModel, providerTest } from "./commands-code/provider"
 import { stop } from "./commands/gateway"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
@@ -28,8 +28,9 @@ const HELP = `
   hivecode doctor              Diagnóstico del sistema
   hivecode agent list          Listar agentes
   hivecode agent inspect <name> Ver detalles de un agente
-  hivecode agent edit <name>   Editar system prompt de un agente
-  hivecode agent reset <name>  Restaurar system prompt de un agente
+  hivecode agent edit <name>   Editar instrucciones personales
+  hivecode agent configure <name> Configurar modelo y límites
+  hivecode agent reset <name>  Limpiar instrucciones personales
   hivecode provider list       Listar providers configurados
   hivecode provider add [name] Añadir provider de IA
   hivecode provider remove <name>  Eliminar provider
@@ -45,17 +46,15 @@ const HELP = `
   --help, -h                   Mostrar esta ayuda
 `
 
-import { bootstrap, registerModule } from "@johpaz/hivecode-core"
-import { HiveCodeModule } from "@johpaz/hivecode-code"
+import { bootstrap } from "@johpaz/hivecode-core"
 
 let _dbInitialized = false
 
-function ensureGlobalInit(): void {
+async function ensureGlobalInit(): Promise<void> {
   if (_dbInitialized) return
   if (!process.env.HIVE_DEV) logger.setLevel("warn")
   try {
-    registerModule(HiveCodeModule)
-    bootstrap()
+    await bootstrap()
     _dbInitialized = true
   } catch (err) {
     logger.error("[cli] ❌ Error de inicialización:", (err as Error).message)
@@ -71,21 +70,21 @@ async function main(): Promise<void> {
   const flags = normalizedArgs.filter(a => a.startsWith("--"))
 
   const skipInit = command !== undefined && ["--help", "-h", "--version", "-v", "upgrade", "exit"].includes(command)
-  if (!skipInit) ensureGlobalInit()
+  if (!skipInit) await ensureGlobalInit()
 
   switch (command) {
     case undefined:
-      ensureGlobalInit()
+      await ensureGlobalInit()
       await repl()
       break
 
     case "doctor":
-      ensureGlobalInit()
+      await ensureGlobalInit()
       await doctor(flags)
       break
 
     case "agent": {
-      ensureGlobalInit()
+      await ensureGlobalInit()
       const sub = normalizedArgs[1]
       const rest = normalizedArgs.slice(2)
       switch (sub) {
@@ -97,6 +96,9 @@ async function main(): Promise<void> {
           break
         case "edit":
           await agentEdit(rest[0])
+          break
+        case "configure":
+          await agentConfigure(rest[0], rest.slice(1))
           break
         case "reset":
           await agentReset(rest[0])
@@ -110,7 +112,7 @@ async function main(): Promise<void> {
     }
 
     case "provider": {
-      ensureGlobalInit()
+      await ensureGlobalInit()
       const sub = normalizedArgs[1]
       const rest = normalizedArgs.slice(2)
       switch (sub) {
@@ -152,22 +154,22 @@ async function main(): Promise<void> {
       break
 
     case "free":
-      ensureGlobalInit()
+      await ensureGlobalInit()
       await freeDispatch(normalizedArgs.slice(1))
       break
 
     case "login":
-      ensureGlobalInit()
+      await ensureGlobalInit()
       await login()
       break
 
     case "logout":
-      ensureGlobalInit()
+      await ensureGlobalInit()
       await logout()
       break
 
     case "whoami":
-      ensureGlobalInit()
+      await ensureGlobalInit()
       await whoami()
       break
 

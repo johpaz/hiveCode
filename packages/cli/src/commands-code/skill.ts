@@ -14,13 +14,14 @@ import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveSpinner, hiveText, isCancel,
 } from "../cli-ui.ts"
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { SkillDoc } from "@johpaz/hivecode-core/storage/collections"
 
 export async function skillList(): Promise<void> {
   hiveIntro("hivecode · Skills")
 
-  const db = getDb()
-  const rows = db.query("SELECT id, name, description, enabled, category FROM skills ORDER BY id").all() as any[]
+  const skills = await col<SkillDoc>("skills")
+  const rows = (await skills.scan()).map((entry) => entry.doc).sort((a, b) => a.id.localeCompare(b.id))
 
   if (rows.length === 0) {
     hiveNote("Sin skills", ["No hay skills registradas."])
@@ -29,8 +30,8 @@ export async function skillList(): Promise<void> {
   }
 
   for (const row of rows) {
-    const statusIcon = row.enabled ? "●" : "○"
-    const color = row.enabled ? "\x1b[38;5;114m" : "\x1b[38;5;240m"
+    const statusIcon = row.active ? "●" : "○"
+    const color = row.active ? "\x1b[38;5;114m" : "\x1b[38;5;240m"
     hivePhaseComplete(row.id, `${row.name}`)
     process.stdout.write(`  │    ${color}${statusIcon}\x1b[0m  ${row.category || "general"}  ·  ${row.description?.slice(0, 60) || ""}...\n  │\n`)
   }
@@ -45,8 +46,9 @@ export async function skillEnable(name?: string): Promise<void> {
     process.exit(1)
   }
 
-  const db = getDb()
-  db.query("UPDATE skills SET enabled = 1 WHERE id = ?").run(name)
+  const skills = await col<SkillDoc>("skills")
+  const row = await skills.get(name)
+  if (row) await skills.put(name, { ...row.doc, active: true, updated_at: Date.now() }, { expectedVersion: row.version })
   hiveOutro(`Skill ${name} habilitada`)
 }
 
@@ -57,8 +59,9 @@ export async function skillDisable(name?: string): Promise<void> {
     process.exit(1)
   }
 
-  const db = getDb()
-  db.query("UPDATE skills SET enabled = 0 WHERE id = ?").run(name)
+  const skills = await col<SkillDoc>("skills")
+  const row = await skills.get(name)
+  if (row) await skills.put(name, { ...row.doc, active: false, updated_at: Date.now() }, { expectedVersion: row.version })
   hiveOutro(`Skill ${name} deshabilitada`)
 }
 
@@ -81,11 +84,28 @@ export async function skillAdd(pathArg?: string): Promise<void> {
     const name = nameMatch ? nameMatch[1].trim() : filePath.split("/").pop()?.replace(".md", "") || "custom"
     const id = name.toLowerCase().replace(/[^a-z0-9_-]/g, "_")
 
-    const db = getDb()
-    db.query(`
-      INSERT OR REPLACE INTO skills (id, name, description, content, enabled)
-      VALUES (?, ?, ?, ?, 1)
-    `).run(id, name, `Imported from ${filePath}`, content)
+    const skills = await col<SkillDoc>("skills")
+    const existing = await skills.get(id)
+    const now = Date.now()
+    await skills.put(id, {
+      id,
+      name,
+      description: `Imported from ${filePath}`,
+      version: "0.0.1",
+      author: "local",
+      icon: "skill",
+      category: "custom",
+      permissions: JSON.stringify([]),
+      dependencies: JSON.stringify([]),
+      tools: "",
+      triggers: "",
+      preferred_agents: JSON.stringify([]),
+      body: content,
+      version_num: 1,
+      active: true,
+      created_at: existing?.doc.created_at ?? now,
+      updated_at: now,
+    }, { expectedVersion: existing?.version ?? 0 })
 
     hiveOutro(`Skill ${id} añadida`)
   } catch (err) {
@@ -101,8 +121,7 @@ export async function skillRemove(name?: string): Promise<void> {
     process.exit(1)
   }
 
-  const db = getDb()
-  db.query("DELETE FROM skills WHERE id = ?").run(name)
+  await (await col<SkillDoc>("skills")).delete(name)
   hiveOutro(`Skill ${name} eliminada`)
 }
 
@@ -113,8 +132,7 @@ export async function skillInspect(name?: string): Promise<void> {
     process.exit(1)
   }
 
-  const db = getDb()
-  const row = db.query("SELECT * FROM skills WHERE id = ?").get(name) as any
+  const row = (await (await col<SkillDoc>("skills")).get(name))?.doc
 
   if (!row) {
     hiveOutro(`Skill no encontrada: ${name}`, "error")
@@ -127,12 +145,12 @@ export async function skillInspect(name?: string): Promise<void> {
   console.log(`  \x1b[1mNombre:\x1b[0m      ${row.name}`)
   console.log(`  \x1b[1mDescripción:\x1b[0m ${row.description || "N/A"}`)
   console.log(`  \x1b[1mCategoría:\x1b[0m   ${row.category || "N/A"}`)
-  console.log(`  \x1b[1mHabilitada:\x1b[0m  ${row.enabled ? "Sí" : "No"}`)
+  console.log(`  \x1b[1mHabilitada:\x1b[0m  ${row.active ? "Sí" : "No"}`)
   console.log(`  \x1b[1mTriggers:\x1b[0m    ${row.triggers || "N/A"}`)
   console.log(``)
 
-  if (row.content) {
-    const preview = row.content.slice(0, 500).replace(/\n/g, "\n  │    ")
+  if (row.body) {
+    const preview = row.body.slice(0, 500).replace(/\n/g, "\n  │    ")
     console.log(`  \x1b[1mContenido:\x1b[0m\n  │    ${preview}...\n`)
   }
 
@@ -149,7 +167,8 @@ export async function skillAssign(args: string[]): Promise<void> {
     process.exit(1)
   }
 
-  const db = getDb()
-  db.query("UPDATE skills SET category = ? WHERE id = ?").run(coordinator, skillName)
+  const skills = await col<SkillDoc>("skills")
+  const row = await skills.get(skillName)
+  if (row) await skills.put(skillName, { ...row.doc, category: coordinator, updated_at: Date.now() }, { expectedVersion: row.version })
   hiveOutro(`Skill ${skillName} asignada a ${coordinator}`)
 }

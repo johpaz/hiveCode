@@ -6,7 +6,7 @@
  * by its specific adapter, providing clean separation of concerns.
  */
 
-import { loadConfig, startGateway, logger, getHiveDir, initializeDatabase } from "@johpaz/hivecode-core";
+import { loadConfig, startGateway, logger, getHiveDir } from "@johpaz/hivecode-core";
 import { existsSync, mkdirSync, openSync } from "node:fs";
 import * as path from "node:path";
 import { embeddedUI } from "../ui-bundle.generated";
@@ -262,7 +262,7 @@ export async function start(flags: string[]): Promise<void> {
  ║   ⬡  Frontend      ⬡  Security           ║
  ║   ⬡  Test          ⬡  DevOps             ║
  ║                                           ║
- ║   Terminal-only · SQLite WAL · Bun Workers║
+ ║   Terminal-only · HiveDB · Bun Workers    ║
  ╚═══════════════════════════════════════════╝
 
 📦 Installation: ${adapter.name}

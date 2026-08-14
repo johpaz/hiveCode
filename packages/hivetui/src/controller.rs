@@ -1,11 +1,7 @@
 #[cfg(not(test))]
-use std::io::{stdout, Write};
-
-#[cfg(not(test))]
-use base64::Engine as _;
-
-#[cfg(not(test))]
 use arboard::Clipboard;
+#[cfg(not(test))]
+use crate::clipboard;
 use crossterm::{
     event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -85,6 +81,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
             KeyCode::Down => {
                 let max = match hub.active_tab {
                     SettingsTab::Providers | SettingsTab::Models => hub.providers.len(),
+                    SettingsTab::Agents    => hub.agents.len(),
                     SettingsTab::Mcp       => hub.mcp.len(),
                     SettingsTab::Skills    => hub.skills.len(),
                     _                      => 0,
@@ -96,6 +93,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 let cmd = match hub.active_tab {
                     SettingsTab::Providers => "/provider add",
                     SettingsTab::Models    => "/modelo add",
+                    SettingsTab::Agents    => "/agent list",
                     SettingsTab::Mcp       => "/mcp add",
                     SettingsTab::Skills    => "/skill add",
                     SettingsTab::Github    => "/github connect",
@@ -161,6 +159,10 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     SettingsTab::Models => {
                         hub.providers.get(hub.selected_row)
                             .map(|p| format!("/modelo set {} {}", p.id, p.model))
+                    }
+                    SettingsTab::Agents => {
+                        hub.agents.get(hub.selected_row)
+                            .map(|a| format!("/agent configure {}", a.id))
                     }
                     SettingsTab::Mcp => {
                         hub.mcp.get(hub.selected_row)
@@ -567,6 +569,9 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
             } else {
                 let submitted = state.input.submit();
                 if !submitted.trim().is_empty() {
+                    if submitted.trim().eq_ignore_ascii_case("/auto") {
+                        state.resume_auto_layout();
+                    }
                     state.show_welcome = false; // entrar al chat al enviar el primer mensaje
                     if state.session.mode == ReplMode::Plan {
                         state.plan.current = None;
@@ -944,6 +949,7 @@ fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
                     hub.active_tab = match tab_name {
                         "Providers" => SettingsTab::Providers,
                         "Modelos"   => SettingsTab::Models,
+                        "Agentes"   => SettingsTab::Agents,
                         "MCP"       => SettingsTab::Mcp,
                         "Skills"    => SettingsTab::Skills,
                         "GitHub"    => SettingsTab::Github,
@@ -1188,13 +1194,8 @@ fn copy_selected_entry_to_clipboard(state: &AppState) {
     }
 
     #[cfg(not(test))]
-    let encoded = base64::engine::general_purpose::STANDARD.encode(entry.content.as_bytes());
-    #[cfg(not(test))]
     {
-        let osc52 = format!("\x1b]52;c;{}\x07", encoded);
-        let mut out = stdout();
-        let _ = out.write_all(osc52.as_bytes());
-        let _ = out.flush();
+        let _ = clipboard::copy_text(&entry.content);
     }
 }
 
@@ -1787,6 +1788,7 @@ Vistas (tabs)
 3 / /layout code       Cambios en código + workers
 4 / /layout review     Revisión + aprobación
 5 / /layout dashboard  Panel de todos los workers
+/auto                  Reactivar navegación automática de layouts
 /welcome               Volver a la pantalla de bienvenida
 
 Atajos de teclado

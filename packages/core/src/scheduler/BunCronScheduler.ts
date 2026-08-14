@@ -1,16 +1,9 @@
 /**
- * BunCronScheduler — Implementación nativa con Bun.cron
- *
- * Implementa CronScheduler usando la API built-in de Bun:
- * - Tareas recurrentes: Bun.cron() con expresión ajustada a UTC
- * - Tareas one_shot:   setTimeout() con delay calculado desde fire_at
- * - Startup:           reconcilia todos los jobs activos de la BD
- *
- * Limitación conocida: el ajuste de timezone es estático (calculado al registrar).
- * Los jobs en zonas con DST se desajustan una hora en el cambio de horario.
+ * BunCronScheduler - native Bun.cron scheduler backed by HiveDB.
  */
 
-import { getDb } from "../storage/sqlite";
+import { col } from "../storage/hive";
+import type { CronJobDoc, TaskRunDoc } from "../storage/collections";
 import { logger } from "../utils/logger";
 import type {
   CronScheduler,
@@ -22,40 +15,12 @@ import type {
 
 const log = logger.child("BunCronScheduler");
 
-// ─── Tipos internos ──────────────────────────────────────────────────────────
-
-export interface DbCronRow {
-  id: string;
-  name: string;
-  task: string;
-  task_type: string;
-  status: string;
-  cron_expression: string | null;
-  fire_at: string | null;
-  timezone: string;
-  start_at: string | null;
-  stop_at: string | null;
-  max_runs: number | null;
-  protect: number;
-  interval_sec: number | null;
-  agent_id: string | null;
-  channel: string;
-  payload: string;
-  tool_name: string | null;
-  run_count: number;
-  error_count: number;
-  next_run_at: string | null;
-  last_run_at: string | null;
-}
-
 type Handle = {
   job?: { stop(): void };
   timeout?: ReturnType<typeof setTimeout>;
 };
 
-export type ExecuteCallback = (task: DbCronRow) => Promise<void>;
-
-// ─── Helpers de timezone y cron ──────────────────────────────────────────────
+export type ExecuteCallback = (task: CronJobDoc) => Promise<void>;
 
 function getTimezoneOffsetHours(timezone: string): number {
   try {
@@ -68,24 +33,17 @@ function getTimezoneOffsetHours(timezone: string): number {
   }
 }
 
-/**
- * Ajusta el campo HOUR de una expresión cron de `timezone` a UTC.
- * Solo maneja horas como enteros simples — rangos/listas/pasos quedan sin tocar.
- */
 function toUtcCron(expr: string, timezone: string): string {
   if (!timezone || timezone === "UTC") return expr;
   const parts = expr.trim().split(/\s+/);
   if (parts.length < 5) return expr;
   const hour = parseInt(parts[1], 10);
-  if (isNaN(hour)) return expr;
+  if (Number.isNaN(hour)) return expr;
   const offset = getTimezoneOffsetHours(timezone);
   parts[1] = String(((hour + offset) % 24 + 24) % 24);
   return parts.join(" ");
 }
 
-/**
- * Expande un campo cron (ej. "1-5/2", "0,15,30,45", "*") a un array de valores.
- */
 function expandField(field: string, min: number, max: number): number[] {
   if (field === "*") return Array.from({ length: max - min + 1 }, (_, i) => i + min);
   const result = new Set<number>();
@@ -94,24 +52,20 @@ function expandField(field: string, min: number, max: number): number[] {
       const [rangePart, stepStr] = part.split("/");
       const step = parseInt(stepStr, 10) || 1;
       const [startStr, endStr] = (rangePart === "*" ? `${min}-${max}` : rangePart).split("-");
-      for (let v = parseInt(startStr, 10); v <= (endStr ? parseInt(endStr, 10) : max); v += step) {
-        result.add(v);
-      }
+      const start = parseInt(startStr, 10);
+      const end = endStr ? parseInt(endStr, 10) : max;
+      for (let v = start; v <= end; v += step) result.add(v);
     } else if (part.includes("-")) {
       const [startStr, endStr] = part.split("-");
       for (let v = parseInt(startStr, 10); v <= parseInt(endStr, 10); v++) result.add(v);
     } else {
       const n = parseInt(part, 10);
-      if (!isNaN(n)) result.add(n);
+      if (!Number.isNaN(n)) result.add(n);
     }
   }
   return [...result].sort((a, b) => a - b);
 }
 
-/**
- * Calcula la próxima ejecución de una expresión cron UTC.
- * Retorna ISO string o null si no puede calcularse.
- */
 function computeNextRun(utcExpr: string): string | null {
   try {
     const parts = utcExpr.trim().split(/\s+/);
@@ -126,7 +80,6 @@ function computeNextRun(utcExpr: string): string | null {
     candidate.setUTCSeconds(0, 0);
     candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
 
-    // Buscar hasta 1 año adelante (minuto a minuto, 527040 iteraciones máx)
     for (let i = 0; i < 527040; i++) {
       if (
         validMons.includes(candidate.getUTCMonth() + 1) &&
@@ -145,7 +98,13 @@ function computeNextRun(utcExpr: string): string | null {
   }
 }
 
-function rowToTask(row: DbCronRow): CronTask {
+function nextRunFor(input: Pick<CronJobDoc, "task_type" | "cron_expression" | "fire_at" | "timezone">): string | null {
+  if (input.task_type === "one_shot") return input.fire_at ?? null;
+  if (!input.cron_expression) return null;
+  return computeNextRun(toUtcCron(input.cron_expression, input.timezone));
+}
+
+function rowToTask(row: CronJobDoc): CronTask {
   return {
     id: row.id,
     name: row.name,
@@ -161,7 +120,14 @@ function rowToTask(row: DbCronRow): CronTask {
   };
 }
 
-// ─── BunCronScheduler ─────────────────────────────────────────────────────────
+async function patchCronJob(id: string, patch: Partial<CronJobDoc>): Promise<CronJobDoc | null> {
+  const jobs = await col<CronJobDoc>("cronJobs");
+  const existing = await jobs.get(id);
+  if (!existing) return null;
+  const updated = { ...existing.doc, ...patch, updated_at: new Date().toISOString() };
+  await jobs.put(id, updated, { expectedVersion: existing.version });
+  return updated;
+}
 
 export class BunCronScheduler implements CronScheduler {
   private handles = new Map<string, Handle>();
@@ -171,20 +137,15 @@ export class BunCronScheduler implements CronScheduler {
     this.executeCallback = executeCallback;
   }
 
-  /**
-   * Cargar todos los jobs activos de la BD y registrarlos con Bun.cron/setTimeout.
-   * Llamar una sola vez al arrancar el gateway.
-   */
   async startup(): Promise<void> {
-    const db = getDb();
-    const rows = db
-      .query(`SELECT * FROM cron_jobs WHERE status = 'active' ORDER BY created_at ASC`)
-      .all() as DbCronRow[];
+    const rows = (await (await col<CronJobDoc>("cronJobs")).findBy("status", "active"))
+      .map((entry) => entry.doc)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
 
     let registered = 0;
     for (const row of rows) {
       try {
-        this._register(row);
+        this.register(row);
         registered++;
       } catch (err) {
         log.warn(`[startup] Failed to register "${row.name}" (${row.id}): ${(err as Error).message}`);
@@ -193,209 +154,216 @@ export class BunCronScheduler implements CronScheduler {
     log.info(`[startup] ${registered}/${rows.length} cron jobs registered`);
   }
 
-  // ─── CronScheduler interface ──────────────────────────────────────────────
+  async create(input: CronTaskInput): Promise<CronCreateResult> {
+    const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    const now = new Date().toISOString();
+    const base: CronJobDoc = {
+      id,
+      name: input.name,
+      task: input.task,
+      task_type: input.task_type,
+      cron_expression: input.cron_expression ?? null,
+      fire_at: input.fire_at ?? null,
+      timezone: input.timezone || "UTC",
+      start_at: input.start_at ?? null,
+      stop_at: input.stop_at ?? null,
+      dom_and_dow: !!input.dom_and_dow,
+      max_runs: input.max_runs ?? null,
+      protect: input.protect !== false,
+      interval_sec: input.interval_sec ?? null,
+      agent_id: input.agent_id ?? "",
+      channel: input.channel || "system",
+      payload: JSON.stringify(input.payload ?? {}),
+      tool_name: input.tool_name ?? null,
+      status: "active",
+      run_count: 0,
+      error_count: 0,
+      last_error: null,
+      created_at: now,
+      updated_at: now,
+      last_run_at: null,
+      next_run_at: null,
+      completed_at: null,
+    };
+    const doc = { ...base, next_run_at: nextRunFor(base) };
 
-  create(input: CronTaskInput): CronCreateResult {
-    const db = getDb();
-    const { id: taskId } = db.query(`SELECT lower(hex(randomblob(8))) AS id`).get() as { id: string };
+    await (await col<CronJobDoc>("cronJobs")).put(id, doc, { expectedVersion: 0 });
+    this.register(doc);
 
-    const utcExpr = input.cron_expression
-      ? toUtcCron(input.cron_expression, input.timezone)
-      : null;
-    const nextRun = utcExpr ? computeNextRun(utcExpr) : null;
-
-    db.query(`
-      INSERT INTO cron_jobs (
-        id, name, task, task_type, cron_expression, fire_at, timezone,
-        start_at, stop_at, dom_and_dow, max_runs, protect, interval_sec,
-        agent_id, channel, payload, tool_name, status, next_run_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
-    `).run(
-      taskId,
-      input.name,
-      input.task,
-      input.task_type,
-      input.cron_expression ?? null,
-      input.fire_at ?? null,
-      input.timezone || "UTC",
-      input.start_at ?? null,
-      input.stop_at ?? null,
-      input.dom_and_dow ? 1 : 0,
-      input.max_runs ?? null,
-      input.protect !== false ? 1 : 0,
-      input.interval_sec ?? null,
-      input.agent_id ?? null,
-      input.channel || "system",
-      JSON.stringify(input.payload ?? {}),
-      input.tool_name ?? null,
-      nextRun,
-    );
-
-    const row = db.query(`SELECT * FROM cron_jobs WHERE id = ?`).get(taskId) as DbCronRow;
-    this._register(row);
-
-    log.info(`[create] "${input.name}" (${taskId}) — next: ${nextRun ?? "N/A"}`);
-    return { id: taskId, nextRun: nextRun ?? undefined };
+    log.info(`[create] "${input.name}" (${id}) - next: ${doc.next_run_at ?? "N/A"}`);
+    return { id, nextRun: doc.next_run_at };
   }
 
-  update(taskId: string, changes: Record<string, unknown>): boolean {
-    const db = getDb();
-    const current = db.query(`SELECT * FROM cron_jobs WHERE id = ?`).get(taskId) as DbCronRow | null;
+  async update(taskId: string, changes: Record<string, unknown>): Promise<boolean> {
+    const jobs = await col<CronJobDoc>("cronJobs");
+    const current = await jobs.get(taskId);
     if (!current) return false;
 
     const allowed = new Set([
       "name", "task", "cron_expression", "fire_at", "timezone", "channel",
       "max_runs", "start_at", "stop_at", "agent_id", "payload", "tool_name",
+      "dom_and_dow", "protect", "interval_sec",
     ]);
-    const fields: string[] = [];
-    const values: unknown[] = [];
-    for (const [k, v] of Object.entries(changes)) {
-      if (allowed.has(k)) { fields.push(`${k} = ?`); values.push(v); }
+    const patch: Partial<CronJobDoc> = {};
+    for (const [key, value] of Object.entries(changes)) {
+      if (!allowed.has(key)) continue;
+      if (key === "payload") patch.payload = typeof value === "string" ? value : JSON.stringify(value ?? {});
+      else if (key === "dom_and_dow" || key === "protect") (patch as any)[key] = !!value;
+      else (patch as any)[key] = value ?? null;
     }
-    if (fields.length === 0) return false;
+    if (Object.keys(patch).length === 0) return false;
 
-    db.query(`UPDATE cron_jobs SET ${fields.join(", ")} WHERE id = ?`).run(...([...values, taskId] as any));
+    const merged = { ...current.doc, ...patch };
+    patch.next_run_at = nextRunFor(merged);
+    patch.updated_at = new Date().toISOString();
+    const updated = { ...current.doc, ...patch };
+    await jobs.put(taskId, updated, { expectedVersion: current.version });
 
-    if (current.status === "active") {
-      this._stop(taskId);
-      const updated = db.query(`SELECT * FROM cron_jobs WHERE id = ?`).get(taskId) as DbCronRow;
-      this._register(updated);
+    if (updated.status === "active") {
+      this.stop(taskId);
+      this.register(updated);
     }
     log.info(`[update] Job ${taskId} updated`);
     return true;
   }
 
-  pause(taskId: string): boolean {
-    const db = getDb();
-    const row = db.query(`SELECT status FROM cron_jobs WHERE id = ?`).get(taskId) as { status: string } | null;
-    if (!row || row.status !== "active") return false;
-    this._stop(taskId);
-    db.query(`UPDATE cron_jobs SET status = 'paused' WHERE id = ?`).run(taskId);
+  async pause(taskId: string): Promise<boolean> {
+    const entry = await (await col<CronJobDoc>("cronJobs")).get(taskId);
+    if (!entry || entry.doc.status !== "active") return false;
+    this.stop(taskId);
+    await patchCronJob(taskId, { status: "paused" });
     log.info(`[pause] Job ${taskId} paused`);
     return true;
   }
 
-  resume(taskId: string): boolean {
-    const db = getDb();
-    const row = db.query(`SELECT * FROM cron_jobs WHERE id = ?`).get(taskId) as DbCronRow | null;
-    if (!row || row.status !== "paused") return false;
-
-    const utcExpr = row.cron_expression ? toUtcCron(row.cron_expression, row.timezone) : null;
-    const nextRun = utcExpr ? computeNextRun(utcExpr) : null;
-    db.query(`UPDATE cron_jobs SET status = 'active', next_run_at = ? WHERE id = ?`).run(nextRun, taskId);
-
-    this._register({ ...row, status: "active" });
-    log.info(`[resume] Job ${taskId} resumed — next: ${nextRun ?? "N/A"}`);
+  async resume(taskId: string): Promise<boolean> {
+    const entry = await (await col<CronJobDoc>("cronJobs")).get(taskId);
+    if (!entry || entry.doc.status !== "paused") return false;
+    const updated = await patchCronJob(taskId, {
+      status: "active",
+      next_run_at: nextRunFor(entry.doc),
+    });
+    if (!updated) return false;
+    this.register(updated);
+    log.info(`[resume] Job ${taskId} resumed - next: ${updated.next_run_at ?? "N/A"}`);
     return true;
   }
 
-  delete(taskId: string): boolean {
-    const db = getDb();
-    this._stop(taskId);
-    const result = db.query(`DELETE FROM cron_jobs WHERE id = ?`).run(taskId) as { changes: number };
-    if (result.changes > 0) { log.info(`[delete] Job ${taskId} deleted`); return true; }
-    return false;
+  async delete(taskId: string): Promise<boolean> {
+    const jobs = await col<CronJobDoc>("cronJobs");
+    if (!(await jobs.get(taskId))) return false;
+    this.stop(taskId);
+    await jobs.delete(taskId);
+    log.info(`[delete] Job ${taskId} deleted`);
+    return true;
   }
 
-  trigger(taskId: string): boolean {
-    const db = getDb();
-    const row = db.query(`SELECT * FROM cron_jobs WHERE id = ?`).get(taskId) as DbCronRow | null;
+  async trigger(taskId: string): Promise<boolean> {
+    const row = (await (await col<CronJobDoc>("cronJobs")).get(taskId))?.doc;
     if (!row) return false;
-    this._executeJob(row).catch(err =>
+    this.executeJob(row).catch((err) =>
       log.error(`[trigger] Job ${taskId} execution error:`, err)
     );
     return true;
   }
 
-  listTasks(status?: string): CronTask[] {
-    const db = getDb();
-    const rows = (status
-      ? db.query(`SELECT * FROM cron_jobs WHERE status = ? ORDER BY next_run_at ASC`).all(status)
-      : db.query(`SELECT * FROM cron_jobs ORDER BY created_at DESC`).all()
-    ) as DbCronRow[];
-    return rows.map(rowToTask);
+  async listTasks(status?: string): Promise<CronTask[]> {
+    const rows = status
+      ? (await (await col<CronJobDoc>("cronJobs")).findBy("status", status)).map((entry) => entry.doc)
+      : (await (await col<CronJobDoc>("cronJobs")).scan()).map((entry) => entry.doc);
+    return rows
+      .sort((a, b) => (a.next_run_at ?? a.created_at).localeCompare(b.next_run_at ?? b.created_at))
+      .map(rowToTask);
   }
 
-  getTask(taskId: string): CronTask | null {
-    const db = getDb();
-    const row = db.query(`SELECT * FROM cron_jobs WHERE id = ?`).get(taskId) as DbCronRow | null;
+  async getTask(taskId: string): Promise<CronTask | null> {
+    const row = (await (await col<CronJobDoc>("cronJobs")).get(taskId))?.doc;
     return row ? rowToTask(row) : null;
   }
 
-  getStatus(): CronStatusEntry[] {
-    const db = getDb();
-    const rows = db
-      .query(`SELECT id, name, status, next_run_at, last_run_at FROM cron_jobs ORDER BY created_at ASC`)
-      .all() as { id: string; name: string; status: string; next_run_at: string | null; last_run_at: string | null }[];
-    return rows.map(r => ({
-      id: r.id,
-      name: r.name,
-      status: r.status,
-      nextRun: r.next_run_at ?? undefined,
-      lastRun: r.last_run_at ?? undefined,
+  async getStatus(): Promise<CronStatusEntry[]> {
+    const rows = (await (await col<CronJobDoc>("cronJobs")).scan())
+      .map((entry) => entry.doc)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      status: row.status,
+      nextRun: row.next_run_at ?? undefined,
+      lastRun: row.last_run_at ?? undefined,
     }));
   }
 
-  // ─── Privados ─────────────────────────────────────────────────────────────
-
-  private _register(row: DbCronRow): void {
-    this._stop(row.id);
+  private register(row: CronJobDoc): void {
+    this.stop(row.id);
 
     if (row.task_type === "recurring" && row.cron_expression) {
       const utcExpr = toUtcCron(row.cron_expression, row.timezone);
-      const job = Bun.cron(utcExpr as any, () => { this._fireJob(row.id); });
+      const job = Bun.cron(utcExpr as any, () => { this.fireJob(row.id); });
       this.handles.set(row.id, { job });
-      log.debug(`[register] Recurring "${row.name}" → "${utcExpr}"`);
+      log.debug(`[register] Recurring "${row.name}" -> "${utcExpr}"`);
     } else if (row.task_type === "one_shot" && row.fire_at) {
       const delay = new Date(row.fire_at).getTime() - Date.now();
       if (delay <= 0) {
-        log.warn(`[register] One-shot "${row.name}" fire_at is in the past — skipping`);
+        log.warn(`[register] One-shot "${row.name}" fire_at is in the past - skipping`);
         return;
       }
-      const timeout = setTimeout(() => { this._fireJob(row.id); }, delay);
+      const timeout = setTimeout(() => { this.fireJob(row.id); }, delay);
       this.handles.set(row.id, { timeout });
       log.debug(`[register] One-shot "${row.name}" in ${Math.round(delay / 1000)}s`);
     }
   }
 
-  private _stop(taskId: string): void {
-    const h = this.handles.get(taskId);
-    if (h?.job) h.job.stop();
-    if (h?.timeout !== undefined) clearTimeout(h.timeout);
+  private stop(taskId: string): void {
+    const handle = this.handles.get(taskId);
+    if (handle?.job) handle.job.stop();
+    if (handle?.timeout !== undefined) clearTimeout(handle.timeout);
     this.handles.delete(taskId);
   }
 
-  private _fireJob(taskId: string): void {
-    const db = getDb();
-    const row = db.query(`SELECT * FROM cron_jobs WHERE id = ?`).get(taskId) as DbCronRow | null;
-    if (!row || row.status !== "active") return;
-
-    const now = new Date();
-    if (row.start_at && now < new Date(row.start_at)) return;
-    if (row.stop_at && now > new Date(row.stop_at)) {
-      db.query(`UPDATE cron_jobs SET status = 'completed', completed_at = ? WHERE id = ?`)
-        .run(now.toISOString(), taskId);
-      this._stop(taskId);
-      return;
-    }
-
-    this._executeJob(row).catch(err =>
-      log.error(`[fire] "${row.name}" (${taskId}) error:`, err)
-    );
+  private fireJob(taskId: string): void {
+    this.getRunnableJob(taskId).then((row) => {
+      if (!row) return;
+      this.executeJob(row).catch((err) =>
+        log.error(`[fire] "${row.name}" (${taskId}) error:`, err)
+      );
+    }).catch((err) => log.error(`[fire] Failed to load job ${taskId}:`, err));
   }
 
-  private async _executeJob(row: DbCronRow): Promise<void> {
-    const db = getDb();
-    const { id: runId } = db.query(`SELECT lower(hex(randomblob(8))) AS id`).get() as { id: string };
+  private async getRunnableJob(taskId: string): Promise<CronJobDoc | null> {
+    const row = (await (await col<CronJobDoc>("cronJobs")).get(taskId))?.doc;
+    if (!row || row.status !== "active") return null;
+
+    const now = new Date();
+    if (row.start_at && now < new Date(row.start_at)) return null;
+    if (row.stop_at && now > new Date(row.stop_at)) {
+      await patchCronJob(taskId, { status: "completed", completed_at: now.toISOString() });
+      this.stop(taskId);
+      return null;
+    }
+    return row;
+  }
+
+  private async executeJob(row: CronJobDoc): Promise<void> {
+    const runId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
     const startedAt = new Date().toISOString();
+    const runs = await col<TaskRunDoc>("taskRuns");
+    await runs.put(runId, {
+      id: runId,
+      task_id: row.id,
+      status: "running",
+      started_at: startedAt,
+      finished_at: null,
+      duration_ms: null,
+      error_message: null,
+      payload_snapshot: row.payload,
+      agent_response: null,
+    }, { expectedVersion: 0 });
 
-    db.query(`
-      INSERT INTO task_runs (id, task_id, status, started_at, payload_snapshot)
-      VALUES (?, ?, 'running', ?, ?)
-    `).run(runId, row.id, startedAt, row.payload);
-
-    db.query(`UPDATE cron_jobs SET last_run_at = ?, run_count = run_count + 1 WHERE id = ?`)
-      .run(startedAt, row.id);
+    await patchCronJob(row.id, {
+      last_run_at: startedAt,
+      run_count: row.run_count + 1,
+    });
 
     const t0 = Date.now();
     let success = true;
@@ -406,41 +374,41 @@ export class BunCronScheduler implements CronScheduler {
     } catch (err) {
       success = false;
       errorMsg = (err as Error).message;
-      db.query(`UPDATE cron_jobs SET error_count = error_count + 1, last_error = ? WHERE id = ?`)
-        .run(errorMsg, row.id);
+      await patchCronJob(row.id, {
+        error_count: row.error_count + 1,
+        last_error: errorMsg,
+      });
       log.error(`[execute] "${row.name}" failed: ${errorMsg}`);
     }
 
     const durationMs = Date.now() - t0;
     const finishedAt = new Date().toISOString();
-
-    db.query(`
-      UPDATE task_runs SET status = ?, finished_at = ?, duration_ms = ?, error_message = ?
-      WHERE id = ?
-    `).run(success ? "success" : "failed", finishedAt, durationMs, errorMsg, runId);
-
-    // Verificar max_runs
-    if (row.max_runs !== null) {
-      const updated = db.query(`SELECT run_count FROM cron_jobs WHERE id = ?`).get(row.id) as { run_count: number } | null;
-      if (updated && updated.run_count >= row.max_runs) {
-        db.query(`UPDATE cron_jobs SET status = 'completed', completed_at = ? WHERE id = ?`)
-          .run(finishedAt, row.id);
-        this._stop(row.id);
-        log.info(`[execute] "${row.name}" completed after ${updated.run_count} runs`);
-        return;
-      }
+    const runEntry = await runs.get(runId);
+    if (runEntry) {
+      await runs.put(runId, {
+        ...runEntry.doc,
+        status: success ? "success" : "failed",
+        finished_at: finishedAt,
+        duration_ms: durationMs,
+        error_message: errorMsg,
+      }, { expectedVersion: runEntry.version });
     }
 
-    // One-shot: completar después de la primera ejecución
+    const latest = (await (await col<CronJobDoc>("cronJobs")).get(row.id))?.doc;
+    if (!latest) return;
+
+    if (latest.max_runs !== null && latest.run_count >= latest.max_runs) {
+      await patchCronJob(row.id, { status: "completed", completed_at: finishedAt });
+      this.stop(row.id);
+      log.info(`[execute] "${row.name}" completed after ${latest.run_count} runs`);
+      return;
+    }
+
     if (row.task_type === "one_shot") {
-      db.query(`UPDATE cron_jobs SET status = 'completed', completed_at = ? WHERE id = ?`)
-        .run(finishedAt, row.id);
-      this._stop(row.id);
-    } else if (row.cron_expression) {
-      // Actualizar next_run_at para jobs recurrentes
-      const utcExpr = toUtcCron(row.cron_expression, row.timezone);
-      const nextRun = computeNextRun(utcExpr);
-      db.query(`UPDATE cron_jobs SET next_run_at = ? WHERE id = ?`).run(nextRun, row.id);
+      await patchCronJob(row.id, { status: "completed", completed_at: finishedAt });
+      this.stop(row.id);
+    } else {
+      await patchCronJob(row.id, { next_run_at: nextRunFor(latest) });
     }
   }
 }

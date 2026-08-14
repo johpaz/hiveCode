@@ -26,14 +26,15 @@ import {
 } from "./conversation-store"
 import { estimateTokens } from "../utils/toon"
 import { callLLM, resolveProviderConfig, type ContentPart } from "./llm-client"
-import { getDb } from "../storage/sqlite"
+import { col, fromIndexable } from "../storage/hive"
+import type { AgentDoc, CodeConfigDoc } from "../storage/collections"
 
 const log = logger.child("compaction")
 
 // Token budget: compress when stored tokens exceed this threshold
 const COMPACT_TOKEN_THRESHOLD = 6000   // ~60% of 10K context window
 const KEEP_LAST_N_MESSAGES = 5         // always keep most recent N messages
-const TOOL_RESULT_MAX_CHARS = 200      // max chars for old tool results after clearing
+const TOOL_RESULT_MAX_CHARS = 600      // max chars for old tool results after clearing
 const MAX_TRANSCRIPT_MSGS = 30         // cap messages sent to summarizer (avoids OOM on small models)
 const MAX_MSG_CHARS = 300              // chars per message in transcript
 
@@ -46,11 +47,11 @@ export async function maybeCompact(
   notify?: { channel: string; userId: string }
 ): Promise<void> {
   try {
-    const totalTokens = getTotalTokens(threadId)
+    const totalTokens = await getTotalTokens(threadId)
     if (totalTokens < COMPACT_TOKEN_THRESHOLD) return
 
-    const summary = getSummary(threadId)
-    const totalMessages = getMessageCount(threadId)
+    const summary = await getSummary(threadId)
+    const totalMessages = await getMessageCount(threadId)
 
     // Already summarized up to near the current state
     if (summary && summary.last_message_id > totalMessages - KEEP_LAST_N_MESSAGES) return
@@ -69,7 +70,7 @@ export async function compactThread(
   threadId: string,
   notify?: { channel: string; userId: string }
 ): Promise<void> {
-  const allMessages = getHistory(threadId)
+  const allMessages = await getHistory(threadId)
   if (allMessages.length <= KEEP_LAST_N_MESSAGES) return
 
   // Find a clean cut point: the "keep" side must begin with a user turn so
@@ -88,7 +89,7 @@ export async function compactThread(
 
   const lastSummarizedId = toSummarize[toSummarize.length - 1].id
 
-  const existingSummary = getSummary(threadId)
+  const existingSummary = await getSummary(threadId)
   if (existingSummary && existingSummary.last_message_id >= lastSummarizedId) return
 
   // Cap transcript to avoid overflowing small model contexts
@@ -105,20 +106,19 @@ export async function compactThread(
     })
     .join("\n\n")
 
-  const db = getDb()
-  const coordinator = db.query<any, []>(
-    "SELECT provider_id, model_id FROM agents WHERE role = 'coordinator' LIMIT 1"
-  ).get()
+  const agents = await col<AgentDoc>("agents")
+  const coordinator = (await agents.findBy("role", "coordinator"))[0]?.doc
 
-  let provId = coordinator?.provider_id
-  let modId = coordinator?.model_id
+  let provId = fromIndexable(coordinator?.provider_id)
+  let modId = fromIndexable(coordinator?.model_id)
   if (!provId || !modId) {
-    const cfgRow = db.query("SELECT value FROM code_config WHERE key = 'default_provider'").get() as any
-    const fallbackProvider = cfgRow?.value || "gemini"
+    const codeConfig = await col<CodeConfigDoc>("codeConfig")
+    const cfgRow = await codeConfig.get("default_provider")
+    const fallbackProvider = cfgRow?.doc.value || "gemini"
     const modelKey = `provider_model_${fallbackProvider}`
-    const modelRow = db.query("SELECT value FROM code_config WHERE key = ?").get(modelKey) as any
+    const modelRow = await codeConfig.get(modelKey)
     provId = provId || fallbackProvider
-    modId = modId || modelRow?.value || "gemini-2.5-flash"
+    modId = modId || modelRow?.doc.value || "gemini-2.5-flash"
   }
   const providerCfg = await resolveProviderConfig(provId, modId)
 
@@ -141,7 +141,7 @@ export async function compactThread(
   const summary = summaryResponse.content.trim()
   if (!summary) return
 
-  saveSummary(threadId, summary, toSummarize.length, lastSummarizedId)
+  await saveSummary(threadId, summary, toSummarize.length, lastSummarizedId)
   log.info(
     `[compaction] Thread ${threadId} compacted: ${toSummarize.length} msgs → ${estimateTokens(summary)} tokens`
   )
@@ -164,44 +164,78 @@ export async function compactThread(
 /**
  * Clear old tool results in-memory to reduce tokens before a model call.
  * Does NOT modify the database — only the in-memory messages array.
- * 
+ *
  * Strategy: COMPRESS (Context Engineering)
  * - Replaces old tool results with short summaries
- * - Keeps recent tool results intact (keepLastN)
- * - Uses TOON format for compact representation
+ * - Keeps the most recent `keepLastTurns` turns intact
+ * - Never truncates the latest result of any given tool
+ *
+ * The window is measured in **turns** (assistant messages), not raw messages. Counting
+ * raw messages meant that a turn with several parallel tool calls consumed the whole
+ * budget on its own, so the model lost sight of what it had just done after ~2 turns
+ * and started repeating tool calls.
  */
-export function clearOldToolResults<T extends { role: string; content: string | ContentPart[] }>(
+export function clearOldToolResults<T extends { role: string; content: string | ContentPart[]; tool_call_id?: string }>(
   messages: T[],
-  keepLastN = 6
+  keepLastTurns = 4
 ): T[] {
-  if (messages.length <= keepLastN) return messages
-  const cutoffIndex = messages.length - keepLastN
+  const cutoffIndex = findTurnCutoff(messages, keepLastTurns)
+  if (cutoffIndex <= 0) return messages
+
+  // The freshest result of each tool stays intact even when it falls outside the window:
+  // it is the model's only record that the call already happened.
+  const freshestByTool = new Map<string, number>()
+  for (let i = 0; i < cutoffIndex; i++) {
+    const msg = messages[i]
+    if (msg.role !== "tool") continue
+    freshestByTool.set(toolNameForResult(messages, i), i)
+  }
+  const protectedIndexes = new Set(freshestByTool.values())
 
   return messages.map((msg, i) => {
-    if (i >= cutoffIndex) return msg
-    
-    if (msg.role === "tool" && typeof msg.content === "string") {
-      // For tool results older than keepLastN, summarize
-      if (msg.content.length > TOOL_RESULT_MAX_CHARS) {
-        // Try to extract key info from TOON/JSON format
-        let summary = msg.content.substring(0, TOOL_RESULT_MAX_CHARS)
-        
-        // If it looks like JSON/TOON, add a marker
-        if (msg.content.trim().startsWith('{') || msg.content.trim().includes(':')) {
-          summary = `[Tool result summarized: ${summary}...]`
-        } else {
-          summary = `[Result truncated: ${summary}...]`
-        }
-        
-        return {
-          ...msg,
-          content: summary,
-        }
-      }
+    if (i >= cutoffIndex || protectedIndexes.has(i)) return msg
+    if (msg.role !== "tool" || typeof msg.content !== "string") return msg
+    if (msg.content.length <= TOOL_RESULT_MAX_CHARS) return msg
+
+    const head = msg.content.substring(0, TOOL_RESULT_MAX_CHARS)
+    const looksStructured = msg.content.trim().startsWith("{") || msg.content.trim().includes(":")
+    return {
+      ...msg,
+      content: looksStructured
+        ? `[Tool result summarized: ${head}...]`
+        : `[Result truncated: ${head}...]`,
     }
-    
-    return msg
   })
+}
+
+/** Index of the first message belonging to the last `keepLastTurns` assistant turns. */
+function findTurnCutoff(messages: Array<{ role: string }>, keepLastTurns: number): number {
+  let turns = 0
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role !== "assistant") continue
+    turns++
+    if (turns >= keepLastTurns) return i
+  }
+  return 0
+}
+
+/**
+ * Best-effort tool name for a result, resolved through the assistant turn that
+ * requested it. Falls back to the call id so distinct calls never collapse.
+ */
+function toolNameForResult(
+  messages: Array<{ role: string; tool_call_id?: string; tool_calls?: any[] }>,
+  index: number,
+): string {
+  const callId = messages[index].tool_call_id
+  if (callId) {
+    for (let i = index - 1; i >= 0; i--) {
+      const call = messages[i].tool_calls?.find((tc: any) => tc.id === callId)
+      if (call?.function?.name) return call.function.name
+    }
+    return callId
+  }
+  return `#${index}`
 }
 
 /**

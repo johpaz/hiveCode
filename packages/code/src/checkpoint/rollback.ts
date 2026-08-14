@@ -1,6 +1,13 @@
 import { mkdirSync } from "node:fs"
 import * as path from "node:path"
-import type { CheckpointFile } from "@johpaz/hivecode-core/db/repos/checkpoints"
+
+export interface CheckpointFile {
+  checkpoint_id: string
+  file_path: string
+  content: Buffer
+  content_hash: string
+  operation: "created" | "modified" | "deleted"
+}
 
 /**
  * Restaura archivos a su estado previo al checkpoint.

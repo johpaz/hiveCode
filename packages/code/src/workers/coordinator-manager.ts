@@ -1,14 +1,14 @@
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
-import { getSessionDb, closeSessionDb } from "@johpaz/hivecode-core/db/client"
-import { getMemoryDb } from "@johpaz/hivecode-core/storage/memory-db"
-import { MemoryRepo } from "@johpaz/hivecode-core/storage/memory-repo"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { AgentMemoryDoc, CodeConfigDoc, CodePlaybookDoc, CodeSessionDoc, CodeTaskPhaseDoc, HarnessTaskDoc, ModelDoc, WorkerActivityDoc } from "@johpaz/hivecode-core/storage/collections"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
+import { computeBackoffDelay } from "@johpaz/hivecode-core/utils/retry"
 import { createAllTools } from "@johpaz/hivecode-core/tools"
+import { ProfileHarness } from "@johpaz/hivecode-core/harness/profile-harness"
+import { classifyTask } from "@johpaz/hivecode-core/harness/adaptive-scheduler"
 import type { Config } from "@johpaz/hivecode-core/config"
 import { loadConfig } from "@johpaz/hivecode-core/config"
 import type { Tool } from "@johpaz/hivecode-core/tools"
 import { selectSkills, getMinimalSkills, type SkillDescriptor } from "@johpaz/hivecode-core/agent/skill-selector"
-import { syncSkillsToFTS } from "@johpaz/hivecode-core/agent/context-compiler"
 import {
   getMode, setMode, getPhaseIndex, setPhaseIndex,
   setWorkerBusy, isWorkerBusy, setCancelled, isCancelled,
@@ -19,6 +19,14 @@ import { loadSecrets, distributeSecrets } from "./secrets"
 import { getToolsForCoordinator, executeToolByName } from "./tool-bridge"
 import { parsePlan, getDefaultPhases, groupPhasesByLevel } from "./plan-parser"
 import type { ParsedPhase } from "./plan-parser"
+
+/** Shape of the `submit_review_verdict` structured decision (see worker-handler.ts). */
+interface ReviewVerdict {
+  verdict: "aprobado" | "aprobado_con_observaciones" | "rechazado"
+  criteria: Array<{ description: string; met: boolean; evidence?: string }>
+  categories?: Array<{ name: string; status: "ok" | "warning" | "blocking"; detail?: string }>
+  reasons?: string
+}
 import { checkAutomaticInterruption } from "../modes/interruptions"
 import { broadcastNarrative, broadcastPhase, broadcastMode, broadcastPhaseStart, broadcastPhaseEnd, broadcastTaskEnd, broadcastThinking } from "@johpaz/hivecode-core/gateway/task-streaming"
 import { validateCommand } from "@johpaz/hivecode-core/tools/code/command-validator"
@@ -47,16 +55,23 @@ import {
 
 const log = logger.child("coordinator-manager")
 
+async function getCodeConfig(key: string): Promise<string> {
+  return (await (await col<CodeConfigDoc>("codeConfig")).get(key))?.doc.value ?? ""
+}
+
 // BEE is index 0 in the bitmask; coordinators follow in the pool
 // librarian and forensic are on-demand workers — not in the persistent pool
 const COORDINATOR_NAMES: PhaseName[] = [
   "bee", "architecture",
   "product_manager",
   "backend", "frontend",
-  "mobile", "data_scientist",
+  "data_scientist",
   "security", "test", "devops",
-  "dba", "integration", "reviewer",
+  "verifier", "reviewer",
 ]
+
+/** Circuit breaker: stop auto-restarting a coordinator after this many consecutive crashes. */
+const MAX_WORKER_RESTARTS = 5
 
 type NarrativeChunkCallback = (chunk: {
   coordinator: string
@@ -78,13 +93,11 @@ function spawnCoordinatorWorker(name: PhaseName): Bun.Worker {
     case "product_manager": return new (Worker as any)(new URL("./product-manager.worker.ts", import.meta.url), { smol }) as Bun.Worker
     case "backend":         return new (Worker as any)(new URL("./backend.worker.ts",         import.meta.url), { smol }) as Bun.Worker
     case "frontend":        return new (Worker as any)(new URL("./frontend.worker.ts",        import.meta.url), { smol }) as Bun.Worker
-    case "mobile":          return new (Worker as any)(new URL("./mobile.worker.ts",          import.meta.url), { smol }) as Bun.Worker
     case "data_scientist":  return new (Worker as any)(new URL("./data-scientist.worker.ts",  import.meta.url), { smol }) as Bun.Worker
     case "security":        return new (Worker as any)(new URL("./security.worker.ts",        import.meta.url), { smol }) as Bun.Worker
     case "test":            return new (Worker as any)(new URL("./test.worker.ts",            import.meta.url), { smol }) as Bun.Worker
     case "devops":          return new (Worker as any)(new URL("./devops.worker.ts",          import.meta.url), { smol }) as Bun.Worker
-    case "dba":             return new (Worker as any)(new URL("./dba.worker.ts",             import.meta.url), { smol }) as Bun.Worker
-    case "integration":     return new (Worker as any)(new URL("./integration.worker.ts",     import.meta.url), { smol }) as Bun.Worker
+    case "verifier":        return new (Worker as any)(new URL("./verifier.worker.ts",        import.meta.url), { smol }) as Bun.Worker
     case "reviewer":        return new (Worker as any)(new URL("./reviewer.worker.ts",        import.meta.url), { smol }) as Bun.Worker
     case "librarian":       return new (Worker as any)(new URL("./librarian.worker.ts",       import.meta.url), { smol }) as Bun.Worker
     case "forensic":        return new (Worker as any)(new URL("./forensic.worker.ts",        import.meta.url), { smol }) as Bun.Worker
@@ -94,6 +107,8 @@ function spawnCoordinatorWorker(name: PhaseName): Bun.Worker {
 
 export class CoordinatorManager extends CoordinatorBase {
   private workers: Map<PhaseName, Bun.Worker> = new Map()
+  /** Consecutive crash count per coordinator; resets on any successful message. */
+  private workerCrashCounts = new Map<PhaseName, number>()
   private scribe = new Scribe()
   private activeTaskId: string | null = null
   private activeSessionId: string | null = null
@@ -133,10 +148,15 @@ export class CoordinatorManager extends CoordinatorBase {
   }
 
   async startAll(): Promise<void> {
-    log.info("[coordinator-manager] Starting BEE + 6 coordinators...")
+    log.info("[coordinator-manager] Starting lazy harness runtime...")
 
     // Load and distribute secrets BEFORE creating workers
     await this.reloadSecrets()
+
+    // Rehydrate durable state from HiveDB so recovery/resume reads see prior
+    // sessions, then reconcile any task a previous process left mid-flight.
+    await this.scribe.hydrate()
+    this.reconcileInterruptedTasks()
 
     // Load all tools from core
     try {
@@ -148,17 +168,39 @@ export class CoordinatorManager extends CoordinatorBase {
       this.allTools = []
     }
 
-    for (const name of COORDINATOR_NAMES) {
-      this.createWorker(name)
-    }
-
     this.broadcastChannel = new BroadcastChannel("hivecode:control")
     this.broadcastChannel.onmessage = (event: any) => this.handleControlMessage(event.data as ControlMessage)
 
-    this.initToolPool(4)
-
     startReflectorCron()
-    log.info("[coordinator-manager] ✅ BEE + all coordinators running (Tool Pool: 4 workers)")
+    log.info("[coordinator-manager] ✅ Runtime ready — agents and tool workers activate on demand")
+  }
+
+  /**
+   * Boot-time reconciliation: a task left `running`/`planning` by a process that
+   * died is not really running anymore. Move it to `paused` (resumable) when a
+   * recovery point exists, or `failed` when it doesn't, and surface a
+   * `resume_available` signal so the TUI can offer to continue it. Runs after
+   * `scribe.hydrate()`, so the in-memory task/recovery-point caches are populated.
+   */
+  private reconcileInterruptedTasks(): void {
+    const interrupted = this.scribe.findInterruptedTasks()
+    if (interrupted.length === 0) return
+    log.info(`[coordinator-manager] 🔧 Reconciling ${interrupted.length} interrupted task(s) from a previous process`)
+    for (const task of interrupted) {
+      const recovery = this.scribe.getLatestRecoveryPoint(task.id)
+      if (recovery) {
+        this.scribe.updateTaskStatus(task.id, "paused")
+        log.info(`[coordinator-manager] ⏸️  Task ${task.id} paused at level ${recovery.completedPhases.length} — resume available`)
+        this.onIpcEvent?.("resume_available", {
+          task_id: task.id,
+          checkpoint_id: recovery.id,
+          reason: `Interrupted at level ${recovery.completedPhases.length}; ${recovery.pendingPhases.length} phase(s) pending.`,
+        })
+      } else {
+        this.scribe.updateTaskStatus(task.id, "failed")
+        log.info(`[coordinator-manager] ✗ Task ${task.id} marked failed — no recovery point to resume from`)
+      }
+    }
   }
 
   private initToolPool(size: number): void {
@@ -184,6 +226,12 @@ export class CoordinatorManager extends CoordinatorBase {
   }
 
   private async executeInToolWorker(toolName: string, toolArgs: any, config: any): Promise<any> {
+    if (this.toolWorkerPool.length === 0) {
+      // Three is the global adaptive concurrency ceiling. The pool is created
+      // only for the first actual tool call, so idle startup has zero workers.
+      this.initToolPool(3)
+      log.info("[coordinator-manager] Tool pool activated lazily (max concurrency: 3)")
+    }
     const worker = this.idleToolWorkers.pop()
     if (!worker) {
       // Fallback to main thread if pool is busy
@@ -209,15 +257,15 @@ export class CoordinatorManager extends CoordinatorBase {
   /** Create a session at TUI startup — one session per TUI lifecycle */
   openSession(): string {
     this.activeSessionId = this.scribe.createSession(process.cwd())
-    // Open per-session DB and wire all subsystems (Blackboard, Checkpoint, ADR, Risk)
-    const sessionDb = getSessionDb(this.activeSessionId)
+    // Wire all shared subsystems against HiveDB-backed session state.
+    const sessionState = { sessionId: this.activeSessionId }
     // Use a combined emitter: gateway broadcast + optional TUI socket callback
     const gatewayIpc = makeGatewayEmitter(this.activeSessionId)
     const onIpcEvent = this.onIpcEvent
     const ipc = onIpcEvent
       ? { emit(event: string, payload: unknown) { gatewayIpc.emit(event, payload); onIpcEvent(event, payload) } }
       : gatewayIpc
-    this.initSubsystems(sessionDb, this.activeSessionId, ipc)
+    this.initSubsystems(sessionState, this.activeSessionId, ipc)
     this.loadProjectAdrs(process.cwd())
     return this.activeSessionId
   }
@@ -226,7 +274,6 @@ export class CoordinatorManager extends CoordinatorBase {
   closeSession(): void {
     if (this.activeSessionId) {
       this.scribe.closeSession(this.activeSessionId)
-      closeSessionDb(this.activeSessionId)
       this.activeSessionId = null
     }
   }
@@ -298,6 +345,11 @@ export class CoordinatorManager extends CoordinatorBase {
       branchName: workspace.branchName,
     })
 
+    if (workspace.isolated && existsSync(workspace.worktreePath)) {
+      // Deterministic task worktrees survive process restarts. Reattach instead
+      // of attempting `git worktree add` over the existing directory.
+      this.preparedWorkspaces.add(workspace.workspaceId)
+    }
     if (workspace.isolated && !this.preparedWorkspaces.has(workspace.workspaceId)) {
       await this.workspaceManager.prepare(workspace)
       this.preparedWorkspaces.add(workspace.workspaceId)
@@ -365,11 +417,35 @@ export class CoordinatorManager extends CoordinatorBase {
           }
         }
         this.workers.delete(name)
-        // Auto-restart with exponential backoff
+        // Auto-restart with real exponential backoff + circuit breaker: a worker
+        // that crashes on every task (systematic bug) must not spin in a tight
+        // restart loop — after MAX_WORKER_RESTARTS consecutive crashes we stop
+        // restarting it and escalate instead of thrashing.
+        const crashes = (this.workerCrashCounts.get(name) ?? 0) + 1
+        this.workerCrashCounts.set(name, crashes)
+        if (crashes > MAX_WORKER_RESTARTS) {
+          log.error(
+            `[coordinator-manager] ⛔ ${name} crashed ${crashes} times consecutively — ` +
+            `circuit breaker open, not restarting. Escalating.`,
+          )
+          this.onIpcEvent?.("forensic_alert", {
+            worker: name,
+            reason: `${name} crashed ${crashes} times consecutively; auto-restart disabled.`,
+            severity: "critical",
+          })
+          return
+        }
+        const delayMs = computeBackoffDelay(crashes, { initialDelayMs: 1000, backoffMultiplier: 2, maxDelayMs: 30_000 })
+        this.onIpcEvent?.("phase_retry", {
+          worker: name,
+          attempt: crashes,
+          max_attempts: MAX_WORKER_RESTARTS,
+          reason: `Crashed: ${err.message}. Restarting with backoff.`,
+        })
         setTimeout(() => {
           this.createWorker(name)
-          log.info(`[coordinator-manager] 🔄 ${name} worker restarted`)
-        }, 1000)
+          log.info(`[coordinator-manager] 🔄 ${name} worker restarted (attempt ${crashes}, ${Math.round(delayMs)}ms backoff)`)
+        }, delayMs)
       }
       this.workers.set(name, worker)
       log.info(`[coordinator-manager] ✅ ${name} started`)
@@ -385,6 +461,9 @@ export class CoordinatorManager extends CoordinatorBase {
       log.info(`[coordinator-manager] ${name} terminated`)
     }
     this.workers.clear()
+    for (const worker of this.toolWorkerPool) worker.terminate()
+    this.toolWorkerPool = []
+    this.idleToolWorkers = []
     this.broadcastChannel?.close()
   }
 
@@ -404,9 +483,8 @@ export class CoordinatorManager extends CoordinatorBase {
     // Ensure we have a session (created at TUI startup via openSession(), fallback here)
     if (!this.activeSessionId) {
       this.activeSessionId = this.scribe.createSession(process.cwd())
-      const sessionDb = getSessionDb(this.activeSessionId)
       const ipc = makeGatewayEmitter(this.activeSessionId)
-      this.initSubsystems(sessionDb, this.activeSessionId, ipc)
+      this.initSubsystems({ sessionId: this.activeSessionId }, this.activeSessionId, ipc)
       this.loadProjectAdrs(process.cwd())
     }
 
@@ -428,20 +506,105 @@ export class CoordinatorManager extends CoordinatorBase {
       stage: mode === "plan" ? "planning" : "understanding",
       executionPolicy: mode === "approval" ? "approval" : "auto",
     })
-    const initialWorkspace = await this.ensureTaskWorkspace(this.activeTaskId, false)
+    const initialWorkspace = await this.ensureTaskWorkspace(
+      this.activeTaskId,
+      classifyTask(description) !== "conversation",
+    )
     this.emitTaskUpdate("running", { title: description, mode })
     const taskStartTime = performance.now()
 
-    // Resolve provider/model from code_config (set by REPL or provider add command)
-    const db = getDb()
-    const configuredProvider = (
-      db.query("SELECT value FROM code_config WHERE key = 'default_provider'").get() as any
-    )?.value ?? ""
+    // Resolve provider/model from HiveDB (set by REPL or provider add command)
+    const configuredProvider = await getCodeConfig("default_provider")
     const configuredModel = configuredProvider
-      ? (db.query("SELECT value FROM code_config WHERE key = ?").get(`provider_model_${configuredProvider}`) as any)?.value ?? ""
+      ? await getCodeConfig(`provider_model_${configuredProvider}`)
       : ""
 
     log.info(`[coordinator-manager] 🚀 Task ${this.activeTaskId} (mode: ${mode}, provider: ${configuredProvider || "env-default"}): ${description}`)
+
+    // Canonical profile harness. The old specialized coordinator pipeline is
+    // retained below only to resume legacy plans when explicitly requested.
+    if (process.env.HIVECODE_LEGACY_HARNESS !== "1") {
+      const harness = new ProfileHarness()
+      const result = await harness.run({
+        objective: description,
+        sessionId: this.activeSessionId,
+        workspace: initialWorkspace.worktreePath,
+        policy: mode,
+        provider: configuredProvider || undefined,
+        model: configuredModel || undefined,
+        parentTaskId: this.activeTaskId,
+        approve: onApprovalCheckpoint
+          ? async (gate, evidence) => {
+              const decision = await onApprovalCheckpoint({
+                phase: gate,
+                phaseIndex: gate === "specification" ? 1 : 2,
+                totalPhases: 2,
+                narrativeEntry: evidence,
+                nextPhase: gate === "specification" ? "execute_dag" : "integrate",
+              })
+              return decision === "approve" ? "approve" : "cancel"
+            }
+          : undefined,
+        onEvent: event => {
+          if (event.agent) {
+            if (event.type === "agent_progress") {
+              this.emitNarrativeChunk({
+                coordinator: event.agent,
+                phase: event.phase ?? "progress",
+                content: event.message,
+                streamId: `${this.activeTaskId}:${event.agent}`,
+              })
+            }
+            this.onIpcEvent?.("worker_update", {
+              worker: event.agent,
+              phase: event.phase ?? event.type,
+              status: event.type === "agent_completed" ? "done" : "running",
+              activity: event.message.slice(0, 160),
+              task_id: this.activeTaskId,
+            })
+          }
+        },
+      })
+
+      this.scribe.appendNarrative({
+        taskId: this.activeTaskId,
+        sessionId: this.activeSessionId,
+        coordinator: "bee",
+        phase: result.status,
+        entry: result.response,
+        isDraft: false,
+        isOverride: false,
+      })
+
+      if (result.status === "completed") {
+        if (result.complexity !== "conversation") {
+          await this.integrateTaskWorkspace(this.activeTaskId, "auto")
+        }
+        this.scribe.updateTaskStatus(this.activeTaskId, "completed")
+        this.taskSupervisor.updateStage(this.activeTaskId, "completed")
+        this.emitTaskUpdate("completed", { title: description, mode })
+      } else if (result.status === "ready" || result.status === "waiting_user") {
+        this.scribe.updateTaskStatus(this.activeTaskId, "paused")
+        this.taskSupervisor.updateStage(this.activeTaskId, "waiting_user")
+        this.emitTaskUpdate("paused", { title: description, mode })
+      } else {
+        this.scribe.updateTaskStatus(this.activeTaskId, "cancelled")
+        this.emitTaskUpdate("cancelled", { title: description, mode })
+      }
+
+      this.scribe.updateTaskMetadata(this.activeTaskId, {
+        tokensIn: 0,
+        tokensOut: 0,
+        filesChanged: 0,
+        linesAdded: 0,
+        linesRemoved: 0,
+        durationMs: Math.round(performance.now() - taskStartTime),
+      })
+      this.scribe.completeTurn(turnId, result.response, this.activeTaskId)
+      if (this.onTaskComplete) this.onTaskComplete(result.response)
+      if (result.response && !this.onTaskComplete) process.stdout.write(result.response + "\n")
+      return
+    }
 
     // ── Phase 0: BEE — Senior Dev orchestrator ────────────────────────────────
     // BEE reads project context, classifies the task, and decides how to route it.
@@ -853,12 +1016,12 @@ export class CoordinatorManager extends CoordinatorBase {
     const workspaceRoot = workspace.worktreePath
     const durationMs = Math.round(performance.now() - taskStartMs)
 
-    // Aggregate tokens from all phases
-    const db = getDb()
-    const totals = db.query<{ ti: number; tout: number }, [string]>(`
-      SELECT COALESCE(SUM(tokens_in),0) AS ti, COALESCE(SUM(tokens_out),0) AS tout
-      FROM code_task_phases WHERE task_id = ?
-    `).get(this.activeTaskId) ?? { ti: 0, tout: 0 }
+    // Aggregate tokens from all phases.
+    const phaseRows = await (await col<CodeTaskPhaseDoc>("codeTaskPhases")).findBy("task_id", this.activeTaskId)
+    const totals = phaseRows.reduce((acc, entry) => ({
+      ti: acc.ti + entry.doc.tokens_in,
+      tout: acc.tout + entry.doc.tokens_out,
+    }), { ti: 0, tout: 0 })
 
     // Collect git changes after task
     let fileChanges: FileChange[] = []
@@ -941,8 +1104,8 @@ export class CoordinatorManager extends CoordinatorBase {
 
     // ACE Reflector: auto-run every N tasks or when trace threshold is met
     incrementTaskCounter()
-    if (shouldRunReflector(db)) {
-      runReflector(db).then((result) => {
+    if (shouldRunReflector()) {
+      runReflector().then((result) => {
         if (result.rules > 0) {
           log.info(`[coordinator-manager] ACE Reflector auto-run: ${result.rules} new rules`)
         }
@@ -954,7 +1117,7 @@ export class CoordinatorManager extends CoordinatorBase {
 
   private phasesNeedIsolatedWorkspace(phases: ParsedPhase[]): boolean {
     const mutatingCoordinators = new Set<PhaseName>([
-      "backend", "frontend", "mobile", "data_scientist", "devops", "dba", "integration",
+      "backend", "frontend", "data_scientist", "devops",
     ])
     return phases.some((phase) => mutatingCoordinators.has(phase.coordinator))
   }
@@ -1075,11 +1238,26 @@ export class CoordinatorManager extends CoordinatorBase {
       totalPhases: number
       narrativeEntry: string
       nextPhase?: string
-    }) => Promise<"approve" | "skip" | "cancel">
+    }) => Promise<"approve" | "skip" | "cancel">,
+    startLevel = 0,
   ): Promise<boolean> {
     const levels = groupPhasesByLevel(phases)
 
-    log.info(`[coordinator-manager] 📋 Executing ${phases.length} phases in ${levels.length} level(s):`)
+    // Persist the plan so a later process can resume this task from a recovery
+    // point instead of restarting from scratch (see resumeTask).
+    if (this.activeTaskId) {
+      this.scribe.savePlan(this.activeTaskId, {
+        phases,
+        description,
+        provider,
+        model,
+        archNarrative: archNarrative ?? null,
+        interfaces: interfaces ?? null,
+        mode,
+      })
+    }
+
+    log.info(`[coordinator-manager] 📋 Executing ${phases.length} phases in ${levels.length} level(s)${startLevel > 0 ? ` (resuming at level ${startLevel})` : ""}:`)
     for (let lvl = 0; lvl < levels.length; lvl++) {
       log.info(`[coordinator-manager]    Level ${lvl}: ${levels[lvl].map(p => p.coordinator).join(" + ")}`)
     }
@@ -1087,12 +1265,18 @@ export class CoordinatorManager extends CoordinatorBase {
     let globalPhaseIndex = 0
 
     for (let levelIdx = 0; levelIdx < levels.length; levelIdx++) {
+      // Resume: levels below startLevel already completed in a prior run.
+      if (levelIdx < startLevel) {
+        globalPhaseIndex += levels[levelIdx].length
+        continue
+      }
+
       if (isCancelled()) {
         if (this.activeTaskId) await this.cleanupTaskWorkspaceIfClean(this.activeTaskId, "cancelled")
         return false
       }
 
-      // Track current level for worker_activity writes
+      // Track current level for worker activity writes.
       this.currentLevel = levelIdx
 
       const phaseMode = getMode()
@@ -1117,11 +1301,12 @@ export class CoordinatorManager extends CoordinatorBase {
         this.scribe.saveRecoveryPoint(this.activeTaskId, null, completedPhaseIds, pendingPhaseIds, levelIdx)
       }
 
-      const levelTasks: Array<{ phase: PhaseName; task: CoordinatorTask; startedAt: number }> = levelPhases.map(phaseDef => {
+      const levelTasks: Array<{ phase: PhaseName; task: CoordinatorTask; startedAt: number }> = []
+      for (const phaseDef of levelPhases) {
         const phase = phaseDef.coordinator
         const workspace = this.getTaskWorkspace(this.activeTaskId)
         // Override model to most capable for reviewer
-        const effectiveModel = phase === "reviewer" ? this.getHighestCapabilityModel() || model : model
+        const effectiveModel = phase === "reviewer" ? (await this.getHighestCapabilityModel()) || model : model
         const task: CoordinatorTask = {
           taskId: this.activeTaskId || "current",
           phaseId: this.scribe.createPhase(this.activeTaskId || "current", phase, phase),
@@ -1141,11 +1326,11 @@ export class CoordinatorManager extends CoordinatorBase {
           model: effectiveModel || undefined,
         }
         this.writeWorkerActivity(phase, levelIdx, "running", 0, 0, Date.now(), null)
-        return { phase, task, startedAt: Date.now() }
-      })
+        levelTasks.push({ phase, task, startedAt: Date.now() })
+      }
 
       // Transversal SecurityAuditor: run alongside engineer levels if security is not already planned
-      const engineerPhases: PhaseName[] = ["backend", "frontend", "mobile", "data_scientist"]
+      const engineerPhases: PhaseName[] = ["backend", "frontend", "data_scientist"]
       const levelHasEngineers = levelPhases.some(p => engineerPhases.includes(p.coordinator))
       const securityAlreadyInLevel = levelPhases.some(p => p.coordinator === "security")
       if (levelHasEngineers && !securityAlreadyInLevel) {
@@ -1177,15 +1362,21 @@ export class CoordinatorManager extends CoordinatorBase {
         if (this.activeTaskId) broadcastPhaseStart(this.activeTaskId, phase, phase)
       }
 
-      const results = await Promise.all(
-        levelTasks.map(({ phase, task }) => this.dispatchPhase(phase, task))
-      )
+      const results: CoordinatorResult[] = []
+      // Global adaptive ceiling: never keep more than three model invocations
+      // active, even when a legacy plan emits a wider dependency level.
+      for (let offset = 0; offset < levelTasks.length; offset += 3) {
+        const batch = levelTasks.slice(offset, offset + 3)
+        results.push(...await Promise.all(
+          batch.map(({ phase, task }) => this.dispatchPhase(phase, task)),
+        ))
+      }
 
       for (let r = 0; r < results.length; r++) {
         const result = results[r]
         const { phase, task, startedAt } = levelTasks[r]
 
-        // Record completion in worker_activity
+        // Record completion in worker activity.
         this.writeWorkerActivity(
           phase, levelIdx,
           result.status === "failed" ? "failed" : "done",
@@ -1293,7 +1484,24 @@ export class CoordinatorManager extends CoordinatorBase {
 
         // Post-reviewer: activate Librarian if approved
         if (phase === "reviewer") {
-          const verdict = this.parseReviewerVerdict(result.narrativeEntry)
+          const structuredVerdict = result.structuredDecision as unknown as ReviewVerdict | undefined
+          const verdict = structuredVerdict?.verdict ?? this.parseReviewerVerdict(result.narrativeEntry)
+          if (structuredVerdict) {
+            const unmet = structuredVerdict.criteria.filter((c) => !c.met)
+            this.onIpcEvent?.("review_verdict_update", {
+              reviewer: "reviewer",
+              status: structuredVerdict.verdict,
+              summary: structuredVerdict.reasons
+                || (unmet.length > 0
+                  ? `${unmet.length}/${structuredVerdict.criteria.length} criterios sin cumplir`
+                  : `${structuredVerdict.criteria.length}/${structuredVerdict.criteria.length} criterios cumplidos`),
+              observations: (structuredVerdict.categories ?? []).map((c) => `[${c.status}] ${c.name}${c.detail ? `: ${c.detail}` : ""}`),
+              requested_changes: unmet.map((c) => c.description),
+              affected_files: [],
+              criteria: structuredVerdict.criteria,
+              categories: structuredVerdict.categories,
+            })
+          }
           if (verdict === "aprobado" || verdict === "aprobado_con_observaciones") {
             log.info(`[coordinator-manager] 📚 Reviewer approved — activating Librarian`)
             this.runLibrarianAgent(task, provider, model).catch(err => {
@@ -1344,7 +1552,87 @@ export class CoordinatorManager extends CoordinatorBase {
     return true
   }
 
-  /** Write a row to the session DB worker_activity table for level-based tracking */
+  /**
+   * Re-enter a task's phase loop from its latest recovery point instead of
+   * restarting from BEE. Needs a persisted plan (savePlan, written when the loop
+   * first ran) — tasks that predate plan persistence can't be resumed this way
+   * and the caller should re-run them normally. Returns true if the task
+   * completed. Surfaced via the CLI `task resume` command and the boot-time
+   * `resume_available` signal.
+   */
+  async resumeTask(taskId: string): Promise<boolean> {
+    const profileTask = (await (await col<HarnessTaskDoc>("harnessTasks")).scan())
+      .map(entry => entry.doc)
+      .filter(task => task.parentTaskId === taskId)
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0]
+    if (profileTask) {
+      this.activeTaskId = taskId
+      if (!this.activeSessionId) this.activeSessionId = profileTask.sessionId
+      const workspace = await this.ensureTaskWorkspace(taskId, profileTask.mutating)
+      const configuredProvider = await getCodeConfig("default_provider")
+      const configuredModel = configuredProvider
+        ? await getCodeConfig(`provider_model_${configuredProvider}`)
+        : ""
+      const result = await new ProfileHarness().run({
+        objective: profileTask.title,
+        sessionId: profileTask.sessionId,
+        workspace: workspace.worktreePath,
+        policy: profileTask.executionPolicy,
+        provider: configuredProvider || undefined,
+        model: configuredModel || undefined,
+        resumeTaskId: profileTask.taskId,
+        parentTaskId: taskId,
+        // `task resume` already asks the operator for explicit confirmation.
+        approve: async () => "approve",
+      })
+      if (result.status === "completed") {
+        if (result.complexity !== "conversation") {
+          await this.integrateTaskWorkspace(taskId, "auto")
+        }
+        this.scribe.updateTaskStatus(taskId, "completed")
+        this.emitTaskUpdate("completed")
+        return true
+      }
+      this.scribe.updateTaskStatus(taskId, "paused")
+      this.emitTaskUpdate("paused")
+      return false
+    }
+
+    const plan = await this.scribe.getPlan(taskId)
+    if (!plan) {
+      log.warn(`[coordinator-manager] ✗ Cannot resume ${taskId}: no persisted plan`)
+      return false
+    }
+    const recovery = this.scribe.getLatestRecoveryPoint(taskId)
+    const startLevel = recovery?.level ?? 0
+    const phases = JSON.parse(plan.phases_json) as ParsedPhase[]
+
+    this.activeTaskId = taskId
+    if (!this.activeSessionId) this.activeSessionId = this.scribe.createSession(process.cwd())
+    const turnId = this.scribe.createTurn(this.activeSessionId, `Resume task ${taskId}`)
+    this.scribe.updateTaskStatus(taskId, "running")
+    log.info(`[coordinator-manager] ▶️  Resuming task ${taskId} at level ${startLevel} (${phases.length} phase(s) in plan)`)
+
+    const taskStartMs = performance.now()
+    const completed = await this.executePhaseLoop(
+      phases,
+      plan.description,
+      plan.arch_narrative ?? undefined,
+      plan.interfaces ?? undefined,
+      plan.mode as SessionMode,
+      plan.provider,
+      plan.model,
+      undefined,
+      startLevel,
+    )
+    if (completed) {
+      await this.finalizeTask(taskStartMs, turnId, "Task resumed and completed", { mode: plan.mode as SessionMode })
+      log.info(`[coordinator-manager] ✅ Resumed task ${taskId} completed`)
+    }
+    return completed
+  }
+
+  /** Write worker activity for level-based tracking. */
   private writeWorkerActivity(
     phase: PhaseName,
     level: number,
@@ -1356,11 +1644,19 @@ export class CoordinatorManager extends CoordinatorBase {
   ): void {
     if (!this.activeSessionId) return
     try {
-      const sessionDb = getSessionDb(this.activeSessionId)
-      sessionDb.query(
-        `INSERT INTO worker_activity (session_id, worker, phase, level, status, input_tokens, output_tokens, started_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(this.activeSessionId, phase, phase, level, status, tokensIn, tokensOut, startedAt, completedAt)
+      void this.persistWorkerActivity({
+        id: `wa_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+        session_id: this.activeSessionId,
+        worker: phase,
+        phase,
+        level,
+        status,
+        current_action: status === "running" ? `ejecutando ${phase}` : phase,
+        input_tokens: tokensIn,
+        output_tokens: tokensOut,
+        started_at: startedAt,
+        completed_at: completedAt,
+      })
       this.onIpcEvent?.("worker_update", {
         worker: phase,
         phase,
@@ -1371,25 +1667,59 @@ export class CoordinatorManager extends CoordinatorBase {
         transversal: phase === "security",
       })
     } catch {
-      // worker_activity is non-critical — never block on write failure
+      // worker activity is non-critical — never block on write failure
     }
   }
 
+  private async persistWorkerActivity(doc: WorkerActivityDoc): Promise<void> {
+    const workerActivity = await col<WorkerActivityDoc>("workerActivity")
+    await workerActivity.put(doc.id, doc)
+  }
+
   /** Returns the highest-capability model ID available for the configured provider */
-  private getHighestCapabilityModel(): string | null {
+  private async getHighestCapabilityModel(): Promise<string | null> {
     try {
-      const db = getDb()
-      // Try to find a model tagged as top-tier; fall back to configured model
-      const row = db.query<{ id: string }, []>(
-        `SELECT id FROM models WHERE tier = 'top' ORDER BY id DESC LIMIT 1`
-      ).get()
-      return row?.id ?? null
+      const rows = await (await col<ModelDoc>("models")).scan()
+      const top = rows
+        .map((entry) => entry.doc)
+        .filter((model) => model.enabled && (model.capabilities ?? "").toLowerCase().includes("top"))
+        .sort((a, b) => b.id.localeCompare(a.id))[0]
+      return top?.id ?? null
     } catch {
       return null
     }
   }
 
   /** Run ForensicAgent as an on-demand temporary worker */
+  /**
+   * Public entry point for invoking ForensicAgent OUTSIDE the normal phase loop —
+   * used when a task exhausts its process-level retries (FailureRecoveryScheduler)
+   * without ever hitting a single worker's iteration limit. Requires startAll() to
+   * have been called first (workspace/tools/secrets must be initialized).
+   */
+  async analyzeFailure(description: string, errorSummary: string, mode: "auto" | "approval" = "auto"): Promise<CoordinatorResult> {
+    const taskId = this.activeTaskId || `forensic-${Date.now()}`
+    if (!this.activeTaskId) this.activeTaskId = taskId
+    const syntheticTask: CoordinatorTask = {
+      taskId,
+      phaseId: this.scribe.createPhase(taskId, "forensic", "forensic"),
+      phase: "forensic",
+      description: `Analyze why this task failed repeatedly across retries and never succeeded: ${description}. Last error: ${errorSummary.slice(0, 500)}`,
+      narrative: "",
+      mode,
+      projectPath: process.cwd(),
+    }
+    return this.runForensicAgent("bee" as PhaseName, syntheticTask, {
+      taskId,
+      phaseId: syntheticTask.phaseId,
+      coordinator: "bee",
+      status: "failed",
+      narrativeEntry: errorSummary,
+      filesModified: [],
+      durationMs: 0,
+    })
+  }
+
   private async runForensicAgent(
     failedPhase: PhaseName,
     originalTask: CoordinatorTask,
@@ -1402,7 +1732,7 @@ export class CoordinatorManager extends CoordinatorBase {
       taskId,
       phaseId,
       phase: "forensic",
-      description: `Analyze why ${failedPhase} failed after exhausting iterations. Failed narrative: ${failedResult.narrativeEntry?.slice(0, 500)}`,
+      description: originalTask.description || `Analyze why ${failedPhase} failed after exhausting iterations. Failed narrative: ${failedResult.narrativeEntry?.slice(0, 500)}`,
       narrative: originalTask.narrative || "",
       mode: originalTask.mode,
       projectPath: workspace.worktreePath,
@@ -1417,14 +1747,15 @@ export class CoordinatorManager extends CoordinatorBase {
 
     const forensicWorker = new (Worker as any)(new URL("./forensic.worker.ts", import.meta.url), { smol: true }) as Bun.Worker
 
+    const tools = getToolsForCoordinator("forensic" as PhaseName, this.allTools)
+    const compiledContext = await this.compileWorkerContext("forensic" as PhaseName, forensicTask.description, forensicTask.narrative)
+    const msg: ManagerToWorkerMessage = {
+      type: "TASK",
+      task: { ...forensicTask, tools: tools as any, compiledContext },
+    }
+
     return new Promise((resolve) => {
       const resolverKey = `${taskId}:${phaseId}`
-      const tools = getToolsForCoordinator("forensic" as PhaseName, this.allTools)
-      const compiledContext = this.compileWorkerContext("forensic" as PhaseName, forensicTask.description, forensicTask.narrative)
-      const msg: ManagerToWorkerMessage = {
-        type: "TASK",
-        task: { ...forensicTask, tools: tools as any, compiledContext },
-      }
 
       const timeout = setTimeout(() => {
         forensicWorker.terminate()
@@ -1477,7 +1808,11 @@ export class CoordinatorManager extends CoordinatorBase {
     return { action: "escalate", detail: "ForensicAgent did not produce a parseable recommendation." }
   }
 
-  /** Parse reviewer verdict from its narrative */
+  /**
+   * Fallback string-match when the reviewer didn't call `submit_review_verdict`
+   * (e.g. a weaker model that ignores tool calls). The primary path is the
+   * structured decision handled above — deterministic checklist over free text.
+   */
   private parseReviewerVerdict(narrative: string): "aprobado" | "aprobado_con_observaciones" | "rechazado" {
     const normalized = narrative.toLowerCase()
     if (normalized.includes("aprobado_con_observaciones") || normalized.includes("aprobado con observaciones")) {
@@ -1521,13 +1856,14 @@ export class CoordinatorManager extends CoordinatorBase {
 
     const libWorker = new (Worker as any)(new URL("./librarian.worker.ts", import.meta.url), { smol: true }) as Bun.Worker
 
+    const tools = getToolsForCoordinator("librarian" as PhaseName, this.allTools)
+    const compiledContext = await this.compileWorkerContext("librarian" as PhaseName, libTask.description, libTask.narrative)
+    const msg: ManagerToWorkerMessage = {
+      type: "TASK",
+      task: { ...libTask, tools: tools as any, compiledContext },
+    }
+
     return new Promise((resolve) => {
-      const tools = getToolsForCoordinator("librarian" as PhaseName, this.allTools)
-      const compiledContext = this.compileWorkerContext("librarian" as PhaseName, libTask.description, libTask.narrative)
-      const msg: ManagerToWorkerMessage = {
-        type: "TASK",
-        task: { ...libTask, tools: tools as any, compiledContext },
-      }
 
       const timeout = setTimeout(() => {
         libWorker.terminate()
@@ -1559,8 +1895,15 @@ export class CoordinatorManager extends CoordinatorBase {
     })
   }
 
-  private dispatchPhase(phase: PhaseName, task: CoordinatorTask): Promise<CoordinatorResult> {
+  private async dispatchPhase(phase: PhaseName, task: CoordinatorTask): Promise<CoordinatorResult> {
+    const tools = getToolsForCoordinator(phase, this.allTools)
+    const compiledContext = await this.compileWorkerContext(phase, task.description, task.narrative)
+
     return new Promise((resolve, reject) => {
+      if (!this.workers.has(phase)) {
+        this.createWorker(phase)
+        log.info(`[coordinator-manager] Activated ${phase} on demand`)
+      }
       const worker = this.workers.get(phase)
       if (!worker) {
         reject(new Error(`No worker for phase: ${phase}`))
@@ -1580,12 +1923,6 @@ export class CoordinatorManager extends CoordinatorBase {
       }, 300_000)
       this.pendingTimeouts.set(resolverKey, timeout)
 
-    // Get tools for this coordinator
-    const tools = getToolsForCoordinator(phase, this.allTools)
-
-    // Compile worker context (skills, playbook, scratchpad) for this phase
-    const compiledContext = this.compileWorkerContext(phase, task.description, task.narrative)
-
     // Send task with tools + compiled context via string fast-path (SPEC §3.1: ~500 ns latency)
     const msg: ManagerToWorkerMessage = {
       type: "TASK",
@@ -1600,16 +1937,15 @@ export class CoordinatorManager extends CoordinatorBase {
 
   /** Compile worker context: relevant skills, playbook rules, and scratchpad notes.
    *  Runs on main thread where DB is available; injects as string into CoordinatorTask. */
-  private compileWorkerContext(phase: PhaseName, taskDescription: string, narrative: string): string {
-    const db = getDb()
+  private async compileWorkerContext(phase: PhaseName, taskDescription: string, narrative: string): Promise<string> {
     const sections: string[] = []
 
     // 0. Project context — injected for ALL coordinators (especially Bee)
     // This gives every worker a global map of the project without having to discover it
     try {
-      const activeSession = db.query<any, []>(
-        "SELECT id FROM code_sessions WHERE status = 'active' ORDER BY last_active DESC LIMIT 1"
-      ).get()
+      const activeSession = (await (await col<CodeSessionDoc>("codeSessions")).findBy("status", "active"))
+        .map((entry) => entry.doc)
+        .sort((a, b) => b.last_active.localeCompare(a.last_active))[0]
       if (activeSession?.id) {
         const projectCtx = getProjectContext(activeSession.id)
         if (projectCtx) {
@@ -1620,10 +1956,10 @@ export class CoordinatorManager extends CoordinatorBase {
       // skip if no active session or cache miss
     }
 
-    // 1. Skills — minimal + FTS5-discovered for this phase
+    // 1. Skills — minimal + HiveDB-discovered for this phase
     try {
-      const minimalSkills = getMinimalSkills()
-      const discoveredSkills = selectSkills(`${taskDescription} ${phase}`)
+      const minimalSkills = await getMinimalSkills()
+      const discoveredSkills = await selectSkills(`${taskDescription} ${phase}`)
       const seen = new Set<string>()
       const allSkills: SkillDescriptor[] = []
       for (const s of [...minimalSkills, ...discoveredSkills]) {
@@ -1642,11 +1978,11 @@ export class CoordinatorManager extends CoordinatorBase {
 
     // 2. Playbook rules relevant to this coordinator
     try {
-      const rules = db.query<any, [string]>(`
-        SELECT rule, confidence FROM code_playbook
-        WHERE active = 1 AND (coordinator = ? OR coordinator IS NULL)
-        ORDER BY confidence DESC LIMIT 5
-      `).all(phase)
+      const rules = (await (await col<CodePlaybookDoc>("codePlaybook")).findBy("active", true))
+        .map((entry) => entry.doc)
+        .filter((rule) => rule.coordinator === phase || rule.coordinator == null)
+        .sort((a, b) => b.confidence - a.confidence)
+        .slice(0, 5)
       if (rules.length > 0) {
         let playbookSection = "# PLAYBOOK RULES\nFollow these verified patterns:\n\n"
         for (const r of rules) {
@@ -1655,38 +1991,71 @@ export class CoordinatorManager extends CoordinatorBase {
         sections.push(playbookSection)
       }
     } catch {
-      // code_playbook may not have rows yet — skip silently
+      // Playbook may not have rows yet — skip silently
     }
 
-    // 3. Agent memory from previous sessions (FTS5-filtered by relevance + domain type)
+    // 3. Agent memory from previous sessions (filtered by relevance + domain type)
     try {
-      const memRepo = new MemoryRepo()
       const projectId = process.cwd()
-      const memoryTypeFilter: Partial<Record<PhaseName, import("@johpaz/hivecode-core/storage/memory-repo").MemoryType[]>> = {
+      const memoryTypeFilter: Partial<Record<PhaseName, string[]>> = {
         architecture:    ["pattern", "contract"],
         security:        ["antipattern"],
         test:            ["forensic_lesson"],
+        verifier:        ["contract", "forensic_lesson"],
         reviewer:        ["pattern", "antipattern", "contract", "convention", "forensic_lesson"],
       }
       const typeFilter = memoryTypeFilter[phase]
-      const memories = typeFilter
-        ? memRepo.searchByTypeAndRelevance(projectId, `${taskDescription} ${phase}`, typeFilter, 8)
-        : memRepo.searchByRelevance(projectId, `${taskDescription} ${phase}`, 8)
+      const query = `${taskDescription} ${phase}`.toLowerCase()
+      const terms = query.split(/\W+/).filter(term => term.length > 2)
+      const memories = (await (await col<AgentMemoryDoc>("agentMemory")).findBy("project_id", projectId))
+        .map((entry) => entry.doc)
+        .filter((memory) => !memory.deprecated)
+        .filter((memory) => !typeFilter || typeFilter.includes(memory.type))
+        .map((memory) => ({
+          memory,
+          score: terms.reduce((sum, term) => sum + (memory.content.toLowerCase().includes(term) ? 1 : 0), 0),
+        }))
+        .filter((entry) => entry.score > 0)
+        .sort((a, b) => b.score - a.score || (b.memory.confidence ?? 0) - (a.memory.confidence ?? 0))
+        .slice(0, 8)
+        .map((entry) => entry.memory)
       if (memories.length > 0) {
         let memSection = "# PROJECT MEMORY (from previous sessions)\nKnowledge accumulated by the swarm:\n\n"
         for (const m of memories) {
           memSection += `[${m.type}|${m.severity}] ${m.content}\n`
-          memRepo.updateLastUsed(m.id)
         }
         sections.push(memSection)
       }
     } catch {
-      // memory.db may not be initialized in test/worker context — skip silently
+      // Project memory is advisory — skip silently if unavailable.
     }
 
     // 4. Recent scratchpad / narrative context
     if (narrative) {
       sections.push(`# PROJECT NARRATIVE\n${narrative}`)
+    }
+
+    // 4.5 Decision traces — pushed proactively to parallel writers, not just
+    // discoverable via read_narrative. Cognition Principle 1 ("share full agent
+    // traces, not just individual messages"): a bare `decision` string lets two
+    // parallel writers (backend/frontend/data_scientist) make conflicting
+    // assumptions the blackboard can't reconcile after the fact; seeing what was
+    // considered and discarded (`options`/`context`) before they write is what
+    // catches the conflict before it becomes a bug.
+    const traceReaders: PhaseName[] = ["backend", "frontend", "data_scientist", "reviewer", "verifier"]
+    if (traceReaders.includes(phase)) {
+      try {
+        const activeDecisions = this.scribe.readDecisions("active").slice(0, 5)
+        if (activeDecisions.length > 0) {
+          let traceSection = "# DECISION TRACES (ADRs activos)\nQué se decidió, qué se consideró y por qué — no solo el resultado:\n\n"
+          for (const adr of activeDecisions) {
+            traceSection += `## ${adr.title}\nContexto: ${adr.context.slice(0, 300)}\nOpciones consideradas: ${adr.options.slice(0, 300)}\nDecisión: ${adr.decision.slice(0, 300)}\n\n`
+          }
+          sections.push(traceSection)
+        }
+      } catch {
+        // Decision traces are advisory — skip silently if unavailable.
+      }
     }
 
     // 5. Learning Harness — inject known failure patterns for Architecture coordinator
@@ -1717,6 +2086,10 @@ export class CoordinatorManager extends CoordinatorBase {
 
   private handleWorkerMessage(name: PhaseName, rawMsg: WorkerToManagerMessage | string): void {
     const msg = typeof rawMsg === "string" ? JSON.parse(rawMsg) as WorkerToManagerMessage : rawMsg
+    // A worker that talks back is healthy — reset its consecutive-crash counter
+    // so a fresh crash later starts backoff from scratch rather than tripping
+    // the circuit breaker on old, already-recovered crashes.
+    if (this.workerCrashCounts.get(name)) this.workerCrashCounts.set(name, 0)
     if (msg.type === "RESULT" && msg.result) {
       // NOTE: We intentionally do NOT emit onNarrativeChunk here for the final
       // agent response, because the caller (executeTask via runTask) already
@@ -2019,11 +2392,11 @@ export class CoordinatorManager extends CoordinatorBase {
           : msg.toolName === "fs_write" ? "created" : "modified"
         this.evaluateFileRisk(logicalRiskPath, riskOp as "created" | "modified" | "deleted", name)
 
-        // Sync code_fts index after successful write/edit (fire-and-forget)
+        // Sync code search index after successful write/edit (fire-and-forget)
         if (this.activeSessionId) {
           const absolutePath = this.workspacePath(riskFilePath, workspaceRoot)
           updateFileIndex(this.activeSessionId, absolutePath, workspaceRoot).catch((err) => {
-            log.debug(`[coordinator-manager] code_fts sync failed for ${absolutePath}: ${(err as Error).message}`)
+            log.debug(`[coordinator-manager] code search sync failed for ${absolutePath}: ${(err as Error).message}`)
           })
         }
 

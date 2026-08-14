@@ -1,17 +1,18 @@
 /**
  * MCP Hot Reload
  *
- * Watches for MCP server changes in DB and updates MCP Manager automatically
+ * Watches for MCP server changes in HiveDB and updates MCP Manager automatically
  * 
  * Architecture: Direct Connection
- * - MCP servers are tracked in DB (mcp_servers table)
- * - MCP tools are loaded at runtime from connected servers (not stored in DB)
+ * - MCP servers are tracked in the `mcpServers` collection.
+ * - MCP tools are loaded at runtime from connected servers.
  */
 
-import { getDb } from "../storage/sqlite";
+import { col } from "../storage/hive";
+import type { McpServerDoc } from "../storage/collections";
 import { logger } from "../utils/logger";
 import { decryptConfig } from "../storage/crypto";
-import { syncMCPToolsToDB, syncMCPToolsToFTS, clearMCPToolsFromDB } from "./tool-sync";
+import { syncMCPToolsToDB, syncMCPToolsToIndex, clearMCPToolsFromDB } from "./tool-sync";
 import type { MCPClientManager } from "@johpaz/hivecode-mcp";
 
 const log = logger.child("mcp:hot-reload");
@@ -56,13 +57,13 @@ export function stopMCPHotReload(): void {
 }
 
 /**
- * Sync MCP servers from DB to MCP Manager
+ * Sync MCP servers from HiveDB to MCP Manager.
  * Note: Only server status is tracked, tools are loaded at runtime
  */
 async function syncMCPServers(mcpManager: MCPClientManager): Promise<void> {
   try {
-    const db = getDb();
-    const dbServers = db.query(`SELECT * FROM mcp_servers WHERE enabled = 1`).all() as Record<string, any>[];
+    const serversCol = await col<McpServerDoc>("mcpServers");
+    const dbServers = (await serversCol.findBy("enabled", true)).map((entry) => entry.doc);
 
     const currentServerNames = new Set(dbServers.map(s => s.id || s.name));
 
@@ -101,17 +102,17 @@ async function syncMCPServers(mcpManager: MCPClientManager): Promise<void> {
 
           // Get tools count and update status
           const tools = mcpManager.getServerTools(serverName) || [];
-          db.query(`UPDATE mcp_servers SET status = ?, tools_count = ? WHERE id = ?`).run("connected", tools.length, serverName);
+          await patchServer(serverName, { status: "connected", tools_count: tools.length });
 
-          // Persist MCP tool definitions to DB and FTS5
+          // Persist MCP tool definitions to HiveDB and the capability index
           // Use server.name (human-readable) for mcpToolId consistency with context-compiler
-          syncMCPToolsToDB(server.id || server.name, server.name || serverName, tools);
-          await syncMCPToolsToFTS();
+          await syncMCPToolsToDB(server.id || server.name, server.name || serverName, tools);
+          await syncMCPToolsToIndex();
 
           log.info(`MCP server ${serverName} connected: ${tools.length} tools available`);
         } catch (err) {
           log.error(`Failed to connect MCP server ${serverName}: ${(err as Error).message}`);
-          db.query(`UPDATE mcp_servers SET status = ? WHERE id = ?`).run("error", serverName);
+          await patchServer(serverName, { status: "error" });
         }
       }
     }
@@ -127,11 +128,10 @@ async function syncMCPServers(mcpManager: MCPClientManager): Promise<void> {
           delete currentConfig.servers[oldServerName];
           await mcpManager.updateConfig(currentConfig);
 
-          // Delete MCP tool definitions from DB and FTS5
-          clearMCPToolsFromDB(oldServerName);
+          // Delete MCP tool definitions from HiveDB and the capability index
+          await clearMCPToolsFromDB(oldServerName);
 
-          // Update DB status
-          db.query(`UPDATE mcp_servers SET status = ?, tools_count = 0 WHERE id = ?`).run("disconnected", oldServerName);
+          await patchServer(oldServerName, { status: "disconnected", tools_count: 0 });
 
           log.info(`MCP server ${oldServerName} disconnected`);
         } catch (err) {
@@ -144,4 +144,11 @@ async function syncMCPServers(mcpManager: MCPClientManager): Promise<void> {
   } catch (err) {
     log.error(`MCP server sync failed: ${(err as Error).message}`);
   }
+}
+
+async function patchServer(id: string, patch: Partial<McpServerDoc>): Promise<void> {
+  const servers = await col<McpServerDoc>("mcpServers");
+  const entry = await servers.get(id);
+  if (!entry) return;
+  await servers.put(id, { ...entry.doc, ...patch }, { expectedVersion: entry.version });
 }

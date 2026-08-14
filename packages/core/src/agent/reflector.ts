@@ -2,116 +2,75 @@
  * ACE Reflector — analyzes recent traces and produces insights.
  *
  * Runs in the background (never blocks the main agent loop).
- * Triggered by the tracer after N new traces.
- *
- * Output → `reflections` table → picked up by Curator.
+ * Output goes to the HiveDB `reflections` collection and is picked up by Curator.
  */
 
+import { col, nextId } from "../storage/hive"
+import type { CursorDoc, ReflectionDoc, TraceDoc } from "../storage/collections"
 import { logger } from "../utils/logger"
 
 const log = logger.child("reflector")
 
 const MAX_TRACES_TO_ANALYZE = 30
 const MIN_TRACES_TO_RUN = 10
+const CURSOR_ID = "reflector:lastTrace"
 
-/** Main entry point — called from tracer.ts */
 export async function runReflector(): Promise<void> {
   try {
-    const { getDb } = await import("../storage/sqlite")
-    const db = getDb()
+    log.info("[reflector] Starting reflection cycle...")
 
-    log.info(`[reflector] Starting reflection cycle...`)
+    const cursors = await col<CursorDoc>("cursors")
+    const cursorEntry = await cursors.get(CURSOR_ID)
+    const lastProcessedId = cursorEntry?.doc.value ?? null
 
-    // Fetch traces not yet covered by any reflection
-    log.debug(`[reflector] Querying last reflection ID...`)
-    const lastReflectionId = (db.query<any, []>(
-      "SELECT MAX(id) as mid FROM reflections"
-    ).get() as any)?.mid ?? 0
-    log.debug(`[reflector] Last reflection ID: ${lastReflectionId}`)
+    const traces = await col<TraceDoc>("traces")
+    let candidates = lastProcessedId
+      ? await traces.scan({ start: lastProcessedId })
+      : await traces.scan({})
+    if (lastProcessedId && candidates[0]?.id === lastProcessedId) candidates = candidates.slice(1)
 
-    // Get last processed trace ID from reflections
-    log.debug(`[reflector] Querying last processed trace ID with json_each...`)
-    let lastProcessedTrace = 0
-    try {
-      const result = (db.query<any, []>(
-        `SELECT MAX(CAST(json_each.value AS INTEGER)) as max_id
-         FROM reflections, json_each(reflections.trace_ids)
-         WHERE reflections.id = (SELECT MAX(id) FROM reflections)`
-      ).get() as any)?.max_id ?? 0
-      lastProcessedTrace = result
-      log.debug(`[reflector] Last processed trace ID: ${lastProcessedTrace}`)
-    } catch (jsonErr) {
-      log.error(`[reflector] json_each query failed:`, jsonErr)
-      log.error(`[reflector] Full error details:`, {
-        message: (jsonErr as Error).message,
-        stack: (jsonErr as Error).stack,
-        errno: (jsonErr as any).errno,
-        byteOffset: (jsonErr as any).byteOffset,
-      })
-      throw jsonErr // Re-throw to see full stack trace in main catch
-    }
+    const traceEntries = candidates.slice(0, MAX_TRACES_TO_ANALYZE)
+    const traceDocs = traceEntries.map((entry) => entry.doc)
+    log.debug(`[reflector] Fetched ${traceDocs.length} traces`)
 
-    log.debug(`[reflector] Fetching traces from DB, lastProcessedTrace=${lastProcessedTrace}, limit=${MAX_TRACES_TO_ANALYZE}`)
-    const traces = db.query<any, [number, number]>(`
-      SELECT id, agent_id, agent_name, tool_used, input_summary,
-             output_summary, success, error_message, duration_ms, tokens_used, created_at
-      FROM traces
-      WHERE id > ?
-      ORDER BY id ASC
-      LIMIT ?
-    `).all(lastProcessedTrace, MAX_TRACES_TO_ANALYZE)
-
-    log.debug(`[reflector] Fetched ${traces.length} traces from DB`)
-
-    if (traces.length < MIN_TRACES_TO_RUN) {
-      log.debug(`[reflector] Not enough traces (${traces.length}/${MIN_TRACES_TO_RUN}), skipping`)
+    if (traceDocs.length < MIN_TRACES_TO_RUN) {
+      log.debug(`[reflector] Not enough traces (${traceDocs.length}/${MIN_TRACES_TO_RUN}), skipping`)
       return
     }
 
-    log.info(`[reflector] Analyzing ${traces.length} traces...`)
-
-    const insights = analyzeTracesLocally(traces)
-
-    if (insights.length === 0) {
-      log.debug("[reflector] No insights generated")
-      return
+    const insights = analyzeTracesLocally(traceDocs)
+    if (insights.length > 0) {
+      const reflections = await col<ReflectionDoc>("reflections")
+      const traceIds = JSON.stringify(traceEntries.map((entry) => entry.id))
+      for (const insight of insights) {
+        const id = await nextId("reflections")
+        await reflections.put(id, {
+          id,
+          trace_ids: traceIds,
+          insight_type: insight.type,
+          description: insight.description,
+          affected_tools: insight.affectedTools ? JSON.stringify(insight.affectedTools) : null,
+          affected_agents: insight.affectedAgents ? JSON.stringify(insight.affectedAgents) : null,
+          confidence: insight.confidence,
+          created_at: Date.now(),
+        }, { expectedVersion: 0 })
+      }
+      log.info(`[reflector] Generated ${insights.length} insights`)
     }
 
-    const traceIds = JSON.stringify(traces.map((t: any) => t.id))
+    const newCursor = traceEntries[traceEntries.length - 1].id
+    await cursors.put(CURSOR_ID, { value: newCursor, updated_at: Date.now() }, { expectedVersion: cursorEntry?.version ?? 0 })
 
-    for (const insight of insights) {
-      db.query(`
-        INSERT INTO reflections (trace_ids, insight_type, description, affected_tools, affected_agents, confidence)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(
-        traceIds,
-        insight.type,
-        insight.description,
-        insight.affectedTools ? JSON.stringify(insight.affectedTools) : null,
-        insight.affectedAgents ? JSON.stringify(insight.affectedAgents) : null,
-        insight.confidence,
-      )
-    }
-
-    log.info(`[reflector] Generated ${insights.length} insights`)
-
-    // Trigger curator
     const { runCurator } = await import("./curator")
     await runCurator()
-    
-    log.info(`[reflector] Reflection cycle completed successfully`)
+    log.info("[reflector] Reflection cycle completed successfully")
   } catch (err) {
-    log.error(`[reflector] Error during reflection:`, {
+    log.error("[reflector] Error during reflection:", {
       message: (err as Error).message,
       stack: (err as Error).stack,
-      errno: (err as any).errno,
-      byteOffset: (err as any).byteOffset,
-      code: (err as any).code,
     })
   }
 }
-
-// ─── Local analysis (heuristic, no LLM call needed for basic patterns) ────────
 
 interface Insight {
   type: "success_pattern" | "failure_pattern" | "optimization" | "ethics_violation"
@@ -121,18 +80,14 @@ interface Insight {
   confidence: number
 }
 
-function analyzeTracesLocally(traces: any[]): Insight[] {
+function analyzeTracesLocally(traces: TraceDoc[]): Insight[] {
   const insights: Insight[] = []
 
-  // ── Failure patterns ─────────────────────────────────────────────────────
-  const failures = traces.filter((t: any) => !t.success)
+  const failures = traces.filter((trace) => !trace.success)
   if (failures.length > 3) {
-    // Group by tool
     const toolFailures: Record<string, number> = {}
-    for (const f of failures) {
-      if (f.tool_used) {
-        toolFailures[f.tool_used] = (toolFailures[f.tool_used] || 0) + 1
-      }
+    for (const failure of failures) {
+      if (failure.tool_used) toolFailures[failure.tool_used] = (toolFailures[failure.tool_used] || 0) + 1
     }
     for (const [tool, count] of Object.entries(toolFailures)) {
       if (count >= 3) {
@@ -146,13 +101,12 @@ function analyzeTracesLocally(traces: any[]): Insight[] {
     }
   }
 
-  // ── Slow tools ───────────────────────────────────────────────────────────
   const slowThresholdMs = 5000
   const slowTools: Record<string, number[]> = {}
-  for (const t of traces) {
-    if (t.tool_used && t.duration_ms > slowThresholdMs) {
-      if (!slowTools[t.tool_used]) slowTools[t.tool_used] = []
-      slowTools[t.tool_used].push(t.duration_ms)
+  for (const trace of traces) {
+    if (trace.tool_used && (trace.duration_ms ?? 0) > slowThresholdMs) {
+      slowTools[trace.tool_used] ??= []
+      slowTools[trace.tool_used].push(trace.duration_ms!)
     }
   }
   for (const [tool, durations] of Object.entries(slowTools)) {
@@ -167,13 +121,12 @@ function analyzeTracesLocally(traces: any[]): Insight[] {
     }
   }
 
-  // ── High success pattern ─────────────────────────────────────────────────
   const successByTool: Record<string, { ok: number; total: number }> = {}
-  for (const t of traces) {
-    if (!t.tool_used) continue
-    if (!successByTool[t.tool_used]) successByTool[t.tool_used] = { ok: 0, total: 0 }
-    successByTool[t.tool_used].total++
-    if (t.success) successByTool[t.tool_used].ok++
+  for (const trace of traces) {
+    if (!trace.tool_used) continue
+    successByTool[trace.tool_used] ??= { ok: 0, total: 0 }
+    successByTool[trace.tool_used].total++
+    if (trace.success) successByTool[trace.tool_used].ok++
   }
   for (const [tool, stats] of Object.entries(successByTool)) {
     if (stats.total >= 5 && stats.ok / stats.total >= 0.9) {
@@ -186,8 +139,7 @@ function analyzeTracesLocally(traces: any[]): Insight[] {
     }
   }
 
-  // ── High token usage ─────────────────────────────────────────────────────
-  const highTokenTraces = traces.filter((t: any) => t.tokens_used > 4000)
+  const highTokenTraces = traces.filter((trace) => (trace.tokens_used ?? 0) > 4000)
   if (highTokenTraces.length > 3) {
     insights.push({
       type: "optimization",

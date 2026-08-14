@@ -113,7 +113,7 @@ fn draw_right_base(canvas: &mut Canvas, x: u16, y: u16, _w: u16, version: &str) 
     canvas.print(x, row, "local-first", Style::new().fg(SECONDARY));
     canvas.print(x + 11, row, " · ", Style::new().fg(DIM));
     canvas.print(x + 14, row, "bun", Style::new().fg(WHITE));
-    canvas.print(x + 17, row, " · sqlite + FTS5 · blackboard", Style::new().fg(SECONDARY));
+    canvas.print(x + 17, row, " · HiveDB · blackboard", Style::new().fg(SECONDARY));
     row += 1;
 
     canvas.print(x, row, "@johpaz", Style::new().fg(SECONDARY));
@@ -126,7 +126,7 @@ fn draw_right_base(canvas: &mut Canvas, x: u16, y: u16, _w: u16, version: &str) 
     row
 }
 
-/// Boot lines dinámicas — reflejan el estado real recibido vía IPC (que a su vez viene de SQLite).
+/// Boot lines dinámicas — reflejan el estado real recibido vía IPC y persistido en HiveDB.
 fn draw_boot_lines(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &AppState) -> u16 {
     let mut row = y;
 
@@ -146,10 +146,10 @@ fn draw_boot_lines(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &AppState
     } else {
         "iniciando workers...".to_string()
     };
-    let sqlite_txt = if has_session {
-        format!("sqlite WAL · sesión {}", &state.session.session_id.get(..8).unwrap_or("?"))
+    let db_txt = if has_session {
+        format!("HiveDB · sesión {}", &state.session.session_id.get(..8).unwrap_or("?"))
     } else {
-        "sqlite + FTS5 · WAL mode".to_string()
+        "HiveDB · blackboard".to_string()
     };
     let mode_txt = format!(
         "{} · modo {} · {} · {}",
@@ -165,7 +165,7 @@ fn draw_boot_lines(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &AppState
 
     let lines: &[(&str, String, bool, bool)] = &[
         ("load ", load_txt,      false, worker_count > 0),
-        ("db   ", sqlite_txt,    false, has_session),
+        ("db   ", db_txt,        false, has_session),
         ("mode ", mode_txt,      false, !provider.trim().is_empty()),
         ("task ", task_txt,      false, state.harness.active_task_id.is_some()),
         ("work ", workspace_txt, false, state.harness.active_workspace_status.is_some()),

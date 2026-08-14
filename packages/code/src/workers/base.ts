@@ -1,29 +1,23 @@
-import { FileRisksRepo } from "@johpaz/hivecode-core/db"
-import type { Database } from "bun:sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { FileRiskDoc } from "@johpaz/hivecode-core/storage/collections"
 import type { Blackboard } from "../context/blackboard.ts"
 import type { ConflictDetector } from "../context/conflict-detector.ts"
 import type { IpcEmitter } from "../context/ipc-emitter.ts"
 
 export abstract class BaseWorker {
-  protected fileRisks: FileRisksRepo
-
   constructor(
     protected name: string,
     protected sessionId: string,
-    protected db: Database,
+    protected db: unknown,
     protected blackboard: Blackboard,
     protected detector: ConflictDetector,
     protected ipc: IpcEmitter,
-  ) {
-    this.fileRisks = new FileRisksRepo(db)
-  }
+  ) {}
 
-  /** Llamar antes de tocar cualquier archivo — detecta conflictos y registra riesgo */
+  /** Llamar antes de tocar cualquier archivo: detecta conflictos y registra riesgo. */
   protected async safeWrite(filePath: string, action: () => Promise<void>): Promise<void> {
-    // 1. Leer contexto relevante del blackboard
-    const context = this.blackboard.readRelevant(this.name, { filePath })
+    await this.blackboard.readRelevant(this.name, { filePath })
 
-    // 2. Detectar conflictos — bloquear si hay críticos
     const conflicts = await this.detector.checkBeforeWrite(this.name, filePath)
     const hasCritical = conflicts.some(c => c.severity === "critical")
     if (hasCritical) {
@@ -36,23 +30,11 @@ export abstract class BaseWorker {
       return
     }
 
-    // 3. Registrar que voy a tocar este archivo
-    this.fileRisks.upsert({
-      session_id: this.sessionId,
-      file_path: filePath,
-      risk_level: conflicts.some(c => c.severity === "high") ? "high" : "medium",
-      operation: "modified",
-      adr_ref: null,
-      reason: null,
-      agent: this.name,
-    })
-
+    await this.recordFileRisk(filePath, conflicts.some(c => c.severity === "high") ? "high" : "medium")
     await this.blackboard.write(this.name, "observation", `Iniciando escritura en ${filePath}`, { filePath })
 
-    // 4. Ejecutar acción
     await action()
 
-    // 5. Confirmar finalización
     await this.blackboard.write(this.name, "observation", `Completada escritura en ${filePath}`, { filePath })
 
     this.ipc.emit("file_risk_update", {
@@ -63,7 +45,7 @@ export abstract class BaseWorker {
     })
   }
 
-  /** Publicar razonamiento — va al blackboard y al TUI como ReasoningChunk */
+  /** Publicar razonamiento: va al blackboard y al TUI como ReasoningChunk. */
   protected async think(reasoning: string, filePath?: string): Promise<void> {
     await this.blackboard.write(this.name, "reasoning", reasoning, { filePath })
     this.ipc.emit("reasoning_chunk", {
@@ -73,13 +55,34 @@ export abstract class BaseWorker {
     })
   }
 
-  /** Publicar una decisión al blackboard (visible para otros workers y Bee) */
+  /** Publicar una decision al blackboard, visible para otros workers y Bee. */
   protected async decide(decision: string, filePath?: string): Promise<void> {
     await this.blackboard.write(this.name, "decision", decision, { filePath })
   }
 
-  /** Registrar una observación sin bloquear */
+  /** Registrar una observacion sin bloquear. */
   protected async observe(observation: string, filePath?: string): Promise<void> {
     await this.blackboard.write(this.name, "observation", observation, { filePath })
+  }
+
+  private async recordFileRisk(filePath: string, riskLevel: string): Promise<void> {
+    const risks = await col<FileRiskDoc>("fileRisks")
+    const id = `${this.sessionId}:${this.name}:${filePath}`
+    const existing = await risks.get(id)
+    await risks.put(
+      id,
+      {
+        id,
+        session_id: this.sessionId,
+        file_path: filePath,
+        risk_level: riskLevel,
+        operation: "modified",
+        adr_ref: null,
+        reason: null,
+        agent: this.name,
+        updated_at: Date.now(),
+      },
+      { expectedVersion: existing?.version ?? 0 },
+    )
   }
 }

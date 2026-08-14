@@ -1,4 +1,3 @@
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { getMode, isWorkerBusy, isPaused, isCancelled } from "@johpaz/hivecode-code/modes"
 
 const COORDINATORS = ["architecture", "backend", "frontend", "security", "test", "devops"]

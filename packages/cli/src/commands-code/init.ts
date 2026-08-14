@@ -13,10 +13,49 @@
 import * as path from "node:path"
 
 import { hiveIntro, hiveOutro, hiveNote, hiveSpinner, hiveText, isCancel } from "../cli-ui.ts"
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type { CodeNarrativeDoc, CodeSessionDoc } from "@johpaz/hivecode-core/storage/collections"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 
 const log = logger.child("init")
+
+function nowIso(): string {
+  return new Date().toISOString()
+}
+
+async function getOrCreateSession(cwd: string): Promise<string> {
+  const sessions = await col<CodeSessionDoc>("codeSessions")
+  const existing = (await sessions.findBy("project_path", cwd))
+    .map((entry) => entry.doc)
+    .filter((session) => session.status === "active")
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0]
+  if (existing) return existing.id
+
+  const id = Bun.randomUUIDv7()
+  await sessions.put(id, {
+    id,
+    project_path: cwd,
+    status: "active",
+    created_at: nowIso(),
+    last_active: nowIso(),
+  }, { expectedVersion: 0 })
+  return id
+}
+
+async function appendInitNarrative(sessionId: string, coordinator: string, phase: string, entry: string): Promise<void> {
+  const id = Bun.randomUUIDv7()
+  await (await col<CodeNarrativeDoc>("codeNarrative")).put(id, {
+    id,
+    task_id: null,
+    session_id: sessionId,
+    coordinator,
+    phase,
+    entry,
+    is_draft: false,
+    is_override: false,
+    created_at: nowIso(),
+  }, { expectedVersion: 0 })
+}
 
 interface StackInfo {
   name: string
@@ -104,23 +143,9 @@ export async function init(pathArg?: string): Promise<void> {
   indexSpinner.start("Indexando codebase...")
 
   let indexResult = { indexed: 0, skipped: 0, durationMs: 0 }
+  let sessionId: string | null = null
   try {
-    const db = getDb()
-
-    // Ensure code schema is applied
-    const { CODE_SCHEMA } = await import("@johpaz/hivecode-code/narrative")
-    db.run(CODE_SCHEMA)
-
-    // Create or reuse a session for this init
-    const existingSession = db.query<any, [string]>(
-      "SELECT id FROM code_sessions WHERE project_path = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1"
-    ).get(cwd)
-
-    const sessionId = existingSession?.id ?? (() => {
-      const id = Bun.randomUUIDv7()
-      db.query("INSERT INTO code_sessions (id, project_path) VALUES (?, ?)").run(id, cwd)
-      return id
-    })()
+    sessionId = await getOrCreateSession(cwd)
 
     const { buildFullIndex } = await import("@johpaz/hivecode-code/agent/code-indexer" as any)
     indexResult = await buildFullIndex(sessionId, cwd)
@@ -147,11 +172,7 @@ export async function init(pathArg?: string): Promise<void> {
 
   // ── Step 4: Write first narrative entry ──────────────────────────────────
   try {
-    const db = getDb()
-    const sessionId = (db.query<any, [string]>(
-      "SELECT id FROM code_sessions WHERE project_path = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1"
-    ).get(cwd))?.id
-
+    sessionId = sessionId ?? await getOrCreateSession(cwd)
     if (sessionId) {
       const entry = [
         `## Inicialización — ${projectName}`,
@@ -161,10 +182,7 @@ export async function init(pathArg?: string): Promise<void> {
         readme ? `\n### README\n${readme.slice(0, 800)}` : "",
       ].filter(Boolean).join("\n")
 
-      db.query(`
-        INSERT INTO code_narrative (session_id, coordinator, phase, entry, is_draft, is_override)
-        VALUES (?, 'system', 'init', ?, 0, 0)
-      `).run(sessionId, entry)
+      await appendInitNarrative(sessionId, "system", "init", entry)
     }
   } catch (err) {
     log.warn("[init] Failed to write narrative entry:", (err as Error).message)
@@ -187,16 +205,9 @@ export async function init(pathArg?: string): Promise<void> {
   if (!isCancel(focus) && focus && typeof focus === "string") {
     // Store the focus area as context in narrative
     try {
-      const db = getDb()
-      const sessionId = (db.query<any, [string]>(
-        "SELECT id FROM code_sessions WHERE project_path = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1"
-      ).get(cwd))?.id
-
+      sessionId = sessionId ?? await getOrCreateSession(cwd)
       if (sessionId) {
-        db.query(`
-          INSERT INTO code_narrative (session_id, coordinator, phase, entry, is_draft, is_override)
-          VALUES (?, 'user', 'focus', ?, 0, 0)
-        `).run(sessionId, `Área de enfoque inicial: ${focus}`)
+        await appendInitNarrative(sessionId, "user", "focus", `Área de enfoque inicial: ${focus}`)
       }
     } catch { /* optional */ }
   }

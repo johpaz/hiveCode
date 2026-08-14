@@ -18,7 +18,7 @@ De todo lo que pasó, extrae SOLO lo que es accionable para sesiones futuras.
 ### Tipos de conocimiento a persistir (via write_memory tool):
 
 **pattern** — enfoque que funcionó y fue aprobado:
-"Las queries de búsqueda en este proyecto usan prepared statements con db.query() de Bun SQLite"
+"Las busquedas persistentes de este proyecto usan colecciones e indices HiveDB"
 
 **antipattern** — enfoque que causó fallos o fue rechazado:
 "Intentar agregar dependencias externas de caché viola el ADR-003 de este proyecto"

@@ -3,17 +3,14 @@
  *
  * Orden de ensamblaje:
  * 1. ÉTICA (capa constitucional, siempre completa, inmutable)
- * 2. IDENTIDAD DEL AGENTE (de la tabla agents)
+ * 2. IDENTIDAD DEL AGENTE (colección agents)
  * 3. HIVE ECOSYSTEM (system prompt directo para el coordinador)
- * 4. IDENTIDAD DEL USUARIO (de la tabla users)
- *
- * El Context Compiler agrega después:
- * - Playbook rules (ACE)
- * - Scratchpad notes
- * - Skills activos
+ * 4. IDENTIDAD DEL USUARIO (colección users)
  */
 
-import { getDb } from "../storage/sqlite"
+import { col } from "../storage/hive"
+import type { AgentDoc, EthicsDoc, UserDoc } from "../storage/collections"
+import { resolveUserId } from "../storage/onboarding"
 import { logger } from "../utils/logger"
 import { formatContext } from "../utils/toon"
 
@@ -24,39 +21,21 @@ export interface BuildSystemPromptOpts {
   userId?: string
 }
 
-/**
- * Construye el system prompt completo para un agente.
- *
- * Jerarquía:
- * 1. Ética (siempre completa, no se filtra, no se comprime)
- * 2. Identidad del agente (role, description, system_prompt)
- * 3. Hive Ecosystem (ya incluido en agents.system_prompt desde onboarding.ts)
- * 4. Identidad del usuario (nombre, preferencias, contexto)
- */
 export async function buildSystemPrompt(opts: BuildSystemPromptOpts): Promise<string> {
-  const db = getDb()
-  const { agentId = "main" } = opts
+  const { agentId = "main", userId } = opts
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // 1. ÉTICA — Capa constitucional (siempre completa)
-  // ──────────────────────────────────────────────────────────────────────────
-  const ethicsRules = db.query<any, []>(`
-    SELECT name, content, description
-    FROM ethics
-    WHERE enabled = 1 AND active = 1
-    ORDER BY is_default DESC, id ASC
-  `).all()
+  const ethics = await col<EthicsDoc>("ethics")
+  const ethicsRules = (await ethics.scan())
+    .map((entry) => entry.doc)
+    .filter((rule) => rule.enabled && rule.active)
+    .sort((a, b) => (b.is_default ? 1 : 0) - (a.is_default ? 1 : 0) || a.id.localeCompare(b.id))
 
   let ethicsSection = ""
   if (ethicsRules.length > 0) {
-    const ethicsContent = ethicsRules.map((rule: any) => {
-      return `## ${rule.name}\n${rule.content}`
-    }).join("\n\n")
-
+    const ethicsContent = ethicsRules.map((rule) => `## ${rule.name}\n${rule.content}`).join("\n\n")
     ethicsSection = `# ÉTICA Y REGLAS CONSTITUCIONALES\n\n${ethicsContent}\n\n`
     log.info(`[prompt-builder] Loaded ${ethicsRules.length} ethics rules`)
   } else {
-    // Ética por defecto si no hay reglas configuradas
     ethicsSection = `# ÉTICA Y REGLAS CONSTITUCIONALES\n\n` +
       `- Sé útil, inofensivo y honesto\n` +
       `- No generes contenido dañino, ilegal o peligroso\n` +
@@ -64,34 +43,17 @@ export async function buildSystemPrompt(opts: BuildSystemPromptOpts): Promise<st
       `- Si no sabes algo, admítelo\n\n`
   }
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // 2. IDENTIDAD DEL AGENTE
-  // ──────────────────────────────────────────────────────────────────────────
-  const agent = db.query<any, [string]>(`
-    SELECT id, name, role, description, system_prompt, tone, max_iterations, workspace
-    FROM agents
-    WHERE id = ?
-  `).get(agentId)
-
-  if (!agent) {
-    throw new Error(`Agent not found: ${agentId}`)
-  }
+  const agents = await col<AgentDoc>("agents")
+  const agent = (await agents.get(agentId))?.doc
+  if (!agent) throw new Error(`Agent not found: ${agentId}`)
 
   let agentSection = `# IDENTIDAD DEL AGENTE\n\n`
   agentSection += `**Nombre**: ${agent.name}\n`
   agentSection += `**Rol**: ${agent.role}\n`
-
-  if (agent.description) {
-    agentSection += `**Descripción**: ${agent.description}\n`
-  }
-
-  if (agent.tone) {
-    agentSection += `**Tono**: ${agent.tone}\n`
-  }
-
+  if (agent.description) agentSection += `**Descripción**: ${agent.description}\n`
+  if (agent.tone) agentSection += `**Tono**: ${agent.tone}\n`
   agentSection += `**Iteraciones máximas**: ${agent.max_iterations}\n\n`
 
-  // Workspace configuration
   const workspacePath = agent.workspace || null
   if (workspacePath) {
     agentSection += `# WORKSPACE — ESPACIO DE TRABAJO EXCLUSIVO\n\n`
@@ -100,43 +62,47 @@ export async function buildSystemPrompt(opts: BuildSystemPromptOpts): Promise<st
     agentSection += `1. **TODAS** tus operaciones de archivos y comandos ocurren DENTRO de \`${workspacePath}\`. Sin excepciones.\n`
     agentSection += `2. Cuando el sistema te pida listar archivos, explorar, leer o escribir — hazlo SIEMPRE dentro de \`${workspacePath}\`.\n`
     agentSection += `3. Nunca uses \`ls\`, \`find\`, \`cat\` u otras herramientas apuntando a directorios del sistema (\`/\`, \`~\`, \`/home\`, \`/etc\`, etc.).\n`
-    agentSection += `4. Cuando uses \`shell_executor\`, el directorio de trabajo ya es \`${workspacePath}\` por defecto — NO necesitas especificar \`cwd\`.\n`
-    agentSection += `5. Para rutas relativas, son relativas a \`${workspacePath}\` — no al directorio del proceso.\n`
+    agentSection += `4. Cuando uses \`shell_executor\`, el directorio de trabajo ya es \`${workspacePath}\` por defecto.\n`
+    agentSection += `5. Para rutas relativas, son relativas a \`${workspacePath}\`.\n`
     agentSection += `6. Si el usuario pide explorar "el proyecto" o "los archivos", asume que se refiere a \`${workspacePath}\`.\n`
-    agentSection += `7. Las tools de filesystem (\`fs_read\`, \`fs_write\`, \`fs_list\`, etc.) ya tienen tu workspace configurado — úsalas directamente con rutas relativas.\n\n`
+    agentSection += `7. Las tools de filesystem ya tienen tu workspace configurado — úsalas directamente con rutas relativas.\n\n`
     agentSection += `> IMPORTANTE: Cualquier intento de acceder fuera de \`${workspacePath}\` será bloqueado automáticamente por el sistema.\n\n`
-    agentSection += `## CONSULTAS EN MCP, para llamar datos puedes buscar las tools por get o list recors\n\n`
-
   }
 
-  // System prompt específico del agente (su "personalidad" especializada)
   if (agent.system_prompt) {
     agentSection += `## System Prompt\n\n${agent.system_prompt}\n\n`
   }
+  if (agent.user_instructions?.trim()) {
+    agentSection += `## Instrucciones personales del usuario\n\n${agent.user_instructions.trim()}\n\n`
+  }
 
+  const resolvedUserId = userId || await resolveUserId()
+  const users = await col<UserDoc>("users")
+  const user = (await users.get(resolvedUserId))?.doc
+  let userSection = `# IDENTIDAD DEL USUARIO\n\n`
+  if (user) {
+    const userData: Record<string, string | null> = {}
+    if (user.name) userData.Nombre = user.name
+    if (user.language) userData.Idioma = user.language
+    if (user.timezone) userData.ZonaHoraria = user.timezone
+    if (user.occupation) userData.Ocupacion = user.occupation
+    if (user.notes) userData.Notas = user.notes
+    userSection += Object.keys(userData).length > 0
+      ? `${formatContext(userData)}\n\n`
+      : `Usuario ID: ${resolvedUserId}\n\n`
+  } else {
+    userSection += `Usuario ID: ${resolvedUserId}\n\n`
+  }
 
-
-
-
-
-
-  // ──────────────────────────────────────────────────────────────────────────
-  // Ensamblar secciones en orden
-  // ──────────────────────────────────────────────────────────────────────────
-  const systemPrompt = `${ethicsSection}${agentSection}`.trim()
-
+  const systemPrompt = `${ethicsSection}${agentSection}${userSection}`.trim()
   log.info(`[prompt-builder] Built system prompt for agent=${agent.name} role=${agent.role}`)
-
   return systemPrompt
 }
 
-/**
- * Versión simplificada para cuando solo se necesita el agentId
- * (usa userId por defecto de env o threadId)
- */
 export async function buildSystemPromptWithProjects(opts: {
   agentId: string
-
+  userId?: string
 }): Promise<string> {
-  return buildSystemPrompt({ agentId: opts.agentId })
+  const userId = opts.userId || await resolveUserId()
+  return buildSystemPrompt({ agentId: opts.agentId, userId })
 }

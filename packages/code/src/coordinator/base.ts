@@ -1,4 +1,3 @@
-import type { Database } from "bun:sqlite"
 import { Blackboard } from "../context/blackboard.ts"
 import { ConflictDetector } from "../context/conflict-detector.ts"
 import { CheckpointManager } from "../checkpoint/manager.ts"
@@ -21,10 +20,10 @@ export abstract class CoordinatorBase {
 
   /**
    * Must be called once (in startAll) after a session ID is available.
-   * Wires all subsystems to the per-session SQLite DB.
+   * Wires all subsystems to the shared HiveDB-backed session state.
    */
   protected initSubsystems(
-    db: Database,
+    db: unknown,
     sessionId: string,
     ipc: IpcEmitter,
   ): void {

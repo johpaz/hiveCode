@@ -7,7 +7,7 @@ Los skills son bundles ejecutables con system prompt, herramientas y triggers. H
 
 **Total actual: 33 bundled + 31 globales = 64 skills**
 
-> **Descubrimiento en runtime:** `search_knowledge(type="skills", query="...")` busca sobre todos los skills activos (bundled + globales) usando FTS5.
+> **Descubrimiento en runtime:** `search_knowledge(type="skills", query="...")` busca sobre todos los skills activos (bundled + globales) usando HiveDB index.
 
 ---
 
@@ -17,7 +17,7 @@ El agente arranca con estos skills sin necesidad de búsqueda:
 
 | Skill | Propósito |
 |-------|-----------|
-| `busqueda_fts5` | **Sistema central de descubrimiento** — cómo encontrar tools, skills, MCP y playbook |
+| `busqueda_hivedb` | **Sistema central de descubrimiento** — cómo encontrar tools, skills, MCP y playbook |
 | `memory_manager` | Gestión de memoria persistente entre sesiones |
 | `task_orchestrator` | Coordinación de workers y delegación |
 
@@ -66,7 +66,7 @@ Generación y mejora de código via `task_delegate_code` (Qwen, Claude, Gemini, 
 | Skill | Herramientas | Propósito |
 |-------|-------------|-----------|
 | `agent_utilities` | `spawn_agent`, `save_note`, `report_progress`, `get_project_context` | Subagentes efímeros, notas persistentes, progreso y contexto del proyecto |
-| `busqueda_fts5` | `search_knowledge` | Cómo descubrir tools, skills, MCP y código con FTS5 |
+| `busqueda_hivedb` | `search_knowledge` | Cómo descubrir tools, skills, MCP y código con HiveDB index |
 
 ### Cron (2 skills)
 
@@ -181,7 +181,7 @@ Al arrancar el gateway (`packages/core/src/gateway/initializer.ts`), `SkillLoade
 4. Workspace  — ./skills/                           (específicos del proyecto)
 ```
 
-Después de cargar, hace `INSERT OR REPLACE` en la tabla `skills` de SQLite y `syncSkillsToFTS()` re-indexa todo → disponibles via `search_knowledge`.
+Después de cargar, actualiza la colección `skills` de HiveDB y `syncSkillsToIndex()` re-indexa todo → disponibles via `search_knowledge`.
 
 ### Paths por plataforma
 
@@ -240,4 +240,4 @@ triggers:
 ## Ejemplos
 ```
 
-> Los skills globales (`~/.claude/skills/`) solo necesitan `name` y `description` en el frontmatter — el body markdown completo es suficiente para que el agente los descubra y use correctamente via FTS5.
+> Los skills globales (`~/.claude/skills/`) solo necesitan `name` y `description` en el frontmatter — el body markdown completo es suficiente para que el agente los descubra y use correctamente via HiveDB index.

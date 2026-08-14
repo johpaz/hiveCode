@@ -12,24 +12,51 @@ import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveSpinner, hiveConfirm, isCancel,
 } from "../cli-ui.ts"
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
+import { col } from "@johpaz/hivecode-core/storage/hive"
+import type {
+  CodeFileChangeDoc,
+  CodeNarrativeDoc,
+  CodePlaybookDoc,
+  CodeRecoveryPointDoc,
+  CodeSessionModeDoc,
+  CodeTaskDoc,
+  CodeTaskPhaseDoc,
+  CodeTaskPlanDoc,
+  CodeTraceDoc,
+  HarnessTaskDoc,
+} from "@johpaz/hivecode-core/storage/collections"
 import { executeToolByName } from "@johpaz/hivecode-code/workers/tool-bridge"
 import { createAllTools } from "@johpaz/hivecode-core/tools"
 import { loadConfig } from "@johpaz/hivecode-core/config"
+
+function nowIso(): string {
+  return new Date().toISOString()
+}
+
+async function findTask(taskId: string): Promise<{ id: string; doc: CodeTaskDoc; version: number } | null> {
+  const tasks = await col<CodeTaskDoc>("codeTasks")
+  const exact = await tasks.get(taskId)
+  if (exact) return { id: taskId, doc: exact.doc, version: exact.version }
+  const rows = await tasks.scan()
+  const match = rows.find((entry) => entry.id === taskId || entry.id.startsWith(taskId))
+  return match ? { id: match.id, doc: match.doc, version: match.version } : null
+}
 
 // ─── Mode History ────────────────────────────────────────────────────────────
 
 export async function modeHistory(): Promise<void> {
   hiveIntro("hivecode · Historial de Modos")
 
-  const db = getDb()
-  const rows = db.query(`
-    SELECT sm.*, t.description
-    FROM code_session_modes sm
-    LEFT JOIN code_tasks t ON sm.task_id = t.id
-    ORDER BY sm.changed_at DESC
-    LIMIT 20
-  `).all() as any[]
+  const tasks = new Map(
+    (await (await col<CodeTaskDoc>("codeTasks")).scan()).map((entry) => [entry.id, entry.doc])
+  )
+  const rows = (await (await col<CodeSessionModeDoc>("codeSessionModes")).scan())
+    .map((entry) => ({
+      ...entry.doc,
+      description: entry.doc.task_id ? tasks.get(entry.doc.task_id)?.description : undefined,
+    }))
+    .sort((a, b) => b.changed_at.localeCompare(a.changed_at))
+    .slice(0, 20)
 
   if (rows.length === 0) {
     hiveNote("Sin historial", ["No hay cambios de modo registrados."])
@@ -108,76 +135,83 @@ export async function taskResume(taskId?: string): Promise<void> {
 
   hiveIntro("hivecode · Reanudar Tarea")
 
-  const db = getDb()
-  const task = db.query(
-    "SELECT id, description, status, mode FROM code_tasks WHERE id = ? OR id LIKE ? LIMIT 1"
-  ).get(taskId, `${taskId}%`) as any
+  const task = await findTask(taskId)
 
   if (!task) {
     hiveOutro(`Tarea no encontrada: ${taskId}`, "error")
     process.exit(1)
   }
 
-  if (task.status !== "paused") {
-    hiveOutro(`La tarea ${task.id.slice(0, 8)} no está pausada (estado: ${task.status})`, "error")
+  const resumable = task.doc.status === "paused" || task.doc.status === "failed"
+  if (!resumable) {
+    hiveOutro(`La tarea ${task.doc.id.slice(0, 8)} no es reanudable (estado: ${task.doc.status})`, "error")
     process.exit(1)
   }
 
-  // ── Recovery point ────────────────────────────────────────────────────────
-  const recovery = db.query(
-    "SELECT * FROM code_recovery_points WHERE task_id = ? ORDER BY id DESC LIMIT 1"
-  ).get(task.id) as any
+  // ── Recovery point + persisted plan ───────────────────────────────────────
+  const recovery = (await (await col<CodeRecoveryPointDoc>("codeRecoveryPoints")).findBy("task_id", task.doc.id))
+    .map((entry) => entry.doc)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0]
 
-  const snapshots = db.query(
-    "SELECT file_path, content FROM code_file_snapshots WHERE task_id = ? ORDER BY id"
-  ).all(task.id) as any[]
+  const plan = await (await col<CodeTaskPlanDoc>("codeTaskPlans")).get(task.doc.id)
+  const profileTask = (await (await col<HarnessTaskDoc>("harnessTasks")).scan())
+    .map(entry => entry.doc)
+    .filter(entry => entry.parentTaskId === task.doc.id)
+    .sort((a, b) => b.updatedAt - a.updatedAt)[0]
 
-  let filesRestored = 0
-
-  if (snapshots.length > 0) {
-    const shouldRestore = await hiveConfirm({
-      message: `Hay ${snapshots.length} snapshot(s) de archivos guardados. ¿Restaurar al estado anterior?`,
-    })
-
-    if (!isCancel(shouldRestore) && shouldRestore) {
-      const spinner = hiveSpinner("default")
-      spinner.start("Restaurando archivos...")
-      for (const snap of snapshots) {
-        try {
-          await Bun.write(snap.file_path, snap.content)
-          filesRestored++
-        } catch {
-          // file path may be outside cwd — skip silently
-        }
-      }
-      spinner.stop(`${filesRestored} archivo(s) restaurado(s)`)
-    }
+  if (!plan && !profileTask) {
+    // Task predates plan persistence — we can't re-enter the phase loop, so fall
+    // back to the old behaviour: mark running and tell the user to re-run.
+    await (await col<CodeTaskDoc>("codeTasks")).put(task.id, { ...task.doc, status: "running" }, { expectedVersion: task.version })
+    hiveNote("Sin plan persistido", [
+      `ID: ${task.doc.id}`,
+      "Esta tarea es anterior a la persistencia de planes y no puede reanudarse automáticamente.",
+      "",
+      "Usa 'hivecode run \"<desc>\"' para continuar con una nueva ejecución.",
+    ])
+    hiveOutro("Listo para reanudar manualmente")
+    return
   }
 
-  // ── Update task status ────────────────────────────────────────────────────
-  db.query("UPDATE code_tasks SET status = 'running' WHERE id = ?").run(task.id)
+  const startLevel = recovery?.level ?? 0
+  const shouldResume = await hiveConfirm({
+    message: profileTask
+      ? `Reanudar la tarea desde ${profileTask.stage}? Se conservarán los nodos completados del DAG.`
+      : `Reanudar la tarea desde el nivel ${startLevel}? Se relanzan los coordinadores para continuar el trabajo.`,
+  })
+  if (isCancel(shouldResume) || !shouldResume) {
+    hiveOutro("Reanudación cancelada")
+    return
+  }
 
-  // ── Summary ───────────────────────────────────────────────────────────────
+  // ── Re-enter the phase loop at the recovery point ─────────────────────────
+  const spinner = hiveSpinner("default")
+  spinner.start(`Reanudando tarea en el nivel ${startLevel}...`)
+  const { CoordinatorManager } = await import("@johpaz/hivecode-code/workers/coordinator-manager")
+  const manager = new CoordinatorManager()
+  let completed = false
+  try {
+    await manager.startAll()
+    completed = await manager.resumeTask(task.doc.id)
+  } catch (err) {
+    spinner.stop("Reanudación falló")
+    hiveOutro(`Error al reanudar: ${(err as Error).message}`, "error")
+    await manager.stopAll()
+    process.exit(1)
+  }
+  await manager.stopAll()
+  spinner.stop(completed ? "Tarea reanudada y completada" : "Reanudación finalizada (revisa el estado)")
+
   const lines: string[] = [
-    `ID: ${task.id}`,
-    `Descripción: ${task.description?.slice(0, 60)}`,
-    `Modo: ${task.mode}`,
-    "",
+    `ID: ${task.doc.id}`,
+    `Descripción: ${task.doc.description?.slice(0, 60)}`,
+    `Nivel de reanudación: ${startLevel}`,
+    `Resultado: ${completed ? "completada" : "no completada — revisa hivecode task status"}`,
   ]
-
-  if (recovery) {
-    const completed: number[] = JSON.parse(recovery.completed_phases || "[]")
-    const pending: number[] = JSON.parse(recovery.pending_phases || "[]")
-    if (completed.length > 0) lines.push(`Fases completadas: ${completed.length}`)
-    if (pending.length > 0) lines.push(`Fases pendientes: ${pending.length}`)
-    if (recovery.git_ref) lines.push(`Git ref: ${(recovery.git_ref as string).slice(0, 8)}`)
-  }
-
-  if (filesRestored > 0) lines.push(`Archivos restaurados: ${filesRestored}`)
-  lines.push("", "Usa 'hivecode run \"<desc>\"' para continuar con una nueva ejecución.")
+  if (recovery?.git_ref) lines.push(`Git ref: ${(recovery.git_ref as string).slice(0, 8)}`)
 
   hiveNote("Tarea reanudada", lines)
-  hiveOutro("Listo para reanudar")
+  hiveOutro(completed ? "Tarea completada" : "Reanudación finalizada")
 }
 
 // ─── Upgrade ─────────────────────────────────────────────────────────────────
@@ -244,10 +278,7 @@ export async function taskDebug(taskId?: string, flags: string[] = []): Promise<
   }
 
   // Support short IDs (first 8 chars)
-  const db = getDb()
-  const task = db.query<any, [string, string]>(
-    "SELECT * FROM code_tasks WHERE id = ? OR id LIKE ? LIMIT 1"
-  ).get(taskId, `${taskId}%`) as any
+  const task = await findTask(taskId)
 
   if (!task) {
     hiveOutro(`Tarea no encontrada: ${taskId}`, "error")
@@ -259,25 +290,25 @@ export async function taskDebug(taskId?: string, flags: string[] = []): Promise<
     return idx !== -1 ? Number(flags[idx + 1]) : null
   })()
 
-  hiveIntro(`hivecode · Debug · ${task.id.slice(0, 8)}`)
+  hiveIntro(`hivecode · Debug · ${task.doc.id.slice(0, 8)}`)
 
   const w = process.stdout.columns || 100
 
   // ── Task overview ──────────────────────────────────────────────────────────
-  const statusColor = task.status === "completed" ? GREEN : task.status === "failed" ? RED : AMBER
+  const statusColor = task.doc.status === "completed" ? GREEN : task.doc.status === "failed" ? RED : AMBER
   process.stdout.write(`\n${BOLD}TAREA${RESET}\n`)
-  process.stdout.write(`  ID          ${CYAN}${task.id}${RESET}\n`)
-  process.stdout.write(`  Descripción ${task.description}\n`)
-  process.stdout.write(`  Estado      ${statusColor}${task.status}${RESET}   Modo: ${AMBER}${task.mode}${RESET}\n`)
-  if (task.branch_name) process.stdout.write(`  Rama        ${DIM}${task.branch_name}${RESET}\n`)
-  process.stdout.write(`  Duración    ${fmt(task.duration_ms || 0)}   Tokens: ${tokens(task.tokens_in || 0, task.tokens_out || 0)}\n`)
-  process.stdout.write(`  Archivos    ${task.files_changed || 0} cambiados   +${task.lines_added || 0} / -${task.lines_removed || 0} líneas\n`)
-  process.stdout.write(`  Creada      ${DIM}${task.created_at}${RESET}\n`)
+  process.stdout.write(`  ID          ${CYAN}${task.doc.id}${RESET}\n`)
+  process.stdout.write(`  Descripción ${task.doc.description}\n`)
+  process.stdout.write(`  Estado      ${statusColor}${task.doc.status}${RESET}   Modo: ${AMBER}${task.doc.mode}${RESET}\n`)
+  if (task.doc.branch_name) process.stdout.write(`  Rama        ${DIM}${task.doc.branch_name}${RESET}\n`)
+  process.stdout.write(`  Duración    ${fmt(task.doc.duration_ms || 0)}   Tokens: ${tokens(task.doc.tokens_in || 0, task.doc.tokens_out || 0)}\n`)
+  process.stdout.write(`  Archivos    ${task.doc.files_changed || 0} cambiados   +${task.doc.lines_added || 0} / -${task.doc.lines_removed || 0} líneas\n`)
+  process.stdout.write(`  Creada      ${DIM}${task.doc.created_at}${RESET}\n`)
 
   // ── Phase breakdown ────────────────────────────────────────────────────────
-  const phases = db.query<any, [string]>(
-    "SELECT * FROM code_task_phases WHERE task_id = ? ORDER BY id ASC"
-  ).all(task.id) as any[]
+  const phases = (await (await col<CodeTaskPhaseDoc>("codeTaskPhases")).findBy("task_id", task.doc.id))
+    .map((entry) => entry.doc)
+    .sort((a, b) => a.id.localeCompare(b.id))
 
   process.stdout.write(`\n${BOLD}FASES${RESET}  (${phases.length} total)\n`)
 
@@ -305,9 +336,10 @@ export async function taskDebug(taskId?: string, flags: string[] = []): Promise<
     }
 
     // Tool traces for this phase
-    const traces = db.query<any, [string, string]>(
-      "SELECT * FROM code_traces WHERE task_id = ? AND coordinator = ? ORDER BY id ASC"
-    ).all(task.id, p.coordinator) as any[]
+    const traces = (await (await col<CodeTraceDoc>("codeTraces")).findBy("task_id", task.doc.id))
+      .map((entry) => entry.doc)
+      .filter((trace) => trace.coordinator === p.coordinator)
+      .sort((a, b) => a.id.localeCompare(b.id))
 
     if (traces.length > 0) {
       process.stdout.write(`\n     ${DIM}── Herramientas (${traces.length}) ──${RESET}\n`)
@@ -327,9 +359,10 @@ export async function taskDebug(taskId?: string, flags: string[] = []): Promise<
     }
 
     // Narrative for this phase
-    const narrativeEntries = db.query<any, [string, string]>(
-      "SELECT entry, is_override FROM code_narrative WHERE task_id = ? AND coordinator = ? ORDER BY id ASC"
-    ).all(task.id, p.coordinator) as any[]
+    const narrativeEntries = (await (await col<CodeNarrativeDoc>("codeNarrative")).findBy("task_id", task.doc.id))
+      .map((entry) => entry.doc)
+      .filter((entry) => entry.coordinator === p.coordinator)
+      .sort((a, b) => a.id.localeCompare(b.id))
 
     if (narrativeEntries.length > 0) {
       process.stdout.write(`\n     ${DIM}── Narrativo ──${RESET}\n`)
@@ -344,12 +377,11 @@ export async function taskDebug(taskId?: string, flags: string[] = []): Promise<
   // ── Playbook rules active for this task's coordinators ────────────────────
   const coordinatorNames = [...new Set(phases.map(p => p.coordinator))]
   if (coordinatorNames.length > 0) {
-    const placeholders = coordinatorNames.map(() => "?").join(",")
-    const rules = db.query<any, string[]>(
-      `SELECT rule, coordinator, confidence FROM code_playbook
-       WHERE active = 1 AND (coordinator IN (${placeholders}) OR coordinator IS NULL)
-       ORDER BY confidence DESC LIMIT 10`
-    ).all(...coordinatorNames) as any[]
+    const rules = (await (await col<CodePlaybookDoc>("codePlaybook")).findBy("active", true))
+      .map((entry) => entry.doc)
+      .filter((rule) => rule.coordinator == null || coordinatorNames.includes(rule.coordinator as any))
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, 10)
 
     if (rules.length > 0) {
       process.stdout.write(`\n${BOLD}PLAYBOOK ACTIVO${RESET}  (${rules.length} reglas)\n`)
@@ -361,9 +393,9 @@ export async function taskDebug(taskId?: string, flags: string[] = []): Promise<
   }
 
   // ── File changes ──────────────────────────────────────────────────────────
-  const fileChanges = db.query<any, [string]>(
-    "SELECT file_path, change_type, lines_added, lines_removed FROM code_file_changes WHERE task_id = ? ORDER BY id ASC"
-  ).all(task.id) as any[]
+  const fileChanges = (await (await col<CodeFileChangeDoc>("codeFileChanges")).findBy("task_id", task.doc.id))
+    .map((entry) => entry.doc)
+    .sort((a, b) => a.id.localeCompare(b.id))
 
   if (fileChanges.length > 0) {
     process.stdout.write(`\n${BOLD}ARCHIVOS MODIFICADOS${RESET}  (${fileChanges.length})\n`)
@@ -374,12 +406,12 @@ export async function taskDebug(taskId?: string, flags: string[] = []): Promise<
   }
 
   // ── PR / branch ───────────────────────────────────────────────────────────
-  if (task.pr_url) {
-    process.stdout.write(`\n${BOLD}PULL REQUEST${RESET}\n  ${CYAN}${task.pr_url}${RESET}\n`)
+  if (task.doc.pr_url) {
+    process.stdout.write(`\n${BOLD}PULL REQUEST${RESET}\n  ${CYAN}${task.doc.pr_url}${RESET}\n`)
   }
 
   process.stdout.write("\n")
-  hiveOutro(phaseFilter !== null ? `Fase ${phaseFilter} de ${phases.length}` : `${phases.length} fases · ${fmt(task.duration_ms || 0)}`)
+  hiveOutro(phaseFilter !== null ? `Fase ${phaseFilter} de ${phases.length}` : `${phases.length} fases · ${fmt(task.doc.duration_ms || 0)}`)
 }
 
 // ─── Init ────────────────────────────────────────────────────────────────────

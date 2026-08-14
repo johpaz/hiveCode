@@ -206,10 +206,8 @@ pub fn agent_display_name(name: &str) -> String {
         "test" => "QAEngineer".to_string(),
         "devops" => "DevOpsEngineer".to_string(),
         "product_manager" => "ProductManager".to_string(),
-        "mobile" => "MobileEngineer".to_string(),
         "data_scientist" => "DataScientist".to_string(),
-        "dba" => "DBA".to_string(),
-        "integration" => "IntegrationEngineer".to_string(),
+        "verifier" => "Verifier".to_string(),
         "reviewer" => "Reviewer".to_string(),
         _ => {
             let mut s = name.to_string();

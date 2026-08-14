@@ -1,8 +1,7 @@
 /**
  * Crypto utilities — TDD §38.12
  *
- * API key storage now delegates to Bun.secrets (OS keystore).
- * Legacy SQLite columns (api_key_encrypted, api_key_iv) are ignored.
+ * API key storage delegates to Bun.secrets (OS keystore).
  */
 
 const SERVICE = "hive-code";
@@ -21,12 +20,12 @@ export function decryptConfig(encrypted: string | null | undefined, _iv?: string
   }
 }
 
-/** @deprecated Provider API keys must never be serialized into SQLite. */
+/** @deprecated Provider API keys must never be serialized into document storage. */
 export function encryptApiKey(_apiKey: string): never {
   throw new Error("encryptApiKey is disabled; use storeProviderApiKey() with Bun.secrets");
 }
 
-/** @deprecated Legacy SQLite API key material is intentionally not readable. */
+/** @deprecated Legacy serialized API key material is intentionally not readable. */
 export function decryptApiKey(_encrypted: string | null | undefined, _iv?: string | null): never {
   throw new Error("decryptApiKey is disabled; use getProviderApiKey() with Bun.secrets");
 }

@@ -12,33 +12,10 @@
  */
 
 import { hiveIntro, hiveOutro, hiveNote } from "../cli-ui.ts"
-import { getDb } from "@johpaz/hivecode-core/storage/sqlite"
 import { hasStoredAuth } from "@johpaz/hivecode-core/auth/auth-cli"
+import { getProvider, listFreeProviderModels, setDefaultProvider } from "./provider-store"
 
 const FREE_PROVIDER_ID = "hivecode-free"
-
-function listFreeModels(): { id: string; name: string; context: number; capabilities: string }[] {
-  const db = getDb()
-  const rows = db
-    .query<
-      { id: string; name: string; context_window: number; capabilities: string },
-      [string]
-    >(
-      `SELECT id, name, context_window, capabilities
-       FROM models
-       WHERE provider_id = ? AND model_type = 'llm' AND enabled = 1
-       ORDER BY name`
-    )
-    .all(FREE_PROVIDER_ID) as Array<{ id: string; name: string; context_window: number; capabilities: string }>
-  return rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    context: r.context_window,
-    capabilities: (() => {
-      try { return (JSON.parse(r.capabilities) as string[]).join(", ") } catch { return "" }
-    })(),
-  }))
-}
 
 export async function freeList(): Promise<void> {
   hiveIntro("hivecode-free · modelos disponibles vía tu API")
@@ -63,7 +40,7 @@ export async function freeList(): Promise<void> {
     ])
   }
 
-  const models = listFreeModels()
+  const models = await listFreeProviderModels(FREE_PROVIDER_ID)
   if (models.length === 0) {
     hiveNote("Sin modelos", [
       "No se encontraron modelos con provider_id = 'hivecode-free'.",
@@ -88,14 +65,12 @@ export async function freeList(): Promise<void> {
 }
 
 export async function freeSetDefault(): Promise<void> {
-  const db = getDb()
-  const rows = db.query("SELECT 1 FROM providers WHERE id = ?").all(FREE_PROVIDER_ID) as unknown[]
-  if (rows.length === 0) {
-    hiveOutro(`Provider '${FREE_PROVIDER_ID}' no existe. Corre la migración inicial.`, "error")
+  const provider = await getProvider(FREE_PROVIDER_ID)
+  if (!provider) {
+    hiveOutro(`Provider '${FREE_PROVIDER_ID}' no existe. Ejecuta hivecode init para crear el catálogo base.`, "error")
     return
   }
-  db.query("INSERT OR REPLACE INTO code_config (key, value) VALUES ('default_provider', ?)")
-    .run(FREE_PROVIDER_ID)
+  await setDefaultProvider(FREE_PROVIDER_ID)
   hiveOutro("hivecode-free es ahora el provider por defecto")
 }
 
