@@ -78,6 +78,9 @@ pub struct DashboardState {
     pub resume: Option<ResumeInfo>,
     pub metrics: DashboardMetrics,
     pub rollback_confirm_checkpoint: Option<String>,
+    /// Detener el enjambre es tan irreversible como un rollback, así que pasa por
+    /// la misma confirmación de dos pasos.
+    pub halt_confirm: bool,
 }
 
 impl DashboardState {
