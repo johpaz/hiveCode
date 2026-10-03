@@ -9,9 +9,13 @@
 import { existsSync, mkdirSync, chmodSync } from "node:fs"
 import path from "node:path"
 
-// Static import — Bun --compile embeds this file into the binary
+// Static import — Bun --compile embeds this file into the binary.
+// Points at the committed empty placeholder (packages/hivetui/hivetui.bin) so the
+// import always resolves in `bun run dev` (cargo build only produces target/debug).
+// `build:binary*` scripts copy the real release binary over the placeholder right
+// before `bun build --compile` and truncate it back afterwards.
 // @ts-ignore — Bun-specific asset import
-import hiivetuiAsset from "../../hivetui/target/release/hivetui" with { type: "file" }
+import hivetuiAsset from "../../hivetui/hivetui.bin" with { type: "file" }
 
 const CACHE_DIR = path.join(process.env.HOME ?? "/tmp", ".hivecode", "bin")
 const CACHED_PATH = path.join(CACHE_DIR, "hivetui")
@@ -24,7 +28,7 @@ export async function extractHivetui(): Promise<string | null> {
 
   try {
     mkdirSync(CACHE_DIR, { recursive: true })
-    const src = Bun.file(hiivetuiAsset)
+    const src = Bun.file(hivetuiAsset)
     if ((await src.size) === 0) return null
     await Bun.write(CACHED_PATH, src)
     chmodSync(CACHED_PATH, 0o755)

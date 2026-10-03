@@ -964,13 +964,19 @@ async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> 
         model: configuredModel || fallbackModel,
         is_active: provider.id === defaultProvider,
         has_key: true,
+        // Los ids ya vienen filtrados por model_type/enabled en modelsByProvider.
+        // La TUI los usa para listar solo los del provider activo.
+        models: (modelsByProvider.get(provider.id) ?? [])
+          .slice()
+          .sort((a, b) => a.id.localeCompare(b.id))
+          .map((m) => m.id),
       }
     }))
   } catch { /* providers pueden no existir aún */ }
 
   let agents: any[] = []
   try {
-    const order = ["bee", "scout", "builder", "verifier", "reviewer"]
+    const order = ["bee", "scout", "builder", "verifier", "reviewer", "spider"]
     agents = (await (await col<AgentDoc>("agents")).scan())
       .map(entry => entry.doc)
       .filter(agent => !!agent.agent_type)

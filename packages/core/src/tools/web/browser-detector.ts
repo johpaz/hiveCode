@@ -1,7 +1,8 @@
 /**
  * Detects Chrome-compatible browser executables on Linux, macOS, and Windows.
- * Used by browser.ts (Bun.WebView via BUN_CHROME_PATH) and
- * browser-agent.ts (agent-browser via --executable-path).
+ * Used by browser.ts (Bun.WebView via BUN_CHROME_PATH) for the screenshot
+ * fallback tools. Obscura (tools/web/obscura.ts) is Chromium-free and does
+ * not need a system browser.
  *
  * Priority: native system binaries → flatpak native binary (extracted path).
  * Flatpak/Snap wrapper scripts are never returned — they sandbox the filesystem

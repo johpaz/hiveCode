@@ -6,8 +6,16 @@ const log = logger.child("llm-client")
 
 export const HIVEAGENTS_BASE_URL = "https://llm.hiveagents.io"
 export const HIVEAGENTS_OPENAI_BASE_URL = `${HIVEAGENTS_BASE_URL}/v1`
-/** Modelo por defecto cuando quien llama no especifica uno. */
-export const HIVEAGENTS_MODEL_ID = "Qwen3-Coder-Next-UD-Q4_K_M.gguf"
+/**
+ * Modelo por defecto cuando quien llama no especifica uno.
+ *
+ * El id es el nombre exacto del fichero GGUF que monta el backend, así que debe
+ * coincidir con una entrada de `GET /api/models`. Antes apuntaba a
+ * `Qwen3-Coder-Next-UD-Q4_K_M.gguf`, que ya no existe en el servidor: cualquier
+ * carga con ese id se quedaba esperando un readiness que nunca llegaba.
+ * El backend marca Qwen3.6-35B-A3B como recomendado (62.7 t/s de generación).
+ */
+export const HIVEAGENTS_MODEL_ID = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
 
 /**
  * Migration fallback only. At runtime the loader and every inference request

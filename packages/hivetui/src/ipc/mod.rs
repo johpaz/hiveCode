@@ -608,6 +608,11 @@ pub struct IpcSettingsProvider {
     pub model: String,
     pub is_active: bool,
     pub has_key: bool,
+    /// Modelos llm habilitados de este provider. El tab Modelos lista solo los del
+    /// provider activo; sin provider activo la lista queda vacía y hay que elegir
+    /// uno primero.
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -52,7 +52,7 @@ export interface AgentDoc {
   tone: string | null;
   role: "coordinator" | "worker";
   /** Stable v1 harness identity. Legacy/custom agents may omit this field. */
-  agent_type?: "bee" | "scout" | "builder" | "verifier" | "reviewer";
+  agent_type?: "bee" | "scout" | "builder" | "verifier" | "reviewer" | "spider";
   status: string;
   enabled: boolean;
   provider_id: string;
@@ -68,7 +68,7 @@ export interface AgentDoc {
   max_input_tokens?: number;
   max_output_tokens?: number;
   max_cost_usd?: number;
-  permission_profile?: "orchestrate" | "read_only" | "write_workspace" | "verify" | "review";
+  permission_profile?: "orchestrate" | "read_only" | "write_workspace" | "verify" | "review" | "web_automation";
   user_instructions?: string;
   config_version?: number;
   workspace: string | null;
@@ -889,7 +889,7 @@ export interface AgentRunDoc {
   agent_id: string;
   kind: "chat" | "worker" | "harness" | "verification" | "review";
   parent_run_id?: string | null;
-  profile_type?: "bee" | "scout" | "builder" | "verifier" | "reviewer";
+  profile_type?: "bee" | "scout" | "builder" | "verifier" | "reviewer" | "spider";
   objective: string;
   status: AgentRunStatus;
   turn: number;

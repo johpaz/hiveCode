@@ -40,7 +40,7 @@ pub use logs::{LogEntry, LogState};
 pub use modal::{
     ConfigModalState, InfoModalState, ModalField, ModalFieldKind, ModalState,
     PlanApprovalState, ReviewAction, ReviewConfirmState, SettingsHubState, SettingsMcp,
-    SettingsAgent, SettingsProvider, SettingsSkill, SettingsTab,
+    ModelRows, SettingsAgent, SettingsProvider, SettingsSkill, SettingsTab,
 };
 pub use panels::PanelLayoutState;
 pub use plan::{ApiContract, PlanEntry, PlanPhase, PlanRisk, PlanState};
@@ -1054,6 +1054,7 @@ impl AppState {
                     hub.providers = providers.into_iter().map(|p| SettingsProvider {
                         id: p.id, name: p.name, model: p.model,
                         is_active: p.is_active, has_key: p.has_key,
+                        models: p.models,
                     }).collect();
                     hub.agents = agents.into_iter().map(|a| SettingsAgent {
                         id: a.id, name: a.name, provider: a.provider, model: a.model,

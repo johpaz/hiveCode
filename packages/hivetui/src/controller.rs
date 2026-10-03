@@ -11,7 +11,7 @@ use crossterm::{
 
 use crate::{
     ipc::TuiMessage,
-    state::{AppState, HistoryEntry, InfoModalState, ModalFieldKind, ModalState, ReplMode,
+    state::{AppState, HistoryEntry, InfoModalState, ModalFieldKind, ModalState, ModelRows, ReplMode,
             ReviewAction, ReviewConfirmState, Role, Selection, SettingsHubState, SettingsTab, TabId},
     renderer::layout_areas,
     term::Rect,
@@ -80,13 +80,25 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
             }
             KeyCode::Down => {
                 let max = match hub.active_tab {
-                    SettingsTab::Providers | SettingsTab::Models => hub.providers.len(),
+                    SettingsTab::Providers => hub.providers.len(),
+                    SettingsTab::Models    => hub.model_row_count(),
                     SettingsTab::Agents    => hub.agents.len(),
                     SettingsTab::Mcp       => hub.mcp.len(),
                     SettingsTab::Skills    => hub.skills.len(),
                     _                      => 0,
                 }.saturating_sub(1);
                 hub.selected_row = (hub.selected_row + 1).min(max);
+                state.dirty.full = true;
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') if hub.active_tab == SettingsTab::Models => {
+                // Cambiar de provider sin salir del tab: los modelos dependen del
+                // provider activo, así que hay que volver a la lista de providers.
+                hub.active_tab = SettingsTab::Providers;
+                hub.selected_row = hub
+                    .active_provider()
+                    .and_then(|p| hub.providers.iter().position(|q| q.id == p.id))
+                    .unwrap_or(0);
+                hub.scroll_offset = 0;
                 state.dirty.full = true;
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
@@ -155,11 +167,17 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                         hub.providers.get(hub.selected_row)
                             .map(|p| format!("/provider set {}", p.id))
                     }
-                    // Cambiar el modelo del provider seleccionado
-                    SettingsTab::Models => {
-                        hub.providers.get(hub.selected_row)
-                            .map(|p| format!("/modelo set {} {}", p.id, p.model))
-                    }
+                    // Cambiar el modelo. Con provider activo las filas son sus modelos, así que
+                    // Enter aplica el modelo elegido. Sin provider activo las filas
+                    // son providers y Enter elige el provider (modelo después).
+                    SettingsTab::Models => match hub.model_rows() {
+                        ModelRows::Models { provider_id, models } => models
+                            .get(hub.selected_row)
+                            .map(|m| format!("/modelo set {provider_id} {m}")),
+                        ModelRows::NeedProvider { providers } => providers
+                            .get(hub.selected_row)
+                            .map(|p| format!("/provider set {}", p.id)),
+                    },
                     SettingsTab::Agents => {
                         hub.agents.get(hub.selected_row)
                             .map(|a| format!("/agent configure {}", a.id))

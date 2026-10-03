@@ -101,7 +101,20 @@ export function formatToolCallForHuman(toolName: string, args: Record<string, un
     case "write_decision":   return `📝 Registrando decisión`
     case "append_narrative": return `📝 Actualizando narrativa`
     case "run_script":       return `▶️  Ejecutando script`
-    case "browser_screenshot": return `🖼️  Capturando pantalla${args.url ? ": " + args.url : ""}`
+    case "browser_navigate":      return `🌐 Navegando${args.url ? ": " + String(args.url).slice(0, 80) : ""}`
+    case "browser_snapshot":      return `📄 Leyendo página`
+    case "browser_markdown":      return `📝 Extrayendo markdown`
+    case "browser_interactive_elements": return `🔎 Listando elementos`
+    case "browser_click":         return `🖱️  Clic${args.ref ? `: ${args.ref}` : args.selector ? `: ${args.selector}` : ""}`
+    case "browser_fill":          return `⌨️  Llenando campo${args.ref ? `: ${args.ref}` : ""}`
+    case "browser_type":          return `⌨️  Escribiendo${args.ref ? `: ${args.ref}` : ""}`
+    case "browser_fill_form":     return `📋 Llenando formulario`
+    case "browser_extract":       return `🧬 Extrayendo datos`
+    case "browser_wait_for":      return `⏳ Esperando ${args.selector ?? "elemento"}`
+    case "browser_wait_for_text": return `⏳ Esperando texto${args.text ? `: ${String(args.text).slice(0, 40)}` : ""}`
+    case "browser_evaluate":      return "🧮 Evaluando JS"
+    case "browser_screenshot":    return `🖼️  Capturando pantalla`
+    case "browser_pdf":           return `📄 Exportando PDF`
     case "web_search":       return `🌐 Buscando web${query ? ": " + query.slice(0, 60) : ""}`
     case "web_fetch":        return `🌐 Fetching${args.url ? ": " + args.url : ""}`
     default:                 return `🔧 ${toolName}`
@@ -219,7 +232,8 @@ export function formatToolResult(toolName: string, result: unknown): string {
       break
     }
     case "browser_screenshot": {
-      summary = `${r?.ok ? "✅" : "❌"} [${toolName}]: ${r?.url || ""}`
+      // Obscura: session-based capture. { ok, path, imageBase64, mimeType, bytes }
+      summary = `${r?.ok ? "✅" : "❌"} [${toolName}]${r?.bytes ? `: ${Math.round(r.bytes / 1024)}KB ${r?.mimeType || "png"}` : ""}`
       if (r?.path)  summary += `\nScreenshot saved to: ${r.path}`
       if (r?.error) summary += `\nError: ${r.error}`
       break

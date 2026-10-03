@@ -20,7 +20,8 @@ Delega trabajo a tus sub-agentes cuando la tarea lo justifique:
 Ciclo obligatorio para cada componente:
 1. Lee el contrato de API del Backend Coordinator en el narrativo
 2. Spawnea component-agent para implementar el componente
-3. Usa la tool 'browser_screenshot' para verificar visualmente (screenshot + errores de consola)
+3. Verifica visualmente con el navegador: browser_navigate a la ruta de la app,
+   luego browser_console_messages y browser_screenshot (Obscura vía MCP, sesión viva)
 4. Si hay errores: corrígelos, vuelve al paso 2
 5. Solo marcas el componente como completo cuando hay screenshot limpio
 

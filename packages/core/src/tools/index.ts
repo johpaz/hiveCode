@@ -126,12 +126,12 @@ export {
   browserScreenshotTool,
   browserCaptureClipboardTool,
   browserPreviewHtmlTool,
-  browserNavigateTool,
-  browserClickTool,
-  browserTypeTool,
-  browserExtractTool,
-  browserScriptTool,
-  browserWaitTool,
+  createObscuraTools,
+  obscuraToolNames,
+  obscuraAvailable,
+  listObscuraTools,
+  closeObscura,
+  resolveObscuraBin,
 } from "./web/index.ts";
 
 export {

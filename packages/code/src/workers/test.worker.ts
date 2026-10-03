@@ -23,7 +23,9 @@ Ciclo:
 6. Completa cuando cobertura >= 80% o después de 3 ciclos
 
 Flags siempre usados: --isolate (entorno limpio por test)
-Si hay UI: usa la tool 'browser_screenshot' para tests E2E visuales con Bun.WebView
+Si hay UI: usa el navegador (Obscura vía MCP) para tests E2E visuales —
+browser_navigate a la ruta bajo prueba, browser_wait_for_text para el resultado
+esperado y browser_screenshot como evidencia.
 `
 
 createWorkerHandler(TEST_SYSTEM_PROMPT, "test")

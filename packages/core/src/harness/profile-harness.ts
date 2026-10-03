@@ -74,6 +74,7 @@ function laneProfile(job: JobDoc): CoreAgentType {
   if (job.lane === "scout") return "scout"
   if (job.lane === "verifier") return "verifier"
   if (job.lane === "reviewer") return "reviewer"
+  if (job.lane === "spider") return "spider"
   return "builder"
 }
 
@@ -95,7 +96,7 @@ async function newestFeatureDir(workspace: string): Promise<string | undefined> 
 async function configureProfiles(workspace: string, provider?: string, model?: string): Promise<void> {
   await ensureCoreAgentProfiles()
   const agents = await col<AgentDoc>("agents")
-  for (const id of ["bee", "scout", "builder", "verifier", "reviewer"] as CoreAgentType[]) {
+  for (const id of ["bee", "scout", "builder", "verifier", "reviewer", "spider"] as CoreAgentType[]) {
     const row = await agents.get(id)
     if (!row) continue
     await agents.put(id, {
@@ -250,7 +251,7 @@ tasks.md en vez de intentar hacerla vos.
 2. Usa search_knowledge para el contexto que te falte del proyecto.
 3. Completa spec.md, plan.md y analysis.md con speckit_artifact_write.
 4. Valida spec y plan con speckit_validate.
-5. Escribe tasks.md con tareas TNNN, lane [scout|builder], ownership y dependencias explícitas.
+5. Escribe tasks.md con tareas TNNN, lane [scout|builder|spider], ownership y dependencias explícitas.
 6. Llama speckit_tasks_sync usando run_id="${taskId}".
 
 No guardes notas de progreso: los artefactos Spec Kit son tu registro.

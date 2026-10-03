@@ -1,7 +1,7 @@
 use crate::{
-    state::{AppState, ModalState, SettingsTab},
+    state::{AppState, ModalState, ModelRows, SettingsTab},
     term::{Canvas, Rect, Style, AMBER, CYAN, DIM, GREEN, RED, SECONDARY, WHITE, BG_ELEVATED},
-    ui::{HitAction, MouseRegion},
+    ui::{HitAction, HitMap, MouseRegion},
 };
 
 const HUB_Z: i16 = 50; // por encima de todo lo demás
@@ -284,49 +284,88 @@ fn render_skills(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
 fn render_models(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hits: bool) {
     let ModalState::Settings(hub) = &state.modal else { return };
 
-    canvas.print(area.x,      area.y, "Provider", Style::new().fg(DIM));
-    canvas.print(area.x + 16, area.y, "Modelo",   Style::new().fg(DIM));
-    canvas.print(area.x + 52, area.y, "Activo",   Style::new().fg(DIM));
-
-    if hub.providers.is_empty() {
-        canvas.print(area.x + 2, area.y + 2,
-            "Configura un provider primero (tab Providers).", Style::new().fg(DIM));
-        return;
-    }
-
     let selected = hub.selected_row;
     let offset = hub.scroll_offset;
     let visible = (area.h.saturating_sub(1)) as usize;
-    for (i, p) in hub.providers.iter().enumerate().skip(offset).take(visible) {
-        let y = area.y + 1 + (i - offset) as u16;
 
-        let is_sel = selected == i;
-        if is_sel {
-            canvas.fill_rect(Rect { x: area.x, y, w: area.w, h: 1 }, ' ', Style::new().fg(WHITE));
-            canvas.print(area.x, y, "▶ ", Style::new().fg(AMBER).bold());
+    match hub.model_rows() {
+        // Sin provider activo: no hay modelos que ofrecer, se elige provider primero.
+        ModelRows::NeedProvider { providers } => {
+            canvas.print(area.x,      area.y, "Provider", Style::new().fg(DIM));
+            canvas.print(area.x + 16, area.y, "Modelo",   Style::new().fg(DIM));
+            canvas.print(area.x + 52, area.y, "Activo",   Style::new().fg(DIM));
+
+            if providers.is_empty() {
+                canvas.print(area.x + 2, area.y + 2,
+                    "Configura un provider primero (tab Providers).", Style::new().fg(DIM));
+                return;
+            }
+
+            for (i, p) in providers.iter().enumerate().skip(offset).take(visible) {
+                let y = area.y + 1 + (i - offset) as u16;
+                let is_sel = selected == i;
+                if is_sel {
+                    canvas.fill_rect(Rect { x: area.x, y, w: area.w, h: 1 }, ' ', Style::new().fg(WHITE));
+                    canvas.print(area.x, y, "▶ ", Style::new().fg(AMBER).bold());
+                }
+                let style = if is_sel { Style::new().fg(WHITE).bold() } else { Style::new().fg(SECONDARY) };
+                canvas.print(area.x + 2,  y, &truncate(&p.id, 14),    style);
+                canvas.print(area.x + 16, y, &truncate(&p.model, 34), style);
+                canvas.print(area.x + 52, y,
+                    if p.is_active { "●" } else { "○" },
+                    if p.is_active { Style::new().fg(GREEN).bold() } else { Style::new().fg(DIM) });
+                register_row_hit(&mut state.hit_map, register_hits, i, area, y);
+            }
+            draw_scrollbar(canvas, area, offset, providers.len(), visible);
+            print_hint(canvas, area, "Elige un provider  ·  P → cambiar de provider");
         }
-        let style = if is_sel { Style::new().fg(WHITE).bold() } else { Style::new().fg(SECONDARY) };
-        canvas.print(area.x + 2,  y, &truncate(&p.id, 14),    style);
-        canvas.print(area.x + 16, y, &truncate(&p.model, 34), style);
-        canvas.print(area.x + 52, y,
-            if p.is_active { "●" } else { "○" },
-            if p.is_active { Style::new().fg(GREEN).bold() } else { Style::new().fg(DIM) });
 
-        if register_hits {
-            state.hit_map.push(MouseRegion::new(
-                format!("settings:row:{i}"),
-                Rect { x: area.x, y, w: area.w, h: 1 },
-                HUB_Z,
-                HitAction::Custom(format!("settings:row:{i}")),
-            ));
+        // Provider activo: solo sus modelos.
+        ModelRows::Models { provider_id, models } => {
+            canvas.print(area.x,      area.y,
+                &format!("Modelo · {provider_id}"), Style::new().fg(DIM));
+            canvas.print(area.x + 44, area.y, "Contexto", Style::new().fg(DIM));
+
+            let total = models.len();
+            for (i, m) in models.iter().enumerate().skip(offset).take(visible) {
+                let y = area.y + 1 + (i - offset) as u16;
+                let is_active = *m == hub.active_provider().map(|p| p.model.as_str()).unwrap_or("");
+                let is_sel = selected == i;
+                if is_sel {
+                    canvas.fill_rect(Rect { x: area.x, y, w: area.w, h: 1 }, ' ', Style::new().fg(WHITE));
+                    canvas.print(area.x, y, "▶ ", Style::new().fg(AMBER).bold());
+                }
+                if is_active {
+                    canvas.print(area.x + 2, y, "●", Style::new().fg(GREEN).bold());
+                }
+                let style = if is_sel { Style::new().fg(WHITE).bold() } else { Style::new().fg(SECONDARY) };
+                canvas.print(area.x + 4, y, &truncate(m, 62), style);
+                register_row_hit(&mut state.hit_map, register_hits, i, area, y);
+            }
+            draw_scrollbar(canvas, area, offset, total, visible);
+            print_hint(canvas, area, "Enter → usar este modelo  ·  P → cambiar de provider");
         }
     }
-    draw_scrollbar(canvas, area, offset, hub.providers.len(), visible);
-    // Hint: Enter para cambiar el modelo de un provider
+}
+
+/// El hint ocupa la última línea; el área de filas deja esa línea libre.
+fn print_hint(canvas: &mut Canvas, area: Rect, text: &str) {
     let hint_y = area.bottom().saturating_sub(1);
-    canvas.print(area.x + 2, hint_y,
-        "Enter → cambiar modelo del provider seleccionado  ·  A → activar provider",
-        Style::new().fg(DIM));
+    canvas.print(area.x + 2, hint_y, text, Style::new().fg(DIM));
+}
+
+/// Registra el hit de una fila. Toma solo el `hit_map` (no `&mut AppState`) para
+/// no pelear con el préstamo inmutable de `state.modal` que sigue vivo en el bucle.
+fn register_row_hit(hit_map: &mut HitMap, register_hits: bool, i: usize, area: Rect, y: u16) {
+    if !register_hits {
+        return;
+    }
+    hit_map.push(MouseRegion::new(
+        format!("settings:row:{i}"),
+        Rect { x: area.x, y, w: area.w, h: 1 },
+        HUB_Z,
+        HitAction::Custom(format!("settings:row:{i}")),
+    ));
 }
 
 fn render_github(canvas: &mut Canvas, area: Rect, state: &mut AppState) {

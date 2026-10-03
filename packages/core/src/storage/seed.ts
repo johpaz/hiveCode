@@ -24,6 +24,13 @@ import { HIVEAGENTS_MODEL_ID } from "../agent/llm-providers/hiveagents"
  * El usuario puede desactivarlas desde la UI si no las necesita
  */
 
+/**
+ * Providers que se han retirado del catálogo y cuya fila se borra de las BDs
+ * existentes en cada arranque. Sus modelos ya los limpia el pase de `seedModelIds`,
+ * porque no aparecen en `SEED_DATA.models`.
+ */
+const RETIRED_PROVIDERS = ["hivecode-free"];
+
 export interface SeedData {
   tools: Array<{ id: string; name: string; category: string; description: string; enabled?: boolean }>
   providers: Array<{ id: string; name: string; baseUrl?: string; category?: string }>
@@ -149,10 +156,48 @@ export const SEED_DATA: SeedData = {
     { id: "get_task_context", name: "get_task_context", category: "narrative", description: "Obtener contexto completo de tarea: narrativa + decisiones + snapshots de archivos. Sinónimos: contexto de tarea, todo sobre la tarea, estado completo de la tarea" },
 
     // ─────────────────────────────────────────
-    // 15. BROWSER (adicionales — los básicos ya están en web_search/web_fetch)
+    // 15. BROWSER — Obscura vía MCP directo (navegación, lectura, interacción, tabs, cookies, PDF)
+    //     (browser_capture_clipboard y browser_preview_html son fallback con Bun.WebView)
     // ─────────────────────────────────────────
     { id: "browser_capture_clipboard", name: "browser_capture_clipboard", category: "browser", description: "Leer imagen del portapapeles del sistema y retornar base64 WebP para el contexto del agente. Sinónimos: capturar portapapeles, leer clipboard, imagen del clipboard, capturar imagen copiada" },
     { id: "browser_preview_html", name: "browser_preview_html", category: "browser", description: "Servir HTML en servidor local temporal y capturar screenshot headless (Bun.WebView). Para verificar UI generada. Sinónimos: preview HTML, renderizar HTML, ver HTML, screenshot de HTML" },
+    { id: "browser_navigate", name: "browser_navigate", category: "browser", description: "Navegar a una URL y mantener sesión viva de navegador para las demás tools browser. Retorna texto legible de la página. Sinónimos: navegar web, abrir página, ir a sitio, cargar url, visitar" },
+    { id: "browser_snapshot", name: "browser_snapshot", category: "browser", description: "Obtener página actual como texto: URL, título, cuerpo y refs de elementos interactivos. Primera lectura preferida tras navegar. Sinónimos: snapshot página, contenido página, ver página, texto página" },
+    { id: "browser_markdown", name: "browser_markdown", category: "browser", description: "Extraer página actual como Markdown (títulos, párrafos, listas, enlaces, código). Contenido estructurado denso en tokens. Sinónimos: extraer markdown, página en markdown, contenido estructurado" },
+    { id: "browser_links", name: "browser_links", category: "browser", description: "Listar todos los enlaces de la página como {text, href} JSON por línea. Sinónimos: listar enlaces, ver links, urls página, hipervínculos" },
+    { id: "browser_interactive_elements", name: "browser_interactive_elements", category: "browser", description: "Listar elementos clicables/escribibles con refs estables (ej. e3). Usar ANTES de click o fill para actuar por ref. Sinónimos: elementos interactivos, botones, inputs, campos, refs" },
+    { id: "browser_click", name: "browser_click", category: "browser", description: "Hacer clic en elemento por ref (de snapshot/interactive elements) o selector CSS. Sinónimos: hacer clic, presionar botón, clickear, pulsar, botón, click" },
+    { id: "browser_fill", name: "browser_fill", category: "browser", description: "Establecer valor de un input (reemplaza el contenido). Por ref o selector. Sinónimos: llenar campo, rellenar input, establecer valor, completar campo" },
+    { id: "browser_type", name: "browser_type", category: "browser", description: "Escribir texto en un input (añade al valor existente). Por ref o selector. Sinónimos: escribir en página, llenar formulario, introducir texto, escribir input" },
+    { id: "browser_fill_form", name: "browser_fill_form", category: "browser", description: "Llenar múltiples inputs en una llamada (array de campos con ref/selector/valor/tipo) y opcionalmente clic en submit. Sinónimos: llenar formulario, completar formulario, rellenar form, enviar formulario" },
+    { id: "browser_detect_forms", name: "browser_detect_forms", category: "browser", description: "Listar formularios de la página con action, método y sus inputs. Entender un form antes de llenarlo. Sinónimos: detectar formularios, ver formularios, campos formulario" },
+    { id: "browser_select_option", name: "browser_select_option", category: "browser", description: "Seleccionar opción de un dropdown/select por valor o texto visible. Sinónimos: seleccionar opción, elegir opción, dropdown, lista desplegable" },
+    { id: "browser_press_key", name: "browser_press_key", category: "browser", description: "Enviar evento de teclado (Enter, Tab, Escape) a un elemento o al documento. Sinónimos: presionar tecla, pulsar enter, teclado, tecla" },
+    { id: "browser_scroll", name: "browser_scroll", category: "browser", description: "Scroll de página o elemento por dirección y píxeles. Usar bottom para disparar infinite-scroll. Sinónimos: scroll, desplazar, bajar página, subir página" },
+    { id: "browser_extract", name: "browser_extract", category: "browser", description: "Extraer datos estructurados de la página con mapa campo→selector CSS ('a@href' para atributos, 'field[]' para arrays). Sinónimos: extraer datos, obtener información, scraping, selectores, xpath" },
+    { id: "browser_search", name: "browser_search", category: "browser", description: "Buscar coincidencias de texto en la página visible con contexto. Sinónimos: buscar en página, encontrar texto, buscar contenido" },
+    { id: "browser_count", name: "browser_count", category: "browser", description: "Contar elementos que coinciden con un selector CSS. Sonda de existencia/paginación. Sinónimos: contar elementos, cuántos, número de elementos" },
+    { id: "browser_get_attribute", name: "browser_get_attribute", category: "browser", description: "Leer atributo de un elemento (href, src, value, data-*). Sinónimos: leer atributo, obtener atributo, href, valor elemento" },
+    { id: "browser_evaluate", name: "browser_evaluate", category: "browser", description: "Evaluar JavaScript en la página y retornar el resultado. Sinónimos: ejecutar javascript, script, código, función, evaluar, js en página" },
+    { id: "browser_wait_for", name: "browser_wait_for", category: "browser", description: "Esperar a que un selector CSS aparezca en el DOM. Sinónimos: esperar elemento, aguardar selector, wait selector, esperar carga" },
+    { id: "browser_wait_for_text", name: "browser_wait_for_text", category: "browser", description: "Esperar a que un texto aparezca en la página — para mensajes o notificaciones de resultado. Sinónimos: esperar texto, aguardar mensaje, esperar resultado" },
+    { id: "browser_back", name: "browser_back", category: "browser", description: "Retroceder en el historial (botón atrás del navegador). Sinónimos: atrás, volver, página anterior, regresar" },
+    { id: "browser_forward", name: "browser_forward", category: "browser", description: "Avanzar en el historial de la página. Sinónimos: adelante, página siguiente, avanzar" },
+    { id: "browser_reload", name: "browser_reload", category: "browser", description: "Recargar la página actual. Sinónimos: recargar, refrescar página, actualizar página" },
+    { id: "browser_close", name: "browser_close", category: "browser", description: "Cerrar la página actual y resetear el estado de la sesión. Sinónimos: cerrar navegador, cerrar página, terminar sesión" },
+    { id: "browser_network_requests", name: "browser_network_requests", category: "browser", description: "Listar peticiones de red de la página actual. Sinónimos: ver peticiones red, requests, tráfico red, llamadas http" },
+    { id: "browser_console_messages", name: "browser_console_messages", category: "browser", description: "Listar mensajes de consola de la página (logs, warnings, errores). Sinónimos: ver consola, logs página, mensajes consola, errores javascript" },
+    { id: "browser_screenshot", name: "browser_screenshot", category: "browser", description: "Capturar viewport actual como PNG (guardado en ~/.hivecode/screenshots/). Para verificación visual o canvas. Sinónimos: captura de pantalla, screenshot, fotografiar página, imagen página, png" },
+    { id: "browser_pdf", name: "browser_pdf", category: "browser", description: "Exportar página actual como PDF paginado (guardado en ~/.hivecode/screenshots/). Sinónimos: exportar pdf, guardar pdf, página a pdf, documento pdf" },
+    { id: "browser_get_cookies", name: "browser_get_cookies", category: "browser", description: "Ver todas las cookies del navegador. Sinónimos: ver cookies, obtener cookies, cookies sesión" },
+    { id: "browser_set_cookie", name: "browser_set_cookie", category: "browser", description: "Añadir o reemplazar una cookie — saltarse un login con un token de sesión. Sinónimos: setear cookie, establecer cookie, inyectar cookie" },
+    { id: "browser_clear_cookies", name: "browser_clear_cookies", category: "browser", description: "Borrar todas las cookies del navegador. Sinónimos: borrar cookies, limpiar cookies, eliminar cookies" },
+    { id: "browser_storage_state", name: "browser_storage_state", category: "browser", description: "Exportar estado completo de sesión (cookies + localStorage) para saltarse un login futuro. Sinónimos: exportar sesión, estado sesión, guardar sesión" },
+    { id: "browser_set_storage_state", name: "browser_set_storage_state", category: "browser", description: "Restaurar sesión previamente exportada por browser_storage_state. Sinónimos: restaurar sesión, importar sesión, cargar sesión guardada" },
+    { id: "browser_tab_new", name: "browser_tab_new", category: "browser", description: "Abrir nueva pestaña (página aislada); las llamadas siguientes operan en la más reciente. Sinónimos: nueva pestaña, abrir pestaña, nuevo tab" },
+    { id: "browser_tab_list", name: "browser_tab_list", category: "browser", description: "Listar pestañas abiertas con ID, URL, título y la activa. Sinónimos: listar pestañas, ver pestañas, tabs abiertos" },
+    { id: "browser_tab_switch", name: "browser_tab_switch", category: "browser", description: "Cambiar pestaña activa — las tools siguientes apuntan a ella. Sinónimos: cambiar pestaña, cambiar tab, activar pestaña" },
+    { id: "browser_tab_close", name: "browser_tab_close", category: "browser", description: "Cerrar pestaña por ID (por defecto la activa). Sinónimos: cerrar pestaña, cerrar tab" },
 
     // ─────────────────────────────────────────
     // 12. OFFICE — Archivos Office (PDF, DOCX, XLSX, PPTX)
@@ -180,12 +225,6 @@ export const SEED_DATA: SeedData = {
     { id: "elevenlabs", name: "ElevenLabs", baseUrl: "https://api.elevenlabs.io/v1" },
     { id: "qwen", name: "Qwen (Alibaba)", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", category: "llm" },
     { id: "nvidia", name: "NVIDIA NIM", baseUrl: "https://integrate.api.nvidia.com/v1" },
-    {
-      id: "hivecode-free",
-      name: "hivecode-free (tu API · Firebase Auth)",
-      baseUrl: process.env.HIVE_FREE_API_URL || "https://api.hivecode.local/v1",
-      category: "llm",
-    },
     { id: "codex", name: "OpenAI Codex", baseUrl: "https://api.openai.com/v1" },
     { id: "opencode-go", name: "OpenCode Go", baseUrl: "https://opencode.ai/zen/go/v1" },
     { id: "minimax", name: "MiniMax", baseUrl: "https://api.minimaxi.com/v1" },
@@ -331,19 +370,6 @@ export const SEED_DATA: SeedData = {
     { id: "moonshotai/kimi-k3", providerId: "nvidia", name: "Kimi K3 (NVIDIA)", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "vision", "json_mode", "function_calling", "streaming", "reasoning"]) },
     { id: "google/gemma-4-31b-it", providerId: "nvidia", name: "Gemma 4 31B (NVIDIA)", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming"]) },
 
-    // ── hivecode-free (NVIDIA NIM free endpoint vía el backend del operador) ──
-    // El backend reenvía el id a NVIDIA con su propia key (HIVE_FREE_HIVECODE_KEY, ver
-    // crypto.ts:getFreeProviderKey). Los ids llevan el prefijo "hivecode-free/" para no
-    // chocar con las filas de `nvidia`: la colección se indexa sólo por id, y el mismo
-    // id en los dos providers se pisaba (le pasó a kimi-k2.6 y a gemma-4-31b).
-    // openai-compat-base quita el prefijo del provider antes de mandar la petición.
-    // Sólo modelos que responden con tool calling desde una cuenta gratuita
-    // (2026-09-10): los 7 anteriores ya no existían en NVIDIA o daban 404 por cuenta.
-    { id: "hivecode-free/deepseek-ai/deepseek-v4-flash-0731", providerId: "hivecode-free", name: "DeepSeek V4 Flash (free)", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
-    { id: "hivecode-free/moonshotai/kimi-k3", providerId: "hivecode-free", name: "Kimi K3 (free)", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
-    { id: "hivecode-free/nvidia/nemotron-3-super-120b-a12b", providerId: "hivecode-free", name: "Nemotron 3 Super 120B (free)", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
-    { id: "hivecode-free/meta/muse-glimmer-30b", providerId: "hivecode-free", name: "Muse Glimmer 30B (free)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "vision", "function_calling", "streaming", "code", "reasoning"]) },
-
     // ── OpenAI Codex (fuente: platform.openai.com/docs/models) ──
     { id: "codex-mini-latest", providerId: "codex", name: "Codex Mini (latest)", modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming", "reasoning"]) },
     { id: "o3", providerId: "codex", name: "O3", modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat", "code", "reasoning", "streaming"]) },
@@ -373,8 +399,19 @@ export const SEED_DATA: SeedData = {
     { id: "MiniMax-M2.5-highspeed", providerId: "minimax", name: "MiniMax M2.5 Highspeed", modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
 
     // ── HiveAgents (backend GGUF propio) ──
-    { id: "Qwen3-Coder-Next-UD-Q4_K_M.gguf", providerId: "hiveagents", name: "Qwen 3 Coder Next", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat", "streaming", "function_calling", "code"]) },
-    { id: "Qwen3.8-27B-UD-Q4_K_XL.gguf", providerId: "hiveagents", name: "Qwen 3.8 27B (visión)", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat", "streaming", "function_calling", "code", "vision"]) },
+    // El id ES el nombre del fichero GGUF: el backend lo carga por ruta y
+    // `isExpectedModelReady` compara `status.model.name` con el id de forma exacta.
+    // Catálogo tomado de GET https://llm.hiveagents.io/api/models (2026-10-03).
+    // Todos salvo DeepSeek usan ctx 50000; DeepSeek V4 Flash son 90.9GB en 3 shards
+    // y se queda en el 32768 que recomienda el backend para no reventar la VRAM.
+    // La marca de visión viene del proyector mmproj del backend, no de /api/models.
+    { id: "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", providerId: "hiveagents", name: "Qwen 3.6 35B A3B (visión)", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat", "streaming", "function_calling", "code", "vision"]) },
+    { id: "Qwen3.8-27B-UD-Q6_K_XL.gguf", providerId: "hiveagents", name: "Qwen 3.8 27B (visión)", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat", "streaming", "function_calling", "code", "vision"]) },
+    { id: "Qwen3.5-9B-UD-Q8_K_XL.gguf", providerId: "hiveagents", name: "Qwen 3.5 9B (visión)", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat", "streaming", "function_calling", "code", "vision"]) },
+    { id: "gemma-4-12b-it-UD-Q8_K_XL.gguf", providerId: "hiveagents", name: "Gemma 4 12B IT (visión)", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat", "streaming", "function_calling", "code", "vision"]) },
+    { id: "Ornith-1.0-9B-UD-Q8_K_XL.gguf", providerId: "hiveagents", name: "Ornith 1.0 9B (visión)", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat", "streaming", "function_calling", "code", "vision"]) },
+    // Solo texto: el backend no monta mmproj para este (3 shards, 90.9GB, 12.8 t/s).
+    { id: "DeepSeek-V4-Flash-UD-IQ2_XXS-00001-of-00003.gguf", providerId: "hiveagents", name: "DeepSeek V4 Flash", modelType: "llm", contextWindow: 32768, capabilities: JSON.stringify(["chat", "streaming", "function_calling", "code"]) },
   ],
 
 
@@ -595,6 +632,16 @@ export async function seedAllData(force = false): Promise<void> {
     }
     log.info(`[seed] ✅ ${SEED_DATA.providers.length} providers procesados`);
 
+    // Providers retirados del catalogo. No existe borrado para
+    // `providers` (a diferencia de `models`, que se limpia con `seedModelIds`),
+    // así que sin esto la fila se quedaría huérfana para siempre en las BDs ya
+    // existentes y seguiría apareciendo en los selectores de provider.
+    for (const retired of RETIRED_PROVIDERS) {
+      if (await providers.delete(retired)) {
+        log.info(`[seed] 🧹 provider retirado "${retired}"`);
+      }
+    }
+
     const models = await col<ModelDoc>("models");
     const seedModelIds = new Set(SEED_DATA.models.map((model) => model.id));
     const existingModels = await models.scan();
@@ -808,8 +855,14 @@ const PATCH_MODELS: SeedData["models"] = [
   { id: "MiniMax-M2.7-highspeed",  providerId: "minimax", name: "MiniMax M2.7 Highspeed",  modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
   { id: "MiniMax-M2.5",            providerId: "minimax", name: "MiniMax M2.5",            modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
   { id: "MiniMax-M2.5-highspeed",  providerId: "minimax", name: "MiniMax M2.5 Highspeed",  modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
-  // HiveAgents — backend GGUF propio
-  { id: "Qwen3.8-27B-UD-Q4_K_XL.gguf", providerId: "hiveagents", name: "Qwen 3.8 27B (visión)", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat","streaming","function_calling","code","vision"]) },
+  // HiveAgents — backend GGUF propio. Debe ir en sync con SEED_DATA.models: el seed
+  // borra todo modelo cuyo id no esté en `seedModelIds` (que solo mira SEED_DATA).
+  { id: "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", providerId: "hiveagents", name: "Qwen 3.6 35B A3B (visión)", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat","streaming","function_calling","code","vision"]) },
+  { id: "Qwen3.8-27B-UD-Q6_K_XL.gguf", providerId: "hiveagents", name: "Qwen 3.8 27B (visión)", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat","streaming","function_calling","code","vision"]) },
+  { id: "Qwen3.5-9B-UD-Q8_K_XL.gguf", providerId: "hiveagents", name: "Qwen 3.5 9B (visión)", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat","streaming","function_calling","code","vision"]) },
+  { id: "gemma-4-12b-it-UD-Q8_K_XL.gguf", providerId: "hiveagents", name: "Gemma 4 12B IT (visión)", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat","streaming","function_calling","code","vision"]) },
+  { id: "Ornith-1.0-9B-UD-Q8_K_XL.gguf", providerId: "hiveagents", name: "Ornith 1.0 9B (visión)", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat","streaming","function_calling","code","vision"]) },
+  { id: "DeepSeek-V4-Flash-UD-IQ2_XXS-00001-of-00003.gguf", providerId: "hiveagents", name: "DeepSeek V4 Flash", modelType: "llm", contextWindow: 32768, capabilities: JSON.stringify(["chat","streaming","function_calling","code"]) },
   // NVIDIA NIM — insignia actuales. Sin esto las BDs existentes no los verían hasta un
   // reseed completo. El patch solo agrega: los ids retirados se limpian en el seed.
   { id: "nvidia/nemotron-3-ultra-550b-a55b",                 providerId: "nvidia", name: "Nemotron 3 Ultra 550B",     modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat","json_mode","function_calling","streaming","reasoning","code"]) },

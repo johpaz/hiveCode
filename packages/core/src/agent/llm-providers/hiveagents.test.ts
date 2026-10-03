@@ -16,17 +16,54 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-const QWEN_VISION_MODEL_ID = "Qwen3.8-27B-UD-Q4_K_XL.gguf";
+const QWEN_VISION_MODEL_ID = "Qwen3.8-27B-UD-Q6_K_XL.gguf";
+/** 90.9GB en 3 shards: se queda en el ctx que recomienda el backend, no en 50000. */
+const DEEPSEEK_MODEL_ID = "DeepSeek-V4-Flash-UD-IQ2_XXS-00001-of-00003.gguf";
 
 describe("HiveAgents preset", () => {
-  test("seeds the catalog with the default model and the 27B vision model", () => {
+  test("seeds every model the backend actually serves", () => {
     const models = SEED_DATA.models.filter((model) => model.providerId === "hiveagents");
-    expect(models.map((model) => model.id)).toEqual([HIVEAGENTS_MODEL_ID, QWEN_VISION_MODEL_ID]);
-    // El context_window del registro es lo que se manda como ctx a /api/load.
+    // El id ES el nombre del fichero GGUF, y `isExpectedModelReady` compara
+    // `status.model.name` con el id de forma exacta: un id inventado deja la
+    // carga esperando un readiness que nunca llega.
+    expect(models.map((model) => model.id).sort()).toEqual([
+      "DeepSeek-V4-Flash-UD-IQ2_XXS-00001-of-00003.gguf",
+      "Ornith-1.0-9B-UD-Q8_K_XL.gguf",
+      "Qwen3.5-9B-UD-Q8_K_XL.gguf",
+      "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+      "Qwen3.8-27B-UD-Q6_K_XL.gguf",
+      "gemma-4-12b-it-UD-Q8_K_XL.gguf",
+    ]);
+    // El modelo por defecto tiene que existir en el catálogo.
+    expect(models.some((model) => model.id === HIVEAGENTS_MODEL_ID)).toBe(true);
+  });
+
+  test("el context_window del registro es el ctx que se manda a /api/load", () => {
+    const models = SEED_DATA.models.filter((model) => model.providerId === "hiveagents");
     for (const model of models) {
-      expect(model.contextWindow).toBe(HIVEAGENTS_DEFAULT_LOAD_CTX);
+      if (model.id === DEEPSEEK_MODEL_ID) {
+        expect(model.contextWindow).toBe(32768);
+      } else {
+        expect(model.contextWindow).toBe(HIVEAGENTS_DEFAULT_LOAD_CTX);
+      }
     }
-    expect(models[1]?.capabilities).toContain("vision");
+  });
+
+  test("marca visión solo en los modelos con proyector mmproj", () => {
+    const models = SEED_DATA.models.filter((model) => model.providerId === "hiveagents");
+    const withVision = models
+      .filter((model) => model.capabilities?.includes("vision"))
+      .map((model) => model.id)
+      .sort();
+    expect(withVision).toEqual([
+      "Ornith-1.0-9B-UD-Q8_K_XL.gguf",
+      "Qwen3.5-9B-UD-Q8_K_XL.gguf",
+      "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+      "Qwen3.8-27B-UD-Q6_K_XL.gguf",
+      "gemma-4-12b-it-UD-Q8_K_XL.gguf",
+    ]);
+    // DeepSeek V4 Flash va sin mmproj: solo texto.
+    expect(models.find((m) => m.id === DEEPSEEK_MODEL_ID)?.capabilities).not.toContain("vision");
   });
 
   test("loads the requested model with the context supplied from the model catalog", async () => {
