@@ -39,6 +39,8 @@ import type {
   WorkerActivityDoc,
 } from "@johpaz/hivecode-core/storage/collections"
 import { restoreFiles } from "@johpaz/hivecode-code/checkpoint/rollback"
+import { hasProviderApiKey, isFreeProvider, storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
+import { getDefaultProvider, getProviderModel, setDefaultProvider, setProviderModel } from "./provider-store"
 
 const SUPPORTED_LLM_PROVIDERS = new Set([
   "hiveagents",
@@ -439,6 +441,102 @@ async function handleTuiMessage(
         send({ type: "status", running: false, msg: "Error" })
         send({ type: "activity_update", coordinator: "", phase: "", status: "idle" })
       }
+      break
+    }
+
+    /**
+     * Activar un provider ya elegido por el usuario en el hub de settings.
+     *
+     * El id llega explícito, así que no hay nada que volver a preguntar: como
+     * mucho se acepta la API key. Antes esta operación llegaba como
+     * `submit("/provider set <id>")`, `handleProviderCommand` ignoraba el `rest`
+     * y `showConfigModal` volvía a pintar la lista entera de providers — el
+     * usuario elegía el mismo provider dos veces seguidas.
+     */
+    case "provider_activate": {
+      const providerId = msg.provider_id?.trim().toLowerCase()
+      if (!providerId) {
+        send({ type: "history_append", role: "system", content: "⚠ provider_activate sin provider_id" })
+        break
+      }
+      try {
+        const row = await (await col<ProviderDoc>("providers")).get(providerId)
+        const doc = row?.doc
+        if (!doc) throw new Error(`Provider no encontrado: ${providerId}`)
+        if (doc.category !== "llm") throw new Error(`${providerId} no es un provider LLM`)
+
+        // La clave solo se toca si viene algo; sin `api_key` se respeta lo que ya
+        // hubiera en el keystore en vez de borrarlo por accidente.
+        const newKey = msg.api_key?.trim()
+        const browserLogin = isFreeProvider(providerId) || doc.is_free_tier === true
+        if (newKey) {
+          await storeProviderApiKey(providerId, newKey)
+        } else if (!(await hasProviderApiKey(providerId))) {
+          // hivecode-free autentica contra el backend con PKCE: sin token la
+          // petición falla con un 401 difícil de diagnosticar, así que el
+          // mensaje dice qué hacer en vez de "no tiene API key".
+          throw new Error(browserLogin
+            ? `${providerId} necesita iniciar sesión. Usa /auth login`
+            : `${providerId} no tiene API key`)
+        }
+
+        // Cambiar de provider sin modelo compatible da 401 en la primera
+        // petición, así que se fija el primero habilitado del nuevo provider.
+        const models = (await (await col<ModelDoc>("models")).findBy("provider_id", providerId))
+          .map(entry => entry.doc)
+          .filter(m => m.model_type === "llm" && m.enabled)
+          .sort((a, b) => a.id.localeCompare(b.id))
+        const model = models[0]?.id
+
+        // Solo se toca el provider/modelo por defecto si algo cambia de verdad.
+        // Reactivar el provider ya activo con su clave debe ser un no-op: si no,
+        // cada Enter en la fila activa saltaría al primer modelo y perdería el
+        // que el usuario tenía elegido.
+        const alreadyActive = (await getDefaultProvider()) === providerId
+        if (alreadyActive && !newKey && !model) {
+          send({
+            type: "history_append",
+            role: "system",
+            content: `  ⭐ Provider ${providerId} ya estaba activo`,
+          })
+          send({ type: "status", running: false, msg: `Provider ${providerId} ya estaba activo` })
+          break
+        }
+
+        if (!alreadyActive) await setDefaultProvider(providerId)
+        if (model && model !== (await getProviderModel(providerId))) {
+          await setProviderModel(providerId, model)
+        }
+        await (await col<ProviderDoc>("providers")).put(
+          providerId,
+          { ...doc, enabled: true },
+          { expectedVersion: row!.version },
+        )
+
+        send({
+          type: "history_append",
+          role: "system",
+          content: newKey
+            ? `  ⭐ Provider ${providerId} configurado y activado${model ? `\n  Modelo: ${model}` : ""}`
+            : `  ⭐ Provider ${providerId} activado${model ? `\n  Modelo: ${model}` : ""}`,
+        })
+        send({
+          type: "state_update",
+          new_provider: providerId,
+          ...(model && { new_model: model }),
+        })
+        send({ type: "status", running: false, msg: `Provider ${providerId} activo` })
+      } catch (err) {
+        send({
+          type:    "history_append",
+          role:    "system",
+          content: `(×ᴗ×) ${(err as Error).message}`,
+        })
+        send({ type: "status", running: false, msg: "Error" })
+      }
+      // El hub sigue abierto en la TUI esperando este refresco: sin él se
+      // quedaría en "Cargando…" con las filas viejas.
+      await sendSettingsSnapshot(send)
       break
     }
 
@@ -958,12 +1056,19 @@ async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> 
       const configuredModel = (await codeConfig.get(`provider_model_${provider.id}`))?.doc.value ?? ""
       const fallbackModel = (modelsByProvider.get(provider.id) ?? [])
         .sort((a, b) => a.name.localeCompare(b.name))[0]?.id ?? ""
+      // El estado de la clave sale del keystore, no de un literal. Con `true`
+      // fijo la columna Key de la TUI marcaba \u2713 para todos los providers y
+      // no daba ninguna pista de cuáles necesitaban clave.
+      const browserLogin = isFreeProvider(provider.id) || provider.is_free_tier === true
       return {
         id: provider.id,
         name: provider.name ?? provider.id,
         model: configuredModel || fallbackModel,
         is_active: provider.id === defaultProvider,
-        has_key: true,
+        has_key: browserLogin || await hasProviderApiKey(provider.id),
+        // hivecode-free y af\u00ednes hacen login por navegador: la TUI no debe
+        // pedirles una API key, no hay ninguna que pegar.
+        browser_login: browserLogin,
         // Los ids ya vienen filtrados por model_type/enabled en modelsByProvider.
         // La TUI los usa para listar solo los del provider activo.
         models: (modelsByProvider.get(provider.id) ?? [])

@@ -30,8 +30,8 @@ bun run dev
 # o bien: hivecode
 
 # Primera vez: configurar un provider
-/provider add anthropic
-# Introduce la API key cuando se solicite
+# F2 → tab Providers → elige la fila → Enter → pega la API key
+# (sin salir de la TUI)
 ```
 
 ---
@@ -86,8 +86,30 @@ La tab activa se enruta automáticamente según el estado de Bun (PLAN → Focus
 | Widget | Activación |
 |--------|-----------|
 | `command_popup` | Tecla `/` — lista de comandos disponibles con navegación |
-| `config_modal` | `/config` — editar providers, modelo, modo, API key |
+| `settings_hub` | `F2` o `Ctrl+Shift+S` — providers, modelos, agentes, MCP, skills, GitHub, Telegram |
+| `config_modal` | `Enter` en un provider del hub — introducir su API key sin volver a elegirlo |
 | `info_modal` | `?` — ayuda contextual del tab activo |
+
+### Elegir provider e introducir su API key
+
+`F2` abre el hub en el tab **Providers**. Cada fila muestra el estado real de sus
+credenciales en la columna `Key`: `✓` clave guardada, `?` falta la API key, `~`
+login de navegador (`hivecode-free`, sin API key).
+
+Al pulsar `Enter` sobre una fila:
+
+- **Falta la clave** → se abre un formulario con un único campo enmascarado.
+  El provider **no** se vuelve a preguntar: el id elegido viaja en el mensaje
+  `provider_activate` y la clave se guarda en `Bun.secrets`.
+- **Ya tiene clave** → se activa directamente.
+- **Login de navegador** → se activa sin pedir clave; hay que haber hecho
+  `/auth login` antes.
+
+El hub se queda abierto mientras se procesa, así que la tabla se refresca sola con
+el `✓` y el `● activo` ya actualizados.
+
+Un provider nuevo que aún no está en la tabla se da de alta con `A`
+(`/provider add`).
 
 ### IPC con Bun
 

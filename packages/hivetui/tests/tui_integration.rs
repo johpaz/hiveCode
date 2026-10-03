@@ -8,7 +8,7 @@
 use hivetui::{
     ipc::BunMessage,
     renderer,
-    state::{AppState, Role, HistoryEntry, ReplMode, TabId},
+    state::{AppState, ModalState, Role, HistoryEntry, ReplMode, SettingsHubState, TabId},
     term::{Canvas, Rect},
     widgets::{history, code_layout, plan_layout, review_layout},
 };
@@ -409,6 +409,148 @@ fn renderer_keeps_reference_chrome_on_all_five_screens() {
     }
 }
 
+// ── Settings Hub: columna Key y flujo de activación ──────────────────────────
+
+/// Monta el hub de settings con los providers dados, como si Bun enviase un
+/// `SettingsData`. Recorre el camino real: mensaje IPC → apply_message → render.
+fn settings_hub_state(
+    providers: Vec<(&str, bool, bool)>, // (id, has_key, browser_login)
+    active: &str,
+) -> AppState {
+    let mut s = base_state();
+    // El hub tiene que estar montado antes del mensaje: `apply_message` solo
+    // aplica `SettingsData` si el hub está en pantalla (por eso el TUI lo mantiene
+    // abierto durante las acciones).
+    s.modal = ModalState::Settings(SettingsHubState::default());
+    s.apply_message(BunMessage::SettingsData {
+        providers: providers
+            .into_iter()
+            .map(|(id, has_key, browser_login)| hivetui::ipc::IpcSettingsProvider {
+                id: id.to_string(),
+                name: id.to_string(),
+                model: format!("{id}/default"),
+                is_active: id == active,
+                has_key,
+                browser_login,
+                models: vec![format!("{id}/default")],
+            })
+            .collect(),
+        agents: vec![],
+        mcp: vec![],
+        skills: vec![],
+        github_connected: false,
+        github_repo: None,
+        telegram_active: false,
+    });
+    s
+}
+
+#[test]
+fn el_hub_de_settings_distingue_quien_tiene_clave() {
+    // Con `has_key` siempre en `true` (el bug anterior) las tres filas
+    // mostraban ✓ y no había forma de saber a quién faltaba la clave.
+    let mut state = settings_hub_state(
+        vec![("anthropic", true, false), ("openai", false, false), ("hivecode-free", false, true)],
+        "anthropic",
+    );
+
+    let mut canvas = make_canvas(140, 40);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+
+    assert!(frame.contains("anthropic"), "deben listarse los providers: {frame}");
+    assert!(frame.contains("openai"));
+    assert!(frame.contains("hivecode-free"));
+    // El glifo de "falta clave" tiene que aparecer en algún sitio.
+    assert!(
+        frame.contains('?'),
+        "un provider sin clave debe marcarse con `?`, no con ✓: {frame}"
+    );
+    assert!(frame.contains('~'), "el login de navegador debe tener su propio glifo: {frame}");
+    assert!(frame.contains('✓'), "el provider con clave debe marcarse: {frame}");
+}
+
+#[test]
+fn el_hub_de_settings_anuncia_el_login_de_navegador() {
+    // hivecode-free no usa API key: el hint debe decirlo para que el usuario no
+    // busque una clave que no existe.
+    let mut state = settings_hub_state(vec![("hivecode-free", false, true)], "openai");
+    let mut canvas = make_canvas(140, 40);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+
+    assert!(
+        frame.contains("login de navegador"),
+        "el footer debe explicar el login de navegador: {frame}"
+    );
+}
+
+#[test]
+fn el_hub_de_settings_avisa_que_pide_la_clave() {
+    let mut state = settings_hub_state(vec![("openai", false, false)], "anthropic");
+    let mut canvas = make_canvas(140, 40);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+
+    assert!(
+        frame.contains("te pedirá la API key"),
+        "el footer debe anticipar el formulario de clave: {frame}"
+    );
+}
+
+#[test]
+fn el_modal_de_api_key_enmascara_lo_escrito() {
+    use hivetui::state::{ModalAction, ModalFieldKind};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    let mut state = settings_hub_state(vec![("openai", false, false)], "anthropic");
+    let mut canvas = make_canvas(140, 40);
+    renderer::render(&mut canvas, &mut state);
+
+    // Enter sobre la fila → formulario local con la clave.
+    hivetui::controller::handle_key_event(
+        &mut state,
+        KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        },
+    );
+
+    let ModalState::Config(modal) = &state.modal else {
+        panic!("Enter sobre un provider sin clave debe abrir el formulario");
+    };
+    assert_eq!(modal.fields.len(), 1, "no debe relistar los providers");
+    assert_eq!(modal.fields[0].kind, ModalFieldKind::Secret);
+    assert_eq!(
+        modal.action,
+        Some(ModalAction::ProviderActivate { provider_id: "openai".into() })
+    );
+
+    // Escribiendo la clave, el lienzo solo debe mostrar viñetas.
+    for c in "sk-secreto".chars() {
+        hivetui::controller::handle_key_event(
+            &mut state,
+            KeyEvent {
+                code: KeyCode::Char(c),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: crossterm::event::KeyEventState::NONE,
+            },
+        );
+    }
+    let mut canvas = make_canvas(140, 40);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+
+    assert!(
+        !frame.contains("sk-secreto"),
+        "la API key no puede aparecer en claro en el lienzo: {frame}"
+    );
+    assert!(frame.contains('•'), "la clave debe salir enmascarada: {frame}");
+}
+
 #[test]
 fn renderer_registers_split_handle_hit_regions() {
     let mut state = base_state();
@@ -485,7 +627,7 @@ fn code_layout_renders_focused_worker_detail() {
     code_layout::render(&mut canvas, area, &state);
     let frame = canvas.to_text_rows().join("\n");
 
-    assert!(frame.contains("@BACKENDENGINEER"), "Code layout debe mostrar worker enfocado");
+    assert!(frame.contains("@TOPO"), "Code layout debe mostrar worker enfocado");
     assert!(frame.contains("THOUGHT STREAM"), "Code layout debe reservar thought stream");
     assert!(frame.contains("BLACKBOARD RELEVANTE"), "Code layout debe reservar blackboard relevante");
 }

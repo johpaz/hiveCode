@@ -658,7 +658,7 @@ mod tests {
         let rows = canvas.to_text_rows();
 
         assert!(rows.iter().any(|row| row.contains("ACTIVIDAD")));
-        assert!(rows.iter().any(|row| row.contains("Bee")));
+        assert!(rows.iter().any(|row| row.contains("Abeja Reina")));
         assert!(rows.iter().any(|row| row.contains("refresh-token")));
     }
 

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     state::{
-        agent_color, agent_display_name, tier_for, AgentTier, AppState, BlackboardEvent,
+        agent_display_name, tier_for, AgentTier, AppState, BlackboardEvent,
         DashboardLevelStatus, ModalState, ReplMode, Worker, WorkerStatus,
     },
     term::{
@@ -639,7 +639,7 @@ fn render_worker_card(canvas: &mut Canvas, area: Rect, worker: &Worker, state: &
         area.x + 3,
         area.y,
         &truncate_cells(&title, area.w.saturating_sub(6) as usize),
-        Style::new().fg(agent_color(&worker.name)).bold().bg(verdict_bg),
+        Style::new().fg(crate::ui::Theme::worker(&worker.name)).bold().bg(verdict_bg),
     );
     if conflicted && area.w > 8 {
         canvas.print(area.right().saturating_sub(3), area.y, "!!", Style::new().fg(RED).bold().bg(verdict_bg));
@@ -1061,7 +1061,7 @@ mod tests {
         render(&mut canvas, Rect::new(0, 0, 100, 24), &state);
         let rows = canvas.to_text_rows().join("\n");
 
-        assert!(rows.contains("@BACKENDENGINEER"));
+        assert!(rows.contains("@TOPO"));
         assert!(rows.contains("implementando endpoint"));
         assert!(rows.contains("src/auth.ts"));
         assert!(rows.contains("iter"));

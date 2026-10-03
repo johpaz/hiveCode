@@ -140,8 +140,11 @@ export type BunMessage =
   | {
       type: "settings_data"
       // `models` = ids de los modelos llm habilitados de ese provider, para que la TUI
-// pueda ofrecer solo los del provider activo sin volver a consultar.
-      providers: Array<{ id: string; name: string; model: string; is_active: boolean; has_key: boolean; models: string[] }>
+      // pueda ofrecer solo los del provider activo sin volver a consultar.
+      // `has_key` se consulta en el keystore (no se inventa): la columna Key de la
+      // TUI tiene que distinguir "clave guardada" de "falta API key".
+      // `browser_login` marca los que hacen PKCE contra el backend y no usan clave.
+      providers: Array<{ id: string; name: string; model: string; is_active: boolean; has_key: boolean; browser_login: boolean; models: string[] }>
       agents: Array<{ id: string; name: string; provider: string; model: string; effort: string; max_turns: number; max_input_tokens: number; max_output_tokens: number; max_cost_usd: number; permission_profile: string }>
       mcp: Array<{ id: string; name: string; url: string; enabled: boolean; has_headers: boolean }>
       skills: Array<{ name: string; description: string; category: string; active: boolean }>
@@ -164,6 +167,16 @@ export type TuiMessage =
   | { type: "exit" }
   | { type: "rollback"; checkpoint_id: string }
   | { type: "request_settings" }
+  /**
+   * Activar el provider que el usuario ya eligió en el hub de settings de la TUI,
+   * guardando su API key si viene.
+   *
+   * Sustituye a mandar `/provider set <id>` como `submit`: ese camino descartaba
+   * el id y Bun volvía a mostrar el desplegable con TODOS los providers, así que
+   * había que elegir dos veces el mismo. Aquí el id viaja explícito y el único
+   * campo que se puede preguntar es la clave.
+   */
+  | { type: "provider_activate"; provider_id: string; api_key?: string }
 
 // ── Priority helpers ──────────────────────────────────────────────────────────
 

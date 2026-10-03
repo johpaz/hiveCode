@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 mod adr;
 mod agent_graph;
@@ -6,7 +5,6 @@ mod checkpoint;
 mod conflicts;
 mod dashboard;
 mod diff;
-mod dirty;
 mod filemap;
 mod harness;
 mod history;
@@ -23,7 +21,7 @@ mod thought;
 mod workers;
 
 pub use adr::{AdrEntry, AdrState};
-pub use agent_graph::{AgentTier, agent_color, all_edges, display_name as agent_display_name, edges_from, edges_to, tier_for};
+pub use agent_graph::{AgentTier, all_edges, display_name as agent_display_name, edges_from, edges_to, tier_for};
 pub use checkpoint::{Checkpoint, CheckpointState};
 pub use conflicts::{AgentConflict, ConflictState};
 pub use dashboard::{
@@ -31,16 +29,15 @@ pub use dashboard::{
 };
 pub use diff::DiffState;
 pub use crate::ipc::DiffLine;
-pub use dirty::DirtyFlags;
 pub use filemap::{FileEntry, FileMapState, RiskLevel};
 pub use harness::{HarnessHealth, HarnessState};
 pub use history::{HistoryEntry, HistoryState, Role};
 pub use input::InputState;
 pub use logs::{LogEntry, LogState};
 pub use modal::{
-    ConfigModalState, InfoModalState, ModalField, ModalFieldKind, ModalState,
-    PlanApprovalState, ReviewAction, ReviewConfirmState, SettingsHubState, SettingsMcp,
-    ModelRows, SettingsAgent, SettingsProvider, SettingsSkill, SettingsTab,
+    ConfigModalState, InfoModalState, ModalAction, ModalField, ModalFieldKind, ModalState,
+    PlanApprovalState, ProviderKeyState, ReviewAction, ReviewConfirmState, SettingsHubState,
+    SettingsMcp, ModelRows, SettingsAgent, SettingsProvider, SettingsSkill, SettingsTab,
 };
 pub use panels::PanelLayoutState;
 pub use plan::{ApiContract, PlanEntry, PlanPhase, PlanRisk, PlanState};
@@ -88,7 +85,6 @@ pub struct AppState {
     pub routing: LayoutRoutingState,
     pub modal: ModalState,
     pub logs: LogState,
-    pub dirty: DirtyFlags,
     pub panels: PanelLayoutState,
     /// Per-frame mouse hit regions emitted by renderer and consumed by controller.
     pub hit_map: crate::ui::HitMap,
@@ -353,7 +349,6 @@ impl AppState {
         self.active_tab = self.routing.recommended_tab;
         self.history_nav_mode = false;
         self.history_hscroll = 0;
-        self.dirty.full = true;
     }
 
     /// El usuario demostró intención de quedarse donde está: está componiendo un
@@ -372,7 +367,6 @@ impl AppState {
         self.active_tab = self.routing.recommended_tab;
         self.history_nav_mode = false;
         self.history_hscroll = 0;
-        self.dirty.full = true;
     }
 
     pub fn tick_layout_transition(&mut self) {
@@ -433,8 +427,6 @@ impl AppState {
         };
         self.tasks.mark_worker(task_id, worker.to_string(), status);
         self.session.task_count = self.session.task_count.max(self.tasks.tasks.len() as u32);
-        self.dirty.session = true;
-        self.dirty.full = true;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -541,9 +533,6 @@ impl AppState {
                         self.workers.workers.push(Worker::new(name));
                     }
                 }
-                self.dirty.session = true;
-                self.dirty.workers = true;
-                self.dirty.full = true;
             }
 
             // ── Respuesta del agente ───────────────────────────────────────────
@@ -566,7 +555,6 @@ impl AppState {
                     }
                 }
                 self.history.selected = Some(self.history.entries.len().saturating_sub(1));
-                self.dirty.history = true;
             }
             BunMessage::AssistantDone => {
                 self.running = false;
@@ -579,8 +567,6 @@ impl AppState {
                 } else {
                     self.recommend_layout(TabId::Focus, LayoutStage::Completed, "tarea completa -> Focus");
                 }
-                self.dirty.full = true;
-                self.dirty.history = true;
             }
             // Protocolo legado: respuesta completa en un mensaje
             BunMessage::HistoryAppend { role, content, agent, timestamp, .. } => {
@@ -601,9 +587,7 @@ impl AppState {
                     } else {
                         self.recommend_layout(TabId::Focus, LayoutStage::Completed, "respuesta completa -> Focus");
                     }
-                    self.dirty.full = true;
                 }
-                self.dirty.history = true;
             }
 
             // ── Estado de sesión ───────────────────────────────────────────────
@@ -623,7 +607,6 @@ impl AppState {
                         self.recommend_layout(TabId::Focus, LayoutStage::Completed, "tarea finalizada -> Focus");
                     }
                 }
-                self.dirty.session = true;
             }
             BunMessage::StateUpdate { new_mode, new_provider, new_model, new_token_count } => {
                 if let Some(m) = new_mode {
@@ -633,12 +616,10 @@ impl AppState {
                         self.plan.scroll = 0;
                     }
                     self.recommend_layout(TabId::Focus, LayoutStage::Idle, "modo actualizado -> Focus");
-                    self.dirty.full = true;
                 }
                 if let Some(p) = new_provider { self.session.provider = p; }
                 if let Some(m) = new_model { self.session.model = m; }
                 if let Some(t) = new_token_count { self.session.token_count = t; }
-                self.dirty.session = true;
             }
 
             // ── Workers ────────────────────────────────────────────────────────
@@ -684,7 +665,6 @@ impl AppState {
                 );
                 self.note_task_worker(task_id, &worker, &status);
                 self.route_after_worker_activity(&worker, &phase, &status, activity.as_deref());
-                self.dirty.workers = true;
             }
             // Legado: activity_update → actualiza coordinator activo
             BunMessage::ActivityUpdate {
@@ -732,7 +712,6 @@ impl AppState {
                 );
                 self.note_task_worker(task_id, &coordinator, &status);
                 self.route_after_worker_activity(&coordinator, &phase, &status, activity.as_deref());
-                self.dirty.workers = true;
             }
 
             BunMessage::DashboardSnapshot {
@@ -789,8 +768,6 @@ impl AppState {
                     self.dashboard.halt.checkpoint_id = halt.checkpoint_id;
                 }
                 // Los snapshots hidratan la UI, pero nunca deciden navegación.
-                self.dirty.full = true;
-                self.dirty.workers = true;
             }
             BunMessage::LibrarianProgress { status, records_written } => {
                 let content = if status == "done" {
@@ -807,7 +784,6 @@ impl AppState {
                     event_type: "LIBRARIAN".to_string(),
                     content,
                 });
-                self.dirty.full = true;
             }
             BunMessage::MemoryUpdate { records_added, records_updated, records_deprecated } => {
                 let content = format!(
@@ -820,7 +796,6 @@ impl AppState {
                     event_type: "MEMORY".to_string(),
                     content,
                 });
-                self.dirty.full = true;
             }
             BunMessage::BlackboardEvent { timestamp, agent, event_type, content } => {
                 self.dashboard.push_blackboard_event(BlackboardEvent {
@@ -829,7 +804,6 @@ impl AppState {
                     event_type,
                     content,
                 });
-                self.dirty.full = true;
             }
             BunMessage::ConflictResolved { agent_a, agent_b, file } => {
                 self.conflicts.entries.retain(|conflict| {
@@ -855,8 +829,6 @@ impl AppState {
                     event_type: "RESOLVED".to_string(),
                     content: "conflicto resuelto".to_string(),
                 });
-                self.dirty.conflicts = true;
-                self.dirty.full = true;
             }
             BunMessage::ForensicAlert { worker, analysis, recommendation } => {
                 let forensic_name = format!("forensic:{worker}");
@@ -882,12 +854,10 @@ impl AppState {
                     content: short_event_text(&analysis),
                 });
                 self.recommend_layout(TabId::Dashboard, LayoutStage::Failed, "análisis forense -> Dashboard");
-                self.dirty.full = true;
             }
             BunMessage::SecurityStatusUpdate { status, findings } => {
                 self.dashboard.security.status = status;
                 self.dashboard.security.findings = findings.unwrap_or(self.dashboard.security.findings);
-                self.dirty.full = true;
             }
             BunMessage::HaltState { active, reason, checkpoint_id } => {
                 self.dashboard.halt.active = active;
@@ -902,7 +872,6 @@ impl AppState {
                     });
                     self.recommend_layout(TabId::Dashboard, LayoutStage::Failed, "HALT activo -> Dashboard");
                 }
-                self.dirty.full = true;
             }
             BunMessage::MetricsUpdate { token_count, cost, elapsed_secs } => {
                 if let Some(tokens) = token_count {
@@ -912,8 +881,6 @@ impl AppState {
                     self.cost = cost;
                 }
                 self.dashboard.metrics.elapsed_secs = elapsed_secs.or(self.dashboard.metrics.elapsed_secs);
-                self.dirty.session = true;
-                self.dirty.full = true;
             }
 
             // ── Checkpoints ────────────────────────────────────────────────────
@@ -929,7 +896,6 @@ impl AppState {
                     tests_passed: tests_passed.unwrap_or(0),
                     tests_total: tests_total.unwrap_or(0),
                 });
-                self.dirty.checkpoints = true;
             }
 
             // ── Mapa de riesgo ─────────────────────────────────────────────────
@@ -960,7 +926,6 @@ impl AppState {
                         lines_removed: lines_removed.unwrap_or(0),
                     });
                 }
-                self.dirty.filemap = true;
             }
 
             // ── Stream de pensamiento ──────────────────────────────────────────
@@ -977,7 +942,6 @@ impl AppState {
                     self.note_task_worker(task_id, &coordinator, "thinking");
                     self.route_after_worker_activity(&coordinator, &phase, "thinking", Some(&content));
                 }
-                self.dirty.thought = true;
             }
             BunMessage::NarrativeChunk { task_id, coordinator, phase, content, .. } => {
                 self.harness.last_agent = Some(coordinator.clone());
@@ -992,9 +956,6 @@ impl AppState {
                     self.note_task_worker(task_id, &coordinator, "thinking");
                     self.route_after_worker_activity(&coordinator, &phase, "thinking", Some(&content));
                 }
-                self.dirty.thought = true;
-                self.dirty.thought_header = true;
-                self.dirty.search_results = true;
             }
             BunMessage::Unknown => {
                 // Mensaje de tipo desconocido — ignorar silenciosamente
@@ -1039,13 +1000,14 @@ impl AppState {
                     cursors: vec![0; n],
                     focused: 0,
                     errors: vec![false; n],
+                    // Los modales de Bun se responden con `ModalSubmit`; la
+                    // acción local y el hub al que volver son cosa de la TUI.
+                    ..Default::default()
                 });
                 self.modal_focused = 0;
-                self.dirty.modal = true;
             }
             BunMessage::ShowInfoModal { title, content } => {
                 self.modal = ModalState::Info(InfoModalState { title, content, scroll: 0 });
-                self.dirty.modal = true;
             }
 
             // ── Settings Hub ───────────────────────────────────────────────────
@@ -1054,6 +1016,7 @@ impl AppState {
                     hub.providers = providers.into_iter().map(|p| SettingsProvider {
                         id: p.id, name: p.name, model: p.model,
                         is_active: p.is_active, has_key: p.has_key,
+                        browser_login: p.browser_login,
                         models: p.models,
                     }).collect();
                     hub.agents = agents.into_iter().map(|a| SettingsAgent {
@@ -1076,7 +1039,6 @@ impl AppState {
                     hub.telegram_active = telegram_active;
                     hub.loading = false;
                 }
-                self.dirty.full = true;
             }
 
             // ── Logs ───────────────────────────────────────────────────────────
@@ -1085,7 +1047,6 @@ impl AppState {
                 if self.logs.entries.len() > self.logs.capacity {
                     self.logs.entries.remove(0);
                 }
-                self.dirty.logs = true;
             }
 
             // ── Alertas ────────────────────────────────────────────────────────
@@ -1100,7 +1061,6 @@ impl AppState {
                     severity,
                     detail,
                 });
-                self.dirty.conflicts = true;
             }
             BunMessage::Error { message } => {
                 self.harness.active_workspace_status = Some("error".to_string());
@@ -1125,9 +1085,6 @@ impl AppState {
                 if self.logs.entries.len() > self.logs.capacity {
                     self.logs.entries.remove(0);
                 }
-                self.dirty.logs = true;
-                self.dirty.history = true;
-                self.dirty.full = true;
             }
 
             // ── Rollback completado ────────────────────────────────────────────
@@ -1141,8 +1098,6 @@ impl AppState {
                 if self.logs.entries.len() > self.logs.capacity {
                     self.logs.entries.remove(0);
                 }
-                self.dirty.logs = true;
-                self.dirty.checkpoints = true;
             }
 
             // ── ADRs ───────────────────────────────────────────────────────────
@@ -1152,8 +1107,6 @@ impl AppState {
                 } else {
                     self.adrs.entries.push(AdrEntry { path, title, content, status });
                 }
-                self.dirty.adrs = true;
-                self.dirty.full = true;
             }
 
             // ── Plan estructurado ───────────────────────────────────────────────
@@ -1169,8 +1122,6 @@ impl AppState {
                     self.history.scroll = 0;
                     self.status_msg = "Error de plan".to_string();
                     self.recommend_layout(TabId::Focus, LayoutStage::Failed, "plan incompleto -> Focus");
-                    self.dirty.history = true;
-                    self.dirty.full = true;
                     return;
                 }
                 self.harness.active_task_id = Some(task_id.clone());
@@ -1204,7 +1155,6 @@ impl AppState {
                     self.dashboard.levels = dashboard_levels_from_phases(&plan.phases);
                 }
                 self.recommend_layout(TabId::Plan, LayoutStage::Planning, "plan estructurado -> Plan");
-                self.dirty.full = true;
             }
             BunMessage::PlanDraftUpdate { task_id, adr_title, adr_content, phases, risks, api_contracts } => {
                 let task_id = task_id
@@ -1251,7 +1201,6 @@ impl AppState {
                     self.dashboard.levels = dashboard_levels_from_phases(&plan.phases);
                 }
                 self.recommend_layout(TabId::Plan, LayoutStage::Planning, "Architect construye plan -> Plan");
-                self.dirty.full = true;
             }
 
             BunMessage::ReviewVerdictUpdate { reviewer, status, summary, observations, requested_changes, affected_files, criteria, categories } => {
@@ -1275,7 +1224,6 @@ impl AppState {
                         .collect(),
                 });
                 self.recommend_layout(TabId::Review, LayoutStage::Reviewing, "Reviewer emitió veredicto -> Review");
-                self.dirty.full = true;
             }
 
             BunMessage::ResumeAvailable { task_id, checkpoint_id, reason } => {
@@ -1287,7 +1235,6 @@ impl AppState {
                     content: short_event_text(&reason),
                 });
                 self.recommend_layout(TabId::Dashboard, LayoutStage::Failed, "checkpoint disponible para reanudar -> Dashboard");
-                self.dirty.full = true;
             }
 
             BunMessage::PhaseRetry { worker, attempt, max_attempts, reason } => {
@@ -1312,7 +1259,6 @@ impl AppState {
                     event_type: "RETRY".to_string(),
                     content: format!("intento {attempt}/{max_attempts}: {}", short_event_text(&reason)),
                 });
-                self.dirty.full = true;
             }
 
             // ── Proyección de tareas ────────────────────────────────────────────
@@ -1370,8 +1316,6 @@ impl AppState {
                         self.recommend_layout(TabId::Code, LayoutStage::Executing, "1 worker activo -> Code");
                     }
                 }
-                self.dirty.session = true;
-                self.dirty.full = true;
             }
 
             // ── Aprobación del plan ─────────────────────────────────────────────
@@ -1380,7 +1324,6 @@ impl AppState {
                 self.harness.active_task_status = Some("approval".to_string());
                 self.modal = ModalState::PlanApproval(PlanApprovalState { selected: 0 });
                 self.recommend_layout(TabId::Plan, LayoutStage::Planning, "plan esperando aprobación -> Plan");
-                self.dirty.full = true;
             }
 
             // ── Diff activo ─────────────────────────────────────────────────────
@@ -1393,8 +1336,6 @@ impl AppState {
                 self.diff.scroll = 0;
                 self.harness.active_workspace_status = Some("diff".to_string());
                 self.route_after_diff();
-                self.dirty.diff = true;
-                self.dirty.full = true;
             }
 
             // ── Snapshots de inicio (storage → IPC) ────────────────────────────
@@ -1418,7 +1359,6 @@ impl AppState {
                     );
                 }
                 // Igual que DashboardSnapshot: hidratar sin cambiar de layout.
-                self.dirty.workers = true;
             }
             BunMessage::FilesSnapshot { files } => {
                 for f in files {
@@ -1435,7 +1375,6 @@ impl AppState {
                         self.filemap.entries.push(FileEntry { path: f.path, risk, operation: f.operation, agent: f.agent, adr_ref: None, lines_added: 0, lines_removed: 0 });
                     }
                 }
-                self.dirty.filemap = true;
             }
 
             // ── No-ops ─────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@
 import { z } from "zod";
 import * as path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
+import { getHiveDbPath } from "@johpaz/hivecode-core/storage/hivedb";
 import type { GatewayConfig, InstallationConfig, InstallationPaths } from "./types";
 import { DEFAULT_GATEWAY_CONFIG, PORTS, gatewayConfigSchema, installationConfigSchema } from "./types";
 
@@ -37,7 +38,10 @@ export function getDefaultPaths(hiveDir?: string): InstallationPaths {
   
   return {
     hiveDir: dir,
-    dbPath: path.resolve(process.cwd(), "hivecode"),
+    // Single source of truth: the same resolution the runtime uses, so a
+    // diagnostic can never point at a different database than the one that
+    // actually opens.
+    dbPath: getHiveDbPath(),
     logPath: path.join(logsDir, "gateway.log"),
     pidPath: path.join(dir, "gateway.pid"),
     uiDir: null, // Will be set by adapter

@@ -1,6 +1,4 @@
-#![allow(dead_code)]
 
-use crate::term::{Color, AMBER, AMBER_BRIGHT, BLUE, CYAN, GREEN, LAVENDER, PINK, PURPLE, RED, SECONDARY, YELLOW};
 
 /// Niveles jerárquicos de agentes, ordenados de arriba (orquestador) a abajo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -51,54 +49,39 @@ pub fn tier_for(name: &str) -> AgentTier {
     }
 }
 
-/// Display name legible para un agente.
-pub fn display_name(name: &str) -> String {
-    match name {
-        "bee" => "Bee".to_string(),
-        "architecture" => "Architecture".to_string(),
-        "backend" => "BackendEngineer".to_string(),
-        "frontend" => "FrontendEngineer".to_string(),
-        "security" => "SecurityAuditor".to_string(),
-        "test" => "QAEngineer".to_string(),
-        "devops" => "DevOpsEngineer".to_string(),
-        "product_manager" => "ProductManager".to_string(),
-        "data_scientist" => "DataScientist".to_string(),
-        "verifier" => "Verifier".to_string(),
-        "reviewer" => "CodeReviewer".to_string(),
-        "forensic" | "forensic_agent" => "ForensicAgent".to_string(),
-        "librarian" => "Librarian".to_string(),
-        _ => {
-            let mut s = name.to_string();
-            if let Some(first) = s.get_mut(0..1) {
-                first.make_ascii_uppercase();
-            }
-            s
-        }
+/// Canonical internal role id → display name. Every agent label in the app
+/// comes from here.
+///
+/// This is the *internal* identifier made legible; Capa 2 replaces it with the
+/// fauna alias that the backend ships in `roster_snapshot`, keeping the same
+/// fallback for roles the swarm has never heard of.
+pub fn display_name(role: &str) -> String {
+    match role {
+        "bee" => "Abeja Reina".to_string(),
+        "product_manager" => "Ocelote".to_string(),
+        "architecture" => "Cóndor".to_string(),
+        "backend" => "Topo".to_string(),
+        "frontend" => "Quetzal".to_string(),
+        "data_scientist" => "Tecolote".to_string(),
+        "security" => "Jaguar".to_string(),
+        "test" => "Chapulín".to_string(),
+        "devops" => "Águila".to_string(),
+        "verifier" | "reviewer" | "quality" => "Puma".to_string(),
+        "forensic" | "forensic_agent" => "Zorro".to_string(),
+        "librarian" => "Armadillo".to_string(),
+        "spider" => "Araña".to_string(),
+        "scout" => "Halcón".to_string(),
+        "tool" | "tool_worker" => "Cangrejo".to_string(),
+        _ => capitalize(role),
     }
 }
 
-/// Color identificador para un agente.
-pub fn agent_color(name: &str) -> Color {
-    const ROLES: &[(&str, Color)] = &[
-        ("bee", AMBER_BRIGHT),
-        ("arch", PURPLE),
-        ("back", BLUE),
-        ("front", CYAN),
-        ("sec", PINK),
-        ("test", YELLOW),
-        ("devops", LAVENDER),
-        ("product", GREEN),
-        ("data", SECONDARY),
-        ("verifier", RED),
-        ("reviewer", AMBER_BRIGHT),
-        ("forensic", SECONDARY),
-        ("librarian", AMBER),
-    ];
-    ROLES
-        .iter()
-        .find(|(key, _)| name.to_lowercase().contains(key))
-        .map(|(_, color)| *color)
-        .unwrap_or(SECONDARY)
+fn capitalize(s: &str) -> String {
+    let mut out = s.to_string();
+    if let Some(first) = out.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    out
 }
 
 /// Aristas del grafo de dependencias/colaboración entre roles.
@@ -145,7 +128,13 @@ pub fn edges_to(name: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// Todas las aristas del grafo.
+/// Todas las aristas del grafo de roles.
+///
+/// **Pendiente de consumidor** (Capa 4): este grafo es hoy una tabla fija de
+/// colaboración entre roles y nada la dibuja. Capa 4 lo reemplaza por la
+/// topología real del plan (`PlanPhase.depends_on`), que es lo que el usuario
+/// necesita ver ("quién espera a quién"). Hasta entonces estas tres funciones son
+/// API pública y por eso Rust no las marca como muertas.
 pub fn all_edges() -> &'static [(&'static str, &'static str)] {
     EDGES
 }

@@ -726,26 +726,54 @@ async function handleProviderCommand(
         const rawIds = allProviders.map(p => p.id)
         const current = rawIds.includes(ctx.activeProvider) ? ctx.activeProvider : rawIds[0]
 
-        const values = await ui.showConfigModal("provider_set", "Activar Provider", [
-          {
-            key: "provider",
-            label: "Selecciona provider",
-            placeholder: current,
-            required: true,
-            secret: false,
-            field_type: "select",
-            options,
-            default_value: current,
-          },
-          {
-            key: "api_key",
-            label: "API Key  (vac\u00edo si ya est\u00e1 configurada)",
-            placeholder: "sk-\u2026 / tu-api-key",
-            required: false,
-            secret: true,
-            field_type: "text",
-          },
-        ])
+        // `/provider set <id>` ya dijo cuál es: no se vuelve a pedir. Antes el
+        // `rest` se ignoraba y el modal repintaba la lista completa, obligando
+        // a elegir dos veces el mismo provider (y se perdía el id si el
+        // usuario elegía otro por accidente).
+        const requestedId = rest[0]?.trim().toLowerCase() ?? ""
+        const requested = providerStates.find(p => p.id === requestedId)
+        if (requestedId && !requested) {
+          return {
+            handled: true,
+            output: `  \u26a0 Provider no encontrado: ${requestedId}\n  Disponibles: ${rawIds.join(", ")}`,
+          }
+        }
+
+        const values: Record<string, string> | null = requested
+          // Solo se pregunta la clave. `provider` viaja prellenado para que el
+          // resto del handler lo lea igual que en el caso con desplegable.
+          ? await ui.showConfigModal("provider_set", `Activar ${requested.id}`, [
+              {
+                key: "api_key",
+                label: requested.hasApiKey
+                  ? "API Key  (vac\u00edo si ya est\u00e1 configurada)"
+                  : `API Key de ${requested.id}`,
+                placeholder: "sk-\u2026 / tu-api-key",
+                required: !requested.hasApiKey,
+                secret: true,
+                field_type: "text",
+              },
+            ]).then(v => v ? { ...v, provider: requested.id } : null)
+          : await ui.showConfigModal("provider_set", "Activar Provider", [
+              {
+                key: "provider",
+                label: "Selecciona provider",
+                placeholder: current,
+                required: true,
+                secret: false,
+                field_type: "select",
+                options,
+                default_value: current,
+              },
+              {
+                key: "api_key",
+                label: "API Key  (vac\u00edo si ya est\u00e1 configurada)",
+                placeholder: "sk-\u2026 / tu-api-key",
+                required: false,
+                secret: true,
+                field_type: "text",
+              },
+            ])
 
         if (!values) return { handled: true, output: "  Cancelado" }
 

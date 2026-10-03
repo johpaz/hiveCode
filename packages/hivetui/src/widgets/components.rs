@@ -1,9 +1,6 @@
 use unicode_width::UnicodeWidthChar;
 
-use crate::term::{
-    Canvas, Color, Rect, Style, AMBER_BRIGHT, BLUE, CYAN, LAVENDER, PINK, PURPLE, SECONDARY,
-    YELLOW,
-};
+use crate::term::{Canvas, Color, Rect, Style};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StyledLine {
@@ -202,44 +199,15 @@ pub fn render_table(canvas: &mut Canvas, area: Rect, columns: &[TableColumn], ro
     }
 }
 
+/// Agent label. Delegates to the canonical table in `state::agent_graph` so
+/// there is exactly one role → name mapping in the app.
 pub fn agent_display_name(name: &str) -> String {
-    match name {
-        "bee" => "Bee".to_string(),
-        "architecture" => "Architecture".to_string(),
-        "backend" => "BackendEngineer".to_string(),
-        "frontend" => "FrontendEngineer".to_string(),
-        "security" => "SecurityAuditor".to_string(),
-        "test" => "QAEngineer".to_string(),
-        "devops" => "DevOpsEngineer".to_string(),
-        "product_manager" => "ProductManager".to_string(),
-        "data_scientist" => "DataScientist".to_string(),
-        "verifier" => "Verifier".to_string(),
-        "reviewer" => "Reviewer".to_string(),
-        _ => {
-            let mut s = name.to_string();
-            if let Some(first) = s.get_mut(0..1) {
-                first.make_ascii_uppercase();
-            }
-            s
-        }
-    }
+    crate::state::agent_display_name(name)
 }
 
+/// Agent colour. Delegates to `Theme::worker`, the single role → colour table.
 pub fn worker_color(name: &str) -> Color {
-    const ROLES: &[(&str, Color)] = &[
-        ("bee", AMBER_BRIGHT),
-        ("arch", PURPLE),
-        ("back", BLUE),
-        ("front", CYAN),
-        ("sec", PINK),
-        ("test", YELLOW),
-        ("devops", LAVENDER),
-    ];
-    ROLES
-        .iter()
-        .find(|(key, _)| name.contains(key))
-        .map(|(_, color)| *color)
-        .unwrap_or(SECONDARY)
+    crate::ui::Theme::worker(name)
 }
 
 fn resolve_column_widths(total_width: u16, columns: &[TableColumn]) -> Vec<u16> {
@@ -326,8 +294,18 @@ mod tests {
 
     #[test]
     fn agent_identity_is_shared_across_layouts() {
-        assert_eq!(agent_display_name("backend"), "BackendEngineer");
+        use crate::term::CYAN;
+        assert_eq!(agent_display_name("backend"), "Topo");
         assert_eq!(agent_display_name("custom_agent"), "Custom_agent");
         assert_eq!(worker_color("frontend"), CYAN);
+    }
+
+    #[test]
+    fn the_thin_wrappers_delegate_to_the_canonical_tables() {
+        // Both used to be independent hardcoded tables that had already drifted.
+        use crate::term::PURPLE;
+        assert_eq!(agent_display_name("architecture"), crate::state::agent_display_name("architecture"));
+        assert_eq!(worker_color("architecture"), crate::ui::Theme::worker("architecture"));
+        assert_eq!(worker_color("architecture"), PURPLE);
     }
 }

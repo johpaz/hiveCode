@@ -191,11 +191,17 @@ fn render_workers_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
         return;
     }
 
+    // The identity band is resizable: `code:workers` drag writes
+    // `code_workers_percent` (state/panels.rs) and the handle for it is
+    // registered by the renderer, so honouring the value here is what makes
+    // that drag do anything at all.
+    let identity_pct = state.panels.code_workers_percent.clamp(20, 80);
+    let rest = 100u16.saturating_sub(identity_pct);
     let split = SplitPane::new(
         Axis::Vertical,
         vec![
-            Constraint::Percent(28),
-            Constraint::Percent(42),
+            Constraint::Percent(identity_pct),
+            Constraint::Percent(rest / 2),
             Constraint::Fill(1),
         ],
     );

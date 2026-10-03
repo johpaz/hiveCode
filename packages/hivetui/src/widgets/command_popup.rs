@@ -13,6 +13,8 @@ pub const COMMANDS: &[Command] = &[
     Command { cmd: "/exit",            desc: "Salir de hivecode" },
     Command { cmd: "/compact",         desc: "Compactar contexto de la sesión" },
     Command { cmd: "/stop",            desc: "Detener tarea en curso" },
+    Command { cmd: "/provider",        desc: "Providers: list · add · set · test · status" },
+    Command { cmd: "/modelo",          desc: "Modelos: list · set · add · delete · info" },
     Command { cmd: "/session",         desc: "Gestionar sesiones" },
     Command { cmd: "/session list",    desc: "Ver sesiones recientes" },
     Command { cmd: "/session resume",  desc: "Reanudar sesión por id" },

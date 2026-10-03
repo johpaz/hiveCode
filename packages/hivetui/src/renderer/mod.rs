@@ -4,7 +4,7 @@ use crate::{
     ui::{split_panes, truncate_cells, Axis, Constraint, HitAction, MouseRegion, SplitPane},
     widgets::{
         activity_toast, checkpoint_bar, code_layout, command_popup, config_modal, conflict_bar,
-        dashboard_layout, focus_layout, header, info_modal, input,
+        dashboard_layout, focus_layout, header, info_modal, input, logs_panel,
         plan_approval_modal, plan_layout, review_layout, settings_hub, statusbar, tabbar, welcome,
     },
 };
@@ -125,6 +125,13 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
         ModalState::PlanApproval(_) => plan_approval_modal::render(canvas, area, state),
         ModalState::ReviewConfirm(_) => {}
         ModalState::None         => {}
+    }
+
+    // `/logs` — overlay sobre el área de contenido. Antes las entradas se
+    // acumulaban en `state.logs` sin que ningún widget las leyera.
+    if state.logs.visible {
+        let areas = layout_areas(area, &state.panels);
+        logs_panel::render(canvas, areas.content, state);
     }
 
     cursor_position(state, input_area)

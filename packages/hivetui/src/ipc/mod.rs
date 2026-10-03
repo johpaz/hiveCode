@@ -607,7 +607,13 @@ pub struct IpcSettingsProvider {
     pub name: String,
     pub model: String,
     pub is_active: bool,
+    /// Lo responde Bun consultando el keystore (`hasProviderApiKey`). Antes
+    /// venía hardcodeado a `true`, así que la columna `Key` de la TUI marcaba
+    /// `✓` para todo provider y no señalaba cuáles necesitaban clave.
     pub has_key: bool,
+    /// El provider se autentica con login de navegador (PKCE) en vez de API key.
+    #[serde(default)]
+    pub browser_login: bool,
     /// Modelos llm habilitados de este provider. El tab Modelos lista solo los del
     /// provider activo; sin provider activo la lista queda vacía y hay que elegir
     /// uno primero.
@@ -672,6 +678,14 @@ pub enum TuiMessage {
     ModeChange { mode: String },
     ModalSubmit { command: String, values: std::collections::HashMap<String, String> },
     ModalCancel { command: String },
+    /// Activar un provider ya elegido en la TUI, opcionalmente Guardando su API
+    /// key en el keystore. Sustituye a mandar `/provider set <id>` como `Submit`:
+    /// ese camino ignoraba el id y Bun volvía a abrir la lista completa de
+    /// providers para que el usuario volviera a elegir el mismo.
+    ///
+    /// `api_key` llega en `None` cuando el provider ya tenía clave o usa login
+    /// de navegador; Bun no vuelve a preguntar.
+    ProviderActivate { provider_id: String, api_key: Option<String> },
     InfoModalClose,
     /// Confirma a Bun que la TUI soltó el terminal y ya puede usarlo.
     /// Sin esto `suspendTui()` en tui-launcher.ts nunca resuelve.
