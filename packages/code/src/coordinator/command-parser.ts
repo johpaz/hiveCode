@@ -925,49 +925,57 @@ async function handleModelCommand(
         if (providers.length === 0) {
           return { handled: true, output: "  No hay providers con API key configurada. Agrega uno con: /provider add" }
         }
-        // Build combined options: "provider :: modelId" — solo providers con API key
+        // Modelos por provider, ya filtrados a los que están habilitados.
         const providerIds = new Set(providers.map(p => p.id))
         const dbModels = (await scanDocs<ModelDoc>("models"))
           .filter((model) => model.enabled && providerIds.has(model.provider_id))
           .sort((a, b) => a.provider_id.localeCompare(b.provider_id) || a.id.localeCompare(b.id))
+        const modelsOf = (pid: string) => dbModels.filter(m => m.provider_id === pid).map(m => m.id)
 
-        const combinedOptions = dbModels.map(m => `${m.provider_id} :: ${m.id}`)
+        // Un provider explícito o el ya activo ACOTA el selector a sus modelos. Antes
+        // se listaban los ~115 modelos de todos los providers en un solo desplegable
+        // como "provider :: modelo", que hacía inmanejable cambiar de modelo. Sin
+        // provider (ni explícito ni activo) se elige uno primero y luego su modelo.
+        const requested = rest[0]?.trim() || ctx.activeProvider || ""
+        let targetProvider = requested && providerIds.has(requested) ? requested : ""
 
-        // Fields: if models exist in BD, use select; else text
-        const currentCombo = ctx.activeProvider && ctx.activeModel
-          ? `${ctx.activeProvider} :: ${ctx.activeModel}`
-          : undefined
-        const defaultCombo = currentCombo && combinedOptions.includes(currentCombo) ? currentCombo : combinedOptions[0]
+        if (!targetProvider) {
+          const picked = await ui.showConfigModal("model_set_provider", "Provider", [
+            {
+              key: "provider", label: "Provider", placeholder: providers[0].id, required: true, secret: false,
+              field_type: "select", options: providers.map(p => p.id),
+              default_value: providerIds.has(requested) ? requested : providers[0].id,
+            },
+          ])
+          if (!picked?.provider) return { handled: true, output: "  Cancelado" }
+          targetProvider = picked.provider.trim()
+        }
 
-        const fields: ModalField[] = combinedOptions.length > 0
-          ? [
-              { key: "combo", label: "Provider :: Modelo", placeholder: "", required: true, secret: false, field_type: "select", options: combinedOptions, default_value: defaultCombo },
-            ]
-          : [
-              { key: "provider", label: "Provider",  placeholder: ctx.activeProvider || providers[0].id, required: true,  secret: false, field_type: "select", options: providers.map(p => p.id), default_value: ctx.activeProvider || undefined },
-              { key: "model",    label: "Modelo ID", placeholder: "claude-sonnet-4-6",                   required: true,  secret: false, field_type: "text" },
-            ]
-
-        const values = await ui.showConfigModal("model_set", "Cambiar Modelo Activo", fields)
+        const options = modelsOf(targetProvider)
+        const currentModel = ctx.activeProvider === targetProvider ? ctx.activeModel : ""
+        // Sin modelos en BD el select quedaría vacío, así que se cae a texto libre
+        // para poder apuntar a un modelo que aún no esté catalogado.
+        const values = options.length > 0
+          ? await ui.showConfigModal("model_set", `Modelo \u00b7 ${targetProvider}`, [
+              {
+                key: "model", label: "Modelo", placeholder: "", required: true, secret: false,
+                field_type: "select", options,
+                default_value: options.includes(currentModel) ? currentModel : options[0],
+              },
+            ])
+          : await ui.showConfigModal("model_set", `Modelo \u00b7 ${targetProvider}`, [
+              { key: "model", label: "Modelo ID", placeholder: "claude-sonnet-4-6", required: true, secret: false, field_type: "text" },
+            ])
         if (!values) return { handled: true, output: "  Cancelado" }
 
-        let providerId: string
-        let modelId: string
-        if (values.combo) {
-          const parts = values.combo.split(" :: ")
-          providerId = parts[0]?.trim() ?? ctx.activeProvider
-          modelId    = parts[1]?.trim() ?? ""
-        } else {
-          providerId = values.provider || ctx.activeProvider
-          modelId    = values.model || ""
-        }
+        const modelId = (values.model ?? "").trim()
         if (!modelId) return { handled: true, output: "  Modelo no especificado" }
-        await setCodeConfig(`provider_model_${providerId}`, modelId)
-        await setCodeConfig("default_provider", providerId)
+        await setCodeConfig(`provider_model_${targetProvider}`, modelId)
+        await setCodeConfig("default_provider", targetProvider)
         return {
           handled: true,
-          output: `  \u2b22 Modelo: ${modelId}  [${providerId}]`,
-          newState: { activeProvider: providerId, activeModel: modelId },
+          output: `  \u2b22 Modelo: ${modelId}  [${targetProvider}]`,
+          newState: { activeProvider: targetProvider, activeModel: modelId },
         }
       }
       // Non-modal fallback

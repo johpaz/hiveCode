@@ -1,7 +1,7 @@
 use crate::{
     state::{AppState, ModalState, ModelRows, SettingsTab},
     term::{Canvas, Rect, Style, AMBER, CYAN, DIM, GREEN, RED, SECONDARY, WHITE, BG_ELEVATED},
-    ui::{HitAction, MouseRegion},
+    ui::{HitAction, HitMap, MouseRegion},
 };
 
 const HUB_Z: i16 = 50; // por encima de todo lo demás
@@ -314,7 +314,7 @@ fn render_models(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
                 canvas.print(area.x + 52, y,
                     if p.is_active { "●" } else { "○" },
                     if p.is_active { Style::new().fg(GREEN).bold() } else { Style::new().fg(DIM) });
-                register_row_hit(state, register_hits, i, area, y);
+                register_row_hit(&mut state.hit_map, register_hits, i, area, y);
             }
             draw_scrollbar(canvas, area, offset, providers.len(), visible);
             print_hint(canvas, area, "Elige un provider  ·  P → cambiar de provider");
@@ -340,7 +340,7 @@ fn render_models(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
                 }
                 let style = if is_sel { Style::new().fg(WHITE).bold() } else { Style::new().fg(SECONDARY) };
                 canvas.print(area.x + 4, y, &truncate(m, 62), style);
-                register_row_hit(state, register_hits, i, area, y);
+                register_row_hit(&mut state.hit_map, register_hits, i, area, y);
             }
             draw_scrollbar(canvas, area, offset, total, visible);
             print_hint(canvas, area, "Enter → usar este modelo  ·  P → cambiar de provider");
