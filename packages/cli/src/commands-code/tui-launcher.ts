@@ -964,6 +964,12 @@ async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> 
         model: configuredModel || fallbackModel,
         is_active: provider.id === defaultProvider,
         has_key: true,
+        // Los ids ya vienen filtrados por model_type/enabled en modelsByProvider.
+        // La TUI los usa para listar solo los del provider activo.
+        models: (modelsByProvider.get(provider.id) ?? [])
+          .slice()
+          .sort((a, b) => a.id.localeCompare(b.id))
+          .map((m) => m.id),
       }
     }))
   } catch { /* providers pueden no existir aún */ }

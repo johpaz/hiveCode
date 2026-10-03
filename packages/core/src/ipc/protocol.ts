@@ -139,7 +139,9 @@ export type BunMessage =
   | { type: "phase_retry"; worker: string; attempt: number; max_attempts: number; reason: string }
   | {
       type: "settings_data"
-      providers: Array<{ id: string; name: string; model: string; is_active: boolean; has_key: boolean }>
+      // `models` = ids de los modelos llm habilitados de ese provider, para que la TUI
+// pueda ofrecer solo los del provider activo sin volver a consultar.
+      providers: Array<{ id: string; name: string; model: string; is_active: boolean; has_key: boolean; models: string[] }>
       agents: Array<{ id: string; name: string; provider: string; model: string; effort: string; max_turns: number; max_input_tokens: number; max_output_tokens: number; max_cost_usd: number; permission_profile: string }>
       mcp: Array<{ id: string; name: string; url: string; enabled: boolean; has_headers: boolean }>
       skills: Array<{ name: string; description: string; category: string; active: boolean }>
