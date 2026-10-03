@@ -313,29 +313,36 @@ export const SEED_DATA: SeedData = {
     { id: "qwen-tts", providerId: "qwen", name: "Qwen TTS", modelType: "tts", contextWindow: 0, capabilities: JSON.stringify(["tts", "speech"]) },
 
     // ── NVIDIA NIM (fuente: build.nvidia.com — modelos con endpoint gratuito) ──
-    { id: "meta/llama-3.3-70b-instruct", providerId: "nvidia", name: "Llama 3.3 70B (NVIDIA)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming"]) },
-    { id: "meta/llama-4-maverick-17b-128e-instruct", providerId: "nvidia", name: "Llama 4 Maverick (NVIDIA)", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming"]) },
-    { id: "nvidia/llama-3.1-nemotron-ultra-253b-v1", providerId: "nvidia", name: "Nemotron Ultra 253B", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "reasoning"]) },
-    { id: "nvidia/llama-3.1-nemotron-70b-instruct", providerId: "nvidia", name: "Nemotron 70B", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming"]) },
-    { id: "deepseek-ai/deepseek-v3.2", providerId: "nvidia", name: "DeepSeek V3.2 (NVIDIA)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code"]) },
-    { id: "qwen/qwen3-coder-480b-a35b-instruct", providerId: "nvidia", name: "Qwen3 Coder 480B (NVIDIA)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code"]) },
-    { id: "qwen/qwen3.5-397b-a17b", providerId: "nvidia", name: "Qwen3.5 397B (NVIDIA)", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming"]) },
-    { id: "moonshotai/kimi-k2-thinking", providerId: "nvidia", name: "Kimi K2 Thinking (NVIDIA)", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "reasoning", "function_calling", "streaming"]) },
-    { id: "mistralai/mistral-large-3-675b-instruct-2512", providerId: "nvidia", name: "Mistral Large 3 (NVIDIA)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming"]) },
+    // Ids verificados contra GET https://integrate.api.nvidia.com/v1/models y con una
+    // llamada real con tool calling desde una cuenta gratuita (2026-09-10). Se sacaron
+    // los que NVIDIA retiró (nemotron-3-nano-30b, llama-3.3-nemotron-super-49b,
+    // llama-3.3-70b, glm-5.2, minimax-m3, gpt-oss-120b) y los que responden 404
+    // "Function not found for account" en cuentas normales (kimi-k2.6,
+    // llama-3.1-nemotron-ultra-253b, llama-3.1-nemotron-70b).
+    // NVIDIA retiró el endpoint de Qwen: no hay ningún modelo Qwen servido por NIM.
+    // El contextWindow es el de despliegue real, no el máximo teórico del paper: varios
+    // Nemotron 3 anuncian 1M pero su config.json trae max_position_embeddings 262144.
+    { id: "nvidia/nemotron-3-ultra-550b-a55b", providerId: "nvidia", name: "Nemotron 3 Ultra 550B", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "reasoning", "code"]) },
+    { id: "nvidia/nemotron-3-super-120b-a12b", providerId: "nvidia", name: "Nemotron 3 Super 120B", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "reasoning", "code"]) },
+    { id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", providerId: "nvidia", name: "Nemotron 3 Nano Omni 30B", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming", "reasoning"]) },
+    { id: "nvidia/nemotron-3.5-lightning-30b-a3b", providerId: "nvidia", name: "Nemotron 3.5 Lightning 30B", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "reasoning"]) },
+    { id: "meta/muse-glimmer-30b", providerId: "nvidia", name: "Muse Glimmer 30B (Meta)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "code", "json_mode", "function_calling", "streaming"]) },
+    { id: "deepseek-ai/deepseek-v4-flash-0731", providerId: "nvidia", name: "DeepSeek V4 Flash (NVIDIA)", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "json_mode", "function_calling", "streaming", "reasoning"]) },
+    { id: "moonshotai/kimi-k3", providerId: "nvidia", name: "Kimi K3 (NVIDIA)", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "vision", "json_mode", "function_calling", "streaming", "reasoning"]) },
     { id: "google/gemma-4-31b-it", providerId: "nvidia", name: "Gemma 4 31B (NVIDIA)", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming"]) },
-    { id: "google/gemma-3-27b-it", providerId: "nvidia", name: "Gemma 3 27B (NVIDIA)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming"]) },
-    { id: "z-ai/glm-5.1", providerId: "nvidia", name: "GLM 5.1 (NVIDIA)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming"]) },
 
-    // ── hivecode-free (NVIDIA NIM free endpoint — server key, no user key required) ──
-    // 5 modelos verificados en build.nvidia.com con "Free Endpoint: Available"
-    // Backend key se inyecta vía env HIVE_FREE_HIVECODE_KEY al boot (ver crypto.ts:getFreeProviderKey)
-    { id: "moonshotai/kimi-k2.6", providerId: "hivecode-free", name: "Kimi K2.6 (free)", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
-    { id: "qwen/qwen3-coder-480b-a35b-instruct", providerId: "hivecode-free", name: "Qwen3 Coder 480B (free)", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code"]) },
-    { id: "minimaxai/minimax-m2.7", providerId: "hivecode-free", name: "minimax M2.7 (free)", modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
-    { id: "google/gemma-4-31b-it", providerId: "hivecode-free", name: "Gemma 4 31B (free)", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
-    { id: "z-ai/glm-5.1", providerId: "hivecode-free", name: "GLM 5.1 (free)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
-    { id: "deepseek-ai/deepseek-v4-flash", providerId: "hivecode-free", name: "DeepSeek V4 Flash (free)", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
-    { id: "mistralai/mistral-medium-3.5-128b", providerId: "hivecode-free", name: "Mistral Medium 3.5 128B (free)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
+    // ── hivecode-free (NVIDIA NIM free endpoint vía el backend del operador) ──
+    // El backend reenvía el id a NVIDIA con su propia key (HIVE_FREE_HIVECODE_KEY, ver
+    // crypto.ts:getFreeProviderKey). Los ids llevan el prefijo "hivecode-free/" para no
+    // chocar con las filas de `nvidia`: la colección se indexa sólo por id, y el mismo
+    // id en los dos providers se pisaba (le pasó a kimi-k2.6 y a gemma-4-31b).
+    // openai-compat-base quita el prefijo del provider antes de mandar la petición.
+    // Sólo modelos que responden con tool calling desde una cuenta gratuita
+    // (2026-09-10): los 7 anteriores ya no existían en NVIDIA o daban 404 por cuenta.
+    { id: "hivecode-free/deepseek-ai/deepseek-v4-flash-0731", providerId: "hivecode-free", name: "DeepSeek V4 Flash (free)", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
+    { id: "hivecode-free/moonshotai/kimi-k3", providerId: "hivecode-free", name: "Kimi K3 (free)", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
+    { id: "hivecode-free/nvidia/nemotron-3-super-120b-a12b", providerId: "hivecode-free", name: "Nemotron 3 Super 120B (free)", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code", "reasoning"]) },
+    { id: "hivecode-free/meta/muse-glimmer-30b", providerId: "hivecode-free", name: "Muse Glimmer 30B (free)", modelType: "llm", contextWindow: 131072, capabilities: JSON.stringify(["chat", "vision", "function_calling", "streaming", "code", "reasoning"]) },
 
     // ── OpenAI Codex (fuente: platform.openai.com/docs/models) ──
     { id: "codex-mini-latest", providerId: "codex", name: "Codex Mini (latest)", modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming", "reasoning"]) },
@@ -367,6 +374,7 @@ export const SEED_DATA: SeedData = {
 
     // ── HiveAgents (backend GGUF propio) ──
     { id: "Qwen3-Coder-Next-UD-Q4_K_M.gguf", providerId: "hiveagents", name: "Qwen 3 Coder Next", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat", "streaming", "function_calling", "code"]) },
+    { id: "Qwen3.8-27B-UD-Q4_K_XL.gguf", providerId: "hiveagents", name: "Qwen 3.8 27B (visión)", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat", "streaming", "function_calling", "code", "vision"]) },
   ],
 
 
@@ -800,6 +808,19 @@ const PATCH_MODELS: SeedData["models"] = [
   { id: "MiniMax-M2.7-highspeed",  providerId: "minimax", name: "MiniMax M2.7 Highspeed",  modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
   { id: "MiniMax-M2.5",            providerId: "minimax", name: "MiniMax M2.5",            modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
   { id: "MiniMax-M2.5-highspeed",  providerId: "minimax", name: "MiniMax M2.5 Highspeed",  modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
+  // HiveAgents — backend GGUF propio
+  { id: "Qwen3.8-27B-UD-Q4_K_XL.gguf", providerId: "hiveagents", name: "Qwen 3.8 27B (visión)", modelType: "llm", contextWindow: 50000, capabilities: JSON.stringify(["chat","streaming","function_calling","code","vision"]) },
+  // NVIDIA NIM — insignia actuales. Sin esto las BDs existentes no los verían hasta un
+  // reseed completo. El patch solo agrega: los ids retirados se limpian en el seed.
+  { id: "nvidia/nemotron-3-ultra-550b-a55b",                 providerId: "nvidia", name: "Nemotron 3 Ultra 550B",     modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat","json_mode","function_calling","streaming","reasoning","code"]) },
+  { id: "nvidia/nemotron-3-super-120b-a12b",                 providerId: "nvidia", name: "Nemotron 3 Super 120B",     modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat","json_mode","function_calling","streaming","reasoning","code"]) },
+  { id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",     providerId: "nvidia", name: "Nemotron 3 Nano Omni 30B",  modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat","vision","json_mode","function_calling","streaming","reasoning"]) },
+  { id: "nvidia/nemotron-3.5-lightning-30b-a3b",             providerId: "nvidia", name: "Nemotron 3.5 Lightning 30B", modelType: "llm", contextWindow: 262144, capabilities: JSON.stringify(["chat","json_mode","function_calling","streaming","reasoning"]) },
+  { id: "meta/muse-glimmer-30b",                             providerId: "nvidia", name: "Muse Glimmer 30B (Meta)",   modelType: "llm", contextWindow: 131072,  capabilities: JSON.stringify(["chat","code","json_mode","function_calling","streaming"]) },
+  { id: "deepseek-ai/deepseek-v4-flash-0731",                providerId: "nvidia", name: "DeepSeek V4 Flash (NVIDIA)", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat","code","json_mode","function_calling","streaming","reasoning"]) },
+  { id: "moonshotai/kimi-k3",                                providerId: "nvidia", name: "Kimi K3 (NVIDIA)",          modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat","code","vision","json_mode","function_calling","streaming","reasoning"]) },
+  // Retirados o sin acceso en cuentas normales (2026-09-10): nemotron-3-nano-30b,
+  // llama-3.3-nemotron-super-49b, kimi-k2.6, glm-5.2, minimax-m3, gpt-oss-120b.
 ]
 
 const PATCH_CODE_BRIDGE: SeedData["codeBridge"] = [

@@ -624,14 +624,14 @@ fn render_decision_panel(canvas: &mut Canvas, area: Rect, state: &AppState) {
 fn render_approval_hints(canvas: &mut Canvas, area: Rect, y: u16) {
     let narrow = area.w < 54;
     if narrow {
-        canvas.print(area.x + 2, y, "[a] aprobar", Style::new().fg(GREEN).bold());
-        canvas.print(area.x + 2, y + 1, "[r] rechazar  [m] modificar", Style::new().fg(RED).bold());
+        canvas.print(area.x + 2, y, "[Alt+a] aprobar", Style::new().fg(GREEN).bold());
+        canvas.print(area.x + 2, y + 1, "[Alt+r] rechazar  [Alt+m] modificar", Style::new().fg(RED).bold());
         return;
     }
 
-    canvas.print(area.x + 2, y, "[a] aprobar", Style::new().fg(GREEN).bold());
-    canvas.print(area.x + 15, y, "[r] rechazar", Style::new().fg(RED).bold());
-    canvas.print(area.x + 29, y, "[m] modificar", Style::new().fg(YELLOW).bold());
+    canvas.print(area.x + 2, y, "[Alt+a] aprobar", Style::new().fg(GREEN).bold());
+    canvas.print(area.x + 15, y, "[Alt+r] rechazar", Style::new().fg(RED).bold());
+    canvas.print(area.x + 29, y, "[Alt+m] modificar", Style::new().fg(YELLOW).bold());
     canvas.print(area.x + 44, y, "requiere Enter de confirmación", Style::new().fg(DIM));
 }
 

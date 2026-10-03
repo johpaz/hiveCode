@@ -8,6 +8,9 @@
   },
   "main": "packages/core/src/index.ts",
   "types": "packages/core/src/index.ts",
+  "engines": {
+    "bun": ">=1.4.2"
+  },
   "workspaces": [
     "packages/*"
   ],
@@ -109,7 +112,7 @@
     "prestart": "bun packages/cli/scripts/setup-agent-browser.ts",
     "start": "bun run packages/cli/src/index.ts start",
     "build": "bun packages/skills/scripts/generate-bundle.ts && (cd packages/hivetui && cargo build --release) && bun build packages/cli/src/index.ts packages/code/src/workers/bee.worker.ts packages/code/src/workers/architecture.worker.ts packages/code/src/workers/product-manager.worker.ts packages/code/src/workers/backend.worker.ts packages/code/src/workers/frontend.worker.ts packages/code/src/workers/data-scientist.worker.ts packages/code/src/workers/security.worker.ts packages/code/src/workers/test.worker.ts packages/code/src/workers/devops.worker.ts packages/code/src/workers/verifier.worker.ts packages/code/src/workers/reviewer.worker.ts packages/code/src/workers/librarian.worker.ts packages/code/src/workers/forensic.worker.ts packages/code/src/workers/tool.worker.ts packages/code/src/workers/subagent.worker.ts --bundle --outdir dist --target bun --entry-naming '[name].js' && mv dist/index.js dist/hivecode.js && bun packages/cli/scripts/postbuild.ts",
-    "build:binary": "mkdir -p dist && bun build packages/cli/src/index.ts --compile --target=bun-linux-x64   --outfile dist/hivecode-linux-x64",
+    "build:binary": "mkdir -p dist && bun build packages/cli/src/index.ts --compile --bytecode --target=bun-linux-x64   --outfile dist/hivecode-linux-x64",
     "prepublishOnly": "bun run build",
     "test": "bun test",
     "test:integration": "bun test --tsconfig-override tests/tsconfig.json tests/",
@@ -117,15 +120,15 @@
     "lint": "bunx tsc --noEmit",
     "bench": "bun run scripts/bench.ts",
     "reload-tools": "bun run scripts/reload-tools.ts",
-    "build:binary:mac": "mkdir -p dist && bun build packages/cli/src/index.ts --compile --target=bun-darwin-arm64 --outfile dist/hivecode-macos-arm64",
-    "build:binary:mac-intel": "mkdir -p dist && bun build packages/cli/src/index.ts --compile --target=bun-darwin-x64   --outfile dist/hivecode-macos-x64",
-    "build:binary:win": "mkdir -p dist && bun build packages/cli/src/index.ts --compile --target=bun-windows-x64  --outfile dist/hivecode-windows.exe",
+    "build:binary:mac": "mkdir -p dist && bun build packages/cli/src/index.ts --compile --bytecode --target=bun-darwin-arm64 --outfile dist/hivecode-macos-arm64",
+    "build:binary:mac-intel": "mkdir -p dist && bun build packages/cli/src/index.ts --compile --bytecode --target=bun-darwin-x64   --outfile dist/hivecode-macos-x64",
+    "build:binary:win": "mkdir -p dist && bun build packages/cli/src/index.ts --compile --bytecode --target=bun-windows-x64  --outfile dist/hivecode-windows.exe",
     "build:binary:all": "bun run build:binary && bun run build:binary:mac && bun run build:binary:win"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.98.0",
     "@google/genai": "^1.43.0",
-    "@johpaz/hive-db": "^0.4.0",
+    "@johpaz/hive-db": "^0.5.1",
     "@modelcontextprotocol/sdk": "^1.26.0",
     "grammy": "latest",
     "openai": "^6.18.0",
@@ -133,7 +136,7 @@
     "zod": "latest"
   },
   "devDependencies": {
-    "@types/bun": "^1.3.13",
+    "@types/bun": "^1.4.1",
     "typescript": "6.0.2"
   }
 }

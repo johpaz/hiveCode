@@ -5,6 +5,7 @@
  * Secrets are managed exclusively via Bun.secrets (OS keystore).
  */
 
+import { resolvePort } from "../utils/port"
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { z } from "zod"
@@ -92,7 +93,9 @@ function readConfigFile(): Record<string, unknown> | null {
 
 function applyEnvOverrides(config: Config): Config {
   const envPort = process.env.HIVE_PORT
-  if (envPort) config.port = Number(envPort)
+  // Sin resolvePort, un HIVE_PORT mal escrito metía NaN acá, saltándose el
+  // `.min(1).max(65535)` que el schema de zod declara para este campo.
+  if (envPort) config.port = resolvePort(envPort, config.port)
   const envHost = process.env.HIVE_HOST
   if (envHost) config.host = envHost
 

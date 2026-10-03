@@ -79,12 +79,22 @@ export abstract class OpenAICompatBase implements LLMProvider {
   }
 
   /** Override to add provider-specific fields to the request body. */
+  /**
+   * Id de modelo que viaja al provider. El catálogo prefija con "<provider>/" las
+   * filas de providers que revenden el mismo modelo (opencode-go/…, hivecode-free/…)
+   * para que no se pisen en la colección; acá se quita. Un provider cuyos modelos
+   * propios ya empiezan con su nombre (NVIDIA: nvidia/nemotron-…) lo sobrescribe.
+   */
+  protected requestModelId(model: string): string {
+    return model.replace(new RegExp(`^${this.providerName}\\/`, "i"), "")
+  }
+
   protected modifyRequestBody(body: any, _options: LLMCallOptions): any {
     return body
   }
 
-  /** Override to customize the OpenAI client (e.g. strip unwanted headers, add custom fetch). */
-  protected async resolveOpenAIClient(apiKey: string, baseURL: string | undefined): Promise<any> {
+  /** Override to customize the OpenAI client (e.g. strip unwanted headers, add custom fetch, per-call headers). */
+  protected async resolveOpenAIClient(apiKey: string, baseURL: string | undefined, _options?: LLMCallOptions): Promise<any> {
     const { default: OpenAI } = await import("openai")
     return new OpenAI({ apiKey, baseURL })
   }
@@ -126,7 +136,7 @@ export abstract class OpenAICompatBase implements LLMProvider {
       throw new Error(`API key missing for provider: ${this.providerName}. Configure it in Settings → Providers.`)
     }
 
-    const client = await this.resolveOpenAIClient(apiKey, baseURL)
+    const client = await this.resolveOpenAIClient(apiKey, baseURL, options)
     const needsReasoning = this.needsReasoningRoundtrip()
 
     const sanitized = sanitizeMessages(options.messages)
@@ -135,9 +145,8 @@ export abstract class OpenAICompatBase implements LLMProvider {
       : sanitized.map(({ reasoning_content: _rc, ...rest }) => rest as typeof sanitized[number])
     const messagesForProvider = rawMessages.map(m => this._convertMessage(m))
 
-    const providerPrefix = new RegExp(`^${this.providerName}\\/`, "i")
     const body: any = {
-      model: options.model.replace(providerPrefix, ""),
+      model: this.requestModelId(options.model),
       messages: messagesForProvider,
       temperature: requiresTemperature1(this.providerName, options.model) ? 1 : (options.temperature ?? 0.7),
     }

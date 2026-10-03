@@ -1,0 +1,38 @@
+name: CI
+
+# release.yml sólo dispara con tags y nunca corrió la suite: los 22 archivos de
+# test del repo no los verificaba nada antes de publicar.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Typecheck y tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Pin exacto: Bun 1.4.1 traía dos regresiones (renombrado de `var` en
+          # `bun build`, que rompía imports con SyntaxError, y una fuga de
+          # AsyncLocalStorage) que sólo 1.4.2 corrige.
+          bun-version: "1.4.2"
+
+      - run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run lint
+
+      # --parallel reparte los archivos entre procesos (uno por núcleo) e implica
+      # --isolate. Medido en este repo: 23,6 s -> 18,1 s, con resultados idénticos.
+      - name: Tests
+        run: bun test --parallel

@@ -1,6 +1,6 @@
 use crate::{
     state::AppState,
-    term::{Canvas, Rect, Style, AMBER, CYAN, DIM, GREEN},
+    term::{Canvas, Rect, Style, AMBER, CYAN, DIM, GREEN, RED},
     ui::truncate_cells,
 };
 
@@ -21,24 +21,55 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     canvas.print(area.x + 1, area.y, "modo:", Style::new().fg(DIM));
     canvas.print(area.x + 7, area.y, mode, mode_style);
 
-    // status_msg de Bun tiene prioridad; si está vacío mostrar atajos de teclado
-    let right_content = if let Some(reason) = state.routing.transition_reason.as_deref() {
-        reason.to_string()
+    // Prioridad: confirmación destructiva > sugerencia de layout > razón de
+    // transición > mensaje de Bun > atajos según el contexto de teclado real.
+    let suggestion = state.pending_layout_suggestion();
+    let typing = !state.input.value().is_empty();
+
+    let (right_content, style) = if state.dashboard.halt_confirm {
+        (
+            "⚠ detener el enjambre · Enter confirma · Esc cancela".to_string(),
+            Style::new().fg(RED).bold(),
+        )
+    } else if state.dashboard.rollback_confirm_checkpoint.is_some() {
+        (
+            "⚠ rollback · Enter confirma · Esc cancela".to_string(),
+            Style::new().fg(RED).bold(),
+        )
+    } else if let Some(tab) = suggestion {
+        let why = state
+            .routing
+            .transition_reason
+            .as_deref()
+            .unwrap_or("hay actividad nueva");
+        (
+            format!("→ {} [{}] · {}", tab.label(), tab.num(), why),
+            Style::new().fg(AMBER).bold(),
+        )
+    } else if let Some(reason) = state.routing.transition_reason.as_deref() {
+        (reason.to_string(), Style::new().fg(AMBER).bold())
     } else if !state.status_msg.is_empty() {
         let prefix = if state.running { "⟳ " } else { "" };
-        format!("{prefix}{}", state.status_msg)
-    } else {
-        format!(
-            "Tab nav  Shift+Tab modo  Esc input  Ctrl+L cargar  Ctrl+Y copiar  Ctrl+C salir"
+        (
+            format!("{prefix}{}", state.status_msg),
+            if state.running { Style::new().fg(CYAN) } else { Style::new().fg(DIM) },
         )
-    };
-
-    let style = if state.routing.transition_reason.is_some() {
-        Style::new().fg(AMBER).bold()
-    } else if state.running {
-        Style::new().fg(CYAN)
+    } else if typing {
+        // Con texto en el input las flechas y las letras son edición, no atajos.
+        (
+            "Enter enviar  ←/→ cursor  Ctrl+←/→ palabra  Esc limpiar  Ctrl+C salir".to_string(),
+            Style::new().fg(DIM),
+        )
+    } else if state.history_nav_mode {
+        (
+            "↑/↓ entrada  Shift+←/→ scroll  Ctrl+L cargar  Ctrl+Y copiar  Tab salir".to_string(),
+            Style::new().fg(DIM),
+        )
     } else {
-        Style::new().fg(DIM)
+        (
+            "1-5 vistas  Tab nav  Shift+Tab modo  ←/→ checkpoint  Ctrl+C salir".to_string(),
+            Style::new().fg(DIM),
+        )
     };
     let shown = truncate_cells(&right_content, area.w.saturating_sub(14) as usize);
     canvas.print(area.x + 13, area.y, &shown, style);

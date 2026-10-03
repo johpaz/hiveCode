@@ -68,3 +68,34 @@ describe("profile harness task routing", () => {
     expect(bee?.model_id).toBe(HIVEAGENTS_MODEL_ID)
   })
 })
+
+describe("approval gate", () => {
+  // "migración" dispara complexity=complex → pasa por planning y llega al gate.
+  const COMPLEX_OBJECTIVE = "planifica la migración de arquitectura del módulo de auth"
+  const planningRunner: ProfileRunner = async () => "Plan listo.\nFEATURE_DIR: specs/001-auth"
+
+  test("waits for the user instead of cancelling when no approver is wired", async () => {
+    // El recovery scheduler reencola con manager.runTask(task, mode) sin approver.
+    // Tratar 'nadie puede responder' como 'rechazado' descartaba el trabajo en silencio.
+    const result = await new ProfileHarness(planningRunner).run({
+      objective: COMPLEX_OBJECTIVE,
+      sessionId: "session-approval",
+      workspace: "/workspace/test",
+      policy: "approval",
+    })
+
+    expect(result.status).toBe("waiting_user")
+  })
+
+  test("cancels when the user actually rejects", async () => {
+    const result = await new ProfileHarness(planningRunner).run({
+      objective: COMPLEX_OBJECTIVE,
+      sessionId: "session-approval-reject",
+      workspace: "/workspace/test",
+      policy: "approval",
+      approve: async () => "cancel",
+    })
+
+    expect(result.status).toBe("cancelled")
+  })
+})

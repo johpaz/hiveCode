@@ -338,6 +338,10 @@ export async function* runAgent(
   }
 
   async function callProfileLLM(request: Parameters<typeof callLLM>[0]) {
+    // Todas las llamadas del run son de la misma conversación: los providers que
+    // rutean o cachean por sesión (OpenCode Go) lo necesitan, y el fallback de
+    // abajo lo conserva porque providerCfg no trae sessionId.
+    request = { sessionId: opts.threadId, ...request }
     try {
       return await callLLM(request)
     } catch (error) {

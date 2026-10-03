@@ -45,7 +45,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: "1.4.2"
 
       - name: Install dependencies
         run: bun install
@@ -54,7 +54,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           if command -v cargo &>/dev/null; then
-            cd packages/tui && cargo build --release
+            cd packages/hivetui && cargo build --release
           else
             echo "Cargo not available, skipping TUI binary"
           fi
@@ -64,6 +64,7 @@ jobs:
         run: |
           bun build packages/cli/src/index.ts \
             --compile \
+            --bytecode \
             --target ${{ matrix.target }} \
             --outfile ${{ matrix.artifact }}
 
@@ -106,7 +107,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: "1.4.2"
 
       - name: Setup Node.js for npm publish
         uses: actions/setup-node@v4

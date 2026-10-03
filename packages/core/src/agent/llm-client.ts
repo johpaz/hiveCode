@@ -95,6 +95,13 @@ export interface LLMCallOptions {
   onReasoningToken?: (token: string) => void
   /** User ID for free-tier cap enforcement. Defaults to "default" if absent. */
   userId?: string
+  /**
+   * Stable id of the conversation this call belongs to (the agent loop's
+   * threadId). Providers that route or cache per session derive their own
+   * header from it — OpenCode Go's `x-opencode-session` — and never send it
+   * verbatim, since it carries user, channel and peer ids.
+   */
+  sessionId?: string
 }
 
 export interface LLMResponse {

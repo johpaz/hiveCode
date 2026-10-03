@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@johpaz/hive-db": "^0.4.0",
+    "@johpaz/hive-db": "^0.5.1",
     "@johpaz/hivecode-mcp": "workspace:*",
     "@johpaz/hivecode-skills": "workspace:*",
     "@vercel/agent-browser": "github:vercel-labs/agent-browser",
@@ -30,7 +30,7 @@
   },
   "devDependencies": {
     "typescript": "6.0.2",
-    "@types/bun": "^1.3.13"
+    "@types/bun": "^1.4.1"
   },
   "exports": {
     ".": "./src/index.ts",

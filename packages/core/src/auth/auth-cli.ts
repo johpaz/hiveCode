@@ -16,6 +16,7 @@
  *   HIVE_FREE_AUTH_PORT — local port for the callback server (default 18923)
  */
 
+import { resolvePort } from "../utils/port";
 import { generatePKCE } from "./auth-pkce"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 
@@ -40,7 +41,7 @@ export interface AuthCliOptions {
 
 export async function runAuthCli(opts: AuthCliOptions = {}): Promise<AuthSuccess | null> {
   const apiBase = (opts.apiBase || process.env.HIVE_FREE_API_URL || "https://api.hivecode.local/v1").replace(/\/+$/, "")
-  const port = Number(opts.callbackPort || process.env.HIVE_FREE_AUTH_PORT || DEFAULT_PORT)
+  const port = resolvePort(opts.callbackPort ?? process.env.HIVE_FREE_AUTH_PORT, DEFAULT_PORT)
   const host = opts.callbackHost || "127.0.0.1"
   const openBrowser = opts.openBrowser || defaultOpenBrowser
 

@@ -1,7 +1,7 @@
 use crate::{
     state::{AppState, ModalState, PanelLayoutState, TabId},
-    term::{Canvas, Rect},
-    ui::{split_panes, Axis, Constraint, HitAction, MouseRegion, SplitPane},
+    term::{Canvas, Rect, Style, AMBER, AMBER_BRIGHT, BG_MAIN, DIM},
+    ui::{split_panes, truncate_cells, Axis, Constraint, HitAction, MouseRegion, SplitPane},
     widgets::{
         activity_toast, checkpoint_bar, code_layout, command_popup, config_modal, conflict_bar,
         dashboard_layout, focus_layout, header, info_modal, input,
@@ -65,9 +65,20 @@ pub fn layout_areas(area: Rect, panels: &PanelLayoutState) -> ChromeAreas {
     }
 }
 
+/// Por debajo de esto los layouts no caben: el chrome solo ya consume ~10 filas y
+/// las columnas de Plan/Code/Review necesitan ancho para no quedar en jirones.
+const MIN_COLS: u16 = 100;
+const MIN_ROWS: u16 = 24;
+
 pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
     canvas.clear();
     let area = canvas.area();
+
+    if area.w < MIN_COLS || area.h < MIN_ROWS {
+        render_too_small(canvas, area);
+        return (0, 0);
+    }
+
     register_hit_regions(state, area);
 
     let input_area = render_main(canvas, area, state);
@@ -117,6 +128,40 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
     }
 
     cursor_position(state, input_area)
+}
+
+/// Mensaje explícito en vez de dibujar un layout ilegible. Dice el tamaño actual y
+/// el mínimo, para que el usuario sepa cuánto le falta.
+fn render_too_small(canvas: &mut Canvas, area: Rect) {
+    canvas.fill_rect(area, ' ', Style::new().bg(BG_MAIN));
+    if area.h == 0 || area.w == 0 {
+        return;
+    }
+    let lines = [
+        ("⬡ hiveCode", Style::new().fg(AMBER_BRIGHT).bold().bg(BG_MAIN)),
+        ("", Style::new().bg(BG_MAIN)),
+        ("terminal demasiado pequeña", Style::new().fg(AMBER).bg(BG_MAIN)),
+    ];
+    let detail = format!("{}x{} · mínimo {}x{}", area.w, area.h, MIN_COLS, MIN_ROWS);
+    let start_y = area.y + area.h.saturating_sub(4) / 2;
+
+    for (idx, (text, style)) in lines.iter().enumerate() {
+        let y = start_y + idx as u16;
+        if y >= area.bottom() || text.is_empty() {
+            continue;
+        }
+        canvas.print_centered(area.x, y, area.w, &truncate_cells(text, area.w as usize), *style);
+    }
+    let y = start_y + lines.len() as u16;
+    if y < area.bottom() {
+        canvas.print_centered(
+            area.x,
+            y,
+            area.w,
+            &truncate_cells(&detail, area.w as usize),
+            Style::new().fg(DIM).bg(BG_MAIN),
+        );
+    }
 }
 
 fn render_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {

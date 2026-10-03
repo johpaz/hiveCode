@@ -274,7 +274,13 @@ ${objective}`,
         || existing.doc.stage === "ready"
       if (policy === "approval" && needsSpecificationApproval) {
         await updateStage("waiting_user", { nextAction: "approve_specification" })
-        const decision = await options.approve?.("specification", planning)
+        // Sin approver cableado (p.ej. el reintento del recovery scheduler) nadie puede
+        // responder: la tarea queda esperando decisión, no se descarta. El stage ya está
+        // persistido, así que es retomable. Mismo criterio que el gate de convergencia.
+        if (!options.approve) {
+          return { taskId, complexity, status: "waiting_user", response: planning, featureDir, repairCycles: 0 }
+        }
+        const decision = await options.approve("specification", planning)
         if (decision !== "approve") {
           await updateStage("cancelled")
           return { taskId, complexity, status: "cancelled", response: planning, featureDir, repairCycles: 0 }

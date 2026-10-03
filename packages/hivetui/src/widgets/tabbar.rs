@@ -5,6 +5,7 @@ use crate::{
         SECONDARY, WHITE, YELLOW,
     },
     ui::text::{cell_width, ellipsize_cells},
+    widgets::components::pulse_color,
 };
 
 const TABS: &[(TabId, &str)] = &[
@@ -20,8 +21,11 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     let y = area.y;
     let mut x = area.x + 1;
 
+    let suggested = state.pending_layout_suggestion();
+
     for (idx, (id, label)) in TABS.iter().enumerate() {
         let is_active = state.active_tab == *id;
+        let is_suggested = suggested == Some(*id);
         let num = idx + 1;
         let badge = badge_for(*id, state);
         let slot_w = tab_slot_width(label, badge.as_deref());
@@ -32,9 +36,12 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
 
         let bg = if is_active { AMBER_SUBTLE } else { BG_PANEL };
 
-        // ⬡
+        // ⬡ — el hexágono parpadea en ámbar cuando el auto-routing sugiere esta
+        // pestaña pero no la forzamos porque el usuario está leyendo o escribiendo.
         let hex_style = if is_active {
             Style::new().fg(AMBER_BRIGHT).bg(bg)
+        } else if is_suggested {
+            Style::new().fg(pulse_color(AMBER_BRIGHT, DIM, state.anim_tick)).bold().bg(bg)
         } else {
             Style::new().fg(DIM).bg(bg)
         };

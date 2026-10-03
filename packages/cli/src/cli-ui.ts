@@ -303,7 +303,10 @@ export async function runProviderSetupWizard(
     }
     hiveNote(`Sesión iniciada como ${result.email ?? "usuario"}`, ["hivecode-free ✓"])
     // El token ya fue guardado en Bun.secrets por runAuthCli
-    return { provider, apiKey: "", baseUrl: "", model: "moonshotai/kimi-k2.6" }
+    // kimi-k2.6 dejó de servir: NVIDIA responde 404 "not found for account" en
+    // cuentas normales. DeepSeek V4 Flash responde en ~0,5 s con tool calling
+    // desde una cuenta gratuita (verificado 2026-09-10).
+    return { provider, apiKey: "", baseUrl: "", model: "hivecode-free/deepseek-ai/deepseek-v4-flash-0731" }
   }
 
   const apiKey = await hiveText({

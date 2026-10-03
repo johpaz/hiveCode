@@ -1,10 +1,23 @@
 /**
- * BunCronScheduler - native Bun.cron scheduler backed by HiveDB.
+ * BunCronScheduler — scheduler con zona horaria, respaldado por HiveDB.
+ *
+ * No usa `Bun.cron()`. Hasta Bun 1.3 interpretaba las expresiones en UTC y acá
+ * se compensaba corriendo el campo de hora con el offset de la zona; Bun 1.4
+ * pasó a interpretarlas en la hora **local del proceso**, con lo que esa
+ * compensación se volvió una doble conversión y los jobs disparaban con el
+ * offset local de retraso. Aparte, `Bun.cron` sigue sin aceptar 6 campos ni una
+ * fecha ISO como patrón (que es como se agendan los `one_shot`), y su handle no
+ * expone la próxima corrida, de donde sale `next_run_at`.
+ *
+ * El motor de `./cron` hace la conversión reloj-de-pared ↔ instante contra
+ * `Intl` en cada cálculo, así que también acierta en los cambios de horario de
+ * verano, que el enfoque de "sumar el offset una vez" no puede resolver.
  */
 
 import { col } from "../storage/hive";
 import type { CronJobDoc, TaskRunDoc } from "../storage/collections";
 import { logger } from "../utils/logger";
+import { Cron, parseCronExpression, nextOccurrence } from "./cron";
 import type {
   CronScheduler,
   CronTaskInput,
@@ -22,86 +35,16 @@ type Handle = {
 
 export type ExecuteCallback = (task: CronJobDoc) => Promise<void>;
 
-function getTimezoneOffsetHours(timezone: string): number {
-  try {
-    const now = new Date();
-    const utcStr = now.toLocaleString("en-US", { timeZone: "UTC" });
-    const tzStr = now.toLocaleString("en-US", { timeZone: timezone });
-    return Math.round((new Date(utcStr).getTime() - new Date(tzStr).getTime()) / 3600000);
-  } catch {
-    return 0;
-  }
-}
-
-function toUtcCron(expr: string, timezone: string): string {
-  if (!timezone || timezone === "UTC") return expr;
-  const parts = expr.trim().split(/\s+/);
-  if (parts.length < 5) return expr;
-  const hour = parseInt(parts[1], 10);
-  if (Number.isNaN(hour)) return expr;
-  const offset = getTimezoneOffsetHours(timezone);
-  parts[1] = String(((hour + offset) % 24 + 24) % 24);
-  return parts.join(" ");
-}
-
-function expandField(field: string, min: number, max: number): number[] {
-  if (field === "*") return Array.from({ length: max - min + 1 }, (_, i) => i + min);
-  const result = new Set<number>();
-  for (const part of field.split(",")) {
-    if (part.includes("/")) {
-      const [rangePart, stepStr] = part.split("/");
-      const step = parseInt(stepStr, 10) || 1;
-      const [startStr, endStr] = (rangePart === "*" ? `${min}-${max}` : rangePart).split("-");
-      const start = parseInt(startStr, 10);
-      const end = endStr ? parseInt(endStr, 10) : max;
-      for (let v = start; v <= end; v += step) result.add(v);
-    } else if (part.includes("-")) {
-      const [startStr, endStr] = part.split("-");
-      for (let v = parseInt(startStr, 10); v <= parseInt(endStr, 10); v++) result.add(v);
-    } else {
-      const n = parseInt(part, 10);
-      if (!Number.isNaN(n)) result.add(n);
-    }
-  }
-  return [...result].sort((a, b) => a - b);
-}
-
-function computeNextRun(utcExpr: string): string | null {
-  try {
-    const parts = utcExpr.trim().split(/\s+/);
-    if (parts.length < 5) return null;
-    const validMins = expandField(parts[0], 0, 59);
-    const validHours = expandField(parts[1], 0, 23);
-    const validDoms = expandField(parts[2], 1, 31);
-    const validMons = expandField(parts[3], 1, 12);
-    const validDows = expandField(parts[4], 0, 6);
-
-    const candidate = new Date();
-    candidate.setUTCSeconds(0, 0);
-    candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
-
-    for (let i = 0; i < 527040; i++) {
-      if (
-        validMons.includes(candidate.getUTCMonth() + 1) &&
-        validDoms.includes(candidate.getUTCDate()) &&
-        validDows.includes(candidate.getUTCDay()) &&
-        validHours.includes(candidate.getUTCHours()) &&
-        validMins.includes(candidate.getUTCMinutes())
-      ) {
-        return candidate.toISOString();
-      }
-      candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 function nextRunFor(input: Pick<CronJobDoc, "task_type" | "cron_expression" | "fire_at" | "timezone">): string | null {
   if (input.task_type === "one_shot") return input.fire_at ?? null;
   if (!input.cron_expression) return null;
-  return computeNextRun(toUtcCron(input.cron_expression, input.timezone));
+  try {
+    const fields = parseCronExpression(input.cron_expression);
+    const next = nextOccurrence(fields, new Date(), { timeZone: input.timezone || "UTC" });
+    return next ? next.toISOString() : null;
+  } catch {
+    return null;
+  }
 }
 
 function rowToTask(row: CronJobDoc): CronTask {
@@ -298,10 +241,10 @@ export class BunCronScheduler implements CronScheduler {
     this.stop(row.id);
 
     if (row.task_type === "recurring" && row.cron_expression) {
-      const utcExpr = toUtcCron(row.cron_expression, row.timezone);
-      const job = Bun.cron(utcExpr as any, () => { this.fireJob(row.id); });
+      const tz = row.timezone || "UTC";
+      const job = new Cron(row.cron_expression, { timezone: tz, name: row.name }, () => { this.fireJob(row.id); });
       this.handles.set(row.id, { job });
-      log.debug(`[register] Recurring "${row.name}" -> "${utcExpr}"`);
+      log.debug(`[register] Recurring "${row.name}" -> "${row.cron_expression}" (${tz}) next: ${job.nextRun()?.toISOString() ?? "N/A"}`);
     } else if (row.task_type === "one_shot" && row.fire_at) {
       const delay = new Date(row.fire_at).getTime() - Date.now();
       if (delay <= 0) {

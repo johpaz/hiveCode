@@ -8,6 +8,7 @@ import {
   HIVEAGENTS_OPENAI_BASE_URL,
   getHiveAgentsModelStatus,
   ensureHiveAgentsModelReady,
+  resolveModelId,
   type HiveAgentsLoadResult,
   type HiveAgentsStatusResult,
 } from "./hiveagents"
@@ -49,7 +50,7 @@ export async function resolveHiveAgentsModelLoadConfig(
   const modelRow = (await modelsCol.get(modelId))?.doc
 
   return {
-    modelId: HIVEAGENTS_MODEL_ID,
+    modelId: resolveModelId(modelId),
     apiKey: await getProviderApiKey("hiveagents"),
     baseUrl: providerRow?.base_url ?? HIVEAGENTS_OPENAI_BASE_URL,
     ctx: positiveNumber(modelRow?.context_window)
@@ -66,23 +67,24 @@ export async function loadHiveAgentsModelFromDb(
   if (!config.apiKey) {
     return {
       success: false,
-      model_id: HIVEAGENTS_MODEL_ID,
+      model_id: config.modelId,
       ctx: config.ctx,
       error: "API key not configured for hiveagents",
     }
   }
 
-  log.info(`[hiveagents] Loading ${HIVEAGENTS_MODEL_ID} with ctx=${config.ctx} and waiting until ready`)
+  log.info(`[hiveagents] Loading ${config.modelId} with ctx=${config.ctx} and waiting until ready`)
   const result = await ensureHiveAgentsModelReady(
     config.apiKey,
     undefined,
     1000,
     300000,
     config.ctx,
+    config.modelId,
   )
   return {
     ...result,
-    model_id: HIVEAGENTS_MODEL_ID,
+    model_id: config.modelId,
     ctx: config.ctx,
   }
 }

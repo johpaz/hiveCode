@@ -6,6 +6,7 @@ const log = logger.child("llm-client")
 
 export const HIVEAGENTS_BASE_URL = "https://llm.hiveagents.io"
 export const HIVEAGENTS_OPENAI_BASE_URL = `${HIVEAGENTS_BASE_URL}/v1`
+/** Modelo por defecto cuando quien llama no especifica uno. */
 export const HIVEAGENTS_MODEL_ID = "Qwen3-Coder-Next-UD-Q4_K_M.gguf"
 
 /**
@@ -50,6 +51,15 @@ function getApiBase(): string {
   return HIVEAGENTS_BASE_URL
 }
 
+/**
+ * El backend identifica los modelos por el nombre del fichero GGUF. Aceptamos el id
+ * con o sin el prefijo `hiveagents/` y caemos al modelo por defecto si no hay ninguno.
+ */
+export function resolveModelId(modelId?: string | null): string {
+  const trimmed = modelId?.trim().replace(/^hiveagents\//, "") ?? ""
+  return trimmed || HIVEAGENTS_MODEL_ID
+}
+
 function getAuthHeaders(apiKey: string): Record<string, string> {
   return {
     "Content-Type": "application/json",
@@ -59,10 +69,10 @@ function getAuthHeaders(apiKey: string): Record<string, string> {
 
 /**
  * Solicita la carga de un modelo GGUF en el backend de HiveAgents.
- * Usa el preset fijo recomendado para Qwen 3 Coder Next.
+ * El backend monta un modelo a la vez; `modelId` decide cuál.
  */
 export async function loadHiveAgentsModel(
-  _modelId: string,
+  modelId: string,
   apiKey: string,
   _baseUrl?: string,
   ctx = HIVEAGENTS_DEFAULT_LOAD_CTX
@@ -70,7 +80,7 @@ export async function loadHiveAgentsModel(
   const apiBase = getApiBase()
   const headers = getAuthHeaders(apiKey)
   const loadBody = {
-    model: HIVEAGENTS_MODEL_ID,
+    model: modelId || HIVEAGENTS_MODEL_ID,
     config: {
       ctx,
       kvType: "f16",
@@ -142,14 +152,16 @@ export async function ensureHiveAgentsModelReady(
   pollIntervalMs = HIVEAGENTS_STATUS_POLL_MS,
   timeoutMs = HIVEAGENTS_READY_TIMEOUT_MS,
   ctx = HIVEAGENTS_DEFAULT_LOAD_CTX,
+  modelId: string = HIVEAGENTS_MODEL_ID,
 ): Promise<HiveAgentsReadyResult> {
+  const target = modelId || HIVEAGENTS_MODEL_ID
   let status = await getHiveAgentsModelStatus()
   onStatus?.(status)
-  if (isExpectedModelReady(status, ctx)) {
+  if (isExpectedModelReady(status, ctx, target)) {
     return { success: true, loading: false, status }
   }
 
-  const load = await loadHiveAgentsModel(HIVEAGENTS_MODEL_ID, apiKey, undefined, ctx)
+  const load = await loadHiveAgentsModel(target, apiKey, undefined, ctx)
   if (!load.success) return load
 
   const deadline = Date.now() + timeoutMs
@@ -160,13 +172,13 @@ export async function ensureHiveAgentsModelReady(
     onStatus?.(status)
     pollCount++
     if (pollCount % 5 === 0) {
-      log.info(`[hiveagents] Waiting for ${HIVEAGENTS_MODEL_ID} to become ready`)
+      log.info(`[hiveagents] Waiting for ${target} to become ready`)
     }
     if (status.error) {
       return { success: false, loading: false, status, error: status.error }
     }
-    if (isExpectedModelReady(status, ctx)) {
-      log.info(`[hiveagents] ${HIVEAGENTS_MODEL_ID} is ready`)
+    if (isExpectedModelReady(status, ctx, target)) {
+      log.info(`[hiveagents] ${target} is ready`)
       return { success: true, loading: false, status }
     }
   }
@@ -179,8 +191,8 @@ export async function ensureHiveAgentsModelReady(
   }
 }
 
-function isExpectedModelReady(status: HiveAgentsStatusResult, ctx: number): boolean {
-  if (!status.loaded || status.loading || status.model?.name !== HIVEAGENTS_MODEL_ID) {
+function isExpectedModelReady(status: HiveAgentsStatusResult, ctx: number, modelId: string): boolean {
+  if (!status.loaded || status.loading || status.model?.name !== modelId) {
     return false
   }
   const loadedCtx = status.model.ctx ?? status.model.n_ctx
@@ -222,11 +234,12 @@ export class HiveAgentsProvider extends OpenAICompatBase {
   }
 
   async call(options: LLMCallOptions): Promise<LLMResponse> {
-    await this._ensureModelLoaded(options)
+    const model = resolveModelId(options.model)
+    await this._ensureModelLoaded(options, model)
     const callOptions = {
       ...options,
       baseUrl: HIVEAGENTS_OPENAI_BASE_URL,
-      model: HIVEAGENTS_MODEL_ID,
+      model,
     }
 
     return super.call(callOptions)
@@ -246,16 +259,17 @@ export class HiveAgentsProvider extends OpenAICompatBase {
     return body
   }
 
-  private async _ensureModelLoaded(options: LLMCallOptions): Promise<void> {
+  private async _ensureModelLoaded(options: LLMCallOptions, modelId: string): Promise<void> {
     const result = await ensureHiveAgentsModelReady(
       options.apiKey,
       undefined,
       HIVEAGENTS_STATUS_POLL_MS,
       HIVEAGENTS_READY_TIMEOUT_MS,
       options.contextWindow ?? HIVEAGENTS_DEFAULT_LOAD_CTX,
+      modelId,
     )
     if (!result.success) {
-      throw new Error(`HiveAgents could not prepare ${HIVEAGENTS_MODEL_ID}: ${result.error}`)
+      throw new Error(`HiveAgents could not prepare ${modelId}: ${result.error}`)
     }
   }
 

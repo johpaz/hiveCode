@@ -54,6 +54,8 @@ export async function searchCapabilities(
   if (!trimmed) return [];
 
   const k = opts.k ?? 10;
+  // hive-db >= 0.4 rejects k <= 0 instead of returning no hits.
+  if (k <= 0) return [];
   const db = await getHiveDb();
   const start = performance.now();
   const types = opts.types?.length ? opts.types : undefined;

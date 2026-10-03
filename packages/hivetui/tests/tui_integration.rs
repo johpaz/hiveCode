@@ -677,3 +677,87 @@ fn full_sequence_init_task_streaming_response() {
     assert_eq!(state.active_tab, TabId::Focus);
     assert!(!state.tab_locked);
 }
+
+// ── Jerarquía del Dashboard en la terminal objetivo (120x30) ──────────────────
+
+/// Registra workers dejando los primeros `running` en ejecución en el nivel activo
+/// y el resto esperando en un nivel posterior — el caso real: pocos activos, muchos
+/// ociosos. El nivel importa: `is_active_worker` clasifica por nivel, no solo por estado.
+fn state_with_workers(running: usize, waiting: usize) -> AppState {
+    let mut state = base_state();
+    let names = [
+        "backend", "frontend", "mobile", "data", "security", "qa",
+        "devops", "architecture", "product", "reviewer", "forensic", "librarian",
+    ];
+    for (idx, name) in names.iter().take(running + waiting).enumerate() {
+        state.apply_message(BunMessage::WorkerUpdate {
+            task_id: None,
+            worker: (*name).into(),
+            phase: "impl".into(),
+            status: if idx < running { "running".into() } else { "waiting".into() },
+            display_name: None,
+            activity: Some(format!("trabajo de {name}")),
+            token_count: Some(1000),
+            level: Some(if idx < running { 2 } else { 3 }),
+            current_action: None,
+            current_file: None,
+            iteration_current: Some(1),
+            iteration_total: Some(3),
+            transversal: None,
+        });
+    }
+    state
+}
+
+#[test]
+fn dashboard_collapses_idle_agents_instead_of_shrinking_active_cards() {
+    let mut state = state_with_workers(4, 8);
+    state.active_tab = TabId::Dashboard;
+
+    let mut canvas = make_canvas(120, 30);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+
+    // Los ociosos se nombran en una línea colapsada, no en tarjetas.
+    assert!(
+        frame.contains("idle:"),
+        "falta el resumen colapsado de agentes inactivos:\n{frame}"
+    );
+
+    // Y las tarjetas activas siguen dibujando su contenido completo (la barra de
+    // iteraciones es lo primero que se pierde cuando una tarjeta se comprime).
+    assert!(
+        frame.contains("iter"),
+        "las tarjetas activas perdieron la barra de iteraciones:\n{frame}"
+    );
+}
+
+#[test]
+fn dashboard_names_active_workers_that_did_not_fit() {
+    // Muchos activos a la vez: los que no caben deben nombrarse, no desaparecer.
+    let mut state = state_with_workers(12, 0);
+    state.active_tab = TabId::Dashboard;
+
+    let mut canvas = make_canvas(120, 30);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+
+    assert!(
+        frame.contains("más:"),
+        "los activos que no caben deberían aparecer en el resumen:\n{frame}"
+    );
+}
+
+#[test]
+fn terminal_below_the_minimum_gets_an_explicit_message() {
+    let mut state = base_state();
+    state.active_tab = TabId::Dashboard;
+
+    let mut canvas = make_canvas(80, 24);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+
+    assert!(frame.contains("demasiado pequeña"), "frame:\n{frame}");
+    assert!(frame.contains("80x24"), "debe decir el tamaño actual:\n{frame}");
+    assert!(frame.contains("100x24"), "debe decir el mínimo:\n{frame}");
+}

@@ -341,15 +341,30 @@ impl AppState {
 
     fn recommend_layout(&mut self, tab: TabId, stage: LayoutStage, reason: impl Into<String>) {
         self.routing.recommend(tab, stage, reason);
-        if !self.tab_locked {
-            let changed = self.active_tab != self.routing.recommended_tab;
-            self.active_tab = self.routing.recommended_tab;
-            self.history_nav_mode = false;
-            self.history_hscroll = 0;
-            if changed {
-                self.dirty.full = true;
-            }
+        if self.tab_locked || self.is_user_busy() {
+            // El usuario está leyendo o escribiendo: no le movemos la pantalla.
+            // El tabbar marca el tab recomendado y el footer explica por qué.
+            return;
         }
+        let changed = self.active_tab != self.routing.recommended_tab;
+        if !changed {
+            return;
+        }
+        self.active_tab = self.routing.recommended_tab;
+        self.history_nav_mode = false;
+        self.history_hscroll = 0;
+        self.dirty.full = true;
+    }
+
+    /// El usuario demostró intención de quedarse donde está: está componiendo un
+    /// mensaje, navegando el historial, o scrolleó hacia atrás para leer.
+    fn is_user_busy(&self) -> bool {
+        !self.input.value().is_empty() || self.history_nav_mode || self.history.scroll > 0
+    }
+
+    /// True cuando el auto-routing quiere otra pestaña pero no la forzamos.
+    pub fn pending_layout_suggestion(&self) -> Option<TabId> {
+        (self.active_tab != self.routing.recommended_tab).then_some(self.routing.recommended_tab)
     }
 
     pub fn resume_auto_layout(&mut self) {
@@ -538,14 +553,18 @@ impl AppState {
                 }
                 match self.history.entries.last_mut() {
                     Some(e) if e.role == Role::Assistant => e.content.push_str(&text),
-                    _ => self.history.entries.push(HistoryEntry {
-                        role: Role::Assistant,
-                        content: text,
-                        agent,
-                        timestamp,
-                    }),
+                    _ => {
+                        self.history.entries.push(HistoryEntry {
+                            role: Role::Assistant,
+                            content: text,
+                            agent,
+                            timestamp,
+                        });
+                        // Solo al abrir un turno nuevo. Resetear en cada chunk impedía
+                        // leer una respuesta larga mientras se está generando.
+                        self.history.scroll = 0;
+                    }
                 }
-                self.history.scroll = 0;
                 self.history.selected = Some(self.history.entries.len().saturating_sub(1));
                 self.dirty.history = true;
             }
@@ -554,7 +573,7 @@ impl AppState {
                 if !self.harness.approval_pending {
                     self.harness.active_task_status = Some("idle".to_string());
                 }
-                self.history.scroll = 0;
+                // El turno termina donde el usuario lo dejó; no lo devolvemos al inicio.
                 if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
                     self.recommend_layout(TabId::Plan, LayoutStage::Planning, "plan listo -> Plan");
                 } else {
@@ -1482,7 +1501,9 @@ mod tests {
         });
 
         assert_eq!(state.active_tab, TabId::Plan);
-        assert!(!state.history_nav_mode);
+        // Ya estábamos en Plan: la recomendación no cambia de tab, así que tampoco
+        // debe sacar al usuario del modo lectura en el que estaba.
+        assert!(state.history_nav_mode);
         assert!(state.plan.current.is_some());
     }
 

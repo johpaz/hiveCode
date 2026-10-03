@@ -62,6 +62,12 @@ impl TableCell {
     }
 }
 
+/// Alterna entre dos colores cada 2 ticks de animación (~240ms) para señalar
+/// que algo pide atención sin recurrir a texto extra.
+pub fn pulse_color(primary: Color, alternate: Color, tick: u8) -> Color {
+    if tick % 4 < 2 { primary } else { alternate }
+}
+
 pub fn text_width(text: &str) -> usize {
     text.chars()
         .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(1).max(1))

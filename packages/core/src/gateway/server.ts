@@ -2321,7 +2321,9 @@ export async function startGateway(config: Config): Promise<void> {
       log.info("MCP hot-reload stopped");
     } catch { }
 
-    server.stop();
+    // Esperar el cierre: desde Bun 1.4 `stop()` deja terminar las peticiones en
+    // vuelo, pero el process.exit(0) de abajo las mataba igual sin este await.
+    await server.stop();
 
     try { unlinkSync(pidFile); } catch { }
     log.info("Gateway shutdown complete");

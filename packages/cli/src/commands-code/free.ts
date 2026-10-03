@@ -55,7 +55,7 @@ export async function freeList(): Promise<void> {
 
   hiveNote("Cómo usarlos", [
     "  /provider set hivecode-free                     (en el TUI)",
-    "  /modelo set hivecode-free moonshotai/kimi-k2.6",
+    "  /modelo set hivecode-free hivecode-free/deepseek-ai/deepseek-v4-flash-0731",
     "  ó: hivecode provider set-default hivecode-free",
     "",
     "Si ves 'Free tier agotado': el cap lo aplica el servidor (default 50K tokens/día).",

@@ -242,11 +242,20 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         return false;
     }
 
-    if state.active_tab == TabId::Dashboard && handle_dashboard_key(state, key.code, key.modifiers) {
+    // Los atajos de layout usan letras desnudas (h/a/r/m) y flechas, así que solo
+    // pueden reclamar la tecla cuando el usuario no está escribiendo. Sin esto,
+    // teclear "hola" en modo Auto envía /halt.
+    let typing = accepts_text(state);
+
+    if state.active_tab == TabId::Dashboard
+        && handle_dashboard_key(state, key.code, key.modifiers, typing)
+    {
         return false;
     }
 
-    if state.active_tab != TabId::Dashboard && handle_immersive_layout_key(state, key.code, key.modifiers) {
+    if state.active_tab != TabId::Dashboard
+        && handle_immersive_layout_key(state, key.code, key.modifiers, typing)
+    {
         return false;
     }
 
@@ -393,10 +402,14 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         && state.input.value().is_empty()
         && !state.history_nav_mode
     {
+        // Enter es seguro (no es un carácter de texto). Las letras van tras Alt:
+        // con el input vacío, una 'a' desnuda es el primer carácter de "arregla".
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         let action = match key.code {
-            KeyCode::Enter | KeyCode::Char('a') | KeyCode::Char('A') => Some(ReviewAction::Approve),
-            KeyCode::Char('r') | KeyCode::Char('R') => Some(ReviewAction::Reject),
-            KeyCode::Char('m') | KeyCode::Char('M') => Some(ReviewAction::Modify),
+            KeyCode::Enter => Some(ReviewAction::Approve),
+            KeyCode::Char('a') | KeyCode::Char('A') if alt => Some(ReviewAction::Approve),
+            KeyCode::Char('r') | KeyCode::Char('R') if alt => Some(ReviewAction::Reject),
+            KeyCode::Char('m') | KeyCode::Char('M') if alt => Some(ReviewAction::Modify),
             _ => None,
         };
         if let Some(action) = action {
@@ -616,10 +629,27 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
     false
 }
 
-fn handle_dashboard_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> bool {
+fn handle_dashboard_key(
+    state: &mut AppState,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    typing: bool,
+) -> bool {
+    // Esc cancela confirmaciones pendientes aunque haya texto escrito: abandonar una
+    // acción destructiva nunca debe requerir vaciar el input primero.
+    if code == KeyCode::Esc && has_pending_confirm(state) {
+        clear_pending_confirm(state);
+        state.selection = None;
+        state.dirty.full = true;
+        return true;
+    }
+    if typing {
+        return false;
+    }
+    let alt = modifiers.contains(KeyModifiers::ALT);
     match code {
         KeyCode::Esc => {
-            state.dashboard.rollback_confirm_checkpoint = None;
+            clear_pending_confirm(state);
             state.selection = None;
             state.dirty.full = true;
             true
@@ -633,6 +663,12 @@ fn handle_dashboard_key(state: &mut AppState, code: KeyCode, modifiers: KeyModif
             true
         }
         KeyCode::Enter => {
+            if state.dashboard.halt_confirm {
+                state.dashboard.halt_confirm = false;
+                state.pending_ipc.push(TuiMessage::Submit { input: "/halt".to_string() });
+                state.dirty.full = true;
+                return true;
+            }
             if state.session.mode == ReplMode::Plan
                 && state.checkpoints.selected.is_none()
                 && !state.dashboard.halt.active
@@ -644,24 +680,30 @@ fn handle_dashboard_key(state: &mut AppState, code: KeyCode, modifiers: KeyModif
             confirm_or_send_dashboard_rollback(state);
             true
         }
-        KeyCode::Char('a') | KeyCode::Char('A') if state.session.mode == ReplMode::Approval && !state.dashboard.halt.active => {
+        // Alt+a/r/m y Alt+h: las letras desnudas son el primer carácter de un mensaje.
+        KeyCode::Char('a') | KeyCode::Char('A')
+            if alt && state.session.mode == ReplMode::Approval && !state.dashboard.halt.active =>
+        {
             state.modal = ModalState::ReviewConfirm(ReviewConfirmState { action: ReviewAction::Approve });
             state.dirty.full = true;
             true
         }
-        KeyCode::Char('r') | KeyCode::Char('R') if state.session.mode == ReplMode::Approval && !state.dashboard.halt.active => {
+        KeyCode::Char('r') | KeyCode::Char('R')
+            if alt && state.session.mode == ReplMode::Approval && !state.dashboard.halt.active =>
+        {
             state.modal = ModalState::ReviewConfirm(ReviewConfirmState { action: ReviewAction::Reject });
             state.dirty.full = true;
             true
         }
-        KeyCode::Char('m') | KeyCode::Char('M') if state.session.mode == ReplMode::Approval && !state.dashboard.halt.active => {
+        KeyCode::Char('m') | KeyCode::Char('M')
+            if alt && state.session.mode == ReplMode::Approval && !state.dashboard.halt.active =>
+        {
             state.modal = ModalState::ReviewConfirm(ReviewConfirmState { action: ReviewAction::Modify });
             state.dirty.full = true;
             true
         }
-        KeyCode::Char('h') | KeyCode::Char('H') if state.session.mode == ReplMode::Auto => {
-            state.pending_ipc.push(TuiMessage::Submit { input: "/halt".to_string() });
-            state.dirty.full = true;
+        KeyCode::Char('h') | KeyCode::Char('H') if alt && state.session.mode == ReplMode::Auto => {
+            request_halt(state);
             true
         }
         KeyCode::BackTab if modifiers.is_empty() => false,
@@ -669,27 +711,41 @@ fn handle_dashboard_key(state: &mut AppState, code: KeyCode, modifiers: KeyModif
     }
 }
 
-fn handle_immersive_layout_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> bool {
-    if modifiers != KeyModifiers::NONE {
+fn handle_immersive_layout_key(
+    state: &mut AppState,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    typing: bool,
+) -> bool {
+    let alt = modifiers.contains(KeyModifiers::ALT);
+    if !modifiers.is_empty() && !alt {
         return false;
     }
-    let focus_accepts_text = state.active_tab == TabId::Focus
-        && (!state.input.value().is_empty() || state.history_nav_mode);
+    // Igual que en Dashboard: Esc cancela confirmaciones aunque se esté escribiendo.
+    if code == KeyCode::Esc && has_pending_confirm(state) {
+        clear_pending_confirm(state);
+        state.dirty.full = true;
+        return true;
+    }
+    if typing {
+        return false;
+    }
     match code {
-        KeyCode::Esc if state.dashboard.rollback_confirm_checkpoint.is_some() => {
-            state.dashboard.rollback_confirm_checkpoint = None;
-            state.dirty.full = true;
-            true
-        }
-        KeyCode::Left if !focus_accepts_text => {
+        KeyCode::Left => {
             move_checkpoint_selection(state, -1);
             true
         }
-        KeyCode::Right if !focus_accepts_text => {
+        KeyCode::Right => {
             move_checkpoint_selection(state, 1);
             true
         }
-        KeyCode::Enter if !focus_accepts_text && state.checkpoints.selected.is_some() => {
+        KeyCode::Enter if state.dashboard.halt_confirm => {
+            state.dashboard.halt_confirm = false;
+            state.pending_ipc.push(TuiMessage::Submit { input: "/halt".to_string() });
+            state.dirty.full = true;
+            true
+        }
+        KeyCode::Enter if state.checkpoints.selected.is_some() => {
             confirm_or_send_dashboard_rollback(state);
             true
         }
@@ -698,13 +754,34 @@ fn handle_immersive_layout_key(state: &mut AppState, code: KeyCode, modifiers: K
             state.dirty.full = true;
             true
         }
-        KeyCode::Char('h') | KeyCode::Char('H') if state.session.mode == ReplMode::Auto => {
-            state.pending_ipc.push(TuiMessage::Submit { input: "/halt".to_string() });
-            state.dirty.full = true;
+        KeyCode::Char('h') | KeyCode::Char('H') if alt && state.session.mode == ReplMode::Auto => {
+            request_halt(state);
             true
         }
         _ => false,
     }
+}
+
+/// El usuario está componiendo texto (hay contenido en el input) o navegando el
+/// historial. En ambos casos las teclas pertenecen al input, no a los atajos de layout.
+fn accepts_text(state: &AppState) -> bool {
+    !state.input.value().is_empty() || state.history_nav_mode
+}
+
+fn has_pending_confirm(state: &AppState) -> bool {
+    state.dashboard.rollback_confirm_checkpoint.is_some() || state.dashboard.halt_confirm
+}
+
+fn clear_pending_confirm(state: &mut AppState) {
+    state.dashboard.rollback_confirm_checkpoint = None;
+    state.dashboard.halt_confirm = false;
+}
+
+/// Primer pulsación arma la confirmación, la segunda envía `/halt`.
+fn request_halt(state: &mut AppState) {
+    state.dashboard.rollback_confirm_checkpoint = None;
+    state.dashboard.halt_confirm = true;
+    state.dirty.full = true;
 }
 
 fn move_checkpoint_selection(state: &mut AppState, delta: isize) {
@@ -719,7 +796,7 @@ fn move_checkpoint_selection(state: &mut AppState, delta: isize) {
         current.saturating_add(delta as usize).min(len.saturating_sub(1))
     };
     state.checkpoints.selected = Some(next);
-    state.dashboard.rollback_confirm_checkpoint = None;
+    clear_pending_confirm(state);
     state.dirty.full = true;
 }
 
@@ -1509,7 +1586,7 @@ mod tests {
         state.active_tab = TabId::Review;
         state.session.mode = ReplMode::Approval;
 
-        let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
         assert!(matches!(
             state.modal,
             ModalState::ReviewConfirm(ReviewConfirmState {
@@ -1524,6 +1601,101 @@ mod tests {
             state.pending_ipc.last(),
             Some(TuiMessage::Submit { input }) if input == "/approve"
         ));
+    }
+
+    fn type_str(state: &mut AppState, text: &str) {
+        for ch in text.chars() {
+            let _ = handle_key_event(&mut *state, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+    }
+
+    #[test]
+    fn typing_in_dashboard_auto_mode_does_not_halt_the_swarm() {
+        let mut state = mk_state_with_entries(1);
+        state.active_tab = TabId::Dashboard;
+        state.session.mode = ReplMode::Auto;
+
+        type_str(&mut state, "hola");
+
+        assert_eq!(state.input.value(), "hola");
+        assert!(!state.dashboard.halt_confirm);
+        assert!(state.pending_ipc.is_empty());
+    }
+
+    #[test]
+    fn typing_in_immersive_layouts_does_not_halt_the_swarm() {
+        for tab in [TabId::Plan, TabId::Code, TabId::Review] {
+            let mut state = mk_state_with_entries(1);
+            state.active_tab = tab;
+            state.session.mode = ReplMode::Auto;
+
+            type_str(&mut state, "haz un fix");
+
+            assert_eq!(state.input.value(), "haz un fix", "tab {tab:?}");
+            assert!(!state.dashboard.halt_confirm, "tab {tab:?}");
+            assert!(state.pending_ipc.is_empty(), "tab {tab:?}");
+        }
+    }
+
+    #[test]
+    fn typing_in_dashboard_approval_mode_does_not_open_review_modal() {
+        let mut state = mk_state_with_entries(1);
+        state.active_tab = TabId::Dashboard;
+        state.session.mode = ReplMode::Approval;
+
+        type_str(&mut state, "arregla");
+
+        assert_eq!(state.input.value(), "arregla");
+        assert!(matches!(state.modal, ModalState::None));
+    }
+
+    #[test]
+    fn halt_requires_a_second_confirmation() {
+        let mut state = mk_state_with_entries(1);
+        state.active_tab = TabId::Dashboard;
+        state.session.mode = ReplMode::Auto;
+
+        let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
+        assert!(state.dashboard.halt_confirm);
+        assert!(state.pending_ipc.is_empty(), "la primera pulsación solo arma la confirmación");
+
+        let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!state.dashboard.halt_confirm);
+        assert!(matches!(
+            state.pending_ipc.last(),
+            Some(TuiMessage::Submit { input }) if input == "/halt"
+        ));
+    }
+
+    #[test]
+    fn esc_cancels_halt_confirmation_even_while_typing() {
+        let mut state = mk_state_with_entries(1);
+        state.active_tab = TabId::Dashboard;
+        state.session.mode = ReplMode::Auto;
+
+        let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
+        assert!(state.dashboard.halt_confirm);
+
+        type_str(&mut state, "no");
+        let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(!state.dashboard.halt_confirm);
+        assert!(state.pending_ipc.is_empty());
+    }
+
+    #[test]
+    fn arrows_move_the_cursor_when_there_is_text_to_edit() {
+        for tab in [TabId::Plan, TabId::Code, TabId::Review, TabId::Dashboard] {
+            let mut state = mk_state_with_entries(1);
+            state.active_tab = tab;
+            type_str(&mut state, "abc");
+            let before = state.checkpoints.selected;
+
+            let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+
+            assert_eq!(state.checkpoints.selected, before, "tab {tab:?}");
+            assert_eq!(state.input.cursor, 2, "tab {tab:?}");
+        }
     }
 
     #[test]

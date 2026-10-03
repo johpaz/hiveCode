@@ -10,11 +10,11 @@ use crate::{
         BG_MAIN, BG_PANEL, BLUE, CYAN, DIM, GREEN, RED, SECONDARY, WHITE, YELLOW,
     },
     ui::{fmt_tokens, truncate_cells},
+    widgets::components::pulse_color,
 };
 
 const GAP: u16 = 1;
 const ACTIVE_CARD_H: u16 = 8;
-const COMPACT_CARD_H: u16 = 5;
 
 #[derive(Clone, Copy)]
 struct DashboardAreas {
@@ -29,7 +29,6 @@ struct DashboardAreas {
 struct CardPlacement {
     worker: String,
     rect: Rect,
-    compact: bool,
 }
 
 #[derive(Clone)]
@@ -238,9 +237,10 @@ fn render_agent_grid(canvas: &mut Canvas, area: Rect, state: &AppState) {
         render_conflict_lines(canvas, &placements, state);
         for placement in &placements {
             if let Some(worker) = worker_for_placement(state, &placement.worker) {
-                render_worker_card(canvas, placement.rect, worker, placement.compact, state);
+                render_worker_card(canvas, placement.rect, worker, state);
             }
         }
+        render_inactive_summary(canvas, grid_area, state, &placements);
     }
 
     if security_w > 0 {
@@ -356,8 +356,8 @@ fn render_controls_line(canvas: &mut Canvas, area: Rect, state: &AppState) {
         "HALT activo · selecciona checkpoint con ←/→ · Enter rollback"
     } else {
         match state.session.mode {
-            ReplMode::Auto => "AUTO · Shift+Tab approval · h HALT · ←/→ checkpoint · Enter rollback",
-            ReplMode::Approval => "APPROVAL · a aprobar · r rechazar · m modificar · ←/→ checkpoint · Enter rollback",
+            ReplMode::Auto => "AUTO · Shift+Tab approval · Alt+h HALT · ←/→ checkpoint · Enter rollback",
+            ReplMode::Approval => "APPROVAL · Alt+a aprobar · Alt+r rechazar · Alt+m modificar · ←/→ checkpoint",
             ReplMode::Plan => "PLAN · Enter iniciar ejecución · ←/→ checkpoint · Enter rollback si hay selección",
         }
     };
@@ -390,13 +390,9 @@ fn checkpoint_labels(state: &AppState) -> Vec<String> {
         .collect()
 }
 
-fn compute_card_placements(area: Rect, state: &AppState) -> Vec<CardPlacement> {
-    let security_w = if should_render_security_strip(state) && area.w > 30 { 1 } else { 0 };
-    let area = Rect::new(area.x, area.y, area.w.saturating_sub(security_w), area.h);
-    if area.w < 8 || area.h < 4 {
-        return Vec::new();
-    }
-
+/// Separa los workers visibles en (activos, terminados, en espera). `None` si no
+/// hay ninguno visible. Los activos son los que merecen tarjeta; el resto se colapsa.
+fn partition_workers(state: &AppState) -> Option<(Vec<&Worker>, Vec<&Worker>, Vec<&Worker>)> {
     let visible: Vec<&Worker> = state
         .workers
         .workers
@@ -405,7 +401,7 @@ fn compute_card_placements(area: Rect, state: &AppState) -> Vec<CardPlacement> {
         .filter(|worker| !is_replaced_worker(worker, state))
         .collect();
     if visible.is_empty() {
-        return Vec::new();
+        return None;
     }
 
     let active_level = active_level(state);
@@ -432,13 +428,37 @@ fn compute_card_placements(area: Rect, state: &AppState) -> Vec<CardPlacement> {
         .copied()
         .filter(|worker| worker.status == WorkerStatus::Waiting && !active_names.contains(worker.name.as_str()))
         .collect();
+    Some((active, completed, pending))
+}
 
-    let compact_h = if area.h >= ACTIVE_CARD_H + COMPACT_CARD_H + 2 {
-        COMPACT_CARD_H
-    } else {
-        0
+fn compute_card_placements(area: Rect, state: &AppState) -> Vec<CardPlacement> {
+    let security_w = if should_render_security_strip(state) && area.w > 30 { 1 } else { 0 };
+    let area = Rect::new(area.x, area.y, area.w.saturating_sub(security_w), area.h);
+    if area.w < 8 || area.h < 4 {
+        return Vec::new();
+    }
+
+    let Some((active, completed, pending)) = partition_workers(state) else {
+        return Vec::new();
     };
-    let active_h = area.h.saturating_sub(compact_h.saturating_add(if compact_h > 0 { 1 } else { 0 }));
+
+    // Los inactivos no ocupan tarjetas: se colapsan en 1-2 líneas al pie. Así las
+    // tarjetas activas conservan su alto completo incluso en terminales de 30 filas.
+    let summary_h = summary_height(completed.len(), pending.len(), area.h);
+    let placements = place_active_cards(area, summary_h, &active);
+
+    // Si algún activo se quedó fuera y no habíamos reservado línea de resumen,
+    // reservamos una para poder nombrarlos en vez de que desaparezcan sin rastro.
+    if placements.len() < active.len() && summary_h == 0 {
+        return place_active_cards(area, 1, &active);
+    }
+    placements
+}
+
+/// Coloca las tarjetas de los workers activos en `area` menos las filas de resumen.
+/// El reviewer, cuando está activo, se lleva una tarjeta ancha a la izquierda.
+fn place_active_cards(area: Rect, summary_h: u16, active: &[&Worker]) -> Vec<CardPlacement> {
+    let active_h = area.h.saturating_sub(summary_h);
     let active_area = Rect::new(area.x, area.y, area.w, active_h);
     let mut placements = Vec::new();
 
@@ -450,8 +470,12 @@ fn compute_card_placements(area: Rect, state: &AppState) -> Vec<CardPlacement> {
             reviewer_w.min(active_area.w),
             active_area.h.min(ACTIVE_CARD_H.max(active_area.h)),
         );
-        placements.push(CardPlacement { worker: reviewer.name.clone(), rect: reviewer_rect, compact: false });
-        let rest: Vec<&Worker> = active.into_iter().filter(|worker| worker.name != "reviewer").collect();
+        placements.push(CardPlacement { worker: reviewer.name.clone(), rect: reviewer_rect });
+        let rest: Vec<&Worker> = active
+            .iter()
+            .copied()
+            .filter(|worker| worker.name != "reviewer")
+            .collect();
         let rest_len = rest.len();
         let rest_area = Rect::new(
             active_area.x + reviewer_rect.w.saturating_add(GAP),
@@ -460,40 +484,111 @@ fn compute_card_placements(area: Rect, state: &AppState) -> Vec<CardPlacement> {
             active_area.h,
         );
         for (worker, rect) in rest.into_iter().zip(place_grid(rest_area, rest_len as u16, 24, ACTIVE_CARD_H)) {
-            placements.push(CardPlacement { worker: worker.name.clone(), rect, compact: false });
+            placements.push(CardPlacement { worker: worker.name.clone(), rect });
         }
     } else {
-        let active_len = active.len();
-        for (worker, rect) in active.into_iter().zip(place_grid(active_area, active_len as u16, 28, ACTIVE_CARD_H)) {
-            placements.push(CardPlacement { worker: worker.name.clone(), rect, compact: false });
-        }
-    }
-
-    if compact_h > 0 {
-        let y = area.bottom().saturating_sub(compact_h);
-        let half_w = area.w.saturating_sub(GAP) / 2;
-        let done_area = Rect::new(area.x, y, half_w, compact_h);
-        let pending_area = Rect::new(area.x + half_w + GAP, y, area.w.saturating_sub(half_w + GAP), compact_h);
-        let done_len = completed.len();
-        for (worker, rect) in completed.into_iter().zip(place_grid(done_area, done_len as u16, 18, COMPACT_CARD_H)) {
-            placements.push(CardPlacement { worker: worker.name.clone(), rect, compact: true });
-        }
-        let pending_len = pending.len();
-        for (worker, rect) in pending.into_iter().zip(place_grid(pending_area, pending_len as u16, 18, COMPACT_CARD_H)) {
-            placements.push(CardPlacement { worker: worker.name.clone(), rect, compact: true });
+        for (worker, rect) in active
+            .iter()
+            .copied()
+            .zip(place_grid(active_area, active.len() as u16, 28, ACTIVE_CARD_H))
+        {
+            placements.push(CardPlacement { worker: worker.name.clone(), rect });
         }
     }
 
     placements
 }
 
+/// Cuántas filas al pie del grid reserva el resumen de inactivos: una por categoría
+/// no vacía, y ninguna si no queda sitio para al menos una tarjeta activa completa.
+fn summary_height(completed: usize, pending: usize, area_h: u16) -> u16 {
+    let wanted = u16::from(completed > 0) + u16::from(pending > 0);
+    if wanted == 0 {
+        return 0;
+    }
+    // El resumen tiene prioridad sobre las últimas filas de una tarjeta: saber que
+    // hay 8 agentes ociosos vale más que una fila extra de detalle. Solo cede
+    // cuando la tarjeta caería por debajo del piso de legibilidad.
+    wanted.min(area_h.saturating_sub(MIN_CARD_H))
+}
+
+/// Dibuja al pie del grid el resumen colapsado de los agentes que no tienen tarjeta:
+/// los terminados, los que esperan, y los activos que no cupieron.
+fn render_inactive_summary(
+    canvas: &mut Canvas,
+    area: Rect,
+    state: &AppState,
+    placements: &[CardPlacement],
+) {
+    let Some((active, completed, pending)) = partition_workers(state) else {
+        return;
+    };
+
+    let placed: HashSet<&str> = placements.iter().map(|p| p.worker.as_str()).collect();
+    let overflow: Vec<&Worker> = active
+        .into_iter()
+        .filter(|worker| !placed.contains(worker.name.as_str()))
+        .collect();
+
+    // Debe coincidir con la reserva que hizo compute_card_placements.
+    let summary_h = summary_height(completed.len(), pending.len(), area.h)
+        .max(u16::from(!overflow.is_empty()));
+    if summary_h == 0 || area.w < 4 {
+        return;
+    }
+
+    let width = area.w.saturating_sub(2) as usize;
+    let mut y = area.bottom().saturating_sub(summary_h);
+    let lines = summary_lines(&overflow, &completed, &pending, width);
+    for (line, color) in lines.into_iter().take(summary_h as usize) {
+        canvas.print(area.x + 1, y, &line, Style::new().fg(color).bg(BG_PANEL));
+        y += 1;
+    }
+}
+
+/// `✓ 4 done: architect · pm · qa · devops` — una línea por categoría, truncada.
+/// El overflow de activos va primero porque es lo que el usuario está esperando ver.
+fn summary_lines(
+    overflow: &[&Worker],
+    completed: &[&Worker],
+    pending: &[&Worker],
+    width: usize,
+) -> Vec<(String, Color)> {
+    let mut out = Vec::new();
+    for (icon, label, group, color) in [
+        ('●', "más", overflow, BLUE),
+        ('✓', "done", completed, GREEN),
+        ('○', "idle", pending, DIM),
+    ] {
+        if group.is_empty() {
+            continue;
+        }
+        let names: Vec<String> = group.iter().map(|w| agent_display_name(&w.name)).collect();
+        let line = format!("{icon} {} {label}: {}", group.len(), names.join(" · "));
+        out.push((truncate_cells(&line, width), color));
+    }
+    out
+}
+
+/// Alto por debajo del cual una tarjeta deja de ser legible (borde + nombre +
+/// estado + intención). Antes que comprimir bajo este piso, se muestran menos
+/// tarjetas y las restantes caen al resumen colapsado.
+const MIN_CARD_H: u16 = 5;
+
 fn place_grid(area: Rect, count: u16, min_w: u16, card_h: u16) -> Vec<Rect> {
     if count == 0 || area.w < 4 || area.h < 3 {
         return Vec::new();
     }
     let cols = count.min(((area.w + GAP) / (min_w + GAP)).max(1));
-    let rows = ((count + cols - 1) / cols).max(1);
-    let h = card_h.min(((area.h.saturating_sub(rows.saturating_sub(1) * GAP)) / rows).max(3));
+    let rows_needed = ((count + cols - 1) / cols).max(1);
+    // Cuántas filas caben sin bajar del piso de legibilidad.
+    let floor = MIN_CARD_H.min(area.h);
+    let rows_fit = ((area.h + GAP) / (card_h.max(floor) + GAP)).max(1);
+    let rows = rows_needed.min(rows_fit);
+    let h = card_h
+        .min((area.h.saturating_sub(rows.saturating_sub(1) * GAP)) / rows)
+        .max(floor);
+    let count = count.min(rows.saturating_mul(cols));
     let mut rects = Vec::with_capacity(count as usize);
     for idx in 0..count {
         let row = idx / cols;
@@ -516,7 +611,7 @@ fn place_grid(area: Rect, count: u16, min_w: u16, card_h: u16) -> Vec<Rect> {
     rects
 }
 
-fn render_worker_card(canvas: &mut Canvas, area: Rect, worker: &Worker, compact: bool, state: &AppState) {
+fn render_worker_card(canvas: &mut Canvas, area: Rect, worker: &Worker, state: &AppState) {
     if area.w < 4 || area.h < 3 {
         return;
     }
@@ -548,17 +643,6 @@ fn render_worker_card(canvas: &mut Canvas, area: Rect, worker: &Worker, compact:
     );
     if conflicted && area.w > 8 {
         canvas.print(area.right().saturating_sub(3), area.y, "!!", Style::new().fg(RED).bold().bg(verdict_bg));
-    }
-
-    if compact {
-        let status = status_label(worker.status);
-        canvas.print(
-            area.x + 2,
-            area.y + 2,
-            &truncate_cells(status, area.w.saturating_sub(4) as usize),
-            Style::new().fg(status_color).bold().bg(verdict_bg),
-        );
-        return;
     }
 
     let intent = worker
@@ -842,15 +926,6 @@ fn worker_display_name(worker: &Worker) -> String {
     }
 }
 
-fn status_label(status: WorkerStatus) -> &'static str {
-    match status {
-        WorkerStatus::Waiting => "○ waiting",
-        WorkerStatus::Running => "● running",
-        WorkerStatus::Done => "✓ done",
-        WorkerStatus::Failed => "✗ failed",
-        WorkerStatus::Warn => "⚠ waiting",
-    }
-}
 
 fn worker_status_color(status: WorkerStatus, tick: u8) -> Color {
     match status {
@@ -868,10 +943,6 @@ fn level_color(status: DashboardLevelStatus, tick: u8) -> Color {
         DashboardLevelStatus::Active => pulse_color(BLUE, AMBER_BRIGHT, tick),
         DashboardLevelStatus::Pending => DIM,
     }
-}
-
-fn pulse_color(primary: Color, alternate: Color, tick: u8) -> Color {
-    if tick % 4 < 2 { primary } else { alternate }
 }
 
 fn iteration_bar(worker: &Worker) -> String {

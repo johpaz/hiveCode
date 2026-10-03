@@ -3,6 +3,7 @@
  */
 
 import type { Tool } from "../types";
+import { parseCronExpression } from "../../scheduler/cron";
 import { col } from "../../storage/hive";
 import type { ChannelDoc, CronJobDoc, TaskRunDoc, UserDoc, UserIdentityDoc } from "../../storage/collections";
 import type { CronScheduler } from "../../scheduler/CronScheduler";
@@ -159,7 +160,9 @@ export const cronCreateTool: Tool = {
 
     if (cron_expression) {
       try {
-        Bun.cron(cron_expression, () => {});
+        // Validar con el mismo motor que agenda: `Bun.cron` rechaza los 6 campos
+        // que el scheduler sí acepta, y dejaba vivo un handle que nadie detenía.
+        parseCronExpression(cron_expression);
       } catch (err) {
         return { ok: false, error: `Invalid cron expression: ${(err as Error).message}` };
       }
