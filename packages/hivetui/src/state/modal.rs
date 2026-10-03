@@ -224,3 +224,67 @@ pub enum ModalState {
     ReviewConfirm(ReviewConfirmState),
     Settings(SettingsHubState),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider(id: &str, is_active: bool, models: &[&str]) -> SettingsProvider {
+        SettingsProvider {
+            id: id.to_string(),
+            name: id.to_string(),
+            model: models.first().map(|m| m.to_string()).unwrap_or_default(),
+            is_active,
+            has_key: true,
+            models: models.iter().map(|m| m.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn con_provider_activo_solo_sale_sus_modelos() {
+        let mut hub = SettingsHubState::default();
+        hub.providers = vec![
+            provider("nvidia", false, &["nvidia/kimi-k3", "nvidia/gemma-4-31b-it"]),
+            provider("hiveagents", true, &["Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"]),
+        ];
+
+        match hub.model_rows() {
+            ModelRows::Models { provider_id, models } => {
+                assert_eq!(provider_id, "hiveagents");
+                // Ningún modelo de otro provider se cuela en la lista.
+                assert_eq!(models, &["Qwen3.6-35B-A3B-UD-Q4_K_M.gguf".to_string()]);
+            }
+            ModelRows::NeedProvider { .. } => panic!("debía listar los modelos del provider activo"),
+        }
+        assert_eq!(hub.model_row_count(), 1);
+    }
+
+    #[test]
+    fn sin_provider_activo_hay_que_elegir_provider_primero() {
+        let mut hub = SettingsHubState::default();
+        hub.providers = vec![
+            provider("anthropic", false, &["claude-opus-4-6"]),
+            provider("openai", false, &["gpt-5.4"]),
+        ];
+
+        assert!(matches!(hub.model_rows(), ModelRows::NeedProvider { .. }));
+        // Las filas son providers, no modelos.
+        assert_eq!(hub.model_row_count(), 2);
+    }
+
+    #[test]
+    fn provider_activo_sin_modelos_tambien_pide_provider_primero() {
+        let mut hub = SettingsHubState::default();
+        hub.providers = vec![provider("vacio", true, &[])];
+
+        assert!(matches!(hub.model_rows(), ModelRows::NeedProvider { .. }));
+        assert_eq!(hub.model_row_count(), 1);
+    }
+
+    #[test]
+    fn sin_ningun_provider_el_tab_no_rompe() {
+        let hub = SettingsHubState::default();
+        assert!(matches!(hub.model_rows(), ModelRows::NeedProvider { providers } if providers.is_empty()));
+        assert_eq!(hub.model_row_count(), 0);
+    }
+}

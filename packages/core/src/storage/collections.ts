@@ -59,6 +59,10 @@ export interface AgentDoc {
   model_id: string;
   tools_json: string | null;
   skills_json: string | null;
+  /** Capabilities this agent may use, when narrower than tools_json. */
+  tool_allowlist_json?: string | null;
+  /** MCP server ids this agent may connect to, when narrower than all. */
+  mcp_server_ids_json?: string | null;
   parent_id: string;
   max_iterations: number;
   /** Optional per-profile controls exposed by the Dashboard. */
@@ -864,6 +868,11 @@ export interface UsageRollupDoc {
   toonJsonTokens: number;
   toonToonTokens: number;
   toonJsonBytes: number;
+  /** Jev decision plane: how many decisions ran, what they cost, what they saved. */
+  jevDecisions?: number;
+  jevCostUsd?: number;
+  jevSavedTokens?: number;
+  jevSavedCostUsd?: number;
   byProvider: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }>;
   byModel: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }>;
 }

@@ -138,6 +138,8 @@ export async function handleUpdateAgent(req: Request, addCorsHeaders: (r: Respon
     max_cost_usd: ["max_cost_usd", "maxCostUsd"],
     tools_json: ["tools_json", "toolsJson"],
     skills_json: ["skills_json", "skillsJson"],
+    tool_allowlist_json: ["tool_allowlist_json", "toolAllowlistJson"],
+    mcp_server_ids_json: ["mcp_server_ids_json", "mcpServerIdsJson"],
     permission_profile: [],
     user_instructions: ["user_instructions", "userInstructions"],
     config_version: [],

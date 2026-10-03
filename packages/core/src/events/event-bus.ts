@@ -111,6 +111,26 @@ export interface EventMap {
     channel: string;
     userId: string;
   };
+  /** Jev served a decision and the caller is applying it. */
+  "jev:decision": {
+    agentId: string;
+    provider: string;
+    model: string;
+    kind: string;
+    summary: string;
+    savedTokens: number;
+    costUsd: number;
+    latencyMs: number;
+    eventId: string;
+    totals: { decisions: number; savedTokens: number; costUsd: number };
+  };
+  /** Availability of the decision plane: off / ready / cooling down. */
+  "jev:status": {
+    state: "off" | "ready" | "fallback";
+    lastError: string | null;
+    lastSuccessAt: number | null;
+    totals: { decisions: number; savedTokens: number; costUsd: number };
+  } | undefined;
 }
 
 export type EventKey = keyof EventMap;

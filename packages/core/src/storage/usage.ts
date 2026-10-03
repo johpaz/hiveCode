@@ -438,3 +438,34 @@ export function recordToonSavings(
     }
   })
 }
+
+/**
+ * Persists one Jev decision into the hourly rollup. The avoided tokens are
+ * priced with the advised agent's own model (input rate), through the same
+ * catalog lookup as real usage, so "saved" and "spent" stay comparable.
+ *
+ * Fire-and-forget: a decision is an optimization, and metering it must never
+ * add latency to the turn that asked for it.
+ */
+export function recordJevDecision(options: {
+  agentId: string
+  provider: string
+  model: string
+  savedTokens: number
+  costUsd: number
+}): void {
+  Promise.resolve().then(async () => {
+    try {
+      const unitCost = calculateCost(options.model, Math.abs(options.savedTokens), 0)
+      const savedCostUsd = Math.sign(options.savedTokens) * unitCost
+      await bumpRollup("usageRollups", hourBucket(Date.now()), {
+        jevDecisions: 1,
+        jevCostUsd: options.costUsd,
+        jevSavedTokens: options.savedTokens,
+        jevSavedCostUsd: savedCostUsd,
+      })
+    } catch (error) {
+      log.warn(`[JEV] Failed to record decision:`, error)
+    }
+  })
+}

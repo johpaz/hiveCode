@@ -253,7 +253,9 @@ export class HiveAgentsProvider extends OpenAICompatBase {
     return super.call(callOptions)
   }
 
-  // Qwen 3 Coder Next is used as a non-thinking coding model in HiveCode.
+  // hiveCode usa los modelos de hiveagents como no-thinking (codificación), así que
+// `enable_thinking` va siempre en false. El SDK hace lo contrario por familia de
+// modelo (Qwen3.x / Gemma 4 / AgentWorld) y lo deja por defecto en true.
   //
   // `chat_template_kwargs` goes at the top level of the body. `extra_body` is a Python
   // SDK convention — the JS SDK forwards it verbatim as an unknown field, so nesting it

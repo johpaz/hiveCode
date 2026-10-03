@@ -22,10 +22,13 @@ import { saveTrace, recordLLMUsage } from "./tracer"
 import { maybeCompact, clearOldToolResults } from "./compaction"
 import type { MCPClientManager } from "@johpaz/hivecode-mcp"
 import { compileContext } from "./context-compiler"
+import { jevWantsParallel } from "./jev-planner"
+import { emitJevDecision } from "./jev-decisions"
 import { formatToolResult } from "../utils/toon"
 import { getAverageTokenCost } from "../storage/usage"
 import type { ContentPart } from "./llm-client"
 import { getExecutionMode, canExecuteTool, requiresConfirmation, getBlockReason } from "./execution-mode"
+import { planJevIteration } from "./jev-planner"
 import { broadcastThinking } from "../gateway/task-streaming"
 
 /**
@@ -433,6 +436,45 @@ export async function* runAgent(
       break
     }
 
+    // Jev decides whether the history gathered so far is still worth paying for,
+    // and whether the turn is done. Skipped below the prune threshold: a
+    // decision costs latency, so it only runs when there is real weight to drop.
+    // Any failure leaves messages and the loadout exactly as they were.
+    const jevIteration = await planJevIteration({
+      objective: typeof opts.userMessage === "string"
+        ? opts.userMessage
+        : Array.isArray(opts.userMessage)
+          ? opts.userMessage.filter(p => p.type === "text").map(p => (p as { text: string }).text).join("\n")
+          : String(opts.userMessage),
+      messages,
+      tools: ctx.tools,
+    }).catch((err) => {
+      log.warn(`[agent-loop] Jev iteration fallback: ${(err as Error).message}`)
+      return null
+    })
+
+    if (jevIteration) {
+      messages = jevIteration.messages
+      ctx.tools = jevIteration.tools
+      log.info(
+        `[agent-loop] Jev action=${jevIteration.action} omitted=${jevIteration.omittedResults} ` +
+        `msgs=${messages.length} tools=${ctx.tools.length} (${jevIteration.decision.latencyMs}ms)`,
+      )
+      emitJevDecision({
+        agentId: opts.agentId,
+        kind: "iteration",
+        provider: provId,
+        model: modId,
+        summary: `${jevIteration.action} · ${jevIteration.omittedResults} resultados podados`,
+        savedTokens: 0,
+        costUsd: jevIteration.decision.costUsd,
+        latencyMs: jevIteration.decision.latencyMs,
+      })
+      // "finish" is not a break: it empties the tool loadout so the next call
+      // has to compose a text answer. The loop exits on that answer, through
+      // the normal path.
+    }
+
     if (iterations > 1 && (iterations - 1) % checkpointEvery === 0) {
       await updateRun({
         status: "running",
@@ -607,8 +649,37 @@ export async function* runAgent(
       approvedTools.push(tc)
     }
 
+    // Jev decides whether this batch may run concurrently. When it is
+    // unavailable it returns null and the sequential-by-default behavior below
+    // stands — correctness never depends on the answer, only speed does.
+    let runConcurrently = false
+    if (approvedTools.length > 1) {
+      const jevParallel = await jevWantsParallel(
+        approvedTools.map(tc => ({ function: { name: tc.function.name, arguments: tc.function.arguments } })),
+      ).catch((err) => {
+        log.warn(`[agent-loop] Jev parallel fallback: ${(err as Error).message}`)
+        return null
+      })
+      if (jevParallel) {
+        runConcurrently = jevParallel.parallel
+        if (jevParallel.decision) {
+          log.info(`[agent-loop] Jev parallel=${runConcurrently} calls=${approvedTools.length} (${jevParallel.decision.latencyMs}ms)`)
+          emitJevDecision({
+            agentId: opts.agentId,
+            kind: "parallel",
+            provider: provId,
+            model: modId,
+            summary: `${approvedTools.length} herramientas ${runConcurrently ? "en paralelo" : "en secuencia"}`,
+            savedTokens: 0,
+            costUsd: jevParallel.decision.costUsd,
+            latencyMs: jevParallel.decision.latencyMs,
+          })
+        }
+      }
+    }
+
     // Phase 2: Parallel Execution
-    const executionPromises = approvedTools.map(async (tc) => {
+    const executeOne = async (tc: typeof approvedTools[number]) => {
       const toolName = tc.function.name
       const tTool = performance.now()
       const toolRuns = await col<ToolRunDoc>("toolRuns")
@@ -676,9 +747,20 @@ export async function* runAgent(
       
       const sig = toolCallSignature(toolName, tc.function.arguments)
       return { toolResultLLM, toolResultJS, id: tc.id, name: toolName, ms: toolMs, sig }
-    })
+    }
 
-    const parallelResults = await Promise.all(executionPromises)
+    // Result order follows tool-call order regardless of execution order, so the
+    // transcript reads the same whether or not the batch was parallelized.
+    let parallelResults: Awaited<ReturnType<typeof executeOne>>[]
+    if (runConcurrently) {
+      parallelResults = await Promise.all(approvedTools.map(executeOne))
+    } else {
+      // Sequential by default: an unproven batch is a batch that can interleave
+      // two writers over the same file.
+      const collected: typeof parallelResults = []
+      for (const tc of approvedTools) collected.push(await executeOne(tc))
+      parallelResults = collected
+    }
     results.push(...parallelResults)
 
     // Phase 3: Post-execution (Traces, yielding, state updates)
