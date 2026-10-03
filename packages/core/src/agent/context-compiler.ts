@@ -27,6 +27,8 @@ import type { MCPClientManager } from "@johpaz/hivecode-mcp"
 import { syncToolCatalogToIndex, mcpToolFullName } from "./tool-selector"
 import { syncSkillsToIndex, getMinimalSkills, selectSkills, type SkillDescriptor } from "./skill-selector"
 import { MINIMAL_TOOLS } from "./minimal-loadout"
+import { getHiveDb } from "../storage/hivedb"
+import { causalLogEnabled } from "../storage/causal-events"
 import { syncPlaybookToIndex } from "./playbook-selector"
 import { describeSwarmCapabilities, planJevContext } from "./jev-planner"
 import { emitJevDecision } from "./jev-decisions"
@@ -86,6 +88,39 @@ export interface CompiledContext {
   }
 }
 
+// ─── G9 causal context (buildAgentContext) ──────────────────────────────────
+
+interface AgentContextItemShape {
+  type: "decision" | "toolCall" | "anomaly" | "episode" | "phaseSummary";
+  seq?: number;
+  phase?: string;
+  text?: string;
+  taskId?: string;
+  summary?: string;
+  keyDecisions?: number[];
+}
+
+interface AgentContextShape {
+  items: AgentContextItemShape[];
+  similarEpisodes: Array<{ taskId: string; summary: string }>;
+  anomalies: AgentContextItemShape[];
+}
+
+function formatCausalContextItem(item: AgentContextItemShape): string | null {
+  switch (item.type) {
+    case "decision":
+    case "toolCall":
+    case "phaseSummary":
+      return item.text ? `- ${item.text}` : null;
+    case "anomaly":
+      return item.text ? `- ⚠ ${item.text}` : null;
+    case "episode":
+      return item.summary ? `- (episodio previo) ${item.summary}` : null;
+    default:
+      return null;
+  }
+}
+
 // ─── Main compiler ─────────────────────────────────────────────────────────
 
 /**
@@ -105,12 +140,18 @@ export async function compileContext(opts: {
   taskContext?: string | ContentPart[]
   mcpManager?: MCPClientManager | null
   /**
+   * G9 causal stream for this invocation. Enables the causal context window:
+   * the decision chain this run has already made, projected back into the
+   * prompt so compaction does not erase it.
+   */
+  causalStreamId?: string
+  /**
    * Skip the Jev pruning pass. Used when resuming: the restored messages are
    * already the pruned set from the run that checkpointed them.
    */
   skipJev?: boolean
 }): Promise<CompiledContext> {
-  const { agentId, threadId, mcpManager, userMessage, isolated, taskContext, skipJev } = opts
+  const { agentId, threadId, mcpManager, userMessage, isolated, taskContext, causalStreamId, skipJev } = opts
 
   // Fallback: Get MCP Manager from singleton if not provided
   const effectiveMcpManager = mcpManager ?? (() => {
@@ -280,6 +321,8 @@ export async function compileContext(opts: {
   // unpruned loadout stays available as the fallback if Jev is unavailable.
   let jevToolsForLLM: LLMToolDef[] | null = null
   let jevDecision: CompiledContext["jevDecision"] | null = null
+  // G9 causal memory block, appended once the system prompt exists (STEP-9e).
+  let systemPromptExtraCausal = ""
 
   const loadoutKind = isCoordinator ? "coordinator (minimal + speckit)"
     : isSpecialistProfile ? `specialist envelope (${agent.agent_type})`
@@ -393,18 +436,18 @@ export async function compileContext(opts: {
   // dropped, in one cheap round-trip, before the prefill that dominates the turn.
   // Optional in the strict sense: when Jev is unavailable or unconfigured,
   // planJevContext returns null and the unpruned context is used unchanged.
+  const objectiveSource = taskContext || userMessage
+  const objectiveText = typeof objectiveSource === "string"
+    ? objectiveSource
+    : Array.isArray(objectiveSource)
+      ? objectiveSource.filter(p => p.type === "text").map(p => (p as { text: string }).text).join("\n")
+      : String(objectiveSource)
+
   if (!skipJev) {
     try {
-      const objectiveSource = taskContext || userMessage
-      const objective = typeof objectiveSource === "string"
-        ? objectiveSource
-        : Array.isArray(objectiveSource)
-          ? objectiveSource.filter(p => p.type === "text").map(p => (p as { text: string }).text).join("\n")
-          : String(objectiveSource)
-
       const swarm = await describeSwarmCapabilities(effectiveMcpManager, { includeSpecialists: !isWorker })
       const jevPlan = await planJevContext({
-        objective,
+        objective: objectiveText,
         messages,
         tools: toolsForLLM,
         allTools,
@@ -437,6 +480,47 @@ export async function compileContext(opts: {
       }
     } catch (err) {
       log.warn(`[context-compiler] [STEP-9d] ⚠️ Jev planning failed, keeping unpruned context: ${(err as Error).message}`)
+    }
+  }
+
+  // [STEP-9e] G9 causal context window.
+  //
+  // buildAgentContext() reconstructs this run's decision chain and anomalies from
+  // the event log and hands back a token-bounded summary. It is memory that
+  // costs no prompt: HiveDB already holds the decisions, this only projects them.
+  //
+  // Only when the summary applies this turn — otherwise it is a DB round-trip on
+  // every call, buying nothing. episodicSimilarity is omitted because it needs
+  // embeddings nothing generates yet.
+  // The 5% share below is clamped to [500, 4000] tokens anyway, so the window
+  // only matters as the denominator of that ratio. max_input_tokens is the
+  // agent's own effective cap, which is the closest thing here to what the
+  // model will actually accept.
+  const modelContextWindow = Number(agent.max_input_tokens) > 0
+    ? Number(agent.max_input_tokens)
+    : 32_000
+  if (summary && totalTokens > TOKEN_COMPACT_THRESHOLD && causalStreamId && causalLogEnabled()) {
+    try {
+      const causalDb = await getHiveDb()
+      const causalMaxTokens = Math.max(500, Math.min(4000, Math.floor(modelContextWindow * 0.05)))
+      const causalCtx = (await causalDb.buildAgentContext({
+        taskId: causalStreamId,
+        currentPhase: "current",
+        currentObjective: objectiveText.slice(0, 2000),
+        maxTokens: causalMaxTokens,
+        strategy: { causalAnchors: true, compressCompletedPhases: true },
+      })) as AgentContextShape
+
+      const causalLines = [...(causalCtx.items ?? []), ...(causalCtx.anomalies ?? [])]
+        .map(formatCausalContextItem)
+        .filter((line): line is string => !!line)
+
+      if (causalLines.length > 0) {
+        systemPromptExtraCausal = `\n\n# CAUSAL CONTEXT (decisiones y tool calls de este turno, previos a la compactación — prioriza la conversación actual; úsalo solo para no repetir algo que ya funcionó o ya falló)\n${causalLines.join("\n")}\n`
+        log.info(`[context-compiler] [STEP-9e] ✅ Injected ${causalLines.length} causal context item(s)`)
+      }
+    } catch (err) {
+      log.warn(`[context-compiler] [STEP-9e] ⚠️ Causal context build failed: ${(err as Error).message}`)
     }
   }
 
@@ -587,6 +671,10 @@ export async function compileContext(opts: {
   }
 
   const finalTools = jevToolsForLLM ?? toolsForLLM
+
+  if (systemPromptExtraCausal) {
+    systemPrompt += systemPromptExtraCausal
+  }
 
   log.info(
     `[context-compiler] ✅ DONE: ${allTools.length} permitted tools, ` +

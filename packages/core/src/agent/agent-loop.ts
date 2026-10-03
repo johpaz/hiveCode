@@ -14,6 +14,9 @@
  */
 
 import { logger } from "../utils/logger"
+import { getHiveDb } from "../storage/hivedb"
+import { causalLogEnabled } from "../storage/causal-events"
+import type { HiveDB } from "@johpaz/hive-db"
 import { col, fromIndexable } from "../storage/hive"
 import type { AgentDoc, AgentRunDoc, AgentRunStatus, CodeConfigDoc, SkillDoc, ToolRunDoc } from "../storage/collections"
 import { callLLM, resolveProviderConfig, type LLMMessage } from "./llm-client"
@@ -29,6 +32,18 @@ import { getAverageTokenCost } from "../storage/usage"
 import type { ContentPart } from "./llm-client"
 import { getExecutionMode, canExecuteTool, requiresConfirmation, getBlockReason } from "./execution-mode"
 import { planJevIteration } from "./jev-planner"
+import { createStuckLoopDetector, getInterventionMessage } from "./stuck-loop"
+import { buildRunEpoch, formatEpochKey } from "./run-epoch"
+import {
+  writeCheckpoint,
+  readCheckpoint,
+  reclaimRun,
+  startLeaseRenewal,
+  leaseOwner,
+  LEASE_SECONDS,
+  type RunCheckpoint,
+  type RepeatTrackerSnapshot,
+} from "./run-store"
 import { broadcastThinking } from "../gateway/task-streaming"
 
 /**
@@ -87,6 +102,41 @@ const DB_MUTATION_TOOLS = new Set([
   "speckit_tasks_sync", "speckit_converge",
 ])
 
+// Stuck-loop and stall detection. RepeatTracker notices the model repeating
+// itself; this catches the retry loop that keeps failing and the run that is
+// busy without advancing — neither of which shows up as a repeat.
+const stuckDetector = createStuckLoopDetector()
+
+function safeParse(value: string): unknown {
+  try { return JSON.parse(value) } catch { return undefined }
+}
+
+/** Tool arguments as a plain object, whatever shape they arrived in. */
+function toArgsRecord(argsJson: string | undefined): Record<string, unknown> {
+  const parsed = argsJson === undefined ? undefined : safeParse(argsJson)
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : {}
+}
+
+/**
+ * Fingerprint of what a run has achieved rather than what it has said: the
+ * sequence of tool names and whether each succeeded. Two turns that produced the
+ * same tools with the same outcomes are the same state, even if the prose
+ * differs — which is exactly the pair a stall looks like.
+ */
+function progressFingerprint(messages: LLMMessage[]): string {
+  const shape: string[] = []
+  for (const m of messages) {
+    if (m.role === "tool") {
+      const failed = typeof m.content === "string"
+        && (m.content.startsWith("[Tool Error]") || m.content.includes('"error":true'))
+      shape.push(`${m.name ?? "?"}:${failed ? "x" : "ok"}`)
+    }
+  }
+  return shape.slice(-8).join(",")
+}
+
 function nowSec(): number {
   return Math.floor(Date.now() / 1000)
 }
@@ -129,7 +179,7 @@ function canonicalJSON(value: unknown): string {
  */
 class RepeatTracker {
   private readonly counts = new Map<string, number>()
-  private readonly window: string[] = []
+  private window: string[] = []
   private lastToolName = ""
   private sameToolStreak = 0
 
@@ -165,6 +215,32 @@ class RepeatTracker {
 
   streakFor(toolName: string): number {
     return this.lastToolName === toolName ? this.sameToolStreak : 0
+  }
+
+  /**
+   * Serialize the detection state. A resumed run that was mid-loop must still be
+   * considered mid-loop — restoring the messages without restoring this would
+   * hand a looping run a clean slate on every crash.
+   */
+  snapshot(): RepeatTrackerSnapshot {
+    return {
+      counts: Object.fromEntries(this.counts),
+      window: [...this.window],
+      lastToolName: this.lastToolName,
+      sameToolStreak: this.sameToolStreak,
+    }
+  }
+
+  static restore(snap: RepeatTrackerSnapshot | null | undefined): RepeatTracker {
+    const tracker = new RepeatTracker()
+    if (!snap) return tracker
+    for (const [signature, count] of Object.entries(snap.counts ?? {})) {
+      tracker.counts.set(signature, count)
+    }
+    tracker.window = [...(snap.window ?? [])].slice(-REPEAT_WINDOW)
+    tracker.lastToolName = snap.lastToolName ?? ""
+    tracker.sameToolStreak = snap.sameToolStreak ?? 0
+    return tracker
   }
 }
 
@@ -213,6 +289,18 @@ export interface AgentLoopOptions {
   onToken?: (token: string) => void
   /** Reasoning tokens as the model produces them. Drives `thought_chunk`. */
   onReasoningToken?: (token: string) => void
+  /**
+   * Resume this run from its checkpoint instead of starting a new one. The
+   * restored messages are already the pruned set, so the Jev pass is skipped.
+   */
+  resume?: boolean
+  /**
+   * Persist a full resumable snapshot of this run. On by default; set false for
+   * work whose transcript is not worth the write (bulk replays, evals).
+   */
+  resumable?: boolean
+  /** Existing run to resume. Implies `resume`. */
+  resumeRunId?: string
 }
 
 export interface StepEvent {
@@ -220,6 +308,43 @@ export interface StepEvent {
   message: string
   toolName?: string
   isError?: boolean
+}
+
+// ─── G9 causal event log ─────────────────────────────────────────────────────
+
+/**
+ * Append one G9 causal event to HiveDB's immutable event log. Never throws: a
+ * broken causal log must never break the agent loop — it is an observability
+ * spine, not a dependency.
+ *
+ * `causation` chains each event to the previous one, which is what
+ * causalThread() walks to reconstruct a decision chain, and `correlation`
+ * groups a whole invocation.
+ */
+async function appendCausalEvent(
+  db: HiveDB,
+  input: {
+    agentId: string
+    streamId: string
+    kind: string
+    payload: Record<string, unknown>
+    causation?: number
+    correlation?: string
+  },
+): Promise<number | undefined> {
+  try {
+    return await db.append({
+      agentId: input.agentId,
+      streamId: input.streamId,
+      kind: input.kind as never,
+      payload: JSON.stringify(input.payload),
+      causation: input.causation,
+      correlation: input.correlation,
+    })
+  } catch (err) {
+    log.warn(`[agent-loop] causal event append failed (kind=${input.kind}): ${(err as Error).message}`)
+    return undefined
+  }
 }
 
 // ─── Stream chunk types (compatible with providers/index.ts) ─────────────────
@@ -255,9 +380,35 @@ export async function* runAgent(
   const maxInputTokens = Number(agent.max_input_tokens || 0)
   const maxOutputTokens = Number(agent.max_output_tokens || 0)
   const objective = opts.rawUserMessage || textFromMessage(opts.userMessage)
-  const runId = `${opts.threadId}:${opts.agentId}:${Date.now()}`
+  // A resumed run keeps its id so the G9 chain continues instead of splitting.
+  const runId = opts.resumeRunId || `${opts.threadId}:${opts.agentId}:${Date.now()}`
   let runStatus: AgentRunStatus = "running"
   let blocker: string | null = null
+  /** Whether this run keeps a full snapshot. Off for evals and bulk replays. */
+  const isResumable = opts.resumable !== false
+
+  // ── G9 causal stream ──────────────────────────────────────────────────────
+  // One stream per invocation (this turn or this worker task), NOT the
+  // persistent threadId: causalThread() reconstructs without a checkpointed
+  // projection, so a months-old thread would be O(full history) on every call.
+  // The run id is reused as the stream id, which also makes resume land in the
+  // same chain instead of starting a second one.
+  const causalDb = causalLogEnabled() ? await getHiveDb() : null
+  const causalStreamId = runId
+  // hive has no mid-turn topic-change classifier, so the whole stream shares one
+  // correlation id; objectiveDrift is wired but will not fire until that exists.
+  const causalCorrelationId = crypto.randomUUID()
+  let lastCausalSeq: number | undefined
+
+  if (causalDb) {
+    lastCausalSeq = await appendCausalEvent(causalDb, {
+      agentId: opts.agentId,
+      streamId: causalStreamId,
+      kind: "IntentLogged",
+      payload: { actor: opts.agentId, intent: objective.slice(0, 2000) },
+      correlation: causalCorrelationId,
+    })
+  }
 
   const agentRuns = await col<AgentRunDoc>("agentRuns")
   async function updateRun(patch: Partial<AgentRunDoc>): Promise<void> {
@@ -267,43 +418,75 @@ export async function* runAgent(
       await agentRuns.put(runId, {
         ...existing.doc,
         ...patch,
-        ...(patch.status === "running" ? { lease_expires_at: nowSec() + 3600 } : {}),
+        ...(patch.status === "running" ? { lease_expires_at: nowSec() + LEASE_SECONDS } : {}),
         updated_at: nowSec(),
-      })
+      }, { expectedVersion: existing.version })
     } catch (err) {
       log.debug(`[agent-loop] Failed to update run ${runId}: ${(err as Error).message}`)
     }
   }
 
-  try {
-    const ts = nowSec()
-    await agentRuns.put(runId, {
-      id: runId,
-      task_id: opts.threadId,
-      thread_id: opts.threadId,
-      session_id: opts.threadId,
-      agent_id: opts.agentId,
-      kind: opts.runKind ?? (opts.isolated ? "worker" : "harness"),
-      parent_run_id: opts.parentRunId ?? null,
-      profile_type: agent.agent_type,
-      objective,
-      status: "running",
-      turn: 0,
-      max_turns: maxSteps,
-      input_tokens: 0,
-      output_tokens: 0,
-      cost_usd: 0,
-      checkpoint_json: null,
-      blocker: null,
-      next_action: null,
-      lease_owner: `agent-loop:${process.pid}`,
-      lease_expires_at: ts + 3600,
-      created_at: ts,
-      updated_at: ts,
-      completed_at: null,
+  /** Snapshot the run so a crash can be resumed from this exact point. */
+  async function checkpoint(pending: RunCheckpoint["pendingToolCalls"], label: string): Promise<void> {
+    if (!isResumable) return
+    await writeCheckpoint(runId, {
+      version: 1,
+      messages,
+      iterations,
+      totalInputTokens,
+      totalOutputTokens,
+      totalCostUsd,
+      repeats: repeats.snapshot(),
+      pendingToolCalls: pending,
+    }).then((ok) => {
+      if (!ok) log.debug(`[agent-loop] ${label} checkpoint not written for ${runId}`)
     })
-  } catch (err) {
-    log.debug(`[agent-loop] Failed to create run ${runId}: ${(err as Error).message}`)
+  }
+
+  // Renewal stops as soon as the run stops being "running" — a lease for a
+  // finished run is what keeps it looking abandoned, not owned.
+  const stopLeaseRenewal = startLeaseRenewal(runId, { isActive: () => runStatus === "running" })
+
+  // A resumed run already has its row; recreating it would wipe the very
+  // checkpoint being resumed from. Reclaim instead, so the lease renewer has an
+  // owner to renew for.
+  const isResume = !!(opts.resume || opts.resumeRunId)
+
+  if (isResume) {
+    await reclaimRun(runId).catch((err) =>
+      log.warn(`[agent-loop] Failed to reclaim run ${runId}: ${(err as Error).message}`)
+    )
+  } else {
+    try {
+      const ts = nowSec()
+      await agentRuns.put(runId, {
+        id: runId,
+        task_id: opts.threadId,
+        thread_id: opts.threadId,
+        session_id: opts.threadId,
+        agent_id: opts.agentId,
+        kind: opts.runKind ?? (opts.isolated ? "worker" : "harness"),
+        parent_run_id: opts.parentRunId ?? null,
+        profile_type: agent.agent_type,
+        objective,
+        status: "running",
+        turn: 0,
+        max_turns: maxSteps,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0,
+        checkpoint_json: null,
+        blocker: null,
+        next_action: null,
+        lease_owner: leaseOwner(),
+        lease_expires_at: ts + LEASE_SECONDS,
+        created_at: ts,
+        updated_at: ts,
+        completed_at: null,
+      })
+    } catch (err) {
+      log.debug(`[agent-loop] Failed to create run ${runId}: ${(err as Error).message}`)
+    }
   }
 
   // Resolve LLM provider config — prefer agent's provider_id, fall back to codeConfig.
@@ -361,6 +544,7 @@ export async function* runAgent(
   }
 
   const cleanModel = providerCfg.model.replace(new RegExp(`^${providerCfg.provider}\\/`), "")
+
   log.info(`[agent-loop] Starting harness: run=${runId} agent=${agentName} thread=${opts.threadId} provider=${providerCfg.provider}/${cleanModel} maxSteps=${maxSteps} checkpointEvery=${checkpointEvery}`)
 
   // Store the user message in conversation history
@@ -386,7 +570,20 @@ export async function* runAgent(
     isolated: opts.isolated,
     taskContext: opts.taskContext,
     userId: opts.userId,
+    causalStreamId: causalDb ? causalStreamId : undefined,
+    // The restored messages are already the pruned set from the run that
+    // checkpointed them; pruning them again would compound the loss.
+    skipJev: isResume,
   })
+
+  // Conditions this run executes under, stamped on every trace it produces.
+  // Traces from one epoch are comparable to each other; across a boundary they
+  // are not, and the reflector needs to see where it fell.
+  const runEpochKey = formatEpochKey(buildRunEpoch({
+    provider: providerCfg.provider,
+    model: providerCfg.model,
+    toolNames: ctx.tools.map(t => t.function.name),
+  }))
 
   const systemPrompt = opts.systemPromptOverride || ctx.systemPrompt
 
@@ -408,10 +605,53 @@ export async function* runAgent(
   let finalContent = ""
   let finalContentEmitted = false
   // Loop detection: counts repeated calls across the whole run, nudging before breaking.
-  const repeats = new RepeatTracker()
+  let repeats = new RepeatTracker()
   let loopDetected = false
   let wrapUpAnnounced = false
 
+  // ── Resume from checkpoint ────────────────────────────────────────────────
+  // The restored messages are already the pruned set from the run that wrote
+  // them, so the Jev pass must not prune them again.
+  if (isResume) {
+    const restored = await readCheckpoint(runId)
+    if (restored) {
+      messages = restored.messages
+      iterations = restored.iterations ?? 0
+      totalInputTokens = restored.totalInputTokens ?? 0
+      totalOutputTokens = restored.totalOutputTokens ?? 0
+      totalCostUsd = restored.totalCostUsd ?? 0
+      repeats = RepeatTracker.restore(restored.repeats)
+
+      const interrupted = (restored.pendingToolCalls ?? []).map((tc) => ({
+        role: "tool" as const,
+        content: "[interrupted] El proceso se reinició mientras esta herramienta corría. El resultado no está disponible — decide si reintentar o continuar sin él.",
+        tool_call_id: tc.id,
+        name: tc.name,
+      }))
+      if (interrupted.length > 0) {
+        // Synthesized rather than re-executed: a tool that may have half-run
+        // must not be run again just because the process died.
+        messages.push(...interrupted)
+        // Clear them from the checkpoint immediately. They are now answered in
+        // the transcript, and leaving them set means a second crash injects the
+        // same replies again — duplicate tool results for one call_id, which
+        // providers reject.
+        await checkpoint([], "resume-clear")
+        log.info(`[agent-loop] Resume: injected ${interrupted.length} synthetic [interrupted] tool message(s)`)
+      }
+      log.info(
+        `[agent-loop] Resume: restored ${messages.length} messages at iteration ${iterations} ` +
+        `from run ${runId}`,
+      )
+    } else {
+      log.info(`[agent-loop] Resume requested but run ${runId} has no usable checkpoint — starting fresh`)
+    }
+  }
+
+  // The try wraps the loop, the synthesis and the finalization without
+  // re-indenting any of it: it guarantees a run never stays "running" with a
+  // live lease when the loop throws or the consumer abandons the generator.
+  try {
   // ── The loop ────────────────────────────────────────────────────────────
   while (iterations < maxSteps) {
     if (opts.signal?.aborted) {
@@ -535,6 +775,25 @@ export async function* runAgent(
       ) * getAverageTokenCost(providerCfg.model)
     }
 
+    // G9: this model turn is the decision that follows the previous event in the
+    // chain. Logging it before the tool calls it implies keeps the reconstructed
+    // thread in causal order.
+    if (causalDb) {
+      const description = response.content?.trim()
+        || (response.tool_calls?.length
+          ? `Calling ${response.tool_calls.map((tc) => tc.function.name).join(", ")}`
+          : "(empty response)")
+      const seq = await appendCausalEvent(causalDb, {
+        agentId: opts.agentId,
+        streamId: causalStreamId,
+        kind: "StateTransition",
+        payload: { description: description.slice(0, 2000) },
+        causation: lastCausalSeq,
+        correlation: causalCorrelationId,
+      })
+      if (seq !== undefined) lastCausalSeq = seq
+    }
+
     // Bifurcate thinking blocks: reasoning_content → WS canal agent:{id}:thinking
     // The content is persisted in DB alongside the assistant message (see below).
     // Here we only broadcast it to dashboard subscribers for real-time display.
@@ -613,7 +872,7 @@ export async function* runAgent(
 
     // Group tools to execute in parallel when possible
     const toolCalls = response.tool_calls
-    const results: Array<{ toolResultLLM: string, toolResultJS?: unknown, id: string, name: string, ms: number, sig: string }> = []
+    const results: Array<{ toolResultLLM: string, toolResultJS?: unknown, id: string, name: string, ms: number, sig: string, argsJson?: string }> = []
 
     // Phase 1: Validations and Confirmations (Sequential)
     const approvedTools: typeof toolCalls = []
@@ -652,6 +911,14 @@ export async function* runAgent(
     // Jev decides whether this batch may run concurrently. When it is
     // unavailable it returns null and the sequential-by-default behavior below
     // stands — correctness never depends on the answer, only speed does.
+    // ── Checkpoint: pending tool_calls recorded BEFORE execution ────────────
+    // A crash between here and the post-tool checkpoint must not re-run these
+    // tools on resume: a write that half-ran would happen twice.
+    await checkpoint(
+      approvedTools.map((tc: typeof toolCalls[number]) => ({ id: tc.id, name: tc.function.name })),
+      "pre-tool",
+    )
+
     let runConcurrently = false
     if (approvedTools.length > 1) {
       const jevParallel = await jevWantsParallel(
@@ -729,6 +996,22 @@ export async function* runAgent(
         && "error" in toolResultJS
         && (toolResultJS as any).error
       )
+
+      // G9: the tool call and its outcome, chained to the decision that asked
+      // for it. toolStats() reads these back as whole-history aggregates.
+      if (causalDb) {
+        const outcome = toolError
+          ? { Err: toolResultLLM.slice(0, 300) }
+          : "Ok"
+        await appendCausalEvent(causalDb, {
+          agentId: opts.agentId,
+          streamId: causalStreamId,
+          kind: "ToolCall",
+          payload: { tool: toolName, latency_ms: toolMs, outcome },
+          causation: lastCausalSeq,
+          correlation: causalCorrelationId,
+        })
+      }
       try {
         const recorded = await toolRuns.get(toolRunId)
         if (recorded) {
@@ -746,7 +1029,17 @@ export async function* runAgent(
       }
       
       const sig = toolCallSignature(toolName, tc.function.arguments)
-      return { toolResultLLM, toolResultJS, id: tc.id, name: toolName, ms: toolMs, sig }
+      return {
+        toolResultLLM,
+        toolResultJS,
+        id: tc.id,
+        name: toolName,
+        ms: toolMs,
+        sig,
+        argsJson: typeof tc.function.arguments === "string"
+          ? tc.function.arguments
+          : JSON.stringify(tc.function.arguments ?? {}),
+      }
     }
 
     // Result order follows tool-call order regardless of execution order, so the
@@ -777,6 +1070,8 @@ export async function* runAgent(
         success: !r.toolResultLLM.startsWith("[Tool Error]"),
         errorMessage: r.toolResultLLM.startsWith("[Tool Error]") ? r.toolResultLLM : null,
         durationMs: r.ms,
+        causalStreamId: causalDb ? causalStreamId : null,
+        runEpoch: runEpochKey,
       })
 
       // Loop detection runs before the result is handed back, so a corrective note can
@@ -800,6 +1095,32 @@ export async function* runAgent(
         // leave the history invalid.
         loopDetected = true
       }
+
+      // Stuck / stall detection runs on every result, including the ones the
+      // RepeatTracker already flagged: a retry loop that keeps failing is a
+      // different diagnosis from a repeated call, and the intervention text
+      // differs.
+      stuckDetector.recordToolCall(
+        runId,
+        r.name,
+        toArgsRecord(r.argsJson),
+        r.toolResultLLM.startsWith("[Tool Error]") ? r.toolResultLLM.slice(0, 300) : undefined,
+      )
+      const stuck = stuckDetector.check(runId)
+      if (stuck.detected && resultContent === r.toolResultLLM) {
+        // Only speak up once: the RepeatTracker may already have said something,
+        // and two warnings in one tool result is noise the model has to read.
+        const intervention = getInterventionMessage(stuck)
+        if (intervention) {
+          resultContent += `\n\n[AVISO DEL HARNESS] ${intervention}`
+          log.warn(`[agent-loop] Stuck ${stuck.kind}: ${stuck.toolName} x${stuck.count}`)
+        }
+      }
+
+      // Progress fingerprint: what the run has achieved, not what it has said.
+      // A transcript hash would move every turn by construction and never
+      // register a stall.
+      stuckDetector.recordProgress(runId, progressFingerprint(messages))
 
       yield { tools: { messages: [{ content: resultContent, tool_call_id: r.id }] } }
       if (opts.onStep) await opts.onStep({ type: "tool_result", message: resultContent })
@@ -935,6 +1256,11 @@ export async function* runAgent(
 
     }
 
+    // ── Checkpoint: tools completed, pending cleared ──────────────────────
+    // The history now includes every tool result, so a resume from here picks
+    // up at the next model call with nothing left in flight.
+    await checkpoint([], "post-tool")
+
     // A stalled run still gets the synthesis pass below, so the user receives a summary
     // of what was actually done instead of a bare "blocked".
     if (loopDetected) break
@@ -1025,6 +1351,7 @@ export async function* runAgent(
     success: runStatus === "completed",
     durationMs,
     tokensUsed: totalInputTokens + totalOutputTokens,
+    runEpoch: runEpochKey,
   })
 
   log.info(
@@ -1039,6 +1366,8 @@ export async function* runAgent(
     output_tokens: totalOutputTokens,
     cost_usd: totalCostUsd,
     blocker,
+    // A run that stopped short of its goal and left a checkpoint is resumable;
+    // one that completed or exhausted its budget is not, whatever the reason.
     next_action: runStatus === "completed" ? null : "resume_or_increase_budget",
     handoff_json: JSON.stringify({
       status: runStatus,
@@ -1047,10 +1376,27 @@ export async function* runAgent(
       output_tokens: totalOutputTokens,
       cost_usd: totalCostUsd,
       blocker,
+      resumable: isResumable,
     }),
     completed_at: nowSec(),
   })
   yield { run: { status: runStatus, blocker } }
+
+  // Last line of defense. The body above can throw, and a consumer can abandon
+  // the generator without draining it — in both cases the run would be left
+  // reading "running" with a live lease, which is exactly what makes
+  // adaptive-scheduler reclaim it out from under nothing.
+  } finally {
+    stopLeaseRenewal()
+    if (runStatus === "running") {
+      runStatus = "interrupted"
+      await updateRun({
+        status: "interrupted",
+        next_action: "resume",
+        blocker: blocker ?? "loop_abandoned",
+      }).catch(() => { /* the row may already be gone */ })
+    }
+  }
 }
 
 // ─── Isolated worker execution (Fase 4.4) ───────────────────────────────────
