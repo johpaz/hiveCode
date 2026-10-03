@@ -44,19 +44,25 @@ describe("getHiveDbPath precedence", () => {
     expect(getHiveDbPath({ HIVE_HOME: "~/.custom" })).toBe(`${HOME}/.custom/data/hivedb`)
   })
 
-  test("HIVE_DEV isolates development from production", () => {
-    expect(getHiveDbPath({ HIVE_DEV: "true" }, "/work")).toBe("/work/.hive-dev/data/hivedb")
-    expect(getHiveDbPath({ HIVE_DEV: "1" }, "/work")).toBe("/work/.hive-dev/data/hivedb")
-  })
-
-  test("HIVE_DEV does not touch the production database", () => {
-    const prod = getHiveDbPath({}, "/work")
-    const dev = getHiveDbPath({ HIVE_DEV: "true" }, "/work")
-    expect(dev).not.toBe(prod)
+  test("HIVE_DEV does not move the database", () => {
+    // Tried and reverted: `bun run dev` sets HIVE_DEV, so putting the database
+    // under it gave the dev loop a second, empty one inside the repo.
+    expect(getHiveDbPath({ HIVE_DEV: "true" }, "/work")).toBe(
+      getHiveDbPath({}, "/work"),
+    )
+    expect(getHiveDbPath({ HIVE_DEV: "1" }, "/work")).toBe(
+      getHiveDbPath({}, "/work"),
+    )
   })
 
   test("HIVE_HOME beats HIVE_DEV", () => {
     expect(getHiveDbPath({ HIVE_HOME: "/opt/hive", HIVE_DEV: "1" })).toBe("/opt/hive/data/hivedb")
+  })
+
+  test("no resolution ever lands inside the working directory", () => {
+    for (const env of [{}, { HIVE_DEV: "1" }, { HIVE_DEV: "true" }, { HIVE_HOME: "/opt/h" }]) {
+      expect(getHiveDbPath(env, "/data/Hive/hivecode").startsWith("/data/Hive/hivecode")).toBe(false)
+    }
   })
 
   test("the default lives in the home directory", () => {

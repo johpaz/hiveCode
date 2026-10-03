@@ -2,9 +2,8 @@
  * E2E: elegir provider e introducir su API key desde el hub de settings.
  *
  * El binario real corre en headless, habla NDJSON por socket y se conduce con
- * teclas reales (`\x1bOQ` = F2, `\r` = Enter, caracteres sueltos = escritura).
- * Nada está simulado: el flujo pasa por el reducer, el IPC y el renderer de
- * producción.
+ * teclas reales sobre su stdin (`\x1bOQ` = F2, `\r` = Enter). Nada está simulado:
+ * el flujo pasa por el reducer, el IPC y el renderer de producción.
  *
  * El bug que cubre: al pulsar Enter sobre un provider, Bun recibía
  * `/provider set <id>` como si fuera un mensaje de chat, descartaba el id y
@@ -21,6 +20,7 @@ import { startSession, waitForFrame, frameText, type SessionOptions } from "./ha
 const F2 = "\x1bOQ"
 const ENTER = "\r"
 const ESC = "\x1b"
+const DOWN = "\x1b[B"
 
 const SETTINGS: SessionOptions = { cols: 130, rows: 40 }
 
@@ -47,7 +47,17 @@ function settingsData(providers: ProviderRow[]) {
   }
 }
 
-/** Un provider recién dado de alta: sin clave en el keystore. */
+/**
+ * ¿El mensaje lleva una clave?
+ *
+ * `Option::None` de serde se serializa como `null`, no se omite el campo, así
+ * que "sin clave" puede llegar de las dos formas según el cliente.
+ */
+function carriesKey(msg: Record<string, unknown>): boolean {
+  return typeof msg.api_key === "string" && msg.api_key.length > 0
+}
+
+/** Recién dado de alta, sin clave en el keystore. */
 const sinClave: ProviderRow = {
   id: "openai",
   name: "OpenAI",
@@ -80,32 +90,52 @@ const conBrowser: ProviderRow = {
   models: ["hivecode-free/deepseek-v4-flash"],
 }
 
-/** Abre el hub con F2 y espera a que pinte sus filas. */
+/**
+ * Abre el hub con F2 y espera a que pinte la fila de `provider`.
+ *
+ * `request_settings` se responde con el snapshot: el TUI solo aplica
+ * `SettingsData` si el hub está montado, así que el orden importa.
+ */
 async function openSettingsHub(
   session: Awaited<ReturnType<typeof startSession>>,
   providers: ProviderRow[],
 ) {
-  const frame = await waitForFrame(
-    session.iter,
-    f => frameText(f).includes(providers[0]!.id),
-    5000,
-    "settings hub con filas",
-  )
-  return frame
+  // El hub pide los datos al abrirse; responder con la fila buscada.
+  const stop = watchRequestSettings(session, providers)
+  session.type(F2)
+  try {
+    return await waitForFrame(
+      session.iter,
+      f => providers.every(p => frameText(f).includes(p.id)),
+      5000,
+      "el hub con sus filas",
+    )
+  } finally {
+    stop()
+  }
+}
+
+/** Responde a cada `request_settings` con el snapshot, como hace tui-launcher. */
+function watchRequestSettings(
+  session: Awaited<ReturnType<typeof startSession>>,
+  providers: ProviderRow[],
+): () => void {
+  let sent = 0
+  const timer = setInterval(() => {
+    const asked = session.ipc.received.filter(m => m.type === "request_settings").length
+    while (sent < asked) {
+      sent += 1
+      session.ipc.send(settingsData(providers))
+    }
+  }, 20)
+  return () => clearInterval(timer)
 }
 
 describe("E2E: elegir provider + API key desde el hub", () => {
   test("la columna Key distingue quién tiene clave y quién no", async () => {
     const session = await startSession("approval", SETTINGS)
     try {
-      session.ipc.send(settingsData([conClave, sinClave, conBrowser]))
-      await waitForFrame(session.iter, f => frameText(f).includes("Providers"), 5000, "hub")
-      const hub = await waitForFrame(
-        session.iter,
-        f => frameText(f).includes("hivecode-free") && frameText(f).includes("● activo"),
-        5000,
-        "las tres filas",
-      )
+      const hub = await openSettingsHub(session, [conClave, sinClave, conBrowser])
       const text = frameText(hub)
 
       // Los tres estados de credenciales tienen glifo propio. Con el
@@ -113,8 +143,7 @@ describe("E2E: elegir provider + API key desde el hub", () => {
       expect(text).toContain("✓")
       expect(text).toContain("?")
       expect(text).toContain("~")
-      // El hint del footer anticipa qué va a pasar al pulsar Enter.
-      expect(text).toContain("te pedirá la API key")
+      expect(text).toContain("● activo")
     } finally {
       session.dispose()
     }
@@ -123,70 +152,128 @@ describe("E2E: elegir provider + API key desde el hub", () => {
   test("Enter sobre un provider sin clave pide solo la clave, no la lista", async () => {
     const session = await startSession("approval", SETTINGS)
     try {
-      session.ipc.send(settingsData([conClave, sinClave]))
-      await openSettingsHub(session, [conClave, sinClave])
+      await openSettingsHub(session, [sinClave])
 
-      // El hub quedó esperando; ahora pulsamos Enter sobre la fila seleccionada.
-      // Headless solo repinta con mensajes entrantes, así que el Enter se ve en
-      // el siguiente frame que forcemos.
-      session.ipc.send({ type: "status", running: false, msg: "enter-1" })
-      const afterEnter = await waitForFrame(
+      session.type(ENTER)
+      const form = await waitForFrame(
         session.iter,
-        f => frameText(f).includes("API key · OpenAI"),
+        f => frameText(f).includes("Clave de OpenAI"),
         5000,
         "el formulario de clave",
       )
-      const text = frameText(afterEnter)
+      const text = frameText(form)
 
       // El campo es la clave, no un desplegable de providers: el id ya lo dijo
-      // el usuario con la navegación por filas.
-      expect(text).toContain("Clave de OpenAI")
+      // el usuario al moverse por las filas.
       expect(text).not.toContain("Selecciona provider")
-      // Y la clave se escribe enmascarada.
-      expect(text).not.toContain("sk-nada")
+      expect(text).not.toContain("hiveagents")
+
+      // Y nada sale hacia Bun hasta que se confirme.
+      expect(session.ipc.received.some(m => m.type === "provider_activate")).toBe(false)
     } finally {
       session.dispose()
     }
   })
 
-  test("el formulario de clave se cierra con Esc sin activar nada", async () => {
+  test("la clave se envía en su propio mensaje, no como comando de chat", async () => {
     const session = await startSession("approval", SETTINGS)
     try {
-      session.ipc.send(settingsData([sinClave]))
       await openSettingsHub(session, [sinClave])
-
-      const sentBefore = session.ipc.received.length
-      session.ipc.send({ type: "status", running: false, msg: "enter-2" })
+      session.type(ENTER)
       await waitForFrame(session.iter, f => frameText(f).includes("Clave de OpenAI"), 5000, "formulario")
 
-      session.ipc.send({ type: "status", running: false, msg: "esc" })
+      session.type("sk-secreto-123")
+      session.type(ENTER)
+
+      const activate = await session.ipc.waitForMessage("provider_activate", 5000)
+      expect(activate.provider_id).toBe("openai")
+      expect(activate.api_key).toBe("sk-secreto-123")
+
+      // El bug original: el provider se elegía de una lista en Bun, y el id del
+      // comando se descartaba. Nada de `/provider set` por aquí.
+      expect(session.ipc.received.some(m => m.type === "submit")).toBe(false)
+    } finally {
+      session.dispose()
+    }
+  })
+
+  test("la clave nunca se dibuja en claro en pantalla", async () => {
+    const session = await startSession("approval", SETTINGS)
+    try {
+      await openSettingsHub(session, [sinClave])
+      session.type(ENTER)
+      await waitForFrame(session.iter, f => frameText(f).includes("Clave de OpenAI"), 5000, "formulario")
+
+      session.type("sk-secreto-123")
+      const form = await waitForFrame(
+        session.iter,
+        f => frameText(f).includes("•"),
+        5000,
+        "la clave enmascarada",
+      )
+
+      expect(frameText(form)).toContain("•")
+      expect(frameText(form)).not.toContain("sk-secreto-123")
+    } finally {
+      session.dispose()
+    }
+  })
+
+  test("el formulario se cierra con Esc sin activar nada", async () => {
+    const session = await startSession("approval", SETTINGS)
+    try {
+      await openSettingsHub(session, [sinClave])
+      session.type(ENTER)
+      await waitForFrame(session.iter, f => frameText(f).includes("Clave de OpenAI"), 5000, "formulario")
+
+      const before = session.ipc.received.length
+      session.type(ESC)
       const back = await waitForFrame(
         session.iter,
-        f => !frameText(f).includes("Clave de OpenAI") && frameText(f).includes("Providers"),
+        f => !frameText(f).includes("Clave de OpenAI") && frameText(f).includes("Configuración"),
         5000,
         "vuelta al hub",
       )
-      expect(frameText(back)).toContain("openai")
 
-      // Ni `provider_activate` ni `modal_cancel`: cancelar un formulario local
-      // no es una petición a Bun.
-      const after = session.ipc.received.slice(sentBefore)
+      // Cancelar un formulario local no es una petición a Bun: ni
+      // `provider_activate` ni `modal_cancel`.
+      const after = session.ipc.received.slice(before)
       expect(after.some(m => m.type === "provider_activate")).toBe(false)
       expect(after.some(m => m.type === "modal_cancel")).toBe(false)
+      // Se vuelve al hub, no al chat.
+      expect(frameText(back)).toContain("openai")
     } finally {
       session.dispose()
     }
   })
 
-  test("un provider de login de navegador se marca como tal", async () => {
+  test("navegar hasta la fila correcta y activarla no vuelve a preguntar el provider", async () => {
     const session = await startSession("approval", SETTINGS)
     try {
-      session.ipc.send(settingsData([conBrowser]))
-      const hub = await openSettingsHub(session, [conBrowser])
+      // La primera fila tiene clave: Enter debe activarla directo, sin modal.
+      await openSettingsHub(session, [conClave, sinClave])
+      session.type(ENTER)
 
-      expect(frameText(hub)).toContain("login de navegador")
-      // Nada que pegar: no puede sugerir una API key.
-      expect(frameText(hub)).not.toContain("te pedirá la API key")
+      const activate = await session.ipc.waitForMessage("provider_activate", 5000)
+      expect(activate.provider_id).toBe("anthropic")
+      // Sin clave que aportar: el campo se omite para que Bun no la pida.
+      expect(carriesKey(activate)).toBe(false)
+    } finally {
+      session.dispose()
+    }
+  })
+
+  test("una fila de login de navegador no pide API key", async () => {
+    const session = await startSession("approval", SETTINGS)
+    try {
+      await openSettingsHub(session, [conBrowser])
+
+      session.type(ENTER)
+      const activate = await session.ipc.waitForMessage("provider_activate", 5000)
+      expect(activate.provider_id).toBe("hivecode-free")
+      expect(carriesKey(activate)).toBe(false)
+      // No se abrió ningún formulario: el footer lo advertía de antemano.
+      expect(session.ipc.received.some(m => m.type === "modal_submit")).toBe(false)
     } finally {
       session.dispose()
     }
@@ -195,13 +282,16 @@ describe("E2E: elegir provider + API key desde el hub", () => {
   test("el hub sin providers invita a dar de alta uno con A", async () => {
     const session = await startSession("approval", SETTINGS)
     try {
-      session.ipc.send(settingsData([]))
+      const stop = watchRequestSettings(session, [])
+      session.type(F2)
       const empty = await waitForFrame(
         session.iter,
         f => frameText(f).includes("Sin providers"),
         5000,
         "estado vacío",
       )
+      stop()
+
       expect(frameText(empty)).toContain("Presiona A")
     } finally {
       session.dispose()
@@ -209,6 +299,5 @@ describe("E2E: elegir provider + API key desde el hub", () => {
   })
 })
 
-// Las constantes de teclado se usan en los ejemplos de documentación del flujo;
-// se mantienen exportadas para que un test futuro pueda escribir la clave.
-export { F2, ENTER, ESC }
+// `DOWN` queda exportado para scenarios que recorran varias filas.
+export { F2, ENTER, ESC, DOWN }

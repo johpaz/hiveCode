@@ -429,10 +429,47 @@ pub enum BunMessage {
         github_repo: Option<String>,
         telegram_active: bool,
     },
+
+    // ── Jev: el plano de decisión ───────────────────────────────────────────
+    // Jev ya emitía estos eventos en el event bus del backend y nadie estaba
+    // suscrito: se calculaba el "por qué" de cada decisión y se tiraba. Esta es
+    // la primeraconsumer.
+    /// Una decisión servida y aplicada: qué podó, si puede paralelizar, a qué
+    /// especialista delegó.
+    JevDecision {
+        agent_id: String,
+        /// "context" (podar + delegar), "parallel", "iteration".
+        kind: String,
+        summary: String,
+        saved_tokens: u64,
+        cost_usd: f64,
+        latency_ms: u64,
+        /// Id estable, para deduplicar tras una reconexión.
+        event_id: String,
+        totals: IpcJevTotals,
+    },
+    /// Disponibilidad del oráculo. `off` = no configurado; `fallback` = enfriándose
+    /// tras fallos. La UI no debe pintar `off` como error.
+    JevStatus {
+        state: String,
+        last_error: Option<String>,
+        last_success_at: Option<u64>,
+        totals: IpcJevTotals,
+    },
+
     /// Captura cualquier tipo de mensaje desconocido — evita que serde falle
     /// y corrompa el canal IPC cuando TypeScript agrega nuevos tipos.
     #[serde(other)]
     Unknown,
+}
+
+/// Acumulado del oráculo. Viaja con cada decisión para que el statusbar pueda
+/// mostrar "ahorró N tokens / $X" sin pedir nada.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpcJevTotals {
+    pub decisions: u64,
+    pub saved_tokens: u64,
+    pub cost_usd: f64,
 }
 
 // ── Tipos de datos para nuevos mensajes ───────────────────────────────────────

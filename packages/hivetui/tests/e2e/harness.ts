@@ -140,13 +140,24 @@ export async function createUnixIpcServer(socketPath?: string): Promise<IpcServe
   return { endpoint, server, waitForConnection: acceptConnection(server) }
 }
 
-/** Spawns the real binary in headless mode and streams its canvas frames. */
+/**
+ * Spawns the real binary in headless mode and streams its canvas frames.
+ *
+ * `type` writes to the TUI's stdin: headless mode feeds those bytes through the
+ * same reducer as the TTY, which is what makes key-driven flows (settings hub,
+ * config modals) reachable from a test.
+ */
 export async function spawnTui(
   endpoint: string,
   size: { cols?: number; rows?: number } = {},
-): Promise<{ frames: () => AsyncGenerator<FrameSnapshot>; kill: () => void }> {
+): Promise<{
+  frames: () => AsyncGenerator<FrameSnapshot>
+  type: (keys: string) => void
+  kill: () => void
+}> {
   const proc = Bun.spawn({
     cmd: [BINARY],
+    stdin: "pipe",
     stdout: "pipe",
     stderr: "ignore",
     env: {
@@ -179,7 +190,9 @@ export async function spawnTui(
     }
   }
 
-  return { frames, kill: () => proc.kill() }
+  const type = (keys: string) => proc.stdin.write(keys)
+
+  return { frames, type, kill: () => proc.kill() }
 }
 
 /** Resolves with the first frame satisfying `predicate`, or rejects on timeout. */
@@ -229,6 +242,8 @@ export type SessionOptions = {
 export async function startSession(mode: string, options: SessionOptions = {}): Promise<{
   ipc: IpcConnection
   iter: AsyncGenerator<FrameSnapshot>
+  /** Sends keystrokes to the TUI's stdin (`"\x1bOQ"` = F2, `"\r"` = Enter). */
+  type: (keys: string) => void
   sessionId: string
   /** The frame rendered right after `init`. Headless emits frames only on
    *  inbound messages, so this is the only chance to inspect it. */
@@ -239,7 +254,7 @@ export async function startSession(mode: string, options: SessionOptions = {}): 
   const { endpoint, server, waitForConnection } = transport === "unix"
     ? await createUnixIpcServer()
     : await createTcpIpcServer()
-  const { frames, kill } = await spawnTui(endpoint, size)
+  const { frames, type, kill } = await spawnTui(endpoint, size)
   const iter = frames()
   const ipc = await waitForConnection()
   await iter.next() // frame 0 — empty welcome state
@@ -263,6 +278,7 @@ export async function startSession(mode: string, options: SessionOptions = {}): 
   return {
     ipc,
     iter,
+    type,
     sessionId,
     initFrame,
     dispose: () => {

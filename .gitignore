@@ -39,6 +39,9 @@ node-compile-cache/
 # hivecode local state
 .hivecode
 /hivecode/
+# Insurance: the database lives in ~/.hivecode/data/hivedb, never in the repo.
+# If a dev-mode path ever points here again, do not commit what it writes.
+.hive-dev/
 
 # Rust/Cargo build artifacts (packages/hivetui and any future Rust crates)
 target/

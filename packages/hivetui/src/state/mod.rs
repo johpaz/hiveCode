@@ -10,6 +10,7 @@ mod harness;
 mod history;
 mod input;
 mod logs;
+mod jev;
 mod modal;
 mod panels;
 mod plan;
@@ -33,6 +34,7 @@ pub use filemap::{FileEntry, FileMapState, RiskLevel};
 pub use harness::{HarnessHealth, HarnessState};
 pub use history::{HistoryEntry, HistoryState, Role};
 pub use input::InputState;
+pub use jev::{JevAvailability, JevDecision, JevState, JevTotals};
 pub use logs::{LogEntry, LogState};
 pub use modal::{
     ConfigModalState, InfoModalState, ModalAction, ModalField, ModalFieldKind, ModalState,
@@ -85,6 +87,8 @@ pub struct AppState {
     pub routing: LayoutRoutingState,
     pub modal: ModalState,
     pub logs: LogState,
+    /// Plano de decisión: disponibilidad del oráculo y rastro de sus decisiones.
+    pub jev: JevState,
     pub panels: PanelLayoutState,
     /// Per-frame mouse hit regions emitted by renderer and consumed by controller.
     pub hit_map: crate::ui::HitMap,
@@ -175,6 +179,8 @@ fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
         BunMessage::LibrarianProgress { .. } => "librarian_progress",
         BunMessage::MemoryUpdate { .. } => "memory_update",
         BunMessage::SettingsData { .. } => "settings_data",
+        BunMessage::JevDecision { .. } => "jev_decision",
+        BunMessage::JevStatus { .. } => "jev_status",
         BunMessage::Unknown => "unknown",
     }
 }
@@ -1046,6 +1052,36 @@ impl AppState {
                 self.logs.entries.push(LogEntry { timestamp, level, source, message });
                 if self.logs.entries.len() > self.logs.capacity {
                     self.logs.entries.remove(0);
+                }
+            }
+
+            // ── Jev: plano de decisión ──────────────────────────────────────────
+            // Antes esto se calculaba en el backend y se tiraba: nadie estaba
+            // suscrito al event bus. Acá queda el rastro.
+            BunMessage::JevDecision { agent_id, kind, summary, saved_tokens,
+                                      cost_usd, latency_ms, event_id, totals } => {
+                self.jev.totals = JevTotals::from(&totals);
+                self.jev.record(JevDecision {
+                    agent_id,
+                    kind,
+                    summary,
+                    saved_tokens,
+                    cost_usd,
+                    latency_ms,
+                    event_id,
+                    availability: self.jev.availability,
+                });
+            }
+            BunMessage::JevStatus { state, last_error, last_success_at, totals } => {
+                self.jev.set_availability(
+                    JevAvailability::from_str(&state),
+                    last_error,
+                    last_success_at,
+                    JevTotals::from(&totals),
+                );
+                // Recovered: the oracle was cooling down and now answers again.
+                if self.jev.availability == JevAvailability::Ready {
+                    self.jev.last_error = None;
                 }
             }
 

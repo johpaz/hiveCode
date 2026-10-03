@@ -137,6 +137,43 @@ export type BunMessage =
     }
   | { type: "resume_available"; task_id: string; checkpoint_id: string; reason: string }
   | { type: "phase_retry"; worker: string; attempt: number; max_attempts: number; reason: string }
+  /**
+   * A Jev decision was served and the caller is applying it.
+   *
+   * Jev (the decision plane) already emits this on the event bus
+   * (`jev-decisions.ts` → `eventBus`) and nothing was subscribed. The TUI is
+   * the first consumer: this is the "why" behind an agent's behaviour — what it
+   * pruned, whether tools may run in parallel, which specialist it picked.
+   *
+   * Snake_case on the wire, like every other field here (`eventId` →
+   * `event_id`). `summary` already arrives truncated to 160 chars.
+   */
+  | {
+      type: "jev_decision"
+      agent_id: string
+      /** Which decision: "context" (prune + delegate), "parallel", "iteration". */
+      kind: string
+      summary: string
+      saved_tokens: number
+      cost_usd: number
+      latency_ms: number
+      /** Stable id, so the TUI can dedupe across a reconnect. */
+      event_id: string
+      totals: { decisions: number; saved_tokens: number; cost_usd: number }
+    }
+  /**
+   * Availability of the decision plane.
+   *
+   * `off` means "not configured" and must not be rendered as an error;
+   * `fallback` means it is cooling down after failures and deserves a warning.
+   */
+  | {
+      type: "jev_status"
+      state: "off" | "ready" | "fallback"
+      last_error: string | null
+      last_success_at: number | null
+      totals: { decisions: number; saved_tokens: number; cost_usd: number }
+    }
   | {
       type: "settings_data"
       // `models` = ids de los modelos llm habilitados de ese provider, para que la TUI
@@ -190,6 +227,13 @@ const LOW_TYPES = new Set<BunMessage["type"]>([
   "memory_update", "librarian_progress", "dashboard_snapshot", "metrics_update",
   // High-volume token streams: they must never delay a critical alert.
   "assistant_chunk", "thought_chunk",
+  // Status flips are rare and tiny; a stale availability dot is worth nothing.
+  "jev_status",
+  // `jev_decision` is deliberately NOT here. It stays on `normal` because it is
+  // the reasoning trail the user actually reads — the same thing Kimi surfaces
+  // as "the logical chain of reasoning and decision-making". Putting it on
+  // `low` would let it be dropped exactly when the swarm gets busy. The TUI
+  // collapses and caps it on its own side instead of losing it in transit.
 ])
 
 export function messagePriority(msg: BunMessage): IpcPriority {

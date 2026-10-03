@@ -24,18 +24,21 @@ const DB_SUBDIR = path.join("data", "hivedb");
  * Where the database lives.
  *
  * Precedence, in order:
- *   1. HIVE_DB_PATH          — explicit override. Tests, containers, ":memory:".
- *   2. HIVE_HOME             — a chosen HiveDir; the database follows it.
- *   3. HIVE_DEV=true         — ./.hive-dev, so a dev loop can never touch
- *                              production state by cd-ing somewhere unexpected.
- *   4. ~/.hivecode           — the default, and the only one that is not
- *                              relative to the working directory.
+ *   1. HIVE_DB_PATH  — explicit override. Tests, containers, ":memory:".
+ *   2. HIVE_HOME     — a chosen HiveDir; the database follows the rest of it.
+ *   3. ~/.hivecode   — the default.
  *
- * The last rule is the important one. A cwd-relative database means a different
- * directory is a different — and completely empty — installation: agents,
- * sessions, memory and durable run state all vanish because you cd'd. Every
- * other piece of persistent state (config.json, gateway.pid, logs, screenshots)
- * has always been global; this brings the database in line with them.
+ * Never relative to the working directory. A cwd-relative database means a
+ * different directory is a different — and completely empty — installation:
+ * agents, sessions, memory and durable run state all vanish because you cd'd.
+ * Every other piece of persistent state (config.json, gateway.pid, logs,
+ * screenshots) has always been global; this brings the database in line.
+ *
+ * HIVE_DEV deliberately does NOT appear here. It selects the debug TUI binary
+ * and the log level — and putting the database under it was tried and reverted:
+ * `bun run dev` sets it, so a dev loop would silently get a second, empty
+ * database inside the repo, in a directory nothing gitignores. One database,
+ * one place. A dev run that needs its own state sets HIVE_DB_PATH.
  */
 export function getHiveDbPath(
   env: Record<string, string | undefined> = process.env,
@@ -48,10 +51,6 @@ export function getHiveDbPath(
       ? path.join(os.homedir(), env.HIVE_HOME.slice(1))
       : env.HIVE_HOME;
     return path.join(home, DB_SUBDIR);
-  }
-
-  if (env.HIVE_DEV === "1" || env.HIVE_DEV === "true") {
-    return path.join(cwd, ".hive-dev", DB_SUBDIR);
   }
 
   return path.join(os.homedir(), ".hivecode", DB_SUBDIR);

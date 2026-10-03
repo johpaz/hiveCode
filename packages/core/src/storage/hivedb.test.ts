@@ -27,16 +27,15 @@ describe("getHiveDbPath", () => {
     );
   });
 
-  test("HIVE_HOME places the database beside the rest of the HiveDir", () => {
-    expect(getHiveDbPath({ HIVE_HOME: "/opt/hive" })).toBe("/opt/hive/data/hivedb");
-  });
-
-  test("HIVE_DEV keeps development out of production", () => {
+  test("HIVE_DEV does not move the database", () => {
+    // `bun run dev` sets it; giving dev its own database meant a second, empty
+    // one appearing inside the repo.
     expect(getHiveDbPath({ HIVE_DEV: "true" }, "/workspace/project")).toBe(
-      path.join("/workspace/project", ".hive-dev", "data", "hivedb"),
-    );
-    expect(getHiveDbPath({ HIVE_DEV: "true" }, "/workspace/project")).not.toBe(
       getHiveDbPath({}, "/workspace/project"),
     );
+  });
+
+  test("HIVE_HOME places the database beside the rest of the HiveDir", () => {
+    expect(getHiveDbPath({ HIVE_HOME: "/opt/hive" })).toBe("/opt/hive/data/hivedb");
   });
 });

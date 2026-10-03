@@ -76,6 +76,7 @@ async function seedProvider(id: string, opts: { models?: string[]; enabled?: boo
       provider_id: id,
       model_type: "llm",
       enabled: true,
+      active: true,
       context_window: 8192,
       capabilities: "[]",
     }, { expectedVersion: 0 })
@@ -202,6 +203,18 @@ describe("protocolo: provider_activate está declarado en ambos lados", () => {
     // La rama que solo pregunta la clave cuando el id viene en el comando.
     expect(parser).toContain("const requestedId = rest[0]")
     expect(parser).toContain("Provider no encontrado")
+  })
+
+  test("el modo headless lee teclas de stdin para poder probar el flujo", () => {
+    // Sin esto, `HIVETUI_HEADLESS=1` solo reacciona a mensajes IPC y toda la
+    // superficie manejada por teclado (hub de settings, modales) queda sin
+    // cobertura end-to-end.
+    const app = fs.readFileSync(
+      path.join(path.resolve(import.meta.dir, "../.."), "packages/hivetui/src/app.rs"), "utf8")
+    const headless = app.slice(app.indexOf("pub async fn run_headless"), app.indexOf("pub async fn run()"))
+    expect(headless).toContain("next_key")
+    expect(headless).toContain("handle_key_event")
+    expect(headless).toContain("stdin_rx.recv()")
   })
 
   test("el hub de settings ya no manda /provider set al pulsar Enter", () => {

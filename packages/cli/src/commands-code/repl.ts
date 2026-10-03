@@ -4,6 +4,8 @@ import { getHiveDir } from "@johpaz/hivecode-core/config/loader"
 import { loadConfig, startGateway, getChannelManager } from "@johpaz/hivecode-core/gateway"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
+import { eventBus } from "@johpaz/hivecode-core/events/event-bus"
+import { getJevStatus } from "@johpaz/hivecode-core/agent/jev-decisions"
 import { maybeLoadHiveAgentsModelFromDb } from "@johpaz/hivecode-core/agent/hiveagents-loader"
 import {
   isCancel, hiveSelect, hiveNote, hiveOutro, hiveSpinner,
@@ -336,6 +338,9 @@ export async function repl(): Promise<void> {
   // Lazy IPC forwarder — populated once TUI socket is ready, null before that.
   // Events fired before TUI connects (should not happen in practice) are silently dropped.
   let _tuiIpcSend: ((msg: any) => void) | null = null
+  // Jev event-bus subscriptions, torn down with the TUI so a relaunch does not
+  // leave a stale listener forwarding into a closed socket.
+  const tuiJevUnsubscribers: Array<() => void> = []
   manager.setIpcCallback((event, payload) => {
     if (!_tuiIpcSend) return
     const p = payload as any
@@ -413,6 +418,64 @@ export async function repl(): Promise<void> {
 
     // Wire live IPC events (file_risk_update, conflict_alert, etc.) to TUI socket
     _tuiIpcSend = (msg: any) => tuiControl.send?.(msg)
+
+    // ── JEV → TUI ────────────────────────────────────────────────────────────
+    // The decision plane already emits `jev:decision` and `jev:status` on the
+    // event bus (packages/core/src/agent/jev-decisions.ts) and nothing was
+    // subscribed, so the whole reasoning trail — what it pruned, how many
+    // tokens it saved, whether tools may run in parallel — was computed and
+    // discarded. The TUI is the first consumer.
+    //
+    // Nothing in jev-planner.ts changes: this only re-emits what it already
+    // produces, renamed to snake_case to match every other wire field.
+    const jevUnsub = [
+      eventBus.on("jev:decision", (d) => {
+        _tuiIpcSend?.({
+          type: "jev_decision",
+          agent_id: d.agentId,
+          kind: d.kind,
+          summary: d.summary,
+          saved_tokens: d.savedTokens,
+          cost_usd: d.costUsd,
+          latency_ms: d.latencyMs,
+          event_id: d.eventId,
+          totals: {
+            decisions: d.totals.decisions,
+            saved_tokens: d.totals.savedTokens,
+            cost_usd: d.totals.costUsd,
+          },
+        })
+      }),
+      eventBus.on("jev:status", (s) => {
+        if (!s) return
+        _tuiIpcSend?.({
+          type: "jev_status",
+          state: s.state,
+          last_error: s.lastError,
+          last_success_at: s.lastSuccessAt,
+          totals: {
+            decisions: s.totals.decisions,
+            saved_tokens: s.totals.savedTokens,
+            cost_usd: s.totals.costUsd,
+          },
+        })
+      }),
+    ]
+    tuiJevUnsubscribers.push(...jevUnsub)
+
+    // Announce the current availability immediately, so the status dot is right
+    // before the first decision rather than blank until then.
+    getJevStatus()
+      .then((s) => {
+        _tuiIpcSend?.({
+          type: "jev_status",
+          state: s.state,
+          last_error: s.lastError,
+          last_success_at: s.lastSuccessAt,
+          totals: s.totals,
+        })
+      })
+      .catch(() => { /* observability is never a hard dependency */ })
 
     // BEE-initiated mode changes (set_session_mode tool) propagate back to TUI
     manager.setModeChangeCallback((mode) => {
@@ -551,6 +614,11 @@ export async function repl(): Promise<void> {
 
       onExit() {
         _tuiIpcSend = null
+        // Drop the Jev subscriptions before the socket closes, so a relaunch
+        // does not accumulate listeners forwarding into a dead socket.
+        while (tuiJevUnsubscribers.length) {
+          try { tuiJevUnsubscribers.pop()?.() } catch { /* best effort */ }
+        }
         // Close session and stop workers
         manager.closeSession()
         manager.stopAll().catch(() => {})
