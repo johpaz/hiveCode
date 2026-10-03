@@ -1,7 +1,8 @@
 import { col, toIndexable } from "../storage/hive"
 import type { AgentDoc } from "../storage/collections"
+import { obscuraToolNames } from "../tools/web/obscura"
 
-export const CORE_AGENT_TYPES = ["bee", "scout", "builder", "verifier", "reviewer"] as const
+export const CORE_AGENT_TYPES = ["bee", "scout", "builder", "verifier", "reviewer", "spider"] as const
 export type CoreAgentType = typeof CORE_AGENT_TYPES[number]
 
 export type AgentPermissionProfile =
@@ -10,6 +11,7 @@ export type AgentPermissionProfile =
   | "write_workspace"
   | "verify"
   | "review"
+  | "web_automation"
 
 export interface CoreAgentDefinition {
   id: CoreAgentType
@@ -49,7 +51,8 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
       "Eres BEE, Lead de hiveCode. Eres el único interlocutor del usuario y dueño del objetivo.",
       "Resuelve directamente preguntas y cambios pequeños. Para features, refactors amplios o arquitectura,",
       "activa obligatoriamente la skill spec-kit antes de implementar. Delega investigación a Scout,",
-      "mutaciones a Builder, validación de aceptación a Verifier y el gate final a Reviewer.",
+      "mutaciones a Builder, validación de aceptación a Verifier, el gate final a Reviewer",
+      "y búsqueda/scraping/automatización web a Spider.",
       "No confundas una identidad de agente con una especialidad: carga skills según la tarea.",
     ].join(" "),
     enabled: true,
@@ -100,7 +103,11 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     tools: [
       ...READ_TOOLS,
       "shell_executor", "check_types", "code_test", "code_build", "run_script",
-      "browser_navigate", "browser_click", "browser_type", "browser_screenshot",
+      // Obscura (MCP directo): reproducir flujos reales en navegador
+      "browser_navigate", "browser_snapshot", "browser_interactive_elements",
+      "browser_click", "browser_fill", "browser_type", "browser_select_option",
+      "browser_press_key", "browser_wait_for", "browser_wait_for_text",
+      "browser_evaluate", "browser_screenshot",
       "speckit_artifact_read", "speckit_validate",
     ],
     skills: ["test_driven_development", "browser_automate", "code_analysis"],
@@ -128,6 +135,42 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
       "Eres Reviewer de hiveCode. No modifiques código. Revisa el diff en contexto limpio,",
       "la especificación, el plan, las tareas y la evidencia del Verifier. Emite un veredicto",
       "estructurado con hallazgos accionables y bloquea desviaciones o criterios incumplidos.",
+    ].join(" "),
+    enabled: true,
+  },
+  spider: {
+    id: "spider",
+    name: "Spider",
+    description: "Especialista web: búsqueda, scraping y automatización de navegador con Obscura vía MCP directo.",
+    role: "worker",
+    permissionProfile: "web_automation",
+    maxTurns: 30,
+    tools: [
+      // Investigación ligera + APIs REST
+      "web_search", "web_fetch", "api_request",
+      // Descubrimiento y contexto
+      "search_knowledge", "get_project_context",
+      "fs_read", "fs_list", "fs_glob",
+      // Registro y handoff
+      "save_note", "report_progress", "memory_write",
+      // El set completo de automatización de navegador (Obscura, MCP 2.0)
+      ...obscuraToolNames(),
+    ],
+    skills: ["web_research", "browser_automate", "browser_scrape", "web_monitor"],
+    systemPrompt: [
+      "Eres Spider de hiveCode, especialista web del enjambre. Eres dueño de la búsqueda,",
+      "el scraping y la automatización web: web_search/web_fetch para investigación ligera,",
+      "api_request para APIs REST y el set completo browser_* (Obscura vía MCP directo) para",
+      "páginas reales con sesión viva de navegador.",
+      "Flujo preferido: browser_navigate → browser_snapshot o browser_markdown →",
+      "browser_interactive_elements → actuar por ref (ej. e3) antes que por selector CSS.",
+      "Prefiere snapshot/markdown sobre screenshot para ahorrar tokens; usa browser_screenshot",
+      "solo para verificación visual y browser_pdf para documentos.",
+      "Devuelve hallazgos autocontenidos con URLs, evidencia y datos estructurados (browser_extract",
+      "o browser_evaluate). Usa cookies/storage_state para sesiones autenticadas sin re-login,",
+      "y nunca compartas credenciales ni tokens en los handoffs.",
+      "Si otro agente usa el navegador simultáneamente, aísla tu trabajo en una pestaña propia",
+      "(browser_tab_new) y ciérrala al terminar (browser_tab_close).",
     ].join(" "),
     enabled: true,
   },

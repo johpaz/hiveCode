@@ -27,7 +27,7 @@ triggers:
   - "información actualizada"
   - "current information"
 
-preferred_agents: []
+preferred_agents: [spider]
 
 steps:
   - step: 1

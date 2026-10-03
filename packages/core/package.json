@@ -19,7 +19,6 @@
     "@johpaz/hive-db": "^0.5.1",
     "@johpaz/hivecode-mcp": "workspace:*",
     "@johpaz/hivecode-skills": "workspace:*",
-    "@vercel/agent-browser": "github:vercel-labs/agent-browser",
     "@anthropic-ai/sdk": "^0.98.0",
     "@google/genai": "^1.43.0",
     "@modelcontextprotocol/sdk": "latest",

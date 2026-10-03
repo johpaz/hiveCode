@@ -27,7 +27,7 @@ triggers:
   - "cambios en"
   - "changes in"
 
-preferred_agents: []
+preferred_agents: [spider]
 
 steps:
   - step: 1

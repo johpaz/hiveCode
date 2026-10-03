@@ -172,7 +172,7 @@ export async function setCoordinatorProviderModel(providerId: string, modelId: s
 
 export async function listEnabledCoordinatorNames(): Promise<string[]> {
   const agents = await col<AgentDoc>("agents")
-  const order = ["bee", "scout", "builder", "verifier", "reviewer"]
+  const order = ["bee", "scout", "builder", "verifier", "reviewer", "spider"]
   const rows = await agents.scan()
   return rows
     .map((entry) => entry.doc)

@@ -1,14 +1,14 @@
 ---
 name: browser_scrape
 description: "Navigate to web pages and capture rendered content including screenshots for dynamic sites"
-version: 1.0.0
+version: 1.1.0
 author: Hive Team
 icon: "📸"
 category: web
 permissions:
   - browser_control
 dependencies: []
-tools: [browser_navigate, browser_screenshot, web_fetch]
+tools: [browser_navigate, browser_snapshot, browser_markdown, browser_links, browser_extract, browser_search, browser_count, browser_scroll, browser_screenshot, browser_pdf, web_fetch, web_search]
 
 # Structured skill fields
 triggers:
@@ -23,7 +23,7 @@ triggers:
   - "tomá screenshot y contenido"
   - "screenshot and content"
 
-preferred_agents: []
+preferred_agents: [spider]
 
 steps:
   - step: 1
@@ -34,45 +34,50 @@ steps:
     output: page_loaded
 
   - step: 2
-    action: browser_screenshot
-    instruction: "Take screenshot to capture visual state of rendered page"
-    output: screenshot
+    action: browser_markdown
+    instruction: "Extract the rendered page as Markdown (headings, paragraphs, lists, links, code blocks)"
+    output: extracted_content
 
   - step: 3
-    action: web_fetch
-    instruction: "Extract text content from rendered page as markdown"
-    output: extracted_content
+    action: browser_screenshot
+    instruction: "Take a screenshot only when visual evidence is required (layout, canvas, ads)"
+    output: screenshot
 
   - step: 4
     action: synthesize
-    instruction: "Combine screenshot and text content for comprehensive capture"
+    instruction: "Combine content and (if needed) screenshot into a single structured capture"
     output: scraped_data
 
 rules:
-  - "Wait for full page load including JavaScript-rendered content"
-  - "Take screenshot before extracting text to capture initial state"
-  - "For infinite scroll pages, scroll down and capture multiple screenshots"
+  - "Use Obscura (headless, no Chromium) — the live session renders JS before returning"
+  - "Prefer browser_markdown/browser_snapshot over web_fetch: the page is already rendered"
+  - "Use browser_extract with a {field: selector} map for structured data ('a@href', 'field[]' for arrays)"
+  - "For infinite scroll: browser_scroll({ direction: 'bottom' }) repeatedly, then extract"
+  - "browser_search to locate a section cheaply before extracting it"
   - "Respect website terms of service — no aggressive scraping"
-  - "Store both screenshot and text for complete record"
+  - "Screenshots are optional evidence, not the default output"
 
 output_format:
   structure: markdown
   sections:
     - "url"
-    - "screenshot_path"
     - "extracted_content"
+    - "screenshot_path"
     - "timestamp"
   max_length: "Full content extraction"
 
 examples:
   - user_input: "capturá el contenido de https://example.com/dashboard"
-    expected_behavior: "browser_navigate → wait for JS render → browser_screenshot → browser_fetch → return both"
+    expected_behavior: "browser_navigate → browser_markdown (+ browser_snapshot) → return both"
 
-  - user_input: "obtené la página renderizada de la app"
-    expected_behavior: "Navigate → wait for SPA to load → screenshot + fetch content"
+  - user_input: "sacame los precios de esta tabla"
+    expected_behavior: "browser_navigate → browser_extract({ schema: { name: 'td:nth-child(2)', price: 'td:nth-child(3)' } })"
+
+  - user_input: "listame todos los enlaces de la página"
+    expected_behavior: "browser_navigate → browser_links (or browser_markdown for context) → enumerate"
 
   - user_input: "scrapeá este sitio con javascript"
-    expected_behavior: "Full browser render → capture visual and text content"
+    expected_behavior: "Full browser render → markdown/extract + optional screenshot"
 ---
 
 # Browser Scrape Skill
@@ -85,25 +90,34 @@ Esta skill se activa para sitios web dinámicos que requieren JavaScript renderi
 
 | Tool | Qué hace | Cuándo usarla |
 |------|----------|---------------|
-| `browser_navigate` | Navega y renderiza página completa | Sitios con JavaScript/SPA |
-| `browser_screenshot` | Captura estado visual | Evidencia de contenido renderizado |
-| `web_fetch` | Extrae texto como markdown | Contenido textual de página renderizada |
+| `browser_navigate` | Navega y renderiza la página completa (Obscura) | Sitios con JavaScript/SPA |
+| `browser_markdown` | Página renderizada como Markdown | Extracción principal (densa en tokens) |
+| `browser_snapshot` | URL, título, texto legible y refs | Vista rápida con contexto |
+| `browser_extract` | Objeto estructurado por mapa campo→selector | Datos tabulares / repetidos |
+| `browser_links` / `browser_search` / `browser_count` | Enumerar, localizar, contar | Antes de scrapear a ciegas |
+| `browser_scroll` | Scroll para infinite scroll | Listas que cargan al bajar |
+| `browser_screenshot` / `browser_pdf` | Evidencia visual / documento | Solo si el texto no basta |
+| `web_fetch` | Fetch ligero sin JS | Sitios estáticos (más barato) |
 
 ## Workflow
 
-1. **Navegar** → `browser_navigate({ url })` + esperar renderizado JS
-2. **Capturar visual** → `browser_screenshot()`
-3. **Extraer texto** → `web_fetch()`
-4. **Combinar** → screenshot + texto para scrape completo
+1. **Navegar** → `browser_navigate({ url })` (espera el render JS sola)
+2. **Extraer** → `browser_markdown()` para contenido, `browser_extract()` para datos
+3. **Enumerar si hace falta** → `browser_links()`, `browser_scroll({ direction: 'bottom' })`
+4. **Evidencia visual (opcional)** → `browser_screenshot()` / `browser_pdf()`
+5. **Combinar** → contenido estructurado + evidencia
 
 ## Mejores Prácticas
 
-- Esperar renderizado completo de JavaScript
-- Para infinite scroll: hacer scroll y múltiples screenshots
-- Capturar antes y después de interacciones si es dinámico
+- La sesión de Obscura ya está renderizada: **no** hace falta `web_fetch` después de navegar
+- `browser_extract` con `'campo[]'` devuelve arrays — ideal para tablas y listados
+- `browser_search` para confirmar que un texto existe antes de raspar una sección
+- Para infinite scroll: `browser_scroll` repetido hasta que `browser_count` deje de crecer
+- Screenshot solo cuando el texto no demuestra el estado visual
 
 ## Errores a Evitar
 
 - ❌ No esperar renderizado JavaScript
 - ❌ Solo capturar HTML estático para sitios SPA
+- ❌ Screenshot como output principal (gasta tokens sin contexto)
 - ❌ Ignorar términos de servicio del sitio

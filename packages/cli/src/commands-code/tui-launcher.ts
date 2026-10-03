@@ -970,7 +970,7 @@ async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> 
 
   let agents: any[] = []
   try {
-    const order = ["bee", "scout", "builder", "verifier", "reviewer"]
+    const order = ["bee", "scout", "builder", "verifier", "reviewer", "spider"]
     agents = (await (await col<AgentDoc>("agents")).scan())
       .map(entry => entry.doc)
       .filter(agent => !!agent.agent_type)

@@ -36,9 +36,12 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
     "check_types", "code_build", "code_test", "code_lint",
     "run_script",
     "append_narrative", "write_decision",
+    // Obscura (MCP directo): navegación + lectura + interacción + screenshot
+    "browser_navigate", "browser_snapshot", "browser_markdown",
+    "browser_interactive_elements", "browser_click", "browser_type",
+    "browser_fill", "browser_fill_form", "browser_wait_for",
+    "browser_wait_for_text", "browser_evaluate", "browser_extract",
     "browser_screenshot", "browser_preview_html",
-    "browser_navigate", "browser_click", "browser_type",
-    "browser_extract", "browser_script", "browser_wait",
   ],
   architecture: [
     ...MINIMAL_TOOLSET,
