@@ -56,6 +56,8 @@
     "./agent/stuck-loop": "./src/agent/stuck-loop.ts",
     "./agent/run-epoch": "./src/agent/run-epoch.ts",
     "./agent/llm-client": "./src/agent/llm-client.ts",
+    "./agent/tool-telemetry": "./src/agent/tool-telemetry.ts",
+    "./agent/agent-identity": "./src/agent/agent-identity.ts",
     "./agent/hiveagents-loader": "./src/agent/llm-providers/hiveagents-loader.ts",
     "./channels": "./src/channels/index.ts",
     "./channels/base": "./src/channels/base.ts",

@@ -6,6 +6,8 @@ import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
 import { eventBus } from "@johpaz/hivecode-core/events/event-bus"
 import { getJevStatus } from "@johpaz/hivecode-core/agent/jev-decisions"
+import { describeSwarmCapabilities } from "@johpaz/hivecode-core/agent/jev-planner"
+import { getAgentService } from "@johpaz/hivecode-core/agent/service"
 import { maybeLoadHiveAgentsModelFromDb } from "@johpaz/hivecode-core/agent/hiveagents-loader"
 import {
   isCancel, hiveSelect, hiveNote, hiveOutro, hiveSpinner,
@@ -462,6 +464,89 @@ export async function repl(): Promise<void> {
       }),
     ]
     tuiJevUnsubscribers.push(...jevUnsub)
+
+    // ── Telemetría de herramientas y esperas → TUI ───────────────────────────
+    // Antes el enjambre llamaba a sus herramientas a ciegas: la TUI recibía
+    // `current_action: "ejecutando <phase>"`, que no dice qué herramienta corre
+    // ni cuánto tarda. Estos tres eventos cierran ese hueco.
+    //
+    // `tool_call` y `tool_done` van en `normal` (no en `low`) porque son el
+    // pulso del enjambre: si se pierden en un embudo lento, la UI miente.
+    // El recorte por columna lo hace el consumidor, no el transporte.
+    const swarmUnsub = [
+      eventBus.on("tool:call", (c) => {
+        _tuiIpcSend?.({
+          type: "tool_call",
+          agent: c.agentId,
+          tool: c.tool,
+          call_id: c.callId,
+          args_summary: c.argsSummary,
+          bee_state: c.beeState,
+          task_id: c.taskId ?? undefined,
+          at: c.at,
+        })
+      }),
+      eventBus.on("tool:done", (d) => {
+        _tuiIpcSend?.({
+          type: "tool_done",
+          agent: d.agentId,
+          tool: d.tool,
+          call_id: d.callId,
+          ok: d.ok,
+          duration_ms: d.durationMs,
+          result_summary: d.resultSummary,
+          task_id: d.taskId ?? undefined,
+          at: d.at,
+        })
+      }),
+      eventBus.on("agent:waiting", (w) => {
+        _tuiIpcSend?.({
+          type: "esperando",
+          agent: w.agentId,
+          esperando_a: w.waitingFor,
+          razon: w.reason,
+          task_id: w.taskId ?? undefined,
+          at: w.at,
+        })
+      }),
+    ]
+    tuiJevUnsubscribers.push(...swarmUnsub)
+
+    // ── Roster → TUI ──────────────────────────────────────────────────────────
+    // One snapshot of the whole swarm: alias, rol, función, tools and MCP state
+    // per specialist. It re-uses `describeSwarmCapabilities()`, the same function
+    // Jev routes over — deliberately, so the TUI can never advertise a tool an
+    // agent does not actually have.
+    //
+    // Sent on init and on agent create/archive, never per frame.
+    const sendRoster = async () => {
+      try {
+        // Same accessor the gateway uses, so MCP connectivity is read from the
+        // live manager rather than guessed.
+        const mcp = getAgentService().getMCPManager()
+        const roster = await describeSwarmCapabilities(mcp, { includeSpecialists: true })
+        if (roster.specialists.length === 0) return
+        _tuiIpcSend?.({
+          type: "roster_snapshot",
+          agentes: roster.specialists.map(s => ({
+            id: s.id,
+            rol: s.rol,
+            alias: s.alias,
+            funcion: s.funcion,
+            nivel: s.nivel,
+            tools: s.tools,
+            mcp: s.mcp.map(m => ({ name: m.name, state: m.state })),
+          })),
+          mcp_servers: roster.mcpServers.map(s => ({
+            id: s.id, name: s.name, tools: s.tools, state: s.state,
+          })),
+        })
+      } catch (err) {
+        // The roster is observability. A failure here must not stop the swarm.
+        logger.warn(`[repl] roster_snapshot no se pudo enviar: ${(err as Error).message}`)
+      }
+    }
+    void sendRoster()
 
     // Announce the current availability immediately, so the status dot is right
     // before the first decision rather than blank until then.

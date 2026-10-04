@@ -50,7 +50,10 @@ pub async fn run_headless() -> Result<()> {
     let emit = |canvas: &mut Canvas, state: &mut AppState, frame: u64, out: &mut dyn Write| {
         renderer::render(canvas, state);
         let rows = canvas.to_text_rows();
-        let tab = format!("{:?}", state.active_tab).to_lowercase();
+        // The tab goes out as its slug, not as the enum's Debug name: renaming a
+        // variant would silently break every E2E assertion that waits on
+        // `f.tab === "..."`. The slug is the stable public identifier.
+        let tab = state.active_tab.slug();
         let mode = format!("{:?}", state.session.mode).to_lowercase();
         let running = state.running;
         let row_json: Vec<String> = rows.iter().map(|r| {

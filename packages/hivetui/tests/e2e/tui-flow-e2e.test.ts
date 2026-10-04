@@ -69,8 +69,8 @@ describe("E2E flow: full auto-mode task lifecycle", () => {
         display_name: "FrontendEngineer", task_id: taskId, level: 2,
       }))
 
-      const parallel = await waitForFrame(s.iter, f => f.tab === "dashboard", 5000, "dashboard tab")
-      expect(parallel.tab).toBe("dashboard")
+      const parallel = await waitForFrame(s.iter, f => f.tab === "enjambre", 5000, "dashboard tab")
+      expect(parallel.tab).toBe("enjambre")
 
       // Streamed reasoning is the production narration channel.
       s.ipc.send({
@@ -104,7 +104,7 @@ describe("E2E flow: full auto-mode task lifecycle", () => {
       const diffFrame = await waitForFrame(
         s.iter, f => frameContains(f, "SENTINEL_DIFF"), 5000, "file diff",
       )
-      expect(diffFrame.tab).toBe("code")
+      expect(diffFrame.tab).toBe("codigo")
       expect(frameContains(diffFrame, "SENTINEL_DIFF")).toBe(true)
 
       // Checkpoint before finishing.
@@ -128,10 +128,10 @@ describe("E2E flow: full auto-mode task lifecycle", () => {
       s.ipc.send({ type: "status", running: false, msg: "Listo" })
 
       const done = await waitForFrame(
-        s.iter, f => !f.running && f.tab === "focus", 5000, "completed task on focus",
+        s.iter, f => !f.running && f.tab === "mesa", 5000, "completed task on focus",
       )
       expect(done.running).toBe(false)
-      expect(done.tab).toBe("focus")
+      expect(done.tab).toBe("mesa")
 
       const finalFrame = await waitForFrame(
         s.iter, f => frameContains(f, "SENTINEL_FINAL"), 5000, "final answer",
@@ -158,8 +158,8 @@ describe("E2E flow: full auto-mode task lifecycle", () => {
         task_id: taskId, level: 2,
       }))
 
-      const frame = await waitForFrame(s.iter, f => f.tab === "code", 5000, "code tab")
-      expect(frame.tab).toBe("code")
+      const frame = await waitForFrame(s.iter, f => f.tab === "codigo", 5000, "code tab")
+      expect(frame.tab).toBe("codigo")
       expect(frame.running).toBe(true)
     } finally {
       s.dispose()
@@ -207,7 +207,7 @@ describe("E2E flow: dashboard_snapshot", () => {
       s.ipc.send(workerUpdate("frontend", "maquetando", "running", { task_id: taskId, level: 2 }))
 
       const frame = await waitForFrame(
-        s.iter, f => f.tab === "dashboard" && frameContains(f, "SENTINEL_WORKER"),
+        s.iter, f => f.tab === "enjambre" && frameContains(f, "SENTINEL_WORKER"),
         5000, "hydrated worker on dashboard",
       )
 
@@ -280,10 +280,10 @@ describe("E2E flow: critical alerts", () => {
       }, { priority: "critical" })
 
       const halted = await waitForFrame(
-        s.iter, f => f.tab === "dashboard" && frameContains(f, "SENTINEL_HALT"),
+        s.iter, f => f.tab === "enjambre" && frameContains(f, "SENTINEL_HALT"),
         5000, "halt banner",
       )
-      expect(halted.tab).toBe("dashboard")
+      expect(halted.tab).toBe("enjambre")
       expect(frameContains(halted, "SENTINEL_HALT")).toBe(true)
     } finally {
       s.dispose()
@@ -302,7 +302,7 @@ describe("E2E flow: critical alerts", () => {
       const frame = await waitForFrame(
         s.iter, f => frameContains(f, "SENTINEL_FORENSIC"), 5000, "forensic alert",
       )
-      expect(frame.tab).toBe("dashboard")
+      expect(frame.tab).toBe("enjambre")
     } finally {
       s.dispose()
     }
@@ -372,10 +372,10 @@ describe("E2E flow: approval gates", () => {
 
       const frame = await waitForFrame(
         s.iter,
-        f => f.tab === "review" && /SENTINEL_VERDICT|SENTINEL_REVIEWED/.test(frameText(f)),
+        f => f.tab === "revision" && /SENTINEL_VERDICT|SENTINEL_REVIEWED/.test(frameText(f)),
         5000, "review verdict",
       )
-      expect(frame.tab).toBe("review")
+      expect(frame.tab).toBe("revision")
       expect(frameText(frame)).toMatch(/SENTINEL_VERDICT|SENTINEL_REVIEWED/)
     } finally {
       s.dispose()
@@ -392,9 +392,9 @@ describe("E2E flow: approval gates", () => {
       }, { priority: "critical" })
 
       const frame = await waitForFrame(
-        s.iter, f => f.tab === "dashboard", 5000, "resume prompt",
+        s.iter, f => f.tab === "enjambre", 5000, "resume prompt",
       )
-      expect(frame.tab).toBe("dashboard")
+      expect(frame.tab).toBe("enjambre")
     } finally {
       s.dispose()
     }
@@ -422,7 +422,7 @@ describe("E2E flow: streamed answer", () => {
         5000, "assembled answer after assistant_done",
       )
       expect(frameContains(done, "SENTINEL_STREAM_COMPLETO")).toBe(true)
-      expect(done.tab).toBe("focus")
+      expect(done.tab).toBe("mesa")
     } finally {
       s.dispose()
     }
@@ -474,7 +474,7 @@ describe("E2E flow: protocol robustness", () => {
       s.ipc.send(workerUpdate("frontend", "maquetando", "running", { task_id: taskId, level: 2 }))
 
       const frame = await waitForFrame(
-        s.iter, f => f.tab === "dashboard" && /librarian/i.test(frameText(f)),
+        s.iter, f => f.tab === "enjambre" && /librarian/i.test(frameText(f)),
         5000, "librarian activity on dashboard",
       )
       expect(frameText(frame)).toMatch(/librarian/i)

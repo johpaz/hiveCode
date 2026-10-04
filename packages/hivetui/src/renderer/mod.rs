@@ -5,7 +5,8 @@ use crate::{
     widgets::{
         activity_toast, checkpoint_bar, code_layout, command_popup, config_modal, conflict_bar,
         dashboard_layout, focus_layout, header, info_modal, input, logs_panel,
-        plan_approval_modal, plan_layout, review_layout, settings_hub, statusbar, tabbar, welcome,
+        plan_approval_modal, plan_layout, review_layout, settings_hub, statusbar, tabbar,
+        taller_layout, welcome,
     },
 };
 #[cfg(not(test))]
@@ -107,7 +108,7 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
     }
 
     // Popup de comandos: flota justo encima del input
-    if state.active_tab == TabId::Focus
+    if state.active_tab == TabId::Mesa
         && state.input.value().starts_with('/')
         && !matches!(state.modal, ModalState::Config(_) | ModalState::Info(_) | ModalState::PlanApproval(_) | ModalState::ReviewConfirm(_) | ModalState::Settings(_)) {
         let history_area = content_area_for_popup(area, state);
@@ -178,11 +179,12 @@ fn render_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {
     canvas.with_clip(areas.tabbar, |canvas| tabbar::render(canvas, areas.tabbar, state));
 
     canvas.with_clip(areas.content, |canvas| match state.active_tab {
-        TabId::Focus     => render_focus(canvas, areas.content, state),
+        TabId::Mesa     => render_focus(canvas, areas.content, state),
         TabId::Plan      => plan_layout::render(canvas, areas.content, state),
         TabId::Code      => code_layout::render(canvas, areas.content, state),
         TabId::Review    => review_layout::render(canvas, areas.content, state),
-        TabId::Dashboard => dashboard_layout::render(canvas, areas.content, state),
+        TabId::Swarm     => dashboard_layout::render(canvas, areas.content, state),
+        TabId::Taller    => taller_layout::render_for_state(canvas, areas.content, state),
     });
 
     canvas.with_clip(areas.checkpoint, |canvas| checkpoint_bar::render(canvas, areas.checkpoint, state));

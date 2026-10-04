@@ -17,6 +17,7 @@ import type { PlaybookRule } from "./playbook-selector"
 import { MINIMAL_TOOLS } from "./minimal-loadout"
 import { searchCapabilities } from "./capability-search"
 import { mcpToolFullName } from "./tool-selector"
+import { agentAlias, agentFunction, agentTierLevel } from "./agent-identity"
 import { askJev, getJevKey, type JevAnswer, type JevQuestion } from "./jev-decisions"
 import { col } from "../storage/hive"
 import type { AgentDoc, McpServerDoc, McpToolDoc } from "../storage/collections"
@@ -38,8 +39,16 @@ export interface JevMcpServer {
 
 export interface JevSpecialist {
   id: string
+  /** Rol interno: `backend`, `frontend`… Es lo que viaja por el bus. */
+  rol: string
+  /** Alias visible: `Topo`, `Quetzal`… Es lo que el usuario lee. */
+  alias: string
   name: string
   description: string
+  /** Una línea en español con qué hace este agente. */
+  funcion: string
+  /** Nivel jerárquico 0-5, el mismo que usa el grafo de la TUI. */
+  nivel: 0 | 1 | 2 | 3 | 4 | 5
   tools: string[]
   mcp: Array<{ name: string; state: JevMcpState }>
 }
@@ -48,6 +57,10 @@ export interface JevSpecialist {
  * What the swarm can do right now: every enabled worker with its tools, and
  * every MCP server with its state. Jev routes over this, so it never recommends
  * a specialist whose MCP is off, nor a tool that is not connected.
+ *
+ * This stays the single source of the roster. `agent-identity.ts` only supplies
+ * the alias/rol/función display data: a second roster reading a different
+ * capability field would drift, and the TUI would show tools the agent lacks.
  */
 export async function describeSwarmCapabilities(
   mcpManager: { getServerTools(key: string): unknown[] | undefined } | null,
@@ -75,8 +88,13 @@ export async function describeSwarmCapabilities(
     .filter(a => a.role === "worker" && a.enabled && a.status !== "archived")
     .map(a => ({
       id: a.id,
+      // `agent_type` es el rol canónico; sin él, el nombre es lo mejor que hay.
+      rol: a.agent_type ?? a.name,
+      alias: agentAlias(a.agent_type ?? a.name),
       name: a.name,
       description: (a.description ?? a.name).slice(0, 200),
+      funcion: agentFunction(a.agent_type ?? a.name),
+      nivel: agentTierLevel(a.agent_type ?? a.name),
       tools: parse(a.tool_allowlist_json).slice(0, 12),
       mcp: parse(a.mcp_server_ids_json)
         .map(id => byId.get(id))

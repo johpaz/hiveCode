@@ -138,6 +138,55 @@ export type BunMessage =
   | { type: "resume_available"; task_id: string; checkpoint_id: string; reason: string }
   | { type: "phase_retry"; worker: string; attempt: number; max_attempts: number; reason: string }
   /**
+   * An agent started a tool call. Always paired with a `tool_done` carrying the
+   * same `call_id`.
+   *
+   * Before this existed the TUI only received `current_action`, a free-text
+   * string the backend filled with "ejecutando &lt;phase&gt;" — it never said
+   * which tool was running or how long it would take.
+   *
+   * `args_summary` is truncated to 120 chars at the emitter: a 400 KB
+   * `fs_read` payload cannot be rendered in a 30-cell column.
+   */
+  | {
+      type: "tool_call"
+      agent: string
+      tool: string
+      call_id: string
+      args_summary: string
+      /** Coarse activity, reusing the classification from `toolToBeeState()`. */
+      bee_state: "thinking" | "searching" | "reading" | "writing" | "executing" | "done" | "error"
+      task_id?: string
+      at: number
+    }
+  /** A tool call finished, successfully or not. */
+  | {
+      type: "tool_done"
+      agent: string
+      tool: string
+      call_id: string
+      ok: boolean
+      duration_ms: number
+      result_summary: string
+      task_id?: string
+      at: number
+    }
+  /**
+   * An agent cannot advance until something else happens.
+   *
+   * `reason` names the cause (`"jev_secuencial"`, `"subagente"`,
+   * `"dependencia"`) rather than a sentence, so the UI can group waiting agents
+   * by why they are stuck.
+   */
+  | {
+      type: "esperando"
+      agent: string
+      esperando_a: string[]
+      razon: string
+      task_id?: string
+      at: number
+    }
+  /**
    * A Jev decision was served and the caller is applying it.
    *
    * Jev (the decision plane) already emits this on the event bus
@@ -173,6 +222,33 @@ export type BunMessage =
       last_error: string | null
       last_success_at: number | null
       totals: { decisions: number; saved_tokens: number; cost_usd: number }
+    }
+  | {
+      type: "roster_snapshot"
+      /**
+       * The whole swarm, once. Sent on `init` and whenever an agent is created
+       * or archived — never in the hot path.
+       *
+       * It is `describeSwarmCapabilities()` serialized: one roster, one read of
+       * the capability fields. A second source would drift and the TUI would
+       * advertise tools an agent does not have.
+       *
+       * `mcp[].state` travels with it so the UI can mark blocked specialists
+       * before the first decision arrives, instead of waiting for `agentMcpOff`.
+       */
+      agentes: Array<{
+        id: string
+        /** Internal role: `backend`, `frontend`… what the bus and the logs use. */
+        rol: string
+        /** Visible alias: `Topo`, `Quetzal`… what the user reads. */
+        alias: string
+        funcion: string
+        /** 0 = commander … 5 = on-demand. Same scale as the TUI's `AgentTier`. */
+        nivel: number
+        tools: string[]
+        mcp: Array<{ name: string; state: "activo" | "disponible" | "apagado" }>
+      }>
+      mcp_servers: Array<{ id: string; name: string; tools: number; state: "activo" | "disponible" | "apagado" }>
     }
   | {
       type: "settings_data"
@@ -229,6 +305,9 @@ const LOW_TYPES = new Set<BunMessage["type"]>([
   "assistant_chunk", "thought_chunk",
   // Status flips are rare and tiny; a stale availability dot is worth nothing.
   "jev_status",
+  // One snapshot of the whole swarm per agent created or archived. Rare enough
+  // to be safe on the lagging channel, and it must never delay a critical alert.
+  "roster_snapshot",
   // `jev_decision` is deliberately NOT here. It stays on `normal` because it is
   // the reasoning trail the user actually reads — the same thing Kimi surfaces
   // as "the logical chain of reasoning and decision-making". Putting it on

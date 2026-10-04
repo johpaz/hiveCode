@@ -211,7 +211,7 @@ fn routing_plan_mode_waits_for_structured_plan() {
         new_token_count: None,
     });
     assert_eq!(state.session.mode, ReplMode::Plan);
-    assert_eq!(state.active_tab, TabId::Focus,
+    assert_eq!(state.active_tab, TabId::Mesa,
         "Cambiar a modo plan debe mantener Focus mientras el plan se genera");
 }
 
@@ -227,7 +227,7 @@ fn routing_approval_mode_waits_for_reviewer_verdict() {
         new_token_count: None,
     });
     assert_eq!(state.session.mode, ReplMode::Approval);
-    assert_eq!(state.active_tab, TabId::Focus,
+    assert_eq!(state.active_tab, TabId::Mesa,
         "Cambiar a modo approval no debe abrir Review sin veredicto");
 
     state.apply_message(BunMessage::ReviewVerdictUpdate {
@@ -273,7 +273,7 @@ fn routing_auto_mode_code_then_focus() {
     state.apply_message(BunMessage::AssistantDone);
     assert!(!state.running, "running debe ser false tras AssistantDone");
     assert!(!state.tab_locked, "sin override manual el routing sigue automático");
-    assert_eq!(state.active_tab, TabId::Focus,
+    assert_eq!(state.active_tab, TabId::Mesa,
         "AssistantDone en AUTO mode debe volver a Focus tab");
 }
 
@@ -311,7 +311,7 @@ fn manual_tab_lock_overrides_auto_routing() {
     assert_eq!(state.active_tab, TabId::Review);
     state.resume_auto_layout();
     assert!(!state.tab_locked);
-    assert_eq!(state.active_tab, TabId::Focus);
+    assert_eq!(state.active_tab, TabId::Mesa);
 }
 
 // ── 8. Welcome screen: no muestra el widget de input ─────────────────────────
@@ -379,27 +379,28 @@ fn welcome_screen_exposes_harness_status() {
 }
 
 #[test]
-fn renderer_keeps_reference_chrome_on_all_five_screens() {
+fn renderer_keeps_reference_chrome_on_every_screen() {
     let mut state = base_state();
     state.harness.approval_pending = true;
 
     for tab in [
-        TabId::Focus,
+        TabId::Swarm,
         TabId::Plan,
+        TabId::Mesa,
         TabId::Code,
         TabId::Review,
-        TabId::Dashboard,
+        TabId::Taller,
     ] {
         state.active_tab = tab;
         let mut canvas = make_canvas(120, 30);
         renderer::render(&mut canvas, &mut state);
 
         let frame = canvas.to_text_rows().join("\n");
-        assert!(frame.contains("FOCUS"));
-        assert!(frame.contains("PLAN"));
-        assert!(frame.contains("CODE"));
-        assert!(frame.contains("REVIEW"));
-        assert!(frame.contains("DASHBOARD"));
+        // Las seis pestañas visibles en todas las vistas: el tabbar es chrome
+        // compartido y no puede desaparecer en una de ellas.
+        for label in ["ENJAMBRE", "PLAN", "MESA", "CÓDIGO", "REVISIÓN", "TALLER"] {
+            assert!(frame.contains(label), "falta {label} en {tab:?}");
+        }
         assert!(frame.contains("CHECKPOINTS"));
         assert!(state
             .hit_map
@@ -816,7 +817,7 @@ fn full_sequence_init_task_streaming_response() {
     // 8. Tarea terminada → Focus
     state.apply_message(BunMessage::AssistantDone);
     assert!(!state.running);
-    assert_eq!(state.active_tab, TabId::Focus);
+    assert_eq!(state.active_tab, TabId::Mesa);
     assert!(!state.tab_locked);
 }
 
@@ -854,7 +855,7 @@ fn state_with_workers(running: usize, waiting: usize) -> AppState {
 #[test]
 fn dashboard_collapses_idle_agents_instead_of_shrinking_active_cards() {
     let mut state = state_with_workers(4, 8);
-    state.active_tab = TabId::Dashboard;
+    state.active_tab = TabId::Swarm;
 
     let mut canvas = make_canvas(120, 30);
     renderer::render(&mut canvas, &mut state);
@@ -878,7 +879,7 @@ fn dashboard_collapses_idle_agents_instead_of_shrinking_active_cards() {
 fn dashboard_names_active_workers_that_did_not_fit() {
     // Muchos activos a la vez: los que no caben deben nombrarse, no desaparecer.
     let mut state = state_with_workers(12, 0);
-    state.active_tab = TabId::Dashboard;
+    state.active_tab = TabId::Swarm;
 
     let mut canvas = make_canvas(120, 30);
     renderer::render(&mut canvas, &mut state);
@@ -893,7 +894,7 @@ fn dashboard_names_active_workers_that_did_not_fit() {
 #[test]
 fn terminal_below_the_minimum_gets_an_explicit_message() {
     let mut state = base_state();
-    state.active_tab = TabId::Dashboard;
+    state.active_tab = TabId::Swarm;
 
     let mut canvas = make_canvas(80, 24);
     renderer::render(&mut canvas, &mut state);

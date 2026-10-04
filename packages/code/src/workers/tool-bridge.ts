@@ -65,14 +65,14 @@ export const COORDINATOR_TOOLS: Record<PhaseName, string[]> = {
   devops: [
     ...MINIMAL_TOOLSET,
   ],
-  verifier: [
+  quality: [
+    // Unión de lo que tenían los dos. Verificar exige ejecución
+    // determinística (correr tests, builds, flujos), así que el gate necesita
+    // shell y run_script; revisar el código necesita tipos y búsqueda.
     ...MINIMAL_TOOLSET,
     "write_decision",
-    "code_test", "code_build", "shell_executor", "run_script",
-  ],
-  reviewer: [
-    ...MINIMAL_TOOLSET,
-    "write_decision",
+    "code_test", "code_build", "check_types", "shell_executor", "run_script",
+    "code_search", "parse_ast", "git_diff", "git_log", "git_status",
   ],
   librarian: [
     ...MINIMAL_TOOLSET,

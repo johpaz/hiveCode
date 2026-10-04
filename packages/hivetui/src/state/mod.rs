@@ -13,9 +13,11 @@ mod logs;
 mod jev;
 mod modal;
 mod panels;
+mod roster;
 mod plan;
 mod review;
 mod routing;
+mod swarm;
 mod session;
 mod tasks;
 mod thought;
@@ -44,8 +46,10 @@ pub use modal::{
 pub use panels::PanelLayoutState;
 pub use plan::{ApiContract, PlanEntry, PlanPhase, PlanRisk, PlanState};
 pub use review::{ReviewCategory, ReviewCriterion, ReviewState, ReviewVerdict};
+pub use roster::{McpRef, McpState, RosterAgent, RosterState, SkillSummary};
 pub use routing::{LayoutRoutingState, LayoutStage};
 pub use session::{ReplMode, SessionState, TabId};
+pub use swarm::{BeeState, SwarmState, ToolCall, WaitingAgent};
 pub use tasks::{TaskProjection, TaskProjectionState};
 pub use thought::{ThoughtChunk, ThoughtStreamState};
 pub use workers::{Worker, WorkerState, WorkerStatus};
@@ -89,6 +93,19 @@ pub struct AppState {
     pub logs: LogState,
     /// Plano de decisión: disponibilidad del oráculo y rastro de sus decisiones.
     pub jev: JevState,
+    /// Telemetría del enjambre: tool calls en vuelo y agentes en espera.
+    pub swarm: SwarmState,
+    /// El enjambre: alias, rol, función, tools y estado de MCP por especialista.
+    pub roster: RosterState,
+    /// Sección activa del TALLER y su scroll.
+    pub taller_section: crate::widgets::taller_layout::Section,
+    pub taller_scroll: usize,
+    /// Habilidades disponibles (pobladas por `roster_snapshot`/`settings_data`).
+    pub skills: Vec<SkillSummary>,
+    /// Estado de GitHub y Telegram para el TALLER.
+    pub github_connected: bool,
+    pub github_repo: Option<String>,
+    pub telegram_active: bool,
     pub panels: PanelLayoutState,
     /// Per-frame mouse hit regions emitted by renderer and consumed by controller.
     pub hit_map: crate::ui::HitMap,
@@ -181,6 +198,10 @@ fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
         BunMessage::SettingsData { .. } => "settings_data",
         BunMessage::JevDecision { .. } => "jev_decision",
         BunMessage::JevStatus { .. } => "jev_status",
+        BunMessage::ToolCall { .. } => "tool_call",
+        BunMessage::ToolDone { .. } => "tool_done",
+        BunMessage::Esperando { .. } => "esperando",
+        BunMessage::RosterSnapshot { .. } => "roster_snapshot",
         BunMessage::Unknown => "unknown",
     }
 }
@@ -386,7 +407,7 @@ impl AppState {
             } else {
                 "Bee clasifica solicitud -> Focus"
             };
-            self.recommend_layout(TabId::Focus, LayoutStage::Classifying, reason);
+            self.recommend_layout(TabId::Mesa, LayoutStage::Classifying, reason);
             return;
         }
 
@@ -403,7 +424,7 @@ impl AppState {
         let execution_workers = self.active_execution_workers();
         if execution_workers.len() >= 2 {
             self.recommend_layout(
-                TabId::Dashboard,
+                TabId::Swarm,
                 LayoutStage::Executing,
                 format!("{} workers activos -> Dashboard", execution_workers.len()),
             );
@@ -421,7 +442,7 @@ impl AppState {
             return;
         }
         if self.active_execution_workers().len() >= 2 {
-            self.recommend_layout(TabId::Dashboard, LayoutStage::Executing, "workers paralelos -> Dashboard");
+            self.recommend_layout(TabId::Swarm, LayoutStage::Executing, "workers paralelos -> Dashboard");
         } else {
             self.recommend_layout(TabId::Code, LayoutStage::Executing, "diff activo -> Code");
         }
@@ -523,7 +544,7 @@ impl AppState {
                     // Siempre iniciar en Focus — el modo sólo cambia el tab durante
                     // una tarea activa (ActivityUpdate/StateUpdate), no al arrancar.
                     if !self.tab_locked {
-                        self.active_tab = TabId::Focus;
+                        self.active_tab = TabId::Mesa;
                     }
                 }
                 if let Some(p) = provider    { self.session.provider     = p; }
@@ -571,7 +592,7 @@ impl AppState {
                 if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
                     self.recommend_layout(TabId::Plan, LayoutStage::Planning, "plan listo -> Plan");
                 } else {
-                    self.recommend_layout(TabId::Focus, LayoutStage::Completed, "tarea completa -> Focus");
+                    self.recommend_layout(TabId::Mesa, LayoutStage::Completed, "tarea completa -> Focus");
                 }
             }
             // Protocolo legado: respuesta completa en un mensaje
@@ -591,7 +612,7 @@ impl AppState {
                     if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
                         self.recommend_layout(TabId::Plan, LayoutStage::Planning, "plan listo -> Plan");
                     } else {
-                        self.recommend_layout(TabId::Focus, LayoutStage::Completed, "respuesta completa -> Focus");
+                        self.recommend_layout(TabId::Mesa, LayoutStage::Completed, "respuesta completa -> Focus");
                     }
                 }
             }
@@ -610,7 +631,7 @@ impl AppState {
                     if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
                         self.recommend_layout(TabId::Plan, LayoutStage::Planning, "plan listo -> Plan");
                     } else {
-                        self.recommend_layout(TabId::Focus, LayoutStage::Completed, "tarea finalizada -> Focus");
+                        self.recommend_layout(TabId::Mesa, LayoutStage::Completed, "tarea finalizada -> Focus");
                     }
                 }
             }
@@ -621,7 +642,7 @@ impl AppState {
                         self.plan.current = None;
                         self.plan.scroll = 0;
                     }
-                    self.recommend_layout(TabId::Focus, LayoutStage::Idle, "modo actualizado -> Focus");
+                    self.recommend_layout(TabId::Mesa, LayoutStage::Idle, "modo actualizado -> Focus");
                 }
                 if let Some(p) = new_provider { self.session.provider = p; }
                 if let Some(m) = new_model { self.session.model = m; }
@@ -859,7 +880,7 @@ impl AppState {
                     event_type: "FORENSIC".to_string(),
                     content: short_event_text(&analysis),
                 });
-                self.recommend_layout(TabId::Dashboard, LayoutStage::Failed, "análisis forense -> Dashboard");
+                self.recommend_layout(TabId::Swarm, LayoutStage::Failed, "análisis forense -> Dashboard");
             }
             BunMessage::SecurityStatusUpdate { status, findings } => {
                 self.dashboard.security.status = status;
@@ -876,7 +897,7 @@ impl AppState {
                         event_type: "HALT".to_string(),
                         content: reason.unwrap_or_else(|| "HALT emitido".to_string()),
                     });
-                    self.recommend_layout(TabId::Dashboard, LayoutStage::Failed, "HALT activo -> Dashboard");
+                    self.recommend_layout(TabId::Swarm, LayoutStage::Failed, "HALT activo -> Dashboard");
                 }
             }
             BunMessage::MetricsUpdate { token_count, cost, elapsed_secs } => {
@@ -1085,6 +1106,72 @@ impl AppState {
                 }
             }
 
+            // ── Telemetría del enjambre ─────────────────────────────────────────
+            BunMessage::ToolCall { agent, tool, call_id, args_summary,
+                                   bee_state, task_id, at } => {
+                self.swarm.start_call(ToolCall {
+                    call_id,
+                    agent: agent.clone(),
+                    tool,
+                    args_summary,
+                    bee_state: BeeState::from_str(&bee_state),
+                    started_at: at,
+                    settled: false,
+                    ok: None,
+                    duration_ms: None,
+                });
+                // An agent that just ran something is not waiting on anything.
+                self.swarm.clear_waiting(&agent);
+                let _ = task_id;
+            }
+            BunMessage::ToolDone { agent, tool, call_id, ok, duration_ms,
+                                   result_summary, task_id, at } => {
+                let settled = self.swarm.settle_call(&call_id, ok, duration_ms);
+                if !settled {
+                    // El `tool_call` se perdió en el canal `low`. Sin esto el
+                    // spinner de esa tool giraría para siempre; lo registramos
+                    // como un evento más para que la UI pueda decirlo.
+                    self.swarm.start_call(ToolCall {
+                        call_id: call_id.clone(),
+                        agent: agent.clone(),
+                        tool,
+                        args_summary: String::new(),
+                        bee_state: if ok { BeeState::Done } else { BeeState::Error },
+                        started_at: at,
+                        settled: true,
+                        ok: Some(ok),
+                        duration_ms: Some(duration_ms),
+                    });
+                    self.swarm.settle_call(&call_id, ok, duration_ms);
+                }
+                let _ = result_summary;
+                let _ = task_id;
+            }
+            BunMessage::Esperando { agent, esperando_a, razon, task_id, at } => {
+                self.swarm.set_waiting(WaitingAgent {
+                    agent,
+                    waiting_for: esperando_a,
+                    reason: razon,
+                    since: at,
+                });
+                let _ = task_id;
+            }
+            // ── Roster del enjambre ─────────────────────────────────────────────
+            // Snapshot completo: reemplaza, no acumula. Un agente archivado
+            // tiene que desaparecer de la UI.
+            BunMessage::RosterSnapshot { agentes, mcp_servers } => {
+                self.roster.apply(agentes);
+                self.roster.mcp_servers = mcp_servers
+                    .into_iter()
+                    .map(|s| crate::state::McpRef {
+                        id: s.id,
+                        name: s.name,
+                        tools: s.tools,
+                        state: crate::state::McpState::from_str(&s.state),
+                    })
+                    .collect();
+            }
+
             // ── Alertas ────────────────────────────────────────────────────────
             BunMessage::ConflictAlert { agent_a, agent_b, file, reason, severity, detail } => {
                 self.harness.active_workspace_status = Some("conflict".to_string());
@@ -1111,7 +1198,7 @@ impl AppState {
                 self.history.scroll = 0;
                 self.running = false;
                 self.status_msg = "Error".to_string();
-                self.recommend_layout(TabId::Focus, LayoutStage::Failed, "error -> Focus");
+                self.recommend_layout(TabId::Mesa, LayoutStage::Failed, "error -> Focus");
                 self.logs.entries.push(LogEntry {
                     timestamp: "ERR".to_string(),
                     level: "error".to_string(),
@@ -1157,7 +1244,7 @@ impl AppState {
                     self.history.selected = Some(self.history.entries.len().saturating_sub(1));
                     self.history.scroll = 0;
                     self.status_msg = "Error de plan".to_string();
-                    self.recommend_layout(TabId::Focus, LayoutStage::Failed, "plan incompleto -> Focus");
+                    self.recommend_layout(TabId::Mesa, LayoutStage::Failed, "plan incompleto -> Focus");
                     return;
                 }
                 self.harness.active_task_id = Some(task_id.clone());
@@ -1270,7 +1357,7 @@ impl AppState {
                     event_type: "RESUME".to_string(),
                     content: short_event_text(&reason),
                 });
-                self.recommend_layout(TabId::Dashboard, LayoutStage::Failed, "checkpoint disponible para reanudar -> Dashboard");
+                self.recommend_layout(TabId::Swarm, LayoutStage::Failed, "checkpoint disponible para reanudar -> Dashboard");
             }
 
             BunMessage::PhaseRetry { worker, attempt, max_attempts, reason } => {
@@ -1341,13 +1428,13 @@ impl AppState {
                 );
                 self.session.task_count = self.session.task_count.max(self.tasks.tasks.len() as u32);
                 if matches!(status.as_str(), "completed" | "done" | "cancelled") {
-                    self.recommend_layout(TabId::Focus, LayoutStage::Completed, "tarea completa -> Focus");
+                    self.recommend_layout(TabId::Mesa, LayoutStage::Completed, "tarea completa -> Focus");
                 } else if status == "failed" {
-                    self.recommend_layout(TabId::Focus, LayoutStage::Failed, "tarea fallida -> Focus");
+                    self.recommend_layout(TabId::Mesa, LayoutStage::Failed, "tarea fallida -> Focus");
                 } else {
                     let count = self.active_execution_workers().len();
                     if count >= 2 {
-                        self.recommend_layout(TabId::Dashboard, LayoutStage::Executing, format!("{count} workers activos -> Dashboard"));
+                        self.recommend_layout(TabId::Swarm, LayoutStage::Executing, format!("{count} workers activos -> Dashboard"));
                     } else if count == 1 {
                         self.recommend_layout(TabId::Code, LayoutStage::Executing, "1 worker activo -> Code");
                     }
@@ -1498,7 +1585,7 @@ mod tests {
             api_contracts: Vec::new(),
         });
 
-        assert_eq!(state.active_tab, TabId::Focus);
+        assert_eq!(state.active_tab, TabId::Mesa);
         assert!(state.plan.current.is_none());
         assert!(state
             .history
@@ -1524,7 +1611,7 @@ mod tests {
             integration_status: Some("isolated".to_string()),
         });
 
-        assert_eq!(state.active_tab, TabId::Dashboard);
+        assert_eq!(state.active_tab, TabId::Swarm);
         assert_eq!(state.tasks.active_task_id.as_deref(), Some("task-1"));
         assert_eq!(state.tasks.tasks[0].title, "Corregir login");
         assert_eq!(state.tasks.tasks[0].active_workers.len(), 2);
@@ -1630,7 +1717,7 @@ mod tests {
             });
         }
 
-        assert_eq!(state.active_tab, TabId::Dashboard);
+        assert_eq!(state.active_tab, TabId::Swarm);
     }
 
     #[test]
@@ -1654,7 +1741,7 @@ mod tests {
             transversal: None,
         });
 
-        assert_eq!(state.active_tab, TabId::Focus);
+        assert_eq!(state.active_tab, TabId::Mesa);
     }
 
     #[test]
@@ -1692,8 +1779,8 @@ mod tests {
             transversal: None,
         });
 
-        assert_eq!(state.active_tab, TabId::Focus);
-        assert_eq!(state.routing.recommended_tab, TabId::Focus);
+        assert_eq!(state.active_tab, TabId::Mesa);
+        assert_eq!(state.routing.recommended_tab, TabId::Mesa);
     }
 
     #[test]
@@ -1721,9 +1808,9 @@ mod tests {
         }
 
         assert_eq!(state.active_tab, TabId::Review);
-        assert_eq!(state.routing.recommended_tab, TabId::Dashboard);
+        assert_eq!(state.routing.recommended_tab, TabId::Swarm);
         state.resume_auto_layout();
-        assert_eq!(state.active_tab, TabId::Dashboard);
+        assert_eq!(state.active_tab, TabId::Swarm);
         assert!(!state.tab_locked);
     }
 

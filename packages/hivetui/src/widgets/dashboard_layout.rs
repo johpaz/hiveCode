@@ -146,6 +146,16 @@ fn render_header(canvas: &mut Canvas, area: Rect, state: &AppState) {
     let mode_x = area.x + area.w.saturating_sub(mode.chars().count() as u16) / 2;
     canvas.print(mode_x, area.y, &mode, Style::new().fg(mode_color).bold().bg(BG_PANEL));
 
+    // Pulso del enjambre: cuántos trabajos y cuántos detenidos. La distinction
+    // importa — "3 corriendo" y "nadie avanza" se veían igual.
+    let pulse = swarm_pulse(state);
+    if let Some((text, color)) = pulse {
+        let x = area.x + left.chars().count() as u16 + 3;
+        if x + text.chars().count() as u16 + 1 < mode_x {
+            canvas.print(x, area.y, &text, Style::new().fg(color).bg(BG_PANEL));
+        }
+    }
+
     let elapsed = state
         .dashboard
         .metrics
@@ -162,6 +172,32 @@ fn render_header(canvas: &mut Canvas, area: Rect, state: &AppState) {
     if right_x > area.x + 1 {
         canvas.print(right_x, area.y, &right, Style::new().fg(SECONDARY).bg(BG_PANEL));
     }
+}
+
+/// El pulso del enjambre en una línea, o `None` cuando no hay nada que decir.
+///
+/// Prioriza la espera sobre el trabajo: si algo está detenido, eso es lo que el
+/// usuario necesita ver primero, aunque haya otras tools corriendo.
+fn swarm_pulse(state: &AppState) -> Option<(String, Color)> {
+    let working = state.swarm.orphaned_calls();
+    let waiting = state.swarm.waiting.len();
+    if working == 0 && waiting == 0 {
+        return None;
+    }
+    // La espera gana: si algo está detenido, es lo que hay que mirar aunque haya
+    // otras herramientas corriendo.
+    if waiting > 0 {
+        let part = format!("○ {waiting} en espera");
+        return Some(if working > 0 {
+            (format!("⚙ {working}  {part}"), YELLOW)
+        } else {
+            (part, YELLOW)
+        });
+    }
+    Some((
+        format!("⚙ {working} trabajando"),
+        pulse_color(GREEN, AMBER_BRIGHT, state.anim_tick),
+    ))
 }
 
 fn render_pipeline(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -645,18 +681,28 @@ fn render_worker_card(canvas: &mut Canvas, area: Rect, worker: &Worker, state: &
         canvas.print(area.right().saturating_sub(3), area.y, "!!", Style::new().fg(RED).bold().bg(verdict_bg));
     }
 
-    let intent = worker
-        .current_action
-        .as_deref()
-        .or(worker.activity.as_deref())
-        .or(worker.detail.as_deref())
-        .unwrap_or("esperando siguiente acción");
+    // La línea de intención ahora sale de la telemetría: qué tool corre, con qué
+    // argumentos, y en qué color según lo que hace. `current_action` queda de
+    // reserva para los agentes legacy.
+    let (live, live_color) = agent_live_line(state, worker);
     if area.h > 2 {
         canvas.print(
             area.x + 2,
             area.y + 2,
-            &truncate_cells(intent, area.w.saturating_sub(4) as usize),
-            Style::new().fg(WHITE).bg(verdict_bg),
+            &truncate_cells(&live, area.w.saturating_sub(4) as usize),
+            Style::new().fg(live_color).bg(verdict_bg),
+        );
+    }
+    // La espera se marca en el borde: es lo que el usuario tiene que notar de un
+    // vistazo, y un texto pequeño en la tarjeta no basta.
+    let waiting = state.swarm.waiting.contains_key(&worker.name);
+    if waiting && area.w > 10 && area.h > 3 {
+        let chip = format!(" ⏳ {} ", state.swarm.waiting[&worker.name].reason_label());
+        canvas.print(
+            area.right().saturating_sub(chip.chars().count() as u16 + 1),
+            area.y,
+            &chip,
+            Style::new().fg(BG_PANEL).bg(YELLOW).bold(),
         );
     }
     if area.h > 3 {
@@ -926,6 +972,81 @@ fn worker_display_name(worker: &Worker) -> String {
     }
 }
 
+/// Qué está haciendo este agente **ahora**, según la telemetría.
+///
+/// Antes esta tarjeta caía en `current_action`, que el backend llenaba con
+/// `"ejecutando <phase>"` — un texto que no decía qué herramienta corría. Ahora
+/// la fuente primaria es la llamada en vuelo real; `current_action` queda como
+/// último recurso para los agentes legacy que no emiten telemetría.
+fn agent_live_line(state: &AppState, worker: &Worker) -> (String, Color) {
+    // 1. Una herramienta corriendo: lo único que de verdad significa "trabajando".
+    if let Some(call) = state
+        .swarm
+        .calls_for(&worker.name)
+        .into_iter()
+        .min_by_key(|c| c.started_at)
+    {
+        let mut line = format!("{} {}", call.bee_state.glyph(), call.tool);
+        if !call.args_summary.is_empty() {
+            let detail = short_arg(&call.args_summary);
+            if !detail.is_empty() {
+                line.push_str(&format!(" · {detail}"));
+            }
+        }
+        return (line, call.bee_state.color());
+    }
+
+    // 2. Una espera explica por qué no avanza. "Corriendo" y "detenido" se veían
+    //    igual desde fuera; esta es la diferencia que el usuario vino a ver.
+    if let Some(waiting) = state.swarm.waiting.get(&worker.name) {
+        return (
+            format!("⏳ {}", waiting.reason_label()),
+            YELLOW,
+        );
+    }
+
+    // 3. La última tool que terminó, mientras se decide el siguiente paso.
+    if let Some(last) = state.swarm.last_tool.get(&worker.name) {
+        if last.settled {
+            let mark = if last.ok == Some(false) { "✗" } else { "✓" };
+            return (
+                format!("{mark} {} · {}", last.tool, last.duration_ms.unwrap_or(0)),
+                if last.ok == Some(false) { RED } else { DIM },
+            );
+        }
+    }
+
+    // 4. Legacy: el backend aún no emite telemetría para este agente.
+    let fallback = worker
+        .current_action
+        .as_deref()
+        .or(worker.activity.as_deref())
+        .or(worker.detail.as_deref())
+        .unwrap_or("esperando siguiente acción")
+        .to_string();
+    (fallback, WHITE)
+}
+
+/// Saca el valor legible de un JSON de argumentos: `{"path":"src/a.ts"}` →
+/// `src/a.ts`. Una columna de 30 celdas no puede con la llave completa.
+fn short_arg(args: &str) -> String {
+    let prefer = ["path", "file", "url", "query", "name", "command"];
+    for key in prefer {
+        let needle = format!("\"{key}\"");
+        if let Some(pos) = args.find(&needle) {
+            let after = &args[pos + needle.len()..];
+            if let Some(colon) = after.find(':') {
+                let rest = after[colon + 1..].trim_start();
+                let rest = rest.strip_prefix('"').unwrap_or(rest);
+                if let Some(end) = rest.find('"') {
+                    return rest[..end].to_string();
+                }
+            }
+        }
+    }
+    args.trim().chars().take(24).collect()
+}
+
 
 fn worker_status_color(status: WorkerStatus, tick: u8) -> Color {
     match status {
@@ -1116,5 +1237,258 @@ mod tests {
 
         let hit = checkpoint_at(&state, Rect::new(0, 0, 100, 24), 18, 22);
         assert_eq!(hit, Some(0));
+    }
+}
+
+#[cfg(test)]
+mod swarm_tests {
+    use super::*;
+    use crate::ipc::BunMessage;
+    use crate::state::{BeeState, ToolCall, WaitingAgent, WorkerStatus};
+
+    fn worker(name: &str) -> Worker {
+        let mut w = Worker::new(name);
+        w.status = WorkerStatus::Running;
+        w.detail = Some("detail".to_string());
+        w
+    }
+
+    fn call(agent: &str, tool: &str, bee_state: BeeState) -> ToolCall {
+        ToolCall {
+            call_id: format!("{agent}-{tool}"),
+            agent: agent.to_string(),
+            tool: tool.to_string(),
+            args_summary: String::new(),
+            bee_state,
+            started_at: 10,
+            settled: false,
+            ok: None,
+            duration_ms: None,
+        }
+    }
+
+    /// El contrato central de esta migración: la telemetría gana siempre.
+    #[test]
+    fn a_real_tool_call_wins_over_the_legacy_current_action() {
+        let mut state = AppState::default();
+        let mut w = worker("backend");
+        w.current_action = Some("ejecutando implementando endpoint".to_string());
+        state.swarm.start_call(call("backend", "fs_write", BeeState::Writing));
+
+        let (line, _) = agent_live_line(&state, &w);
+        assert!(line.contains("fs_write"), "no muestra la tool real: {line}");
+        assert!(
+            !line.contains("ejecutando implementando endpoint"),
+            "el texto legacy se cuela: {line}"
+        );
+    }
+
+    #[test]
+    fn a_waiting_agent_says_why_it_is_not_moving() {
+        // La distinción que el usuario vino a ver: trabajando vs. detenido.
+        let mut state = AppState::default();
+        let w = worker("backend");
+        state.swarm.set_waiting(WaitingAgent {
+            agent: "backend".to_string(),
+            waiting_for: vec![],
+            reason: "jev_secuencial".to_string(),
+            since: 0,
+        });
+
+        let (line, _) = agent_live_line(&state, &w);
+        assert!(line.contains("en secuencia"), "{line}");
+    }
+
+    #[test]
+    fn a_waiting_agent_is_not_shown_as_running_a_tool() {
+        // Una espera tiene que ganarle a la última tool: si el agente ya no
+        // avanza, decir qué tool terminó hace dos segundos confunde.
+        let mut state = AppState::default();
+        let w = worker("backend");
+        state.swarm.start_call(call("backend", "fs_write", BeeState::Writing));
+        state.swarm.settle_call("backend-fs_write", true, 40);
+        state.swarm.set_waiting(WaitingAgent {
+            agent: "backend".to_string(),
+            waiting_for: vec![],
+            reason: "subagente".to_string(),
+            since: 0,
+        });
+
+        let (line, _) = agent_live_line(&state, &w);
+        assert!(line.contains("esperando subagente"), "{line}");
+        assert!(!line.contains("fs_write"), "{line}");
+    }
+
+    #[test]
+    fn the_last_tool_shows_its_outcome_while_the_next_step_is_decided() {
+        let mut state = AppState::default();
+        let w = worker("backend");
+        state.swarm.start_call(call("backend", "code_test", BeeState::Executing));
+        state.swarm.settle_call("backend-code_test", true, 1840);
+
+        let (line, _) = agent_live_line(&state, &w);
+        assert!(line.contains("code_test"), "{line}");
+        assert!(line.contains("1840"), "no muestra la duración: {line}");
+    }
+
+    #[test]
+    fn a_failed_tool_is_marked_as_failed() {
+        let mut state = AppState::default();
+        let w = worker("backend");
+        state.swarm.start_call(call("backend", "shell_executor", BeeState::Executing));
+        state.swarm.settle_call("backend-shell_executor", false, 90);
+
+        let (line, color) = agent_live_line(&state, &w);
+        assert!(line.starts_with('✗'), "{line}");
+        assert_eq!(color, RED);
+    }
+
+    #[test]
+    fn a_legacy_agent_without_telemetry_still_shows_something() {
+        // El swarm puede no haber enviado nada todavía: un panel en blanco
+        // parecería un bug.
+        let mut state = AppState::default();
+        let mut w = worker("backend");
+        w.current_action = Some("implementando endpoint".to_string());
+
+        let (line, _) = agent_live_line(&state, &w);
+        assert_eq!(line, "implementando endpoint");
+    }
+
+    #[test]
+    fn a_legacy_agent_with_nothing_falls_back_to_an_explicit_placeholder() {
+        // Un worker sin `detail` tampoco: entonces sí, el placeholder. Un panel
+        // en blanco parecería un bug.
+        let mut state = AppState::default();
+        let mut w = Worker::new("backend");
+        w.detail = None;
+        let (line, _) = agent_live_line(&state, &w);
+        assert_eq!(line, "esperando siguiente acción");
+    }
+
+    #[test]
+    fn args_are_summarised_by_their_most_useful_key() {
+        assert_eq!(short_arg(r#"{"path":"src/auth/token.ts"}"#), "src/auth/token.ts");
+        assert_eq!(short_arg(r#"{"command":"bun test"}"#), "bun test");
+        assert_eq!(short_arg(r#"{"file":"a.rs"}"#), "a.rs");
+        // Sin clave reconocible, se recortan los primeros caracteres.
+        let raw = r#"{"weirdkey":"some long value here"}"#;
+        assert!(short_arg(raw).chars().count() <= 24);
+    }
+
+    #[test]
+    fn malformed_args_never_panic() {
+        for raw in ["", "{", "{\"path\":", "\"sin objeto\"", "[]"] {
+            let _ = short_arg(raw);
+        }
+    }
+
+    #[test]
+    fn the_pulse_prioritises_being_stuck_over_being_busy() {
+        let mut state = AppState::default();
+        state.swarm.start_call(call("a", "fs_read", BeeState::Reading));
+        state.swarm.set_waiting(WaitingAgent {
+            agent: "b".to_string(),
+            waiting_for: vec![],
+            reason: "dependencia".to_string(),
+            since: 0,
+        });
+
+        let (text, _) = swarm_pulse(&state).expect("hay algo que decir");
+        assert!(text.contains("en espera"), "{text}");
+        // Ambas cifras conviven: "1 trabajando y 1 parado" es información distinta
+        // de "nada funciona".
+        assert!(text.contains('1'), "{text}");
+    }
+
+    #[test]
+    fn the_pulse_says_nothing_when_the_swarm_is_quiet() {
+        // Celdas ocupadas sin información son ruido.
+        assert!(swarm_pulse(&AppState::default()).is_none());
+    }
+
+    #[test]
+    fn a_wait_chip_renders_on_the_card() {
+        let mut state = AppState::default();
+        state.workers.workers.push(worker("backend"));
+        state.swarm.set_waiting(WaitingAgent {
+            agent: "backend".to_string(),
+            waiting_for: vec![],
+            reason: "jev_secuencial".to_string(),
+            since: 0,
+        });
+
+        let mut canvas = Canvas::new(100, 30);
+        render(&mut canvas, Rect::new(0, 0, 100, 30), &state);
+        let frame = canvas.to_text_rows().join("\n");
+        assert!(frame.contains("en secuencia"), "{frame}");
+    }
+
+    #[test]
+    fn a_tool_call_reaches_the_card_through_the_real_reducer() {
+        // El camino completo: mensaje IPC → estado → pantalla.
+        let mut state = AppState::default();
+        state.workers.workers.push(worker("backend"));
+        state.apply_message(BunMessage::ToolCall {
+            agent: "backend".to_string(),
+            tool: "fs_write".to_string(),
+            call_id: "c1".to_string(),
+            args_summary: r#"{"path":"src/a.ts"}"#.to_string(),
+            bee_state: "writing".to_string(),
+            task_id: None,
+            at: 100,
+        });
+
+        assert_eq!(state.swarm.orphaned_calls(), 1);
+        let mut canvas = Canvas::new(100, 30);
+        render(&mut canvas, Rect::new(0, 0, 100, 30), &state);
+        let frame = canvas.to_text_rows().join("\n");
+        assert!(frame.contains("fs_write"), "{frame}");
+        assert!(frame.contains("src/a.ts"), "{frame}");
+    }
+
+    #[test]
+    fn a_running_worker_with_a_failed_tool_is_visible_as_failed() {
+        let mut state = AppState::default();
+        state.workers.workers.push(worker("backend"));
+        state.apply_message(BunMessage::ToolCall {
+            agent: "backend".to_string(),
+            tool: "code_build".to_string(),
+            call_id: "c1".to_string(),
+            args_summary: String::new(),
+            bee_state: "executing".to_string(),
+            task_id: None,
+            at: 1,
+        });
+        state.apply_message(BunMessage::ToolDone {
+            agent: "backend".to_string(),
+            tool: "code_build".to_string(),
+            call_id: "c1".to_string(),
+            ok: false,
+            duration_ms: 320,
+            result_summary: String::new(),
+            task_id: None,
+            at: 321,
+        });
+
+        let (line, color) = agent_live_line(&state, &state.workers.workers[0]);
+        assert!(line.contains("code_build"), "{line}");
+        assert_eq!(color, RED);
+    }
+
+    #[test]
+    fn the_worker_status_still_drives_the_border_not_the_telemetry() {
+        // El borde refleja el estado del worker legacy; la línea interior
+        // reflecta la telemetría. Son dos señales y no deben pisarse.
+        let mut state = AppState::default();
+        let mut failed = Worker::new("backend");
+        failed.status = WorkerStatus::Failed;
+        state.workers.workers.push(failed);
+        state.swarm.start_call(call("backend", "fs_read", BeeState::Reading));
+
+        let mut canvas = Canvas::new(100, 30);
+        render(&mut canvas, Rect::new(0, 0, 100, 30), &state);
+        let frame = canvas.to_text_rows().join("\n");
+        assert!(frame.contains("fs_read"), "{frame}");
     }
 }

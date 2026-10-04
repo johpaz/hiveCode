@@ -457,6 +457,67 @@ pub enum BunMessage {
         totals: IpcJevTotals,
     },
 
+    // ── Telemetría del enjambre ───────────────────────────────────────────
+    // Antes de esto la TUI solo recibía `current_action`, un texto libre que el
+    // backend llenaba con "ejecutando <phase>": no decía qué herramienta corría
+    // ni cuánto tardaba. Estos tres eventos son el pulso real.
+    /// Un agente empezó una llamada. Siempre emparejado con un `ToolDone` del
+    /// mismo `call_id`.
+    ToolCall {
+        agent: String,
+        tool: String,
+        call_id: String,
+        /// Recortado a 120 chars en el emisor: un payload de 400 KB no se
+        /// renderiza en una columna de 30 celdas.
+        args_summary: String,
+        #[serde(default)]
+        bee_state: String,
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        at: u64,
+    },
+    /// Una llamada terminó, bien o mal.
+    ToolDone {
+        agent: String,
+        tool: String,
+        call_id: String,
+        ok: bool,
+        duration_ms: u64,
+        #[serde(default)]
+        result_summary: String,
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        at: u64,
+    },
+    /// Un agente no puede avanzar hasta que pase algo. `razon` nombra la causa
+    /// (`"jev_secuencial"`, `"subagente"`, `"dependencia"`), no una frase, para
+    /// que la UI pueda agrupar por motivo.
+    Esperando {
+        agent: String,
+        #[serde(default)]
+        esperando_a: Vec<String>,
+        razon: String,
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        at: u64,
+    },
+
+    /// El enjambre entero, una vez. Llega en `init` y en cada alta/baja de
+    /// agente; nunca en el camino caliente.
+    ///
+    /// Es `describeSwarmCapabilities()` serializado: un solo roster, una sola
+    /// lectura de los campos de capacidad. `mcp[].state` viaja con él para que
+    /// la UI pueda marcar especialistas bloqueados antes de la primera decisión,
+    /// sin esperar a `agentMcpOff`.
+    RosterSnapshot {
+        agentes: Vec<IpcRosterAgent>,
+        #[serde(default)]
+        mcp_servers: Vec<IpcRosterMcp>,
+    },
+
     /// Captura cualquier tipo de mensaje desconocido — evita que serde falle
     /// y corrompa el canal IPC cuando TypeScript agrega nuevos tipos.
     #[serde(other)]
@@ -470,6 +531,42 @@ pub struct IpcJevTotals {
     pub decisions: u64,
     pub saved_tokens: u64,
     pub cost_usd: f64,
+}
+
+/// Un especialista del roster.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpcRosterAgent {
+    pub id: String,
+    /// Rol interno: `backend`, `frontend`… lo que viaja por el bus.
+    pub rol: String,
+    /// Alias visible: `Topo`, `Quetzal`… lo que el usuario lee.
+    pub alias: String,
+    #[serde(default)]
+    pub funcion: String,
+    /// 0 = comandante … 5 = on-demand. Misma escala que `AgentTier`.
+    #[serde(default)]
+    pub nivel: u8,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub mcp: Vec<IpcRosterMcpRef>,
+}
+
+/// Un servidor MCP y su estado. `apagado` bloquea a quien dependa de él.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpcRosterMcpRef {
+    pub name: String,
+    /// "activo" | "disponible" | "apagado"
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpcRosterMcp {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub tools: u64,
+    pub state: String,
 }
 
 // ── Tipos de datos para nuevos mensajes ───────────────────────────────────────
@@ -864,6 +961,264 @@ pub async fn connect() -> Result<IpcChannels> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deserializa un NDJSON tal como lo emite Bun y devuelve el mensaje plano.
+    fn parse(line: &str) -> BunMessage {
+        let env = sonic_rs::from_str::<IpcEnvelope>(line)
+            .unwrap_or_else(|e| panic!("envelope inválido: {e}\n{line}"));
+        let flat = flatten_envelope(env).unwrap_or_else(|| panic!("envelope aplanable: {line}"));
+        sonic_rs::from_str::<BunMessage>(&flat)
+            .unwrap_or_else(|e| panic!("payload inválido: {e}\n{flat}"))
+    }
+
+    // ── Telemetría del enjambre ────────────────────────────────────────────
+    //
+    // Estos JSON son copia literal de lo que emite `repl.ts` al reenviar los
+    // eventos del event bus. Los tests de TS (`tests/ipc/swarm-telemetry.test.ts`)
+    // fijan los nombres del lado TypeScript, pero no pueden comprobar que serde
+    // los reconozca: si un campo se renombra en un lado, serde lo **ignora en
+    // silencio** y el valor queda en su default. Estos tests son los que
+    // detectan esa divergencia.
+
+    #[test]
+    fn tool_call_deserializes_every_field_the_backend_sends() {
+        let msg = parse(
+            r#"{"protocol_version":1,"priority":"normal","seq":1,"type":"tool_call","payload":{"agent":"a1","tool":"fs_write","call_id":"c1","args_summary":"{ \"path\": \"src/auth/token.ts\" }","bee_state":"writing","task_id":"task-9","at":1700000000000}}"#,
+        );
+        match msg {
+            BunMessage::ToolCall { agent, tool, call_id, args_summary, bee_state, task_id, at } => {
+                assert_eq!(agent, "a1");
+                assert_eq!(tool, "fs_write");
+                assert_eq!(call_id, "c1");
+                assert!(args_summary.contains("token.ts"));
+                assert_eq!(bee_state, "writing");
+                assert_eq!(task_id.as_deref(), Some("task-9"));
+                assert_eq!(at, 1_700_000_000_000);
+            }
+            other => panic!("esperaba tool_call, llegó {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_done_keeps_its_duration_and_outcome() {
+        let msg = parse(
+            r#"{"protocol_version":1,"priority":"normal","seq":2,"type":"tool_done","payload":{"agent":"a1","tool":"fs_write","call_id":"c1","ok":true,"duration_ms":412,"result_summary":"+14 -3","at":1700000000412}}"#,
+        );
+        match msg {
+            BunMessage::ToolDone { ok, duration_ms, call_id, result_summary, .. } => {
+                assert!(ok);
+                assert_eq!(duration_ms, 412, "una duración perdida se ve como 0 ms");
+                assert_eq!(call_id, "c1");
+                assert_eq!(result_summary, "+14 -3");
+            }
+            other => panic!("esperaba tool_done, llegó {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_tool_call_is_not_mistaken_for_a_successful_one() {
+        let msg = parse(
+            r#"{"protocol_version":1,"priority":"normal","seq":3,"type":"tool_done","payload":{"agent":"a1","tool":"shell_executor","call_id":"c2","ok":false,"duration_ms":90,"result_summary":"boom","at":1}}"#,
+        );
+        match msg {
+            BunMessage::ToolDone { ok, tool, .. } => {
+                assert!(!ok, "un fallo silenciado mostraría una tool verde");
+                assert_eq!(tool, "shell_executor");
+            }
+            other => panic!("esperaba tool_done, llegó {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esperando_arrives_with_its_cause_and_targets() {
+        let msg = parse(
+            r#"{"protocol_version":1,"priority":"normal","seq":4,"type":"esperando","payload":{"agent":"topo","esperando_a":["condor"],"razon":"dependencia","at":1700000000000}}"#,
+        );
+        match msg {
+            BunMessage::Esperando { agent, esperando_a, razon, .. } => {
+                assert_eq!(agent, "topo");
+                assert_eq!(razon, "dependencia");
+                assert_eq!(esperando_a, vec!["condor".to_string()]);
+            }
+            other => panic!("esperaba esperando, llegó {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sequential_wait_with_no_targets_still_parses() {
+        // "en secuencia" no depende de nadie: la lista vacía es legítima.
+        let msg = parse(
+            r#"{"protocol_version":1,"priority":"normal","seq":5,"type":"esperando","payload":{"agent":"topo","esperando_a":[],"razon":"jev_secuencial","at":1}}"#,
+        );
+        match msg {
+            BunMessage::Esperando { esperando_a, razon, .. } => {
+                assert!(esperando_a.is_empty());
+                assert_eq!(razon, "jev_secuencial");
+            }
+            other => panic!("esperaba esperando, llegó {other:?}"),
+        }
+    }
+
+    /// Lo que el espejo de TypeScript NO puede detectar.
+    ///
+    /// Si alguien renombra `duration_ms` en un lado, serde **no** degrada a 0:
+    /// rechaza el mensaje entero y la TUI se queda sin el `tool_done` — el
+    /// spinner de esa tool gira para siempre sin explicación. Por eso los
+    /// campos esenciales llevan `#[serde(default)]`: el mensaje llega, se ve la
+    /// tool cerrada, y solo el dato ausente queda en su default.
+    ///
+    /// Este test fija esa diferencia entre "el mensaje se pierde" y "el dato se
+    /// pierde", que es la razón de ser de los defaults.
+    #[test]
+    fn a_missing_essential_field_drops_the_message_entirely() {
+        // `durationMs` en vez de `duration_ms`: exactamente lo que se vería si
+        // el backend empezara a mandar camelCase por accidente.
+        let raw = r#"{"protocol_version":1,"priority":"normal","seq":6,"type":"tool_done","payload":{"agent":"a1","tool":"fs_read","call_id":"c9","ok":true,"durationMs":777,"result_summary":"ok","at":1}}"#;
+        let env = sonic_rs::from_str::<IpcEnvelope>(raw).unwrap();
+        let flat = flatten_envelope(env).unwrap();
+        assert!(
+            sonic_rs::from_str::<BunMessage>(&flat).is_err(),
+            "si esto pasa a parsear, `duration_ms` ganó un default y el mensaje \
+             ya no se pierde — actualiza este test y la nota del enum."
+        );
+    }
+
+    #[test]
+    fn a_non_essential_field_may_be_omitted_without_losing_the_event() {
+        // El caso contrario: `bee_state` y `task_id` sí tienen default, así que
+        // un backend que no los mande no rompe nada.
+        let raw = r#"{"protocol_version":1,"priority":"normal","seq":7,"type":"tool_call","payload":{"agent":"a1","tool":"fs_read","call_id":"c9","args_summary":"","at":1}}"#;
+        let env = sonic_rs::from_str::<IpcEnvelope>(raw).unwrap();
+        let flat = flatten_envelope(env).unwrap();
+        let msg = sonic_rs::from_str::<BunMessage>(&flat).expect("debe parsear");
+        match msg {
+            BunMessage::ToolCall { call_id, bee_state, task_id, .. } => {
+                assert_eq!(call_id, "c9");
+                assert_eq!(bee_state, "");
+                assert!(task_id.is_none());
+            }
+            other => panic!("esperaba tool_call, llegó {other:?}"),
+        }
+    }
+
+    // ── Jev ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn jev_decision_deserializes_its_savings() {
+        let msg = parse(
+            r#"{"protocol_version":1,"priority":"normal","seq":7,"type":"jev_decision","payload":{"agent_id":"a1","kind":"context","summary":"18 → 6 mensajes · 3 tools","saved_tokens":8200,"cost_usd":0.0003,"latency_ms":61,"event_id":"jev:m2k9:3","totals":{"decisions":12,"saved_tokens":48200,"cost_usd":0.021}}}"#,
+        );
+        match msg {
+            BunMessage::JevDecision { agent_id, kind, summary, saved_tokens, cost_usd, latency_ms, event_id, totals } => {
+                assert_eq!(agent_id, "a1");
+                assert_eq!(kind, "context");
+                assert!(summary.contains("18"));
+                assert_eq!(saved_tokens, 8_200);
+                assert!((cost_usd - 0.0003).abs() < 1e-9, "el costo llega como f64 exacto");
+                assert_eq!(latency_ms, 61);
+                assert_eq!(event_id, "jev:m2k9:3");
+                assert_eq!(totals.decisions, 12);
+                assert_eq!(totals.saved_tokens, 48_200);
+                assert!((totals.cost_usd - 0.021).abs() < 1e-9);
+            }
+            other => panic!("esperaba jev_decision, llegó {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unavailable_oracle_reports_off_and_keeps_its_null_error() {
+        // `off` = no configurado. Si `state` se perdiera, quedaría como string
+        // vacío y la TUI asumiría "listo".
+        let msg = parse(
+            r#"{"protocol_version":1,"priority":"low","seq":8,"type":"jev_status","payload":{"state":"off","last_error":null,"last_success_at":null,"totals":{"decisions":0,"saved_tokens":0,"cost_usd":0}}}"#,
+        );
+        match msg {
+            BunMessage::JevStatus { state, last_error, last_success_at, .. } => {
+                assert_eq!(state, "off");
+                assert!(last_error.is_none());
+                assert!(last_success_at.is_none());
+            }
+            other => panic!("esperaba jev_status, llegó {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cooling_oracle_keeps_its_error_text() {
+        let msg = parse(
+            r#"{"protocol_version":1,"priority":"low","seq":9,"type":"jev_status","payload":{"state":"fallback","last_error":"OpenRouter HTTP 429","last_success_at":1700000000,"totals":{"decisions":3,"saved_tokens":900,"cost_usd":0.001}}}"#,
+        );
+        match msg {
+            BunMessage::JevStatus { state, last_error, .. } => {
+                assert_eq!(state, "fallback");
+                assert_eq!(last_error.as_deref(), Some("OpenRouter HTTP 429"));
+            }
+            other => panic!("esperaba jev_status, llegó {other:?}"),
+        }
+    }
+
+    #[test]
+    fn optional_swarm_fields_missing_from_the_wire_do_not_break_the_parse() {
+        // El backend puede omitir `task_id` y `bee_state`. Con `#[serde(default)]`
+        // debe parsear igual; sin él, el mensaje entero se descarta.
+        let msg = parse(
+            r#"{"protocol_version":1,"priority":"normal","seq":10,"type":"tool_call","payload":{"agent":"a1","tool":"fs_read","call_id":"c1","args_summary":"","at":1}}"#,
+        );
+        match msg {
+            BunMessage::ToolCall { bee_state, task_id, .. } => {
+                assert_eq!(bee_state, "");
+                assert!(task_id.is_none());
+            }
+            other => panic!("esperaba tool_call, llegó {other:?}"),
+        }
+    }
+
+    // ── Roster ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn roster_snapshot_deserializes_identity_and_capabilities() {
+        let msg = parse(
+            r#"{"protocol_version":1,"priority":"low","seq":11,"type":"roster_snapshot","payload":{"agentes":[{"id":"agent-1","rol":"backend","alias":"Topo","funcion":"Excava la infraestructura.","nivel":2,"tools":["fs_read","fs_write"],"mcp":[{"name":"obscura","state":"apagado"}]}],"mcp_servers":[{"id":"s1","name":"obscura","tools":37,"state":"apagado"}]}}"#,
+        );
+        match msg {
+            BunMessage::RosterSnapshot { agentes, mcp_servers } => {
+                assert_eq!(agentes.len(), 1);
+                let a = &agentes[0];
+                assert_eq!(a.id, "agent-1");
+                assert_eq!(a.rol, "backend");
+                assert_eq!(a.alias, "Topo");
+                assert!(a.funcion.contains("infraestructura"));
+                assert_eq!(a.nivel, 2);
+                assert_eq!(a.tools, vec!["fs_read".to_string(), "fs_write".to_string()]);
+                assert_eq!(a.mcp.len(), 1);
+                assert_eq!(a.mcp[0].name, "obscura");
+                assert_eq!(a.mcp[0].state, "apagado");
+                assert_eq!(mcp_servers.len(), 1);
+                assert_eq!(mcp_servers[0].tools, 37);
+            }
+            other => panic!("esperaba roster_snapshot, llegó {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_roster_agent_without_mcp_or_function_still_parses() {
+        // Un subagente efímero no tiene MCP ni descripción larga. La ausencia no
+        // puede costar el snapshot entero.
+        let msg = parse(
+            r#"{"protocol_version":1,"priority":"low","seq":12,"type":"roster_snapshot","payload":{"agentes":[{"id":"h1","rol":"scout","alias":"Hormiga-01","nivel":5,"tools":[]}]}}"#,
+        );
+        match msg {
+            BunMessage::RosterSnapshot { agentes, mcp_servers } => {
+                let a = &agentes[0];
+                assert_eq!(a.alias, "Hormiga-01");
+                assert_eq!(a.funcion, "");
+                assert!(a.mcp.is_empty());
+                assert!(mcp_servers.is_empty());
+            }
+            other => panic!("esperaba roster_snapshot, llegó {other:?}"),
+        }
+    }
+
+    // ── Preexistentes ──────────────────────────────────────────────────────
 
     #[test]
     fn flatten_envelope_preserves_routing_metadata() {

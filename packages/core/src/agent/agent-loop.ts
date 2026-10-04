@@ -45,6 +45,7 @@ import {
   type RepeatTrackerSnapshot,
 } from "./run-store"
 import { broadcastThinking } from "../gateway/task-streaming"
+import { emitToolCall, emitToolDone, emitWaiting, summarizeArgs } from "./tool-telemetry"
 
 /**
  * Execute a tool by name from the available tools list
@@ -929,6 +930,16 @@ export async function* runAgent(
       })
       if (jevParallel) {
         runConcurrently = jevParallel.parallel
+        // When the batch cannot be parallelized, the agent is not idle — it is
+        // waiting on the oracle. Telling the TUI *why* is the difference between
+        // "stuck" and "running serially because two tools touch the same file".
+        if (!runConcurrently) {
+          emitWaiting({
+            agentId: opts.agentId,
+            reason: "jev_secuencial",
+            taskId: opts.threadId,
+          })
+        }
         if (jevParallel.decision) {
           log.info(`[agent-loop] Jev parallel=${runConcurrently} calls=${approvedTools.length} (${jevParallel.decision.latencyMs}ms)`)
           emitJevDecision({
@@ -981,6 +992,20 @@ export async function* runAgent(
         await opts.onStep({ type: "tool_call", toolName, message: `Executing: \`${toolName}\` (parallel)` })
       }
 
+      // ── Telemetría para la TUI ───────────────────────────────────────────
+      // `executeOne` es el único camino por el que pasan tanto el lote
+      // paralelo como el secuencial, así que es el punto correcto para
+      // anunciar la llamada y su cierre. Antes no había nada: el TUI recibía
+      // `current_action: "ejecutando <phase>"`, un texto que no decía qué
+      // herramienta corría ni cuánto tardar.
+      emitToolCall({
+        agentId: opts.agentId,
+        tool: toolName,
+        callId: tc.id,
+        argsSummary: summarizeArgs(tc.function.arguments),
+        taskId: opts.threadId,
+      })
+
       const toolResultJS = await executeTool(ctx.allTools, toolName, tc.function.arguments, {
         user_id: opts.userId,
         thread_id: opts.threadId,
@@ -996,6 +1021,16 @@ export async function* runAgent(
         && "error" in toolResultJS
         && (toolResultJS as any).error
       )
+
+      emitToolDone({
+        agentId: opts.agentId,
+        tool: toolName,
+        callId: tc.id,
+        ok: !toolError,
+        durationMs: toolMs,
+        resultSummary: summarizeArgs(toolResultLLM),
+        taskId: opts.threadId,
+      })
 
       // G9: the tool call and its outcome, chained to the decision that asked
       // for it. toolStats() reads these back as whole-history aggregates.

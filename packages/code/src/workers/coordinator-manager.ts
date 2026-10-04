@@ -67,7 +67,7 @@ const COORDINATOR_NAMES: PhaseName[] = [
   "backend", "frontend",
   "data_scientist",
   "security", "test", "devops",
-  "verifier", "reviewer",
+  "quality",
 ]
 
 /** Circuit breaker: stop auto-restarting a coordinator after this many consecutive crashes. */
@@ -97,8 +97,7 @@ function spawnCoordinatorWorker(name: PhaseName): Bun.Worker {
     case "security":        return new (Worker as any)(new URL("./security.worker.ts",        import.meta.url), { smol }) as Bun.Worker
     case "test":            return new (Worker as any)(new URL("./test.worker.ts",            import.meta.url), { smol }) as Bun.Worker
     case "devops":          return new (Worker as any)(new URL("./devops.worker.ts",          import.meta.url), { smol }) as Bun.Worker
-    case "verifier":        return new (Worker as any)(new URL("./verifier.worker.ts",        import.meta.url), { smol }) as Bun.Worker
-    case "reviewer":        return new (Worker as any)(new URL("./reviewer.worker.ts",        import.meta.url), { smol }) as Bun.Worker
+    case "quality":         return new (Worker as any)(new URL("./quality.worker.ts",         import.meta.url), { smol }) as Bun.Worker
     case "librarian":       return new (Worker as any)(new URL("./librarian.worker.ts",       import.meta.url), { smol }) as Bun.Worker
     case "forensic":        return new (Worker as any)(new URL("./forensic.worker.ts",        import.meta.url), { smol }) as Bun.Worker
     default:                throw new Error(`Unknown coordinator: ${name}`)
@@ -1305,8 +1304,8 @@ export class CoordinatorManager extends CoordinatorBase {
       for (const phaseDef of levelPhases) {
         const phase = phaseDef.coordinator
         const workspace = this.getTaskWorkspace(this.activeTaskId)
-        // Override model to most capable for reviewer
-        const effectiveModel = phase === "reviewer" ? (await this.getHighestCapabilityModel()) || model : model
+        // Override model to most capable for the quality gate
+const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityModel()) || model : model
         const task: CoordinatorTask = {
           taskId: this.activeTaskId || "current",
           phaseId: this.scribe.createPhase(this.activeTaskId || "current", phase, phase),
@@ -1482,14 +1481,16 @@ export class CoordinatorManager extends CoordinatorBase {
           broadcastPhaseEnd(this.activeTaskId, phase, phase, result.durationMs)
         }
 
-        // Post-reviewer: activate Librarian if approved
-        if (phase === "reviewer") {
+        // Post-quality: activate Librarian if approved
+        if (phase === "quality") {
           const structuredVerdict = result.structuredDecision as unknown as ReviewVerdict | undefined
           const verdict = structuredVerdict?.verdict ?? this.parseReviewerVerdict(result.narrativeEntry)
           if (structuredVerdict) {
             const unmet = structuredVerdict.criteria.filter((c) => !c.met)
             this.onIpcEvent?.("review_verdict_update", {
-              reviewer: "reviewer",
+              // The roster shows this as the alias; the internal name stays
+              // `quality` so the gate reads as one agent, not two.
+              reviewer: "quality",
               status: structuredVerdict.verdict,
               summary: structuredVerdict.reasons
                 || (unmet.length > 0
@@ -2001,8 +2002,10 @@ export class CoordinatorManager extends CoordinatorBase {
         architecture:    ["pattern", "contract"],
         security:        ["antipattern"],
         test:            ["forensic_lesson"],
-        verifier:        ["contract", "forensic_lesson"],
-        reviewer:        ["pattern", "antipattern", "contract", "convention", "forensic_lesson"],
+        // El gate fused hereda lo que ambos filtraban: verifica (contract,
+        // forensic_lesson) y además juzga calidad (pattern, antipattern,
+        // convention).
+        quality:         ["pattern", "antipattern", "contract", "convention", "forensic_lesson"],
       }
       const typeFilter = memoryTypeFilter[phase]
       const query = `${taskDescription} ${phase}`.toLowerCase()
@@ -2042,7 +2045,7 @@ export class CoordinatorManager extends CoordinatorBase {
     // assumptions the blackboard can't reconcile after the fact; seeing what was
     // considered and discarded (`options`/`context`) before they write is what
     // catches the conflict before it becomes a bug.
-    const traceReaders: PhaseName[] = ["backend", "frontend", "data_scientist", "reviewer", "verifier"]
+    const traceReaders: PhaseName[] = ["backend", "frontend", "data_scientist", "quality"]
     if (traceReaders.includes(phase)) {
       try {
         const activeDecisions = this.scribe.readDecisions("active").slice(0, 5)

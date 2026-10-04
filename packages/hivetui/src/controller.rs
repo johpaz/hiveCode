@@ -17,7 +17,7 @@ use crate::{
     renderer::layout_areas,
     term::Rect,
     ui::{split_panes, Axis, Constraint, HitAction, SplitPane},
-    widgets::{command_popup, dashboard_layout, history, tabbar},
+    widgets::{command_popup, dashboard_layout, history, tabbar, taller_layout},
 };
 
 pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
@@ -261,13 +261,13 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
     // teclear "hola" en modo Auto envía /halt.
     let typing = accepts_text(state);
 
-    if state.active_tab == TabId::Dashboard
+    if state.active_tab == TabId::Swarm
         && handle_dashboard_key(state, key.code, key.modifiers, typing)
     {
         return false;
     }
 
-    if state.active_tab != TabId::Dashboard
+    if state.active_tab != TabId::Swarm
         && handle_immersive_layout_key(state, key.code, key.modifiers, typing)
     {
         return false;
@@ -367,11 +367,15 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                                 state.active_tab = tab;
                             }
                         }
+                        // Cambiar de vista a mano rompe el auto-routing: el
+                        // usuario acaba de decir dónde quiere estar.
+                        state.tab_locked = true;
+                        state.taller_scroll = 0;
                         return false;
                     }
                     "/welcome" => {
                         state.show_welcome = true;
-                        state.active_tab = TabId::Focus;
+                        state.active_tab = TabId::Mesa;
                         return false;
                     }
                     _ => {
@@ -496,10 +500,10 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
             state.history_hscroll = state.history_hscroll.saturating_add(2).min(5000);
             persist_hscroll_for_selected(state);
         }
-        (_, KeyCode::PageUp) if state.active_tab == TabId::Focus && !state.history_nav_mode => {
+        (_, KeyCode::PageUp) if state.active_tab == TabId::Mesa && !state.history_nav_mode => {
             state.history.scroll = state.history.scroll.saturating_sub(5);
         }
-        (_, KeyCode::PageDown) if state.active_tab == TabId::Focus && !state.history_nav_mode => {
+        (_, KeyCode::PageDown) if state.active_tab == TabId::Mesa && !state.history_nav_mode => {
             state.history.scroll = state.history.scroll.saturating_add(5);
         }
         (_, KeyCode::PageUp) if state.active_tab == TabId::Plan => {
@@ -508,10 +512,10 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         (_, KeyCode::PageDown) if state.active_tab == TabId::Plan => {
             state.plan.scroll = state.plan.scroll.saturating_add(5);
         }
-        (_, KeyCode::PageUp) if state.active_tab == TabId::Dashboard => {
+        (_, KeyCode::PageUp) if state.active_tab == TabId::Swarm => {
             state.dashboard_scroll = state.dashboard_scroll.saturating_sub(8);
         }
-        (_, KeyCode::PageDown) if state.active_tab == TabId::Dashboard => {
+        (_, KeyCode::PageDown) if state.active_tab == TabId::Swarm => {
             state.dashboard_scroll = state.dashboard_scroll.saturating_add(8);
         }
         (_, KeyCode::PageUp) => {
@@ -570,10 +574,10 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         (_, KeyCode::Down) if state.active_tab == TabId::Plan && state.input.value().is_empty() => {
             state.plan.scroll += 1;
         }
-        (_, KeyCode::Up) if state.active_tab == TabId::Dashboard && state.input.value().is_empty() => {
+        (_, KeyCode::Up) if state.active_tab == TabId::Swarm && state.input.value().is_empty() => {
             state.dashboard_scroll = state.dashboard_scroll.saturating_sub(1);
         }
-        (_, KeyCode::Down) if state.active_tab == TabId::Dashboard && state.input.value().is_empty() => {
+        (_, KeyCode::Down) if state.active_tab == TabId::Swarm && state.input.value().is_empty() => {
             state.dashboard_scroll += 1;
         }
         (_, KeyCode::Up) if !state.history_nav_mode => state.input.history_up(),
@@ -819,6 +823,28 @@ fn handle_immersive_layout_key(
         return false;
     }
     match code {
+        // ── TALLER: `←/→` cambian de sección, `↑/↓` hacen scroll ──────────
+        // Antes de ser un tab, esto eran las flechas de los checkpoints. Ahora la
+        // sección se recorre dentro de su propia vista, que es lo que el usuario
+        // espera al ver seis pestañas en el tabbar.
+        KeyCode::Left | KeyCode::Right if state.active_tab == TabId::Taller => {
+            state.taller_section = if code == KeyCode::Right {
+                state.taller_section.next()
+            } else {
+                state.taller_section.prev()
+            };
+            state.taller_scroll = 0;
+            true
+        }
+        KeyCode::Up | KeyCode::Down if state.active_tab == TabId::Taller => {
+            let delta: isize = if code == KeyCode::Down { 1 } else { -1 };
+            // El tope lo pone el número de filas de la sección: más allá, el
+            // scroll no movería nada y el usuario creería que la tecla falló.
+            let total = taller_layout::section_rows(state) as isize;
+            let next = state.taller_scroll as isize + delta;
+            state.taller_scroll = next.clamp(0, (total - 1).max(0)) as usize;
+            true
+        }
         KeyCode::Left => {
             move_checkpoint_selection(state, -1);
             true
@@ -916,10 +942,10 @@ fn confirm_or_send_dashboard_rollback(state: &mut AppState) {
 
 pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
     match mouse.kind {
-        MouseEventKind::ScrollUp if state.active_tab == TabId::Focus && !state.history_nav_mode => {
+        MouseEventKind::ScrollUp if state.active_tab == TabId::Mesa && !state.history_nav_mode => {
             state.history.scroll = state.history.scroll.saturating_sub(3);
         }
-        MouseEventKind::ScrollDown if state.active_tab == TabId::Focus && !state.history_nav_mode => {
+        MouseEventKind::ScrollDown if state.active_tab == TabId::Mesa && !state.history_nav_mode => {
             state.history.scroll = state.history.scroll.saturating_add(3);
         }
         MouseEventKind::ScrollUp if state.active_tab == TabId::Plan => {
@@ -948,10 +974,10 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
         MouseEventKind::ScrollDown if state.active_tab == TabId::Review => {
             state.adrs.scroll = state.adrs.scroll.saturating_add(3);
         }
-        MouseEventKind::ScrollUp if state.active_tab == TabId::Dashboard => {
+        MouseEventKind::ScrollUp if state.active_tab == TabId::Swarm => {
             state.dashboard_scroll = state.dashboard_scroll.saturating_sub(3);
         }
-        MouseEventKind::ScrollDown if state.active_tab == TabId::Dashboard => {
+        MouseEventKind::ScrollDown if state.active_tab == TabId::Swarm => {
             state.dashboard_scroll = state.dashboard_scroll.saturating_add(3);
         }
         MouseEventKind::ScrollUp => {
@@ -969,7 +995,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                     return;
                 }
             }
-            if state.active_tab == TabId::Dashboard {
+            if state.active_tab == TabId::Swarm {
                 if let Some(area) = screen_rect_from_size(terminal::size().ok()) {
                     if let Some(checkpoint_idx) = dashboard_layout::checkpoint_at(state, area, mouse.column, mouse.row) {
                         state.checkpoints.selected = Some(checkpoint_idx);
@@ -992,7 +1018,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
             // Click en la fila del tabbar. El tabbar va justo debajo del header,
             // cuya altura es configurable (1-5), así que su fila se deriva del
             // layout y no de una constante.
-            if state.active_tab != TabId::Dashboard {
+            if state.active_tab != TabId::Swarm {
                 if let Some((w, h)) = terminal::size().ok() {
                     let tabbar_area = crate::term::Rect::new(
                         0,
@@ -1003,7 +1029,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                     if tabbar_area.y < h {
                         if let Some(tab) = tabbar::tab_at_col(tabbar_area, mouse.column, state) {
                             state.active_tab = tab;
-                            if tab != TabId::Focus {
+                            if tab != TabId::Mesa {
                                 state.history_nav_mode = false;
                                 state.history_hscroll = 0;
                             }
@@ -1015,7 +1041,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                 }
             }
             let history_area = content_rect_from_size(state, terminal::size().ok());
-            if state.active_tab == TabId::Focus {
+            if state.active_tab == TabId::Mesa {
                 if let Some(area) = history_area {
                     if let Some(entry_idx) = history::entry_at_y(state, area, mouse.row) {
                         persist_hscroll_for_selected(state);
@@ -1061,7 +1087,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
         }
         MouseEventKind::Down(MouseButton::Right) => {
             let history_area = content_rect_from_size(state, terminal::size().ok());
-            if state.active_tab == TabId::Focus {
+            if state.active_tab == TabId::Mesa {
                 if let Some(area) = history_area {
                     if let Some(entry_idx) = history::entry_at_y(state, area, mouse.row) {
                         persist_hscroll_for_selected(state);
@@ -1087,7 +1113,7 @@ fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
                 return false;
             };
             state.active_tab = tab;
-            if tab != TabId::Focus {
+            if tab != TabId::Mesa {
                 state.history_nav_mode = false;
                 state.history_hscroll = 0;
             }
@@ -1371,6 +1397,10 @@ mod tests {
                 timestamp: None,
             })
             .collect();
+        // La tab por defecto pasó a ser ENJAMBRE, donde la rueda desplaza el
+        // panel del enjambre y no el historial. Estos tests fijan MESA
+        // explícitamente porque lo que prueban es el scroll del chat.
+        state.active_tab = TabId::Mesa;
         state
     }
 
@@ -1839,7 +1869,7 @@ mod tests {
     #[test]
     fn dashboard_scroll_uses_wheel_without_entering_history_navigation() {
         let mut state = mk_state_with_entries(3);
-        state.active_tab = TabId::Dashboard;
+        state.active_tab = TabId::Swarm;
         state.history_nav_mode = true;
         state.history.selected = Some(1);
 
@@ -1886,7 +1916,7 @@ mod tests {
     #[test]
     fn typing_in_dashboard_auto_mode_does_not_halt_the_swarm() {
         let mut state = mk_state_with_entries(1);
-        state.active_tab = TabId::Dashboard;
+        state.active_tab = TabId::Swarm;
         state.session.mode = ReplMode::Auto;
 
         type_str(&mut state, "hola");
@@ -1914,7 +1944,7 @@ mod tests {
     #[test]
     fn typing_in_dashboard_approval_mode_does_not_open_review_modal() {
         let mut state = mk_state_with_entries(1);
-        state.active_tab = TabId::Dashboard;
+        state.active_tab = TabId::Swarm;
         state.session.mode = ReplMode::Approval;
 
         type_str(&mut state, "arregla");
@@ -1926,7 +1956,7 @@ mod tests {
     #[test]
     fn halt_requires_a_second_confirmation() {
         let mut state = mk_state_with_entries(1);
-        state.active_tab = TabId::Dashboard;
+        state.active_tab = TabId::Swarm;
         state.session.mode = ReplMode::Auto;
 
         let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
@@ -1944,7 +1974,7 @@ mod tests {
     #[test]
     fn esc_cancels_halt_confirmation_even_while_typing() {
         let mut state = mk_state_with_entries(1);
-        state.active_tab = TabId::Dashboard;
+        state.active_tab = TabId::Swarm;
         state.session.mode = ReplMode::Auto;
 
         let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
@@ -1959,7 +1989,7 @@ mod tests {
 
     #[test]
     fn arrows_move_the_cursor_when_there_is_text_to_edit() {
-        for tab in [TabId::Plan, TabId::Code, TabId::Review, TabId::Dashboard] {
+        for tab in [TabId::Plan, TabId::Code, TabId::Review, TabId::Swarm] {
             let mut state = mk_state_with_entries(1);
             state.active_tab = tab;
             type_str(&mut state, "abc");
@@ -2288,11 +2318,12 @@ Notas y Sistema
 
 Vistas (tabs)
 ═════════════
-1 / /layout focus      Vista principal de chat
-2 / /layout plan       Razonamiento + mapa de archivos
-3 / /layout code       Cambios en código + workers
-4 / /layout review     Revisión + aprobación
-5 / /layout dashboard  Panel de todos los workers
+1 / /layout enjambre   El enjambre en vivo: tool calls y esperas
+2 / /layout plan       Fases del plan y de quién depende cada una
+3 / /layout mesa        Chat + narración + razonamiento
+4 / /layout codigo      Cambios en código + workers
+5 / /layout revision    Revisión + aprobación
+6 / /layout taller      Agentes, herramientas, habilidades, MCP, registro
 /auto                  Reactivar navegación automática de layouts
 /welcome               Volver a la pantalla de bienvenida
 

@@ -18,4 +18,5 @@ pub mod review_layout;
 pub mod settings_hub;
 pub mod statusbar;
 pub mod tabbar;
+pub mod taller_layout;
 pub mod welcome;

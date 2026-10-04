@@ -131,6 +131,42 @@ export interface EventMap {
     lastSuccessAt: number | null;
     totals: { decisions: number; savedTokens: number; costUsd: number };
   } | undefined;
+  /** An agent started a tool call. Always paired with a `tool:done` of the same `callId`. */
+  "tool:call": {
+    agentId: string;
+    tool: string;
+    /** Pairs this call with its completion. */
+    callId: string;
+    argsSummary: string;
+    beeState: string;
+    taskId: string | null;
+    at: number;
+  };
+  /** A tool call finished, successfully or not. */
+  "tool:done": {
+    agentId: string;
+    tool: string;
+    callId: string;
+    ok: boolean;
+    durationMs: number;
+    resultSummary: string;
+    taskId: string | null;
+    at: number;
+  };
+  /**
+   * An agent cannot advance until something else happens.
+   *
+   * `reason` is a short label (`"jev_secuencial"`, `"subagente"`,
+   * `"dependencia"`), not a sentence — it names the cause so the UI can group
+   * waiting agents by why they are stuck.
+   */
+  "agent:waiting": {
+    agentId: string;
+    waitingFor: string[];
+    reason: string;
+    taskId: string | null;
+    at: number;
+  };
 }
 
 export type EventKey = keyof EventMap;
