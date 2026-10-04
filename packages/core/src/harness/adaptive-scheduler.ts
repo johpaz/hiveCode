@@ -98,7 +98,10 @@ export class AdaptiveScheduler {
       const ready: typeof candidates = []
       let mutatingSelected = false
       for (const candidate of candidates) {
-        const readOnly = ["scout", "verifier", "reviewer"].includes(candidate.doc.lane)
+        // El gate fused es read-only como los otros dos: verificar criteria y
+        // revisar código no escriben nada, así que varios pueden ir en paralelo
+        // sin pelearse por el workspace.
+        const readOnly = ["scout", "quality"].includes(candidate.doc.lane)
         if (!readOnly && mutatingSelected) continue
         ready.push(candidate)
         if (!readOnly) mutatingSelected = true
