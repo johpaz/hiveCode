@@ -849,6 +849,10 @@ pub enum TuiMessage {
     Ready,
     Submit { input: String },
     Rollback { checkpoint_id: String },
+    /// Continuar una tarea que quedó a medias cuando el proceso murió. Lo envía
+    /// el badge `▶ RESUME` del panel, que hasta ahora solo se dibujaba: sin este
+    /// mensaje el aviso no tenía ninguna acción detrás.
+    TaskResume { task_id: String },
     ModeChange { mode: String },
     ModalSubmit { command: String, values: std::collections::HashMap<String, String> },
     ModalCancel { command: String },

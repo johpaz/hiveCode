@@ -76,6 +76,10 @@ pub struct DashboardState {
     pub security: SecurityState,
     pub halt: HaltState,
     pub resume: Option<ResumeInfo>,
+    /// Primera pulsación arma el resume, la segunda lo envía. Reanudar una tarea
+    /// retoma su trabajo sobre el workspace, así que pasa por la misma
+    /// confirmación de dos pasos que el rollback y el halt.
+    pub resume_confirm: bool,
     pub metrics: DashboardMetrics,
     pub rollback_confirm_checkpoint: Option<String>,
     /// Detener el enjambre es tan irreversible como un rollback, así que pasa por

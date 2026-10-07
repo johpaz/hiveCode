@@ -13,10 +13,19 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     // A checkpoint left by boot-time reconciliation, distinct from ordinary
     // rollback: this one continues the task from its saved level.
     if let Some(resume) = &state.dashboard.resume {
-        let label = format!(" [▶ RESUME · {}]", resume.reason);
+        let label = if state.dashboard.resume_confirm {
+            format!(" [▶ RESUME · ↩ CONFIRMAR · {}]", resume.reason)
+        } else {
+            format!(" [▶ RESUME · ↩ CONTINUAR · {}]", resume.reason)
+        };
         let max_w = (area.w / 2).max(20) as usize;
         let label = crate::ui::truncate_cells(&label, max_w);
-        canvas.print(x, row, &label, Style::new().fg(GREEN).bold());
+        let style = if state.dashboard.resume_confirm {
+            Style::new().fg(GREEN).bold().bg(GREEN)
+        } else {
+            Style::new().fg(GREEN).bold()
+        };
+        canvas.print(x, row, &label, style);
         x += label.chars().count() as u16 + 1;
     }
 

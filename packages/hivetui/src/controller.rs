@@ -836,6 +836,13 @@ fn handle_dashboard_key(
                 state.pending_ipc.push(TuiMessage::Submit { input: "/halt".to_string() });
                 return true;
             }
+            // Una tarea interrumpida es la acción más urgente del panel, y solo
+            // se alcanza aquí con el input vacío: escribiendo, Enter sigue
+            // enviando el mensaje.
+            if state.dashboard.resume.is_some() && !state.dashboard.halt.active {
+                confirm_or_send_task_resume(state);
+                return true;
+            }
             if state.session.mode == ReplMode::Plan
                 && state.checkpoints.selected.is_none()
                 && !state.dashboard.halt.active
@@ -1010,12 +1017,35 @@ fn accepts_text(state: &AppState) -> bool {
 }
 
 fn has_pending_confirm(state: &AppState) -> bool {
-    state.dashboard.rollback_confirm_checkpoint.is_some() || state.dashboard.halt_confirm
+    state.dashboard.rollback_confirm_checkpoint.is_some()
+        || state.dashboard.halt_confirm
+        || state.dashboard.resume_confirm
 }
 
 fn clear_pending_confirm(state: &mut AppState) {
     state.dashboard.rollback_confirm_checkpoint = None;
     state.dashboard.halt_confirm = false;
+    state.dashboard.resume_confirm = false;
+}
+
+/// Primera pulsación arma el resume, la segunda lo envía.
+///
+/// El badge `▶ RESUME` existe desde la reconciliación de arranque, pero no tenía
+/// ninguna acción detrás: la tarea se quedaba pausada para siempre aunque la TUI
+/// la ofreciera. Un halt armado gana: detener el enjambre es más urgente.
+fn confirm_or_send_task_resume(state: &mut AppState) {
+    let Some(resume) = state.dashboard.resume.clone() else {
+        return;
+    };
+    if state.dashboard.resume_confirm {
+        state.dashboard.resume_confirm = false;
+        // El aviso se consumió. Si el resume falla, Bun vuelve a emitir
+        // `resume_available` y el badge reaparece.
+        state.dashboard.resume = None;
+        state.pending_ipc.push(TuiMessage::TaskResume { task_id: resume.task_id });
+    } else {
+        state.dashboard.resume_confirm = true;
+    }
 }
 
 /// Primer pulsación arma la confirmación, la segunda envía `/halt`.
@@ -1531,6 +1561,86 @@ mod tests {
         // explícitamente porque lo que prueban es el scroll del chat.
         state.active_tab = TabId::Mesa;
         state
+    }
+
+    // ── El badge ▶ RESUME por fin tiene una acción ────────────────────────────
+
+    /// Un panel de enjambre con una tarea interrumpida esperando continuar.
+    fn state_with_pending_resume() -> AppState {
+        let mut state = AppState::default();
+        state.active_tab = TabId::Swarm;
+        state.dashboard.resume = Some(crate::state::ResumeInfo {
+            task_id: "task-interrumpida".to_string(),
+            checkpoint_id: "cp-1".to_string(),
+            reason: "Interrupted at level 2".to_string(),
+        });
+        state
+    }
+
+    #[test]
+    fn the_resume_badge_sends_nothing_on_the_first_press() {
+        let mut state = state_with_pending_resume();
+
+        let handled = handle_dashboard_key(
+            &mut state,
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            false,
+        );
+
+        assert!(handled);
+        assert!(state.dashboard.resume_confirm, "the first press arms");
+        assert!(
+            state.pending_ipc.is_empty(),
+            "arming must not act: {:?}",
+            state.pending_ipc
+        );
+    }
+
+    #[test]
+    fn the_second_press_sends_the_task_resume() {
+        let mut state = state_with_pending_resume();
+        state.dashboard.resume_confirm = true;
+
+        handle_dashboard_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, false);
+
+        assert!(!state.dashboard.resume_confirm, "the confirm is consumed");
+        assert_eq!(state.pending_ipc.len(), 1, "{:?}", state.pending_ipc);
+        assert!(
+            matches!(
+                &state.pending_ipc[0],
+                TuiMessage::TaskResume { task_id } if task_id == "task-interrumpida"
+            ),
+            "expected TaskResume, got {:?}",
+            state.pending_ipc[0]
+        );
+        // The badge is consumed: leaving it up would let Enter re-arm forever.
+        assert!(state.dashboard.resume.is_none());
+    }
+
+    #[test]
+    fn enter_while_typing_still_sends_the_message_not_a_resume() {
+        let mut state = state_with_pending_resume();
+
+        // `typing: true` is what keeps Enter a "send" keystroke.
+        let handled = handle_dashboard_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, true);
+
+        assert!(!handled, "the key falls through to the input");
+        assert!(!state.dashboard.resume_confirm);
+        assert!(state.pending_ipc.is_empty());
+    }
+
+    #[test]
+    fn escape_cancels_an_armed_resume() {
+        let mut state = state_with_pending_resume();
+        state.dashboard.resume_confirm = true;
+
+        handle_dashboard_key(&mut state, KeyCode::Esc, KeyModifiers::NONE, false);
+
+        assert!(!state.dashboard.resume_confirm);
+        assert!(state.pending_ipc.is_empty());
+        // The offer survives: cancelling must not throw away the task.
+        assert!(state.dashboard.resume.is_some());
     }
 
     // ── Provider + API key desde el hub de settings ────────────────────────────

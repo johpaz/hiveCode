@@ -156,6 +156,11 @@ export interface TuiCallbacks {
   onSubmit:   (input: string) => Promise<{ output: string; newMode?: string; newProvider?: string; newModel?: string; newTokenCount?: number }>
   onModeChange?:  (mode: string) => void
   onExit?:        () => void
+  /**
+   * Continue a task the previous process left mid-flight. Absent in modes that
+   * have no runtime behind them, and the badge says so rather than failing.
+   */
+  onTaskResume?:  (taskId: string) => Promise<void>
   /** Mutable ref populated by launchTui so callers can suspend/resume/send/showModal */
   tuiControl?:    {
     suspend: (() => Promise<void>) | null
@@ -599,6 +604,27 @@ async function handleTuiMessage(
       } catch (err) {
         send({ type: "history_append", role: "system", content: `(×ᴗ×) rollback falló: ${(err as Error).message}` })
         send({ type: "status", running: false, msg: "Rollback falló" })
+      }
+      break
+    }
+
+    case "task_resume": {
+      // El badge `▶ RESUME` ya hizo la confirmación en la TUI; aquí solo se
+      // ejecuta. El trabajo es largo, así que el callback suspende la TUI.
+      const taskId = (msg as { type: string; task_id?: string }).task_id
+      if (!taskId) {
+        send({ type: "history_append", role: "system", content: "▶ Resume sin task_id" })
+        break
+      }
+      if (!callbacks.onTaskResume) {
+        send({ type: "history_append", role: "system", content: "▶ Resume no disponible en este modo" })
+        break
+      }
+      try {
+        await callbacks.onTaskResume(taskId)
+      } catch (err) {
+        send({ type: "history_append", role: "system", content: `(×ᴗ×) resume falló: ${(err as Error).message}` })
+        send({ type: "status", running: false, msg: "Resume falló" })
       }
       break
     }

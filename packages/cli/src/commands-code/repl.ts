@@ -19,6 +19,7 @@ import {
 import { loadInitialState, saveMode } from "./repl-state"
 import type { ReplMode } from "./repl-state"
 import { parseInternalCommand, getCtx } from "@johpaz/hivecode-code/coordinator/command-parser"
+import { shortId } from "@johpaz/hivecode-core/storage/ids"
 import type { MenuItem } from "@johpaz/hivecode-code/coordinator/command-parser"
 import { plan as runPlan } from "./plan"
 import { run as runTask } from "./run"
@@ -712,6 +713,40 @@ export async function repl(): Promise<void> {
       onModeChange(mode) {
         currentMode = mode as ReplMode
         void saveMode(currentMode)
+      },
+
+      /**
+       * The `▶ RESUME` badge finally has something behind it.
+       *
+       * `resumeTask` re-enters the phase loop, so it runs exactly like a task:
+       * the TUI releases the terminal for the duration and takes it back after,
+       * and progress reaches the panels over IPC the whole time.
+       */
+      async onTaskResume(taskId: string) {
+        const sessionBefore = manager.getSessionId()
+        _tuiIpcSend?.({ type: "history_append", role: "system", content: `▶ Reanudando tarea ${shortId(taskId)}…` })
+        await tuiControl.suspend?.()
+        let resumed = false
+        try {
+          resumed = await manager.resumeTask(taskId)
+        } finally {
+          await tuiControl.resume?.()
+        }
+        // Boot-time reconciliation sweeps every interrupted task, not just this
+        // project's — so resuming one can adopt its own session. `switchSession`
+        // already cleared the TUI's panels; refill them or the transcript is
+        // blank until the next message.
+        const sessionAfter = manager.getSessionId()
+        if (sessionAfter && sessionAfter !== sessionBefore) {
+          await tuiControl.refreshSession?.(sessionAfter)
+        }
+        _tuiIpcSend?.({
+          type: "history_append",
+          role: "system",
+          content: resumed
+            ? `✓ Tarea ${shortId(taskId)} completada.`
+            : `Tarea ${shortId(taskId)} pausada de nuevo — revisa el panel para reintentarlo.`,
+        })
       },
 
       onExit() {

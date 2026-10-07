@@ -325,6 +325,11 @@ export type TuiMessage =
   | { type: "suspended" }
   | { type: "exit" }
   | { type: "rollback"; checkpoint_id: string }
+  /**
+   * Continuar una tarea que quedó a medias. Lo emite el badge `▶ RESUME` del
+   * panel, que hasta ahora solo se dibujaba.
+   */
+  | { type: "task_resume"; task_id: string }
   | { type: "request_settings" }
   /**
    * Activar el provider que el usuario ya eligió en el hub de settings de la TUI,
