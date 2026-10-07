@@ -83,6 +83,12 @@ export type BunMessage =
   | { type: "error"; message: string }
   | { type: "status";          running: boolean; msg: string }
   | { type: "state_update";    new_mode?: string; new_provider?: string; new_model?: string; new_token_count?: number }
+  /**
+   * The active session changed — it was created lazily on the first message, or
+   * switched with `/session resume`. The TUI clears the transcript and per-session
+   * panels, then Bun re-sends the snapshot for the new id.
+   */
+  | { type: "session_changed"; session_id: string }
   | ({ type: "worker_update"; worker: string; phase: string; status: string; display_name?: string; activity?: string; task_id?: string; token_count?: number } & WorkerDashboardFields)
   | { type: "quick_menu";      items: { label: string; cmd: string; desc: string }[] }
   | ({ type: "activity_update"; coordinator: string; phase: string; status: string; display_name?: string; activity?: string; task_id?: string; token_count?: number } & WorkerDashboardFields)
@@ -336,6 +342,9 @@ export type TuiMessage =
 const CRITICAL_TYPES = new Set<BunMessage["type"]>([
   "init", "conflict_alert", "conflict_resolved", "file_risk_update", "forensic_alert",
   "security_status_update", "halt_state", "review_verdict_update", "resume_available",
+  // Drives a full transcript+panel reset, so it must not sit behind a backlog of
+  // normal-priority history_append frames.
+  "session_changed",
 ])
 const LOW_TYPES = new Set<BunMessage["type"]>([
   "log_entry", "checkpoint_created", "checkpoint_rollback", "context_update",

@@ -378,22 +378,8 @@ export async function repl(): Promise<void> {
   })
 
   await manager.startAll()
-  const sessionId = manager.openSession()
-  logger.info(`[repl] Session started: ${sessionId}`)
-
-  // Reconcile code index on startup: detect external edits and new files
-  const cwd = process.cwd()
-  reconcileCodeIndex(sessionId, cwd).catch((err) => {
-    logger.debug(`[repl] Code index reconciliation failed: ${(err as Error).message}`)
-  })
-
-  // Ensure project context exists for this session (async, non-blocking)
-  if (!getProjectContext(sessionId)) {
-    buildProjectContext(sessionId, cwd).catch((err) => {
-      logger.debug(`[repl] Project context build failed: ${(err as Error).message}`)
-    })
-    logger.info(`[repl] Project context build started for session ${sessionId}`)
-  }
+  // No session yet: it is created on the user's first message, so opening the
+  // TUI and closing it leaves nothing in the session picker.
 
   const activeWorkers = await listEnabledCoordinatorNames()
 
@@ -702,7 +688,9 @@ export async function repl(): Promise<void> {
       initialModel:    init.model,
       projectName:     path.basename(init.projectPath),
       projectPath:     init.projectPath,
-      sessionId,
+      // Empty until the first message creates the session; `session_changed`
+      // then updates the TUI in place.
+      sessionId:       manager.getSessionId() ?? "",
       version:         VERSION,
       taskCount:       init.taskCount,
       tokenCount:      init.tokenCount,

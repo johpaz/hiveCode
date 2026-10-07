@@ -170,7 +170,7 @@ describe("IPC contract: priority routing", () => {
     const mustBeCritical: BunMessage["type"][] = [
       "init", "conflict_alert", "conflict_resolved", "file_risk_update",
       "forensic_alert", "security_status_update", "halt_state",
-      "review_verdict_update", "resume_available",
+      "review_verdict_update", "resume_available", "session_changed",
     ]
     for (const type of mustBeCritical) {
       expect(rustBun, `Rust must handle critical message "${type}"`).toContain(type)

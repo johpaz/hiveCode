@@ -122,6 +122,12 @@ pub enum BunMessage {
         new_model: Option<String>,
         new_token_count: Option<u64>,
     },
+    /// La sesión activa cambió: se creó lazy al primer mensaje, o se cambió con
+    /// `/session resume`. La TUI limpia la transcripción y los paneles por sesión;
+    /// Bun reenvía después el snapshot de la nueva id.
+    SessionChanged {
+        session_id: String,
+    },
 
     // ── Workers y coordinador ──────────────────────────────────────────────────
     WorkerUpdate {

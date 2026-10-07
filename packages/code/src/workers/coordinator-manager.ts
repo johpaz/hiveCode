@@ -32,8 +32,8 @@ import { checkAutomaticInterruption } from "../modes/interruptions"
 import { broadcastNarrative, broadcastPhase, broadcastMode, broadcastPhaseStart, broadcastPhaseEnd, broadcastTaskEnd, broadcastThinking } from "@johpaz/hivecode-core/gateway/task-streaming"
 import { validateCommand } from "@johpaz/hivecode-core/tools/code/command-validator"
 import { incrementTaskCounter, shouldRunReflector, runReflector, startReflectorCron, stopReflectorCron } from "../agent/reflector"
-import { updateFileIndex } from "../agent/code-indexer"
-import { getProjectContext } from "../agent/context-retriever"
+import { updateFileIndex, reconcileCodeIndex } from "../agent/code-indexer"
+import { getProjectContext, buildProjectContext } from "../agent/context-retriever"
 import { existsSync } from "node:fs"
 import { isAbsolute, relative, resolve } from "node:path"
 import { fileURLToPath } from "@johpaz/hivecode-core/gateway/helpers/path"
@@ -252,20 +252,55 @@ export class CoordinatorManager extends CoordinatorBase {
     })
   }
 
-  /** Create a session at TUI startup — one session per TUI lifecycle */
-  openSession(): string {
-    this.activeSessionId = this.scribe.createSession(process.cwd())
-    // Wire all shared subsystems against HiveDB-backed session state.
-    const sessionState = { sessionId: this.activeSessionId }
-    // Use a combined emitter: gateway broadcast + optional TUI socket callback
-    const gatewayIpc = makeGatewayEmitter(this.activeSessionId)
+  /**
+   * Wire every session-scoped subsystem against `sessionId`.
+   *
+   * This is the ONLY place session wiring happens — the first task of a fresh
+   * process and an explicit `/session resume` both route through here, so they
+   * cannot drift apart in which subsystems get re-initialised.
+   */
+  private activateSession(sessionId: string, projectPath: string): void {
+    this.activeSessionId = sessionId
+    this.initSubsystems({ sessionId }, sessionId, this.makeSessionIpc(sessionId))
+    this.loadProjectAdrs(projectPath)
+    // Index the project in the background: detect external edits and new files,
+    // then build the global project context the agents are primed with.
+    void reconcileCodeIndex(sessionId, projectPath).then(() => {
+      if (!getProjectContext(sessionId)) {
+        return buildProjectContext(sessionId, projectPath)
+      }
+    }).catch((err) => {
+      log.debug(`[coordinator-manager] Project indexing failed: ${(err as Error).message}`)
+    })
+  }
+
+  /** Combined emitter: gateway broadcast plus the optional TUI socket callback. */
+  private makeSessionIpc(sessionId: string) {
+    const gatewayIpc = makeGatewayEmitter(sessionId)
     const onIpcEvent = this.onIpcEvent
-    const ipc = onIpcEvent
+    return onIpcEvent
       ? { emit(event: string, payload: unknown) { gatewayIpc.emit(event, payload); onIpcEvent(event, payload) } }
       : gatewayIpc
-    this.initSubsystems(sessionState, this.activeSessionId, ipc)
-    this.loadProjectAdrs(process.cwd())
-    return this.activeSessionId
+  }
+
+  /**
+   * The session for this run, created on the user's first message.
+   *
+   * Deliberately lazy: opening the TUI and never typing must not litter the
+   * session picker with nameless rows. The TUI starts with an empty session_id
+   * and is told the real one via `session_changed` the moment it exists.
+   */
+  private ensureSession(): string {
+    if (this.activeSessionId) return this.activeSessionId
+    const projectPath = process.cwd()
+    const sessionId = this.scribe.createSession(projectPath)
+    log.info(`[coordinator-manager] Session started lazily: ${sessionId}`)
+    this.activateSession(sessionId, projectPath)
+    // The TUI started with an empty session_id; tell it the real one. There is no
+    // snapshot to re-send — this session was born empty and its first turn is
+    // already streaming.
+    this.onIpcEvent?.("session_changed", { session_id: sessionId })
+    return sessionId
   }
 
   /** Close the session when TUI exits */
@@ -478,13 +513,8 @@ export class CoordinatorManager extends CoordinatorBase {
   ): Promise<void> {
     mode = mode ?? getMode()
 
-    // Ensure we have a session (created at TUI startup via openSession(), fallback here)
-    if (!this.activeSessionId) {
-      this.activeSessionId = this.scribe.createSession(process.cwd())
-      const ipc = makeGatewayEmitter(this.activeSessionId)
-      this.initSubsystems({ sessionId: this.activeSessionId }, this.activeSessionId, ipc)
-      this.loadProjectAdrs(process.cwd())
-    }
+    // No session exists until the user actually says something.
+    this.ensureSession()
 
     // Create a turn for this user message — closed after we have the agent response
     const turnId = this.scribe.createTurn(this.activeSessionId, description)

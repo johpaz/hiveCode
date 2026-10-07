@@ -165,6 +165,7 @@ fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
         BunMessage::HistoryAppend { .. } => "history_append",
         BunMessage::Status { .. } => "status",
         BunMessage::StateUpdate { .. } => "state_update",
+        BunMessage::SessionChanged { .. } => "session_changed",
         BunMessage::WorkerUpdate { .. } => "worker_update",
         BunMessage::ActivityUpdate { .. } => "activity_update",
         BunMessage::DashboardSnapshot { .. } => "dashboard_snapshot",
@@ -657,6 +658,21 @@ impl AppState {
                 if let Some(p) = new_provider { self.session.provider = p; }
                 if let Some(m) = new_model { self.session.model = m; }
                 if let Some(t) = new_token_count { self.session.token_count = t; }
+            }
+            BunMessage::SessionChanged { session_id } => {
+                // La sesión activa cambió (creada lazy al primer mensaje, o
+                // cambiada con `/session resume`). Todo lo que cuelga de la
+                // sesión anterior se suelta; Bun reenvía el snapshot de la
+                // nueva justo después de este mensaje.
+                self.history = Default::default();
+                self.checkpoints = Default::default();
+                self.tasks = Default::default();
+                self.conflicts = Default::default();
+                self.thought = Default::default();
+                self.diff = Default::default();
+                self.plan = Default::default();
+                self.dashboard.resume = None;
+                self.session.session_id = session_id;
             }
 
             // ── Workers ────────────────────────────────────────────────────────
@@ -1743,6 +1759,54 @@ mod tests {
         });
 
         assert_eq!(state.session.token_count, 42_000);
+    }
+
+    #[test]
+    fn session_changed_adopts_the_new_id_and_drops_the_previous_transcript() {
+        let mut state = AppState::default();
+
+        // A session's worth of state, as if we had been talking in it.
+        state.apply_message(BunMessage::Init {
+            mode: Some("approval".to_string()),
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-5".to_string()),
+            project_name: Some("mi-app".to_string()),
+            project_path: Some("/tmp/mi-app".to_string()),
+            session_id: "old-session-1".to_string(),
+            version: Some("0.1.0".to_string()),
+            task_count: Some(0),
+            token_count: Some(0),
+            workers: vec![],
+        });
+        for (i, content) in ["hola", "qué tal", "hazme un test"].iter().enumerate() {
+            state.apply_message(BunMessage::HistoryAppend {
+                role: if i % 2 == 0 { "user".to_string() } else { "assistant".to_string() },
+                content: content.to_string(),
+                content_type: None,
+                agent: None,
+                timestamp: None,
+            });
+        }
+        assert_eq!(state.history.entries.len(), 3);
+        assert_eq!(state.session.session_id, "old-session-1");
+
+        state.apply_message(BunMessage::SessionChanged { session_id: "new-session-2".to_string() });
+
+        // The id moves; the transcript of the previous session does not survive.
+        assert_eq!(state.session.session_id, "new-session-2");
+        assert!(state.history.entries.is_empty());
+    }
+
+    #[test]
+    fn session_changed_preserves_the_chosen_mode() {
+        let mut state = AppState::default();
+        state.session.mode = ReplMode::Auto;
+
+        state.apply_message(BunMessage::SessionChanged { session_id: "s-1".to_string() });
+
+        // Switching sessions is not a mode change — the user's choice stands.
+        assert_eq!(state.session.mode, ReplMode::Auto);
+        assert_eq!(state.session.session_id, "s-1");
     }
 
     #[test]
