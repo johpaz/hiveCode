@@ -1,0 +1,145 @@
+/**
+ * Session naming — a session's display name is its user's request.
+ *
+ * `Scribe.createTurn` stamps a provisional title (the first user message,
+ * truncated) so a session is never nameless in the picker. This module refines
+ * that provisional into a short title with one cheap background LLM call, so
+ * the picker reads "arregla el login OAuth" instead of a 120-character wall
+ * of text.
+ *
+ * The guard is stateless and restart-safe: the namer only writes while the
+ * stored title is still the provisional one — byte-for-byte
+ * `firstTurn.user_message.slice(0, 120)`. Once an LLM title lands, the
+ * comparison fails and no later task renames the session. If the call fails,
+ * the provisional survives and the next task retries.
+ */
+import { col, updateDoc } from "@johpaz/hivecode-core/storage/hive"
+import type { AgentDoc, CodeConfigDoc, CodeSessionDoc, CodeTurnDoc } from "@johpaz/hivecode-core/storage/collections"
+import { fromIndexable } from "@johpaz/hivecode-core/storage/hive"
+import { getHiveDbPath } from "@johpaz/hivecode-core/storage/hivedb"
+import { callLLM, resolveProviderConfig } from "@johpaz/hivecode-core/agent/llm-client"
+import { logger } from "@johpaz/hivecode-core/utils/logger"
+import { PROVISIONAL_TITLE_LIMIT } from "./scribe"
+
+const log = logger.child("session-titles")
+
+/** A title is a line, not a paragraph. */
+const MAX_TITLE_CHARS = 80
+
+/**
+ * `findBy` needs a previous createIndex; the calls are idempotent (bootstrap.ts
+ * runs the same ones on every boot), so this is safe on a fresh database and a
+ * no-op on a bootstrapped one. Memoized per resolved DB path, so a test that
+ * repoints HIVE_DB_PATH at a new database does not inherit the memo.
+ */
+let indexesReady: Promise<void> | null = null
+let indexesPath: string | null = null
+
+async function ensureIndexes(): Promise<void> {
+  const dbPath = getHiveDbPath()
+  if (indexesReady && indexesPath === dbPath) return indexesReady
+  indexesPath = dbPath
+  indexesReady = (async () => {
+    await (await (await col<CodeTurnDoc>("codeTurns")).createIndex("session_id"))
+    await (await (await col<AgentDoc>("agents")).createIndex("role"))
+  })().catch((err) => {
+    indexesReady = null
+    indexesPath = null
+    throw err
+  })
+  return indexesReady
+}
+
+/**
+ * Strip the decorations a model tends to add around a title: wrapping quotes,
+ * a "Título:" prefix, trailing punctuation, and any second line.
+ */
+function sanitizeTitle(raw: string): string | null {
+  let title = raw.trim().split("\n")[0] ?? ""
+  title = title.trim()
+  title = title.replace(/^[«"'“”`]+/, "").replace(/[»"'“”`]+$/, "").trim()
+  title = title.replace(/^(t[íi]tulo|title)\s*[:\-—]\s*/i, "")
+  title = title.replace(/[.!?…]+$/, "").trim()
+  title = title.replace(/\s+/g, " ")
+  if (!title) return null
+  return title.slice(0, MAX_TITLE_CHARS)
+}
+
+/**
+ * One naming call: the user's request in, a short title out. Injectable so
+ * tests can stub the model without `mock.module`, which is process-global in
+ * Bun and would leak into every later test file's LLM calls.
+ */
+export type TitleLLM = (userMessage: string) => Promise<{ content: string; stop_reason: string }>
+
+/** The production call — resolves its own provider, same precedence as compaction.ts. */
+const defaultTitleLLM: TitleLLM = async (userMessage) => {
+  await ensureIndexes()
+  const coordinator = (await (await col<AgentDoc>("agents")).findBy("role", "coordinator"))[0]?.doc
+
+  let provider = fromIndexable(coordinator?.provider_id)
+  let model = fromIndexable(coordinator?.model_id)
+  if (!provider || !model) {
+    const codeConfig = await col<CodeConfigDoc>("codeConfig")
+    const fallbackProvider = (await codeConfig.get("default_provider"))?.doc.value || "gemini"
+    provider = provider || fallbackProvider
+    model = model || (await codeConfig.get(`provider_model_${fallbackProvider}`))?.doc.value || "gemini-2.5-flash"
+  }
+
+  const providerCfg = await resolveProviderConfig(provider, model)
+  const response = await callLLM({
+    ...providerCfg,
+    messages: [
+      {
+        role: "system",
+        content:
+          "Nombras sesiones de trabajo. Recibes el primer mensaje de un usuario a un agente de código " +
+          "y devuelves UN título de 3 a 6 palabras en el idioma del mensaje. " +
+          "Solo el título: sin comillas, sin punto final, sin prefijos como «Título:», sin explicación.",
+      },
+      { role: "user", content: userMessage.slice(0, 2000) },
+    ],
+  })
+  return { content: response.content, stop_reason: response.stop_reason }
+}
+
+/**
+ * Name a session from its first user message, in the background. Fire-and-
+ * forget: never throws to the caller, never blocks a task, and a failure
+ * simply leaves the provisional title in place.
+ */
+export async function nameSessionFromFirstMessage(
+  sessionId: string,
+  callTitleLLM: TitleLLM = defaultTitleLLM,
+): Promise<void> {
+  const session = (await (await col<CodeSessionDoc>("codeSessions")).get(sessionId))?.doc
+  if (!session) return
+
+  // `findBy` needs a previous createIndex; `ensureIndexes` covers it.
+  await ensureIndexes()
+  const turns = await col<CodeTurnDoc>("codeTurns")
+  const firstTurn = (await turns.findBy("session_id", sessionId))
+    .map((entry) => entry.doc)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
+  if (!firstTurn) return
+
+  const provisional = firstTurn.user_message.slice(0, PROVISIONAL_TITLE_LIMIT)
+  // Empty title: a pre-field session getting its first post-upgrade task —
+  // name it from its original request. Provisional: refine it. Anything else
+  // is already named; leave it alone.
+  if (session.title && session.title !== provisional) return
+
+  const response = await callTitleLLM(firstTurn.user_message)
+
+  // An error surfaces as content with stop_reason "error" — never save that.
+  if (response.stop_reason === "error") {
+    log.warn(`[session-titles] Naming call failed for ${sessionId.slice(0, 8)} — keeping provisional title`)
+    return
+  }
+
+  const title = sanitizeTitle(response.content)
+  if (!title || title === session.title) return
+
+  await updateDoc<CodeSessionDoc>("codeSessions", sessionId, { title })
+  log.info(`[session-titles] Session ${sessionId.slice(0, 8)} named: ${title}`)
+}

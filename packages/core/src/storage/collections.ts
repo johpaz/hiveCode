@@ -349,30 +349,6 @@ export interface MeetingSegmentDoc {
   created_at: number;
 }
 
-export interface SessionDoc {
-  id: string;
-  project_path: string;
-  project_name: string;
-  started_at: number;
-  ended_at: number | null;
-  mode: string;
-  provider: string;
-  model: string;
-  version: string;
-  token_count: number;
-  cost_usd: number;
-}
-
-export interface MessageDoc {
-  id: string;
-  session_id: string;
-  role: string;
-  agent: string | null;
-  content: string;
-  content_type: string;
-  created_at: number;
-}
-
 export interface AgentContextDoc {
   id: string;
   session_id: string;
@@ -506,6 +482,13 @@ export interface CodeSessionDoc {
   id: string;
   project_path: string;
   status: "active" | "closed";
+  /**
+   * Display name — the user's request, in their words. Stamped provisionally
+   * from the first turn's user message, then refined in the background by a
+   * one-shot LLM call. Absent on sessions created before the field existed;
+   * readers fall back to the first turn's user_message.
+   */
+  title?: string;
   created_at: string;
   last_active: string;
 }

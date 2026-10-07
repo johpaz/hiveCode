@@ -47,6 +47,15 @@ export interface TaskMetadata {
 
 const log = logger.child("scribe")
 
+/**
+ * Length cap of the provisional session title stamped by `createTurn`.
+ *
+ * The background namer (see session-titles.ts) recognises a still-provisional
+ * title by comparing against `userMessage.slice(0, this)`, so the two must
+ * share one constant — a mismatch would make the namer skip forever.
+ */
+export const PROVISIONAL_TITLE_LIMIT = 120
+
 function nowIso(): string {
   return new Date().toISOString()
 }
@@ -242,6 +251,17 @@ export class Scribe {
       completed_at: null,
     }
     this.put("codeTurns", id, doc)
+    // A session's name is its user's request. The first turn stamps a
+    // provisional title so the session is never nameless in the picker, even
+    // if the background LLM renamer never runs or fails.
+    this.enqueue(async () => {
+      const sessions = await col<CodeSessionDoc>("codeSessions")
+      const existing = await sessions.get(sessionId)
+      if (!existing || existing.doc.title) return
+      await updateDoc<CodeSessionDoc>("codeSessions", sessionId, {
+        title: userMessage.slice(0, PROVISIONAL_TITLE_LIMIT),
+      })
+    })
     return id
   }
 

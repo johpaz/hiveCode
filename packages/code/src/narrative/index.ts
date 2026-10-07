@@ -1,5 +1,6 @@
 export * from "./scribe"
 export * from "./schema"
+export * from "./session-titles"
 
 import { ensureHiveDb } from "@johpaz/hivecode-core/storage/bootstrap"
 import { logger } from "@johpaz/hivecode-core/utils/logger"

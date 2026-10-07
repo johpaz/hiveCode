@@ -33,10 +33,8 @@ import type {
   CodeTurnDoc,
   FileRiskDoc,
   McpServerDoc,
-  MessageDoc,
   ModelDoc,
   ProviderDoc,
-  SessionDoc,
   SkillDoc,
   WorkerActivityDoc,
 } from "@johpaz/hivecode-core/storage/collections"
@@ -657,44 +655,28 @@ async function sendHistorySnapshot(send: (m: BunMessage) => void, sessionId: str
     .slice(0, 25)
     .reverse()
 
-  if (turns.length > 0) {
-    for (const turn of turns) {
-      send({
-        type: "history_append",
-        role: "user",
-        content: turn.user_message,
-        content_type: "plain",
-        timestamp: timeFrom(turn.created_at),
-        task_id: turn.task_id ?? undefined,
-      })
-      if (turn.agent_response.trim()) {
-        send({
-          type: "history_append",
-          role: "assistant",
-          content: turn.agent_response,
-          content_type: isLikelyMarkdown(turn.agent_response) ? "markdown" : "plain",
-          agent: "bee",
-          timestamp: timeFrom(turn.completed_at ?? turn.created_at),
-          task_id: turn.task_id ?? undefined,
-        })
-      }
-    }
-    return
-  }
+  if (turns.length === 0) return
 
-  const msgs = (await findDocsBy<MessageDoc>("messages", "session_id", sessionId))
-    .sort((a, b) => b.created_at - a.created_at)
-    .slice(0, 50)
-    .reverse()
-  for (const m of msgs) {
+  for (const turn of turns) {
     send({
       type: "history_append",
-      role: m.role,
-      content: m.content,
-      content_type: m.content_type === "diff" ? "plain" : m.content_type,
-      agent: m.agent ?? undefined,
-      timestamp: hhmmss(m.created_at),
+      role: "user",
+      content: turn.user_message,
+      content_type: "plain",
+      timestamp: timeFrom(turn.created_at),
+      task_id: turn.task_id ?? undefined,
     })
+    if (turn.agent_response.trim()) {
+      send({
+        type: "history_append",
+        role: "assistant",
+        content: turn.agent_response,
+        content_type: isLikelyMarkdown(turn.agent_response) ? "markdown" : "plain",
+        agent: "bee",
+        timestamp: timeFrom(turn.completed_at ?? turn.created_at),
+        task_id: turn.task_id ?? undefined,
+      })
+    }
   }
 }
 
@@ -936,32 +918,24 @@ async function sendDashboardSnapshot(
   } catch { /* no conflicts table */ }
 
   const levels = buildDashboardLevels(workers)
+
+  // Session metrics from the live `codeTasks` of this session. (The legacy
+  // `sessions`/`SessionDoc` collection was write-only history — nothing ever
+  // wrote it — so its read always missed and this aggregation was the only
+  // live path anyway.)
   let metrics: { token_count?: number; cost?: string; elapsed_secs?: number } = {}
   try {
-    const session = (await (await col<SessionDoc>("sessions")).get(sessionId))?.doc
-    if (session) {
+    const tasks = await findDocsBy<CodeTaskDoc>("codeTasks", "session_id", sessionId)
+    if (tasks.length > 0) {
+      const tokenCount = tasks.reduce((sum, task) => sum + Number(task.tokens_in ?? 0) + Number(task.tokens_out ?? 0), 0)
+      const startedAt = tasks.reduce((min, task) => Math.min(min, ms(task.created_at) || Date.now()), Date.now())
       metrics = {
-        token_count: Number(session.token_count ?? 0),
-        cost: `$${Number(session.cost_usd ?? 0).toFixed(2)}`,
-        elapsed_secs: Math.max(0, Math.floor((Date.now() - Number(session.started_at ?? Date.now())) / 1000)),
+        token_count: tokenCount,
+        cost: "$0.00",
+        elapsed_secs: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
       }
     }
-  } catch { /* sessions snapshot unavailable */ }
-
-  if (metrics.token_count === undefined) {
-    try {
-      const tasks = await findDocsBy<CodeTaskDoc>("codeTasks", "session_id", sessionId)
-      if (tasks.length > 0) {
-        const tokenCount = tasks.reduce((sum, task) => sum + Number(task.tokens_in ?? 0) + Number(task.tokens_out ?? 0), 0)
-        const startedAt = tasks.reduce((min, task) => Math.min(min, ms(task.created_at) || Date.now()), Date.now())
-        metrics = {
-          token_count: tokenCount,
-          cost: "$0.00",
-          elapsed_secs: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
-        }
-      }
-    } catch { /* code task metrics unavailable */ }
-  }
+  } catch { /* code task metrics unavailable */ }
 
   const securityWorker = workers.find(w => w.name === "security")
   const haltCheckpoint = checkpoints.find(cp => cp.created_by === "halt")

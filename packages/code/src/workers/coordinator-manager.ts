@@ -15,6 +15,7 @@ import {
 } from "../modes/session-array"
 import { Scribe } from "../narrative/scribe"
 import type { Turn, FileChange } from "../narrative/scribe"
+import { nameSessionFromFirstMessage } from "../narrative/session-titles"
 import { loadSecrets, distributeSecrets } from "./secrets"
 import { getToolsForCoordinator, executeToolByName } from "./tool-bridge"
 import { parsePlan, getDefaultPhases, groupPhasesByLevel } from "./plan-parser"
@@ -1009,6 +1010,7 @@ export class CoordinatorManager extends CoordinatorBase {
   ): Promise<void> {
     if (!this.activeTaskId) return
     const taskId = this.activeTaskId
+    const sessionId = this.activeSessionId
     const workspace = this.getTaskWorkspace(taskId)
     const workspaceRoot = workspace.worktreePath
     const durationMs = Math.round(performance.now() - taskStartMs)
@@ -1079,6 +1081,15 @@ export class CoordinatorManager extends CoordinatorBase {
       }
     } catch (evalErr) {
       log.warn(`[coordinator-manager] Learning harness evaluation failed: ${(evalErr as Error).message}`)
+    }
+
+    // Session naming — one cheap background call, once per session, on every
+    // exit path below. The task's own LLM work is done, so this never competes
+    // with it for a free-tier slot. A failure just keeps the provisional title.
+    if (sessionId) {
+      void this.scribe.flush()
+        .then(() => nameSessionFromFirstMessage(sessionId))
+        .catch((err) => log.warn(`[coordinator-manager] Session naming failed: ${(err as Error).message}`))
     }
 
     const integrationState = await this.integrateTaskWorkspace(taskId, options.mode, options.onApprovalCheckpoint)
