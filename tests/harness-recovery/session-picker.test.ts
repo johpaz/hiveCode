@@ -229,3 +229,30 @@ describe("session context after /session new", () => {
     expect(result.output).toContain("Turnos:")
   })
 })
+
+describe("/clear is gone, /session new replaced it", () => {
+  test("typing /clear points at the command that replaced it", async () => {
+    const result = await parseInternalCommand("/clear", undefined, ctxFor(PROJECT, "none"))
+
+    // It was a real command, so "unknown command" would strand anyone typing it.
+    expect(result.output).toContain("/session new")
+    expect(result.output).not.toContain("comando desconocido")
+  })
+
+  test("/session new asks the runtime to close the session, not to clear the view", async () => {
+    const sessionId = await seedSession(PROJECT, "trabajo en curso", "arregla el login")
+
+    const result = await parseInternalCommand("/session new", undefined, ctxFor(PROJECT, sessionId))
+
+    // The old /clear only emptied the transcript and left the session alone.
+    // `sessionId: null` is what makes the runtime close it and reopen lazily.
+    expect(result.switchSession).toEqual({ sessionId: null })
+  })
+
+  test("/session new on a process with no session says so instead of pretending", async () => {
+    const result = await parseInternalCommand("/session new", undefined, ctxFor(PROJECT, "none"))
+
+    expect(result.switchSession).toBeUndefined()
+    expect(result.output).toContain("No hay sesión activa")
+  })
+})

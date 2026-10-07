@@ -18,7 +18,7 @@ pub const COMMANDS: &[Command] = &[
     Command { cmd: "/session",         desc: "Gestionar sesiones" },
     Command { cmd: "/session list",    desc: "Ver sesiones recientes" },
     Command { cmd: "/session resume",  desc: "Reanudar sesión por id" },
-    Command { cmd: "/session new",     desc: "Iniciar nueva sesión" },
+    Command { cmd: "/session new",     desc: "Cerrar la sesión actual y empezar una nueva" },
     Command { cmd: "/session status",  desc: "Ver sesión activa" },
     Command { cmd: "/doctor",          desc: "Diagnóstico del sistema" },
     Command { cmd: "/version",         desc: "Versión de hivecode" },

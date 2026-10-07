@@ -390,11 +390,6 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                         }
                         return false;
                     }
-                    "/clear" => {
-                        state.history.entries.clear();
-                        state.history.selected = None;
-                        return false;
-                    }
                     "/quit" | "/exit" => {
                         return true; // app.rs envía TuiMessage::Exit
                     }
@@ -2505,7 +2500,6 @@ Locales (TUI)
 ─────────────
 /help        Mostrar esta pantalla
 /quit /exit  Salir de hivetui
-/clear       Limpiar el historial de conversación
 /logs        Mostrar/ocultar panel de logs
 /timeline    Mostrar/ocultar panel de workers
 /copy        Activar modo navegación/copia del historial

@@ -388,6 +388,17 @@ export function syncCommandsToIndex(_db?: DbCompat): void {
   // use the in-memory command catalog below.
 }
 
+/**
+ * Commands that no longer exist, mapped to the one that replaced them.
+ *
+ * `/clear` used to wipe the transcript locally without touching the session,
+ * which left the view and the store disagreeing. `/session new` is the honest
+ * version of the same intent, so it takes the name.
+ */
+const RENAMED_COMMANDS: Record<string, string> = {
+  clear: "/session new",
+}
+
 function renderSuggestions(input: string): string[] {
   const prefix = input.startsWith("/") ? input.slice(1) : input
   if (!prefix || prefix.length < 1) {
@@ -2463,6 +2474,19 @@ export async function parseInternalCommand(
       return { handled: true, output: "\n" + lines.join("\n") + "\n" }
     }
     default: {
+      // Commands we removed, and what replaced them. They were real commands,
+      // so "unknown command" would strand anyone typing them from muscle memory.
+      const renamed = RENAMED_COMMANDS[cmd]
+      if (renamed) {
+        return {
+          handled: true,
+          output:
+            `  \\u00ab${cmd}\\u00bb ahora es \\u00ab${renamed}\\u00bb` +
+            (cmd === "clear"
+              ? "\\n  Cierra la sesi\\u00f3n actual; el siguiente mensaje abre una nueva."
+              : ""),
+        }
+      }
       const suggestion = renderSuggestions(input)
       const hint = suggestion.length > 0
         ? `\n\n  \u00bfQuisiste decir?\n  ${suggestion.slice(0, 3).map(s => `  ${s}`).join("\n")}`
