@@ -8,7 +8,7 @@
 use hivetui::{
     ipc::BunMessage,
     renderer,
-    state::{AppState, Role, HistoryEntry, ReplMode, TabId},
+    state::{AppState, ModalState, Role, HistoryEntry, ReplMode, SettingsHubState, TabId},
     term::{Canvas, Rect},
     widgets::{history, code_layout, plan_layout, review_layout},
 };
@@ -211,7 +211,7 @@ fn routing_plan_mode_waits_for_structured_plan() {
         new_token_count: None,
     });
     assert_eq!(state.session.mode, ReplMode::Plan);
-    assert_eq!(state.active_tab, TabId::Focus,
+    assert_eq!(state.active_tab, TabId::Mesa,
         "Cambiar a modo plan debe mantener Focus mientras el plan se genera");
 }
 
@@ -227,7 +227,7 @@ fn routing_approval_mode_waits_for_reviewer_verdict() {
         new_token_count: None,
     });
     assert_eq!(state.session.mode, ReplMode::Approval);
-    assert_eq!(state.active_tab, TabId::Focus,
+    assert_eq!(state.active_tab, TabId::Mesa,
         "Cambiar a modo approval no debe abrir Review sin veredicto");
 
     state.apply_message(BunMessage::ReviewVerdictUpdate {
@@ -273,7 +273,7 @@ fn routing_auto_mode_code_then_focus() {
     state.apply_message(BunMessage::AssistantDone);
     assert!(!state.running, "running debe ser false tras AssistantDone");
     assert!(!state.tab_locked, "sin override manual el routing sigue automático");
-    assert_eq!(state.active_tab, TabId::Focus,
+    assert_eq!(state.active_tab, TabId::Mesa,
         "AssistantDone en AUTO mode debe volver a Focus tab");
 }
 
@@ -311,7 +311,7 @@ fn manual_tab_lock_overrides_auto_routing() {
     assert_eq!(state.active_tab, TabId::Review);
     state.resume_auto_layout();
     assert!(!state.tab_locked);
-    assert_eq!(state.active_tab, TabId::Focus);
+    assert_eq!(state.active_tab, TabId::Mesa);
 }
 
 // ── 8. Welcome screen: no muestra el widget de input ─────────────────────────
@@ -379,27 +379,28 @@ fn welcome_screen_exposes_harness_status() {
 }
 
 #[test]
-fn renderer_keeps_reference_chrome_on_all_five_screens() {
+fn renderer_keeps_reference_chrome_on_every_screen() {
     let mut state = base_state();
     state.harness.approval_pending = true;
 
     for tab in [
-        TabId::Focus,
+        TabId::Swarm,
         TabId::Plan,
+        TabId::Mesa,
         TabId::Code,
         TabId::Review,
-        TabId::Dashboard,
+        TabId::Taller,
     ] {
         state.active_tab = tab;
         let mut canvas = make_canvas(120, 30);
         renderer::render(&mut canvas, &mut state);
 
         let frame = canvas.to_text_rows().join("\n");
-        assert!(frame.contains("FOCUS"));
-        assert!(frame.contains("PLAN"));
-        assert!(frame.contains("CODE"));
-        assert!(frame.contains("REVIEW"));
-        assert!(frame.contains("DASHBOARD"));
+        // Las seis pestañas visibles en todas las vistas: el tabbar es chrome
+        // compartido y no puede desaparecer en una de ellas.
+        for label in ["ENJAMBRE", "PLAN", "MESA", "CÓDIGO", "REVISIÓN", "TALLER"] {
+            assert!(frame.contains(label), "falta {label} en {tab:?}");
+        }
         assert!(frame.contains("CHECKPOINTS"));
         assert!(state
             .hit_map
@@ -407,6 +408,148 @@ fn renderer_keeps_reference_chrome_on_all_five_screens() {
             .iter()
             .any(|region| region.id.starts_with("tab:")));
     }
+}
+
+// ── Settings Hub: columna Key y flujo de activación ──────────────────────────
+
+/// Monta el hub de settings con los providers dados, como si Bun enviase un
+/// `SettingsData`. Recorre el camino real: mensaje IPC → apply_message → render.
+fn settings_hub_state(
+    providers: Vec<(&str, bool, bool)>, // (id, has_key, browser_login)
+    active: &str,
+) -> AppState {
+    let mut s = base_state();
+    // El hub tiene que estar montado antes del mensaje: `apply_message` solo
+    // aplica `SettingsData` si el hub está en pantalla (por eso el TUI lo mantiene
+    // abierto durante las acciones).
+    s.modal = ModalState::Settings(SettingsHubState::default());
+    s.apply_message(BunMessage::SettingsData {
+        providers: providers
+            .into_iter()
+            .map(|(id, has_key, browser_login)| hivetui::ipc::IpcSettingsProvider {
+                id: id.to_string(),
+                name: id.to_string(),
+                model: format!("{id}/default"),
+                is_active: id == active,
+                has_key,
+                browser_login,
+                models: vec![format!("{id}/default")],
+            })
+            .collect(),
+        agents: vec![],
+        mcp: vec![],
+        skills: vec![],
+        github_connected: false,
+        github_repo: None,
+        telegram_active: false,
+    });
+    s
+}
+
+#[test]
+fn el_hub_de_settings_distingue_quien_tiene_clave() {
+    // Con `has_key` siempre en `true` (el bug anterior) las tres filas
+    // mostraban ✓ y no había forma de saber a quién faltaba la clave.
+    let mut state = settings_hub_state(
+        vec![("anthropic", true, false), ("openai", false, false), ("hivecode-free", false, true)],
+        "anthropic",
+    );
+
+    let mut canvas = make_canvas(140, 40);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+
+    assert!(frame.contains("anthropic"), "deben listarse los providers: {frame}");
+    assert!(frame.contains("openai"));
+    assert!(frame.contains("hivecode-free"));
+    // El glifo de "falta clave" tiene que aparecer en algún sitio.
+    assert!(
+        frame.contains('?'),
+        "un provider sin clave debe marcarse con `?`, no con ✓: {frame}"
+    );
+    assert!(frame.contains('~'), "el login de navegador debe tener su propio glifo: {frame}");
+    assert!(frame.contains('✓'), "el provider con clave debe marcarse: {frame}");
+}
+
+#[test]
+fn el_hub_de_settings_anuncia_el_login_de_navegador() {
+    // hivecode-free no usa API key: el hint debe decirlo para que el usuario no
+    // busque una clave que no existe.
+    let mut state = settings_hub_state(vec![("hivecode-free", false, true)], "openai");
+    let mut canvas = make_canvas(140, 40);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+
+    assert!(
+        frame.contains("login de navegador"),
+        "el footer debe explicar el login de navegador: {frame}"
+    );
+}
+
+#[test]
+fn el_hub_de_settings_avisa_que_pide_la_clave() {
+    let mut state = settings_hub_state(vec![("openai", false, false)], "anthropic");
+    let mut canvas = make_canvas(140, 40);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+
+    assert!(
+        frame.contains("te pedirá la API key"),
+        "el footer debe anticipar el formulario de clave: {frame}"
+    );
+}
+
+#[test]
+fn el_modal_de_api_key_enmascara_lo_escrito() {
+    use hivetui::state::{ModalAction, ModalFieldKind};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    let mut state = settings_hub_state(vec![("openai", false, false)], "anthropic");
+    let mut canvas = make_canvas(140, 40);
+    renderer::render(&mut canvas, &mut state);
+
+    // Enter sobre la fila → formulario local con la clave.
+    hivetui::controller::handle_key_event(
+        &mut state,
+        KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        },
+    );
+
+    let ModalState::Config(modal) = &state.modal else {
+        panic!("Enter sobre un provider sin clave debe abrir el formulario");
+    };
+    assert_eq!(modal.fields.len(), 1, "no debe relistar los providers");
+    assert_eq!(modal.fields[0].kind, ModalFieldKind::Secret);
+    assert_eq!(
+        modal.action,
+        Some(ModalAction::ProviderActivate { provider_id: "openai".into() })
+    );
+
+    // Escribiendo la clave, el lienzo solo debe mostrar viñetas.
+    for c in "sk-secreto".chars() {
+        hivetui::controller::handle_key_event(
+            &mut state,
+            KeyEvent {
+                code: KeyCode::Char(c),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: crossterm::event::KeyEventState::NONE,
+            },
+        );
+    }
+    let mut canvas = make_canvas(140, 40);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+
+    assert!(
+        !frame.contains("sk-secreto"),
+        "la API key no puede aparecer en claro en el lienzo: {frame}"
+    );
+    assert!(frame.contains('•'), "la clave debe salir enmascarada: {frame}");
 }
 
 #[test]
@@ -485,7 +628,7 @@ fn code_layout_renders_focused_worker_detail() {
     code_layout::render(&mut canvas, area, &state);
     let frame = canvas.to_text_rows().join("\n");
 
-    assert!(frame.contains("@BACKENDENGINEER"), "Code layout debe mostrar worker enfocado");
+    assert!(frame.contains("@TOPO"), "Code layout debe mostrar worker enfocado");
     assert!(frame.contains("THOUGHT STREAM"), "Code layout debe reservar thought stream");
     assert!(frame.contains("BLACKBOARD RELEVANTE"), "Code layout debe reservar blackboard relevante");
 }
@@ -674,7 +817,7 @@ fn full_sequence_init_task_streaming_response() {
     // 8. Tarea terminada → Focus
     state.apply_message(BunMessage::AssistantDone);
     assert!(!state.running);
-    assert_eq!(state.active_tab, TabId::Focus);
+    assert_eq!(state.active_tab, TabId::Mesa);
     assert!(!state.tab_locked);
 }
 
@@ -712,7 +855,7 @@ fn state_with_workers(running: usize, waiting: usize) -> AppState {
 #[test]
 fn dashboard_collapses_idle_agents_instead_of_shrinking_active_cards() {
     let mut state = state_with_workers(4, 8);
-    state.active_tab = TabId::Dashboard;
+    state.active_tab = TabId::Swarm;
 
     let mut canvas = make_canvas(120, 30);
     renderer::render(&mut canvas, &mut state);
@@ -736,7 +879,7 @@ fn dashboard_collapses_idle_agents_instead_of_shrinking_active_cards() {
 fn dashboard_names_active_workers_that_did_not_fit() {
     // Muchos activos a la vez: los que no caben deben nombrarse, no desaparecer.
     let mut state = state_with_workers(12, 0);
-    state.active_tab = TabId::Dashboard;
+    state.active_tab = TabId::Swarm;
 
     let mut canvas = make_canvas(120, 30);
     renderer::render(&mut canvas, &mut state);
@@ -751,7 +894,7 @@ fn dashboard_names_active_workers_that_did_not_fit() {
 #[test]
 fn terminal_below_the_minimum_gets_an_explicit_message() {
     let mut state = base_state();
-    state.active_tab = TabId::Dashboard;
+    state.active_tab = TabId::Swarm;
 
     let mut canvas = make_canvas(80, 24);
     renderer::render(&mut canvas, &mut state);

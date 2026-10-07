@@ -1,6 +1,7 @@
 use crate::term::{
     Color, AMBER, AMBER_BRIGHT, AMBER_DIM, BG_CONFLICT, BG_ELEVATED, BG_MAIN, BG_PANEL, BLUE,
-    CYAN, DIM, GREEN, LAVENDER, PINK, PURPLE, RED, SECONDARY, WHITE, YELLOW,
+    CORAL, CYAN, DIM, GREEN, LAVENDER, MINT, ORCHID, PINK, PURPLE, RED, SECONDARY, SKY, SLATE, TEAL, WHITE,
+    YELLOW,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,29 +77,44 @@ impl Theme {
         }
     }
 
-    pub fn worker(self, name: &str) -> Color {
-        let lower = name.to_ascii_lowercase();
-        if lower.contains("bee") || lower.contains("product") {
-            AMBER_BRIGHT
-        } else if lower.contains("arch") {
-            PURPLE
-        } else if lower.contains("front") {
-            CYAN
-        } else if lower.contains("back") {
-            BLUE
-        } else if lower.contains("sec") {
-            PINK
-        } else if lower.contains("test") || lower.contains("qa") {
-            YELLOW
-        } else if lower.contains("devops") {
-            LAVENDER
-        } else if lower.contains("data") {
-            GREEN
-        } else if lower.contains("verifier") {
-            RED
-        } else {
-            self.text_muted
+    /// Canonical role → colour table. Every agent colour in the app comes from
+    /// here: there is no per-widget table.
+    ///
+    /// Matching is by substring on the lowercased internal role id, so
+    /// `data_scientist_worker` and `data_scientist` land on the same colour, and
+    /// an unknown id lands on `text_muted` — readable, but visibly "not a known
+    /// swarm role".
+    pub fn worker(role: &str) -> Color {
+        const ROLES: &[(&str, Color)] = &[
+            ("bee", AMBER_BRIGHT),
+            ("product", TEAL),
+            ("arch", PURPLE),
+            ("back", BLUE),
+            ("front", CYAN),
+            ("data", MINT),
+            ("sec", PINK),
+            ("test", YELLOW),
+            ("devops", LAVENDER),
+            ("verif", RED),
+            ("review", RED),
+            ("quality", RED),
+            ("forensic", CORAL),
+            ("librarian", SLATE),
+            ("spider", ORCHID),
+            ("scout", SKY),
+        ];
+        let lower = role.to_ascii_lowercase();
+        // The tool pool is not a swarm agent; it is the hive's own executor, so
+        // it wears amber. Matched exactly — "tool" as a substring would swallow
+        // unrelated role names.
+        if lower == "tool" || lower == "tool_worker" {
+            return AMBER;
         }
+        ROLES
+            .iter()
+            .find(|(key, _)| lower.contains(key))
+            .map(|(_, color)| *color)
+            .unwrap_or(SECONDARY)
     }
 }
 
@@ -121,9 +137,50 @@ mod tests {
 
     #[test]
     fn maps_worker_roles() {
-        let theme = Theme::default();
-        assert_eq!(theme.worker("architecture"), PURPLE);
-        assert_eq!(theme.worker("frontend"), CYAN);
-        assert_eq!(theme.worker("unknown"), SECONDARY);
+        assert_eq!(Theme::worker("architecture"), PURPLE);
+        assert_eq!(Theme::worker("frontend"), CYAN);
+        assert_eq!(Theme::worker("unknown"), SECONDARY);
+    }
+
+    #[test]
+    fn matching_is_case_and_suffix_insensitive() {
+        // The roster may append suffixes ("backend_worker"); same role, same colour.
+        assert_eq!(Theme::worker("Backend"), Theme::worker("backend_worker"));
+        assert_eq!(Theme::worker("PRODUCT_MANAGER"), Theme::worker("product_manager"));
+    }
+
+    #[test]
+    fn roles_that_used_to_collide_now_have_distinct_colours() {
+        // product_manager and data_scientist both fell on GREEN before; a
+        // reviewer with no entry fell on SECONDARY, which reads as inactive.
+        assert_ne!(Theme::worker("product_manager"), Theme::worker("data_scientist"));
+        assert_ne!(Theme::worker("verifier"), Theme::worker("data_scientist"));
+        // spider used to share frontend's cyan and scout shared data's green.
+        assert_ne!(Theme::worker("spider"), Theme::worker("frontend"));
+        assert_ne!(Theme::worker("scout"), Theme::worker("data_scientist"));
+        for role in ["forensic", "librarian", "scout", "spider", "tool"] {
+            assert_ne!(Theme::worker(role), SECONDARY, "{role} cae en texto apagado");
+        }
+    }
+
+    #[test]
+    fn every_known_role_has_a_colour_of_its_own() {
+        // Guards against adding a role without giving it a tone: an unlisted
+        // role silently degrades to SECONDARY, which reads as inactive.
+        let roles = [
+            "bee", "product_manager", "architecture", "backend", "frontend",
+            "data_scientist", "security", "test", "devops", "verifier",
+            "reviewer", "quality", "forensic", "librarian", "spider", "scout",
+            "tool", "tool_worker",
+        ];
+        for role in roles {
+            assert_ne!(Theme::worker(role), SECONDARY, "{role} sin color propio");
+        }
+    }
+
+    #[test]
+    fn the_fused_quality_role_keeps_the_gate_colour() {
+        assert_eq!(Theme::worker("verifier"), Theme::worker("reviewer"));
+        assert_eq!(Theme::worker("quality"), Theme::worker("verifier"));
     }
 }

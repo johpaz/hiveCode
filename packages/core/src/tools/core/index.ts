@@ -435,13 +435,25 @@ export const notifyTool: Tool = {
   execute: async (params: Record<string, unknown>, config?: any) => {
     const { sendToUserChannel } = await import("../../gateway/channel-notify");
     const message = params.message as string;
-    const channel = (config?.configurable?.channel as string) ?? "webchat";
+    const channel = (config?.configurable?.channel as string) ?? "tui";
     const userId = (config?.configurable?.user_id as string) ?? "";
 
     log.info(`[notify] Sending to ${channel}/${userId}: ${message.substring(0, 80)}`);
 
     const result = await sendToUserChannel(channel, userId, message)
-    if (!result.ok) throw new Error(`Channel send failed: ${result.error}`)
+    // Mismo criterio que `report_progress`: inability to deliver is not a
+    // failure of the task, and throwing here only invites the model to retry
+    // forever. The message is kept in the run's transcript either way.
+    if (!result.ok) {
+      const motivo = result.error ?? "sin canal configurado"
+      log.warn(`[notify] sin canal «${channel}» (${motivo}) — mensaje solo en la transcripción`)
+      return {
+        ok: false,
+        delivered: false,
+        message,
+        aviso: `No hay canal «${channel}» disponible (${motivo}). El mensaje queda en la transcripción. NO reintentes en este turno.`,
+      }
+    }
     return result
   },
 };
@@ -540,7 +552,7 @@ export const reportProgressTool: Tool = {
     const progress = params.progress as number;
     const message = params.message as string;
     const taskId = (params.task_id as string) ?? null;
-    const channel = (config?.configurable?.channel as string) ?? "webchat";
+    const channel = (config?.configurable?.channel as string) ?? "tui";
     const userId = (config?.configurable?.user_id as string) ?? "";
 
     log.info(`[report_progress] ${progress}% — ${message}`);
@@ -557,9 +569,26 @@ export const reportProgressTool: Tool = {
     // Send real-time update to the user's channel
     const progressEmoji = progress >= 100 ? "✅" : progress >= 50 ? "⚙️" : "🔄";
     const result = await sendToUserChannel(channel, userId, `${progressEmoji} ${progress}% — ${message}`)
-    if (!result.ok) throw new Error(`Channel send failed: ${result.error}`)
+    // **Nunca lanzar aquí.** Esta tool informa; que no haya a quién informar no
+    // es un fallo del trabajo. Lanzar convertía cada reporte en un error de
+    // tool, y el modelo respondía reintentando — un bucle infinito quemando
+    // tokens sobre un problema que no podía resolver.
+    //
+    // Se devuelve el motivo para que el modelo lo lea y deje de insistir.
+    if (!result.ok) {
+      const motivo = result.error ?? "sin canal configurado"
+      log.warn(`[report_progress] sin canal «${channel}» (${motivo}) — progreso solo en el registro`)
+      return {
+        ok: false,
+        reported: false,
+        progress,
+        message,
+        task_id: taskId,
+        aviso: `No hay canal «${channel}» disponible (${motivo}). El progreso queda solo en el registro local. NO vuelvas a llamar a report_progress en este turno; sigue con la tarea.`,
+      }
+    }
 
-    return { ok: true, progress, message, task_id: taskId };
+    return { ok: true, reported: true, progress, message, task_id: taskId };
   },
 };
 

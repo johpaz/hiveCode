@@ -24,7 +24,7 @@ impl Default for LayoutRoutingState {
     fn default() -> Self {
         Self {
             stage: LayoutStage::Idle,
-            recommended_tab: TabId::Focus,
+            recommended_tab: TabId::Mesa,
             transition_reason: None,
             transition_ticks_remaining: 0,
         }

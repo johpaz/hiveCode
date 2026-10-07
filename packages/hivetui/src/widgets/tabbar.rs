@@ -8,12 +8,15 @@ use crate::{
     widgets::components::pulse_color,
 };
 
+/// Las vistas del tabbar. El orden **es** el de los atajos 1-6: `TabId::num()`
+/// deriva de `ALL_TABS`, así que esta lista y la numeración no pueden divergir.
 const TABS: &[(TabId, &str)] = &[
-    (TabId::Focus,     "FOCUS"),
-    (TabId::Plan,      "PLAN"),
-    (TabId::Code,      "CODE"),
-    (TabId::Review,    "REVIEW"),
-    (TabId::Dashboard, "DASHBOARD"),
+    (TabId::Swarm,  "ENJAMBRE"),
+    (TabId::Plan,   "PLAN"),
+    (TabId::Mesa,   "MESA"),
+    (TabId::Code,   "CÓDIGO"),
+    (TabId::Review, "REVISIÓN"),
+    (TabId::Taller, "TALLER"),
 ];
 
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -140,8 +143,8 @@ fn tab_slot_width(label: &str, badge: Option<&str>) -> u16 {
 
 fn badge_for(tab: TabId, state: &AppState) -> Option<String> {
     match tab {
-        TabId::Focus if state.running => Some("live".to_string()),
-        TabId::Focus if !state.history.entries.is_empty() => {
+        TabId::Mesa if state.running => Some("live".to_string()),
+        TabId::Mesa if !state.history.entries.is_empty() => {
             Some(state.history.entries.len().min(99).to_string())
         }
         TabId::Plan if state.harness.approval_pending => Some("approve".to_string()),
@@ -162,17 +165,27 @@ fn badge_for(tab: TabId, state: &AppState) -> Option<String> {
         TabId::Review if !state.checkpoints.entries.is_empty() => {
             Some(format!("cp{}", state.checkpoints.entries.len().min(99)))
         }
-        TabId::Dashboard => {
-            let running_workers = state
-                .workers
-                .workers
-                .iter()
-                .filter(|worker| matches!(worker.status, crate::state::WorkerStatus::Running))
-                .count();
-            if running_workers > 0 {
-                Some(format!("{running_workers} run"))
-            } else if !state.tasks.tasks.is_empty() {
-                Some(format!("{} tasks", state.tasks.tasks.len().min(99)))
+        // ENJAMBRE: lo que el usuario necesita antes de mirar nada más.
+        // Herramientas en vuelo es la señal de "está trabajando"; los agentes en
+        // espera, la de "algo no avanza" — que es la que hoy no tiene nombre.
+        TabId::Swarm => {
+            let in_flight = state.swarm.orphaned_calls();
+            let waiting = state.swarm.waiting.len();
+            if in_flight > 0 {
+                Some(format!("{in_flight}⚙"))
+            } else if waiting > 0 {
+                Some(format!("{waiting}⏳"))
+            } else if !state.roster.is_empty() {
+                Some(format!("{}⬡", state.roster.by_id.len().min(99)))
+            } else {
+                None
+            }
+        }
+        // TALLER: lo bloqueado por MCP, que es lo que impide delegar.
+        TabId::Taller => {
+            let blocked = state.roster.blocked().len();
+            if blocked > 0 {
+                Some(format!("{blocked}✗"))
             } else {
                 None
             }
@@ -185,7 +198,11 @@ fn badge_style(tab: TabId, state: &AppState) -> Style {
     match tab {
         TabId::Plan | TabId::Review if state.harness.approval_pending => Style::new().fg(YELLOW).bold(),
         TabId::Review if !state.conflicts.entries.is_empty() => Style::new().fg(RED).bold(),
-        TabId::Focus if state.running => Style::new().fg(GREEN).bold(),
+        TabId::Mesa if state.running => Style::new().fg(GREEN).bold(),
+        // Esperar no es un error, pero sí algo que el usuario debe notar.
+        TabId::Swarm if state.swarm.waiting.len() > 0 => Style::new().fg(YELLOW).bold(),
+        TabId::Swarm if state.swarm.orphaned_calls() > 0 => Style::new().fg(GREEN).bold(),
+        TabId::Taller if !state.roster.blocked().is_empty() => Style::new().fg(RED).bold(),
         TabId::Code if !state.diff.lines.is_empty() => Style::new().fg(WHITE).bold(),
         _ => Style::new().fg(AMBER_DIM),
     }

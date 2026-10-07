@@ -26,7 +26,12 @@ import type { LLMMessage, LLMToolDef, ContentPart } from "./llm-client"
 import type { MCPClientManager } from "@johpaz/hivecode-mcp"
 import { syncToolCatalogToIndex, mcpToolFullName } from "./tool-selector"
 import { syncSkillsToIndex, getMinimalSkills, selectSkills, type SkillDescriptor } from "./skill-selector"
+import { MINIMAL_TOOLS } from "./minimal-loadout"
+import { getHiveDb } from "../storage/hivedb"
+import { causalLogEnabled } from "../storage/causal-events"
 import { syncPlaybookToIndex } from "./playbook-selector"
+import { describeSwarmCapabilities, planJevContext } from "./jev-planner"
+import { emitJevDecision } from "./jev-decisions"
 import { getRecentMessages, getSummary, getScratchpad, toAPIMessages } from "./conversation-store"
 import { formatContext, estimateTokens } from "../utils/toon"
 import { buildSystemPromptWithProjects } from "./prompt-builder"
@@ -42,27 +47,6 @@ const log = logger.child("context-compiler")
 // Configuration constants
 const KEEP_LAST_N_MESSAGES = 40      // Always keep last N messages (Strategy: SELECT) — increased because tool calls/results are now persisted
 const TOKEN_COMPACT_THRESHOLD = 6000 // Compact when exceeds this (Strategy: COMPRESS)
-
-// MINIMAL TOOL SET — fixed always-available tools
-// The agent discovers the rest via search_knowledge
-const MINIMAL_TOOLS = new Set([
-  "save_note",
-  "notify",
-  "report_progress",
-  "search_knowledge",
-])
-
-// MINIMAL SKILL SET — fixed always-available skills
-// These skills are ALWAYS in context - the agent uses them to discover everything else
-//
-// Only skills whose tools are actually in the loadout belong here. `memory_manager` used
-// to be pinned but declares memory_write/memory_read/…, none of which are in
-// MINIMAL_TOOLS — so it advertised capabilities the model did not have and pushed its
-// note-taking intent onto save_note. It stays discoverable via search_knowledge, which
-// its triggers already cover.
-const MINIMAL_SKILL_NAMES = [
-  "busqueda_hivedb", // Discovery central: tools, skills, MCP, playbook via search_knowledge
-]
 
 function parseStringList(value: string | null | undefined): string[] {
   if (!value) return []
@@ -90,6 +74,51 @@ export interface CompiledContext {
   tools: LLMToolDef[]
   allTools: ContextTool[]
   skills: SkillDescriptor[]  // Skills loaded (minimal + discovered)
+  /**
+   * What Jev decided about this turn, when it was asked. Absent when the
+   * decision plane is off, unavailable, or produced nothing to prune.
+   */
+  jevDecision?: {
+    summary: string
+    savedTokens: number
+    latencyMs: number
+    costUsd: number
+    recommendedAgentId: string | null
+    mcpOff: string[]
+  }
+}
+
+// ─── G9 causal context (buildAgentContext) ──────────────────────────────────
+
+interface AgentContextItemShape {
+  type: "decision" | "toolCall" | "anomaly" | "episode" | "phaseSummary";
+  seq?: number;
+  phase?: string;
+  text?: string;
+  taskId?: string;
+  summary?: string;
+  keyDecisions?: number[];
+}
+
+interface AgentContextShape {
+  items: AgentContextItemShape[];
+  similarEpisodes: Array<{ taskId: string; summary: string }>;
+  anomalies: AgentContextItemShape[];
+}
+
+function formatCausalContextItem(item: AgentContextItemShape): string | null {
+  switch (item.type) {
+    case "decision":
+    case "toolCall":
+    case "phaseSummary":
+      return item.text ? `- ${item.text}` : null;
+    case "anomaly":
+      return item.text ? `- ⚠ ${item.text}` : null;
+    case "episode":
+      return item.summary ? `- (episodio previo) ${item.summary}` : null;
+    default:
+      return null;
+  }
 }
 
 // ─── Main compiler ─────────────────────────────────────────────────────────
@@ -110,8 +139,34 @@ export async function compileContext(opts: {
   isolated?: boolean
   taskContext?: string | ContentPart[]
   mcpManager?: MCPClientManager | null
+  /**
+   * G9 causal stream for this invocation. Enables the causal context window:
+   * the decision chain this run has already made, projected back into the
+   * prompt so compaction does not erase it.
+   */
+  causalStreamId?: string
+  /**
+   * Skip the Jev pruning pass. Used when resuming: the restored messages are
+   * already the pruned set from the run that checkpointed them.
+   */
+  skipJev?: boolean
+  /**
+   * Se llama una vez por compilación con la carga **efectiva** de este turno.
+   *
+   * No es el perfil declarado: JEV poda el conjunto y `search_knowledge` lo
+   * amplía, así que lo que el agente tiene delante cambia cada turno. La ficha
+   * del especialista usa esto para no mentir.
+   */
+  onLoadout?: (loadout: {
+    tools: string[]
+    skills: string[]
+    /** De dónde salió el conjunto de herramientas. */
+    origen: "perfil" | "jev_pruned"
+    /** Las skills que están en la carga mínima: no dependen de descubrir nada. */
+    minimal: string[]
+  }) => void
 }): Promise<CompiledContext> {
-  const { agentId, threadId, mcpManager, userMessage, isolated, taskContext } = opts
+  const { agentId, threadId, mcpManager, userMessage, isolated, taskContext, causalStreamId, skipJev } = opts
 
   // Fallback: Get MCP Manager from singleton if not provided
   const effectiveMcpManager = mcpManager ?? (() => {
@@ -276,7 +331,13 @@ export async function compileContext(opts: {
     },
   }))
 
-  const toolsForLLM: LLMToolDef[] = nativeToolsForLLM
+  let toolsForLLM: LLMToolDef[] = nativeToolsForLLM
+  // Populated by the Jev pass in STEP-9d. Kept separate from toolsForLLM so the
+  // unpruned loadout stays available as the fallback if Jev is unavailable.
+  let jevToolsForLLM: LLMToolDef[] | null = null
+  let jevDecision: CompiledContext["jevDecision"] | null = null
+  // G9 causal memory block, appended once the system prompt exists (STEP-9e).
+  let systemPromptExtraCausal = ""
 
   const loadoutKind = isCoordinator ? "coordinator (minimal + speckit)"
     : isSpecialistProfile ? `specialist envelope (${agent.agent_type})`
@@ -346,7 +407,7 @@ export async function compileContext(opts: {
       skillMap.set(skill.name, skill)
     }
   }
-  const allSkills = Array.from(skillMap.values())
+  let allSkills = Array.from(skillMap.values())
 
   // [STEP-9] STRATEGY 3: COMPRESS — Load history with compaction
   log.info(`[context-compiler] [STEP-9] Loading conversation history...`)
@@ -382,6 +443,100 @@ export async function compileContext(opts: {
   } else {
     // Conversation is short enough, use all recent messages
     messages = toAPIMessages(recentMessages)
+  }
+
+  // [STEP-9d] STRATEGY 1.5 — Jev decides what the model actually pays for.
+  //
+  // Everything above assembled the maximal context; this is where most of it is
+  // dropped, in one cheap round-trip, before the prefill that dominates the turn.
+  // Optional in the strict sense: when Jev is unavailable or unconfigured,
+  // planJevContext returns null and the unpruned context is used unchanged.
+  const objectiveSource = taskContext || userMessage
+  const objectiveText = typeof objectiveSource === "string"
+    ? objectiveSource
+    : Array.isArray(objectiveSource)
+      ? objectiveSource.filter(p => p.type === "text").map(p => (p as { text: string }).text).join("\n")
+      : String(objectiveSource)
+
+  if (!skipJev) {
+    try {
+      const swarm = await describeSwarmCapabilities(effectiveMcpManager, { includeSpecialists: !isWorker })
+      const jevPlan = await planJevContext({
+        objective: objectiveText,
+        messages,
+        tools: toolsForLLM,
+        allTools,
+        skills: allSkills,
+        scratchpadNotes: scratchpadNotes.map(n => ({ key: n.key, value: String(n.value ?? "") })),
+        isWorker,
+        swarm,
+      })
+
+      if (jevPlan) {
+        const before = messages.length
+        messages = jevPlan.messages
+        jevToolsForLLM = jevPlan.tools
+        allSkills = jevPlan.skills
+        jevDecision = {
+          summary: `${before} → ${messages.length} mensajes · ${jevPlan.selectedToolNames.length} tools`,
+          savedTokens: 0,
+          latencyMs: jevPlan.decision.latencyMs,
+          costUsd: jevPlan.decision.costUsd,
+          recommendedAgentId: jevPlan.agentId,
+          mcpOff: jevPlan.agentMcpOff,
+        }
+        log.info(
+          `[context-compiler] [STEP-9d] ✅ Jev pruned ${before}→${messages.length} msgs, ` +
+          `${jevPlan.selectedToolNames.length} tools, ${jevPlan.skills.length} skills ` +
+          `(${jevPlan.decision.latencyMs}ms, $${jevPlan.decision.costUsd.toFixed(6)})`,
+        )
+      } else {
+        log.info("[context-compiler] [STEP-9d] Jev unavailable — keeping unpruned context")
+      }
+    } catch (err) {
+      log.warn(`[context-compiler] [STEP-9d] ⚠️ Jev planning failed, keeping unpruned context: ${(err as Error).message}`)
+    }
+  }
+
+  // [STEP-9e] G9 causal context window.
+  //
+  // buildAgentContext() reconstructs this run's decision chain and anomalies from
+  // the event log and hands back a token-bounded summary. It is memory that
+  // costs no prompt: HiveDB already holds the decisions, this only projects them.
+  //
+  // Only when the summary applies this turn — otherwise it is a DB round-trip on
+  // every call, buying nothing. episodicSimilarity is omitted because it needs
+  // embeddings nothing generates yet.
+  // The 5% share below is clamped to [500, 4000] tokens anyway, so the window
+  // only matters as the denominator of that ratio. max_input_tokens is the
+  // agent's own effective cap, which is the closest thing here to what the
+  // model will actually accept.
+  const modelContextWindow = Number(agent.max_input_tokens) > 0
+    ? Number(agent.max_input_tokens)
+    : 32_000
+  if (summary && totalTokens > TOKEN_COMPACT_THRESHOLD && causalStreamId && causalLogEnabled()) {
+    try {
+      const causalDb = await getHiveDb()
+      const causalMaxTokens = Math.max(500, Math.min(4000, Math.floor(modelContextWindow * 0.05)))
+      const causalCtx = (await causalDb.buildAgentContext({
+        taskId: causalStreamId,
+        currentPhase: "current",
+        currentObjective: objectiveText.slice(0, 2000),
+        maxTokens: causalMaxTokens,
+        strategy: { causalAnchors: true, compressCompletedPhases: true },
+      })) as AgentContextShape
+
+      const causalLines = [...(causalCtx.items ?? []), ...(causalCtx.anomalies ?? [])]
+        .map(formatCausalContextItem)
+        .filter((line): line is string => !!line)
+
+      if (causalLines.length > 0) {
+        systemPromptExtraCausal = `\n\n# CAUSAL CONTEXT (decisiones y tool calls de este turno, previos a la compactación — prioriza la conversación actual; úsalo solo para no repetir algo que ya funcionó o ya falló)\n${causalLines.join("\n")}\n`
+        log.info(`[context-compiler] [STEP-9e] ✅ Injected ${causalLines.length} causal context item(s)`)
+      }
+    } catch (err) {
+      log.warn(`[context-compiler] [STEP-9e] ⚠️ Causal context build failed: ${(err as Error).message}`)
+    }
   }
 
   // [STEP-10] STRATEGY 4: ISOLATE — Build context based on agent role
@@ -530,19 +685,62 @@ export async function compileContext(opts: {
       `\n# CURRENT TASK\n${opts.taskContext}\n\nFocus ONLY on this task. Do not deviate.`
   }
 
+  const finalTools = jevToolsForLLM ?? toolsForLLM
+
+  // ── Telemetría de carga para la TUI ─────────────────────────────────────
+  // `finalTools` y `allSkills` son la verdad de ESTE turno, y cambian en cada
+  // uno: JEV poda el conjunto, y `search_knowledge` lo amplía. Mostrar el
+  // `tools_json`/`skills_json` declarado sería mostrar una lista que ya no es la
+  // que el agente tiene delante.
+  //
+  // Se emite después de resolver las dos fuentes para que `origen` diga de
+  // dónde salió cada elemento.
+  if (opts.onLoadout) {
+    try {
+      opts.onLoadout({
+        tools: finalTools.map(t => t.function.name).filter(Boolean),
+        skills: allSkills.map(s => s.name),
+        origen: jevToolsForLLM ? "jev_pruned" : "perfil",
+        minimal: minimalSkills.map(s => s.name),
+      })
+    } catch (err) {
+      // Observabilidad: nunca debe romper la compilación del contexto.
+      log.warn(`[context-compiler] onLoadout falló: ${(err as Error).message}`)
+    }
+  }
+
+  if (systemPromptExtraCausal) {
+    systemPrompt += systemPromptExtraCausal
+  }
+
   log.info(
     `[context-compiler] ✅ DONE: ${allTools.length} permitted tools, ` +
-    `${toolsForLLM.length} selected tools, ${messages.length} messages, ` +
+    `${finalTools.length} selected tools${jevToolsForLLM ? " (jev-pruned)" : ""}, ` +
+    `${messages.length} messages, ` +
     `${allSkills.length} skills (${minimalSkills.length} minimal, ${discoveredSkills.length} discovered), ` +
     `isolated=${isWorker}`
   )
 
+  if (jevDecision) {
+    emitJevDecision({
+      agentId,
+      kind: "context",
+      summary: jevDecision.summary,
+      savedTokens: jevDecision.savedTokens,
+      costUsd: jevDecision.costUsd,
+      latencyMs: jevDecision.latencyMs,
+      provider: agent.provider_id ?? "unknown",
+      model: agent.model_id ?? "unknown",
+    })
+  }
+
   return {
     systemPrompt,
     messages,
-    tools: toolsForLLM,
+    tools: finalTools,
     allTools,
     skills: allSkills,
+    jevDecision: jevDecision ?? undefined,
   }
 }
 

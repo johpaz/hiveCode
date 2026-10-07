@@ -4,6 +4,12 @@ import { getHiveDir } from "@johpaz/hivecode-core/config/loader"
 import { loadConfig, startGateway, getChannelManager } from "@johpaz/hivecode-core/gateway"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
+import { eventBus } from "@johpaz/hivecode-core/events/event-bus"
+import { getJevStatus } from "@johpaz/hivecode-core/agent/jev-decisions"
+import { agentAlias } from "@johpaz/hivecode-core/agent/agent-identity"
+import { describeSwarmCapabilities } from "@johpaz/hivecode-core/agent/jev-planner"
+import { getAgentService } from "@johpaz/hivecode-core/agent/service"
+import { setTuiSendFn } from "@johpaz/hivecode-core/gateway/channel-notify"
 import { maybeLoadHiveAgentsModelFromDb } from "@johpaz/hivecode-core/agent/hiveagents-loader"
 import {
   isCancel, hiveSelect, hiveNote, hiveOutro, hiveSpinner,
@@ -336,6 +342,9 @@ export async function repl(): Promise<void> {
   // Lazy IPC forwarder — populated once TUI socket is ready, null before that.
   // Events fired before TUI connects (should not happen in practice) are silently dropped.
   let _tuiIpcSend: ((msg: any) => void) | null = null
+  // Jev event-bus subscriptions, torn down with the TUI so a relaunch does not
+  // leave a stale listener forwarding into a closed socket.
+  const tuiJevUnsubscribers: Array<() => void> = []
   manager.setIpcCallback((event, payload) => {
     if (!_tuiIpcSend) return
     const p = payload as any
@@ -414,6 +423,173 @@ export async function repl(): Promise<void> {
     // Wire live IPC events (file_risk_update, conflict_alert, etc.) to TUI socket
     _tuiIpcSend = (msg: any) => tuiControl.send?.(msg)
 
+    // La TUI es un destino válido para `notify` y `report_progress`: si el
+    // gateway no está arrancado, el reporte cae a la pantalla en vez de fallar
+    // contra un canal inexistente.
+    setTuiSendFn((message) => {
+      _tuiIpcSend?.({
+        type: "history_append",
+        role: "system",
+        content: message,
+        agent: "progress",
+      })
+      _tuiIpcSend?.({ type: "status", running: true, msg: message })
+    })
+
+    // ── JEV → TUI ────────────────────────────────────────────────────────────
+    // The decision plane already emits `jev:decision` and `jev:status` on the
+    // event bus (packages/core/src/agent/jev-decisions.ts) and nothing was
+    // subscribed, so the whole reasoning trail — what it pruned, how many
+    // tokens it saved, whether tools may run in parallel — was computed and
+    // discarded. The TUI is the first consumer.
+    //
+    // Nothing in jev-planner.ts changes: this only re-emits what it already
+    // produces, renamed to snake_case to match every other wire field.
+    const jevUnsub = [
+      eventBus.on("jev:decision", (d) => {
+        _tuiIpcSend?.({
+          type: "jev_decision",
+          agent_id: d.agentId,
+          kind: d.kind,
+          summary: d.summary,
+          saved_tokens: d.savedTokens,
+          cost_usd: d.costUsd,
+          latency_ms: d.latencyMs,
+          event_id: d.eventId,
+          totals: {
+            decisions: d.totals.decisions,
+            saved_tokens: d.totals.savedTokens,
+            cost_usd: d.totals.costUsd,
+          },
+        })
+      }),
+      eventBus.on("jev:status", (s) => {
+        if (!s) return
+        _tuiIpcSend?.({
+          type: "jev_status",
+          state: s.state,
+          last_error: s.lastError,
+          last_success_at: s.lastSuccessAt,
+          totals: {
+            decisions: s.totals.decisions,
+            saved_tokens: s.totals.savedTokens,
+            cost_usd: s.totals.costUsd,
+          },
+        })
+      }),
+    ]
+    tuiJevUnsubscribers.push(...jevUnsub)
+
+    // ── Telemetría de herramientas y esperas → TUI ───────────────────────────
+    // Antes el enjambre llamaba a sus herramientas a ciegas: la TUI recibía
+    // `current_action: "ejecutando <phase>"`, que no dice qué herramienta corre
+    // ni cuánto tarda. Estos tres eventos cierran ese hueco.
+    //
+    // `tool_call` y `tool_done` van en `normal` (no en `low`) porque son el
+    // pulso del enjambre: si se pierden en un embudo lento, la UI miente.
+    // El recorte por columna lo hace el consumidor, no el transporte.
+    const swarmUnsub = [
+      eventBus.on("tool:call", (c) => {
+        _tuiIpcSend?.({
+          type: "tool_call",
+          agent: c.agentId,
+          tool: c.tool,
+          call_id: c.callId,
+          args_summary: c.argsSummary,
+          bee_state: c.beeState,
+          task_id: c.taskId ?? undefined,
+          at: c.at,
+        })
+      }),
+      eventBus.on("tool:done", (d) => {
+        _tuiIpcSend?.({
+          type: "tool_done",
+          agent: d.agentId,
+          tool: d.tool,
+          call_id: d.callId,
+          ok: d.ok,
+          duration_ms: d.durationMs,
+          result_summary: d.resultSummary,
+          task_id: d.taskId ?? undefined,
+          at: d.at,
+        })
+      }),
+      eventBus.on("agent:waiting", (w) => {
+        _tuiIpcSend?.({
+          type: "esperando",
+          agent: w.agentId,
+          esperando_a: w.waitingFor,
+          razon: w.reason,
+          task_id: w.taskId ?? undefined,
+          at: w.at,
+        })
+      }),
+      // Carga efectiva del turno. Llega por agente y reemplaza la anterior:
+      // cada turno emite la suya, y JEV puede haber podado el conjunto.
+      eventBus.on("agent:loadout", (l) => {
+        _tuiIpcSend?.({
+          type: "carga_actual",
+          agent: l.agentId,
+          tools: l.tools,
+          skills: l.skills,
+          origen: l.origen,
+          minimal: l.minimal,
+          at: l.at,
+        })
+      }),
+    ]
+    tuiJevUnsubscribers.push(...swarmUnsub)
+
+    // ── Roster → TUI ──────────────────────────────────────────────────────────
+    // One snapshot of the whole swarm: alias, rol, función, tools and MCP state
+    // per specialist. It re-uses `describeSwarmCapabilities()`, the same function
+    // Jev routes over — deliberately, so the TUI can never advertise a tool an
+    // agent does not actually have.
+    //
+    // Sent on init and on agent create/archive, never per frame.
+    const sendRoster = async () => {
+      try {
+        // Same accessor the gateway uses, so MCP connectivity is read from the
+        // live manager rather than guessed.
+        const mcp = getAgentService().getMCPManager()
+        const roster = await describeSwarmCapabilities(mcp, { includeSpecialists: true })
+        if (roster.specialists.length === 0) return
+        _tuiIpcSend?.({
+          type: "roster_snapshot",
+          agentes: roster.specialists.map(s => ({
+            id: s.id,
+            rol: s.rol,
+            alias: s.alias,
+            funcion: s.funcion,
+            nivel: s.nivel,
+            tools: s.tools,
+            mcp: s.mcp.map(m => ({ name: m.name, state: m.state })),
+          })),
+          mcp_servers: roster.mcpServers.map(s => ({
+            id: s.id, name: s.name, tools: s.tools, state: s.state,
+          })),
+        })
+      } catch (err) {
+        // The roster is observability. A failure here must not stop the swarm.
+        logger.warn(`[repl] roster_snapshot no se pudo enviar: ${(err as Error).message}`)
+      }
+    }
+    void sendRoster()
+
+    // Announce the current availability immediately, so the status dot is right
+    // before the first decision rather than blank until then.
+    getJevStatus()
+      .then((s) => {
+        _tuiIpcSend?.({
+          type: "jev_status",
+          state: s.state,
+          last_error: s.lastError,
+          last_success_at: s.lastSuccessAt,
+          totals: s.totals,
+        })
+      })
+      .catch(() => { /* observability is never a hard dependency */ })
+
     // BEE-initiated mode changes (set_session_mode tool) propagate back to TUI
     manager.setModeChangeCallback((mode) => {
       currentMode = mode as ReplMode
@@ -458,27 +634,16 @@ export async function repl(): Promise<void> {
           timestamp: new Date().toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" }),
         })
       }
-      // Send activity_update so the CODE tab workers panel shows live status
-      const displayMap: Record<string, string> = {
-        bee: "Bee",
-        architecture: "Architecture",
-        backend: "BackendEngineer",
-        frontend: "FrontendEngineer",
-        security: "SecurityAuditor",
-        test: "QAEngineer",
-        devops: "DevOpsEngineer",
-        product_manager: "ProductManager",
-        data_scientist: "DataScientist",
-        verifier: "Verifier",
-        reviewer: "CodeReviewer",
-      }
+      // Send activity_update so the CODE tab workers panel shows live status.
+      // El nombre visible sale de `agent-identity` —la misma tabla que
+      // consume el roster— en vez de una copia local que ya iba en inglés.
       tuiControl.send?.({
         type: "activity_update",
         task_id: taskId,
         coordinator: chunk.coordinator,
         phase: chunk.phase,
-        status: chunk.phase === "thinking" || chunk.phase === "reason" ? "running" : "running",
-        display_name: displayMap[chunk.coordinator] || chunk.coordinator,
+        status: "running",
+        display_name: agentAlias(chunk.coordinator),
         activity: content.slice(0, 80),
       })
     })
@@ -551,6 +716,11 @@ export async function repl(): Promise<void> {
 
       onExit() {
         _tuiIpcSend = null
+        // Drop the Jev subscriptions before the socket closes, so a relaunch
+        // does not accumulate listeners forwarding into a dead socket.
+        while (tuiJevUnsubscribers.length) {
+          try { tuiJevUnsubscribers.pop()?.() } catch { /* best effort */ }
+        }
         // Close session and stop workers
         manager.closeSession()
         manager.stopAll().catch(() => {})

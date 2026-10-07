@@ -13,6 +13,8 @@ import { logger, onLogEntry, removeLogListener, type LogEntry } from "@johpaz/hi
 import { createIpcServer } from "@johpaz/hivecode-core/ipc/server"
 import type { BunMessage as CoreBunMessage, TuiMessage as CoreTuiMessage } from "@johpaz/hivecode-core/ipc/protocol"
 import { broadcastUiMessage, registerUiMessageHandler } from "@johpaz/hivecode-core/ipc/ui-broadcast"
+import { agentAlias } from "@johpaz/hivecode-core/agent/agent-identity"
+import { parseSkillTools, isMinimalSkill } from "@johpaz/hivecode-core/agent/minimal-loadout"
 import { col } from "@johpaz/hivecode-core/storage/hive"
 import type {
   AdrDoc,
@@ -39,6 +41,8 @@ import type {
   WorkerActivityDoc,
 } from "@johpaz/hivecode-core/storage/collections"
 import { restoreFiles } from "@johpaz/hivecode-code/checkpoint/rollback"
+import { hasProviderApiKey, isFreeProvider, storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
+import { getDefaultProvider, getProviderModel, setDefaultProvider, setProviderModel } from "./provider-store"
 
 const SUPPORTED_LLM_PROVIDERS = new Set([
   "hiveagents",
@@ -442,6 +446,102 @@ async function handleTuiMessage(
       break
     }
 
+    /**
+     * Activar un provider ya elegido por el usuario en el hub de settings.
+     *
+     * El id llega explícito, así que no hay nada que volver a preguntar: como
+     * mucho se acepta la API key. Antes esta operación llegaba como
+     * `submit("/provider set <id>")`, `handleProviderCommand` ignoraba el `rest`
+     * y `showConfigModal` volvía a pintar la lista entera de providers — el
+     * usuario elegía el mismo provider dos veces seguidas.
+     */
+    case "provider_activate": {
+      const providerId = msg.provider_id?.trim().toLowerCase()
+      if (!providerId) {
+        send({ type: "history_append", role: "system", content: "⚠ provider_activate sin provider_id" })
+        break
+      }
+      try {
+        const row = await (await col<ProviderDoc>("providers")).get(providerId)
+        const doc = row?.doc
+        if (!doc) throw new Error(`Provider no encontrado: ${providerId}`)
+        if (doc.category !== "llm") throw new Error(`${providerId} no es un provider LLM`)
+
+        // La clave solo se toca si viene algo; sin `api_key` se respeta lo que ya
+        // hubiera en el keystore en vez de borrarlo por accidente.
+        const newKey = msg.api_key?.trim()
+        const browserLogin = isFreeProvider(providerId) || doc.is_free_tier === true
+        if (newKey) {
+          await storeProviderApiKey(providerId, newKey)
+        } else if (!(await hasProviderApiKey(providerId))) {
+          // hivecode-free autentica contra el backend con PKCE: sin token la
+          // petición falla con un 401 difícil de diagnosticar, así que el
+          // mensaje dice qué hacer en vez de "no tiene API key".
+          throw new Error(browserLogin
+            ? `${providerId} necesita iniciar sesión. Usa /auth login`
+            : `${providerId} no tiene API key`)
+        }
+
+        // Cambiar de provider sin modelo compatible da 401 en la primera
+        // petición, así que se fija el primero habilitado del nuevo provider.
+        const models = (await (await col<ModelDoc>("models")).findBy("provider_id", providerId))
+          .map(entry => entry.doc)
+          .filter(m => m.model_type === "llm" && m.enabled)
+          .sort((a, b) => a.id.localeCompare(b.id))
+        const model = models[0]?.id
+
+        // Solo se toca el provider/modelo por defecto si algo cambia de verdad.
+        // Reactivar el provider ya activo con su clave debe ser un no-op: si no,
+        // cada Enter en la fila activa saltaría al primer modelo y perdería el
+        // que el usuario tenía elegido.
+        const alreadyActive = (await getDefaultProvider()) === providerId
+        if (alreadyActive && !newKey && !model) {
+          send({
+            type: "history_append",
+            role: "system",
+            content: `  ⭐ Provider ${providerId} ya estaba activo`,
+          })
+          send({ type: "status", running: false, msg: `Provider ${providerId} ya estaba activo` })
+          break
+        }
+
+        if (!alreadyActive) await setDefaultProvider(providerId)
+        if (model && model !== (await getProviderModel(providerId))) {
+          await setProviderModel(providerId, model)
+        }
+        await (await col<ProviderDoc>("providers")).put(
+          providerId,
+          { ...doc, enabled: true },
+          { expectedVersion: row!.version },
+        )
+
+        send({
+          type: "history_append",
+          role: "system",
+          content: newKey
+            ? `  ⭐ Provider ${providerId} configurado y activado${model ? `\n  Modelo: ${model}` : ""}`
+            : `  ⭐ Provider ${providerId} activado${model ? `\n  Modelo: ${model}` : ""}`,
+        })
+        send({
+          type: "state_update",
+          new_provider: providerId,
+          ...(model && { new_model: model }),
+        })
+        send({ type: "status", running: false, msg: `Provider ${providerId} activo` })
+      } catch (err) {
+        send({
+          type:    "history_append",
+          role:    "system",
+          content: `(×ᴗ×) ${(err as Error).message}`,
+        })
+        send({ type: "status", running: false, msg: "Error" })
+      }
+      // El hub sigue abierto en la TUI esperando este refresco: sin él se
+      // quedaría en "Cargando…" con las filas viejas.
+      await sendSettingsSnapshot(send)
+      break
+    }
+
     case "mode_change":
       callbacks.onModeChange?.(msg.mode)
       break
@@ -509,23 +609,17 @@ function phaseStatusForTui(status: string): string {
   return status
 }
 
+/**
+ * Nombre visible de un agente.
+ *
+ * Antes era una tabla local con nombres en inglés (`"BackendEngineer"`) que ya
+ * se había desincronizado de la tabla del lado Rust. Ahora sale de
+ * `agent-identity`, la misma que consume `describeSwarmCapabilities()` y que la
+ * TUI recibe por `roster_snapshot` — tres antes, una sola ahora.
+ */
 function displayNameForAgent(name: string): string {
-  const names: Record<string, string> = {
-    bee: "Bee",
-    product_manager: "ProductManager",
-    architecture: "Architecture",
-    architect: "Architecture",
-    backend: "BackendEngineer",
-    frontend: "FrontendEngineer",
-    data_scientist: "DataScientist",
-    security: "SecurityAuditor",
-    test: "QAEngineer",
-    devops: "DevOpsEngineer",
-    verifier: "Verifier",
-    reviewer: "CodeReviewer",
-    librarian: "Librarian",
-  }
-  return names[name] ?? name
+  if (name === "architect") return "Cóndor"
+  return agentAlias(name)
 }
 
 async function scanDocs<T>(collection: string): Promise<T[]> {
@@ -918,15 +1012,21 @@ function buildDashboardLevels(workers: any[]): Array<{ level: number; label: str
   })
 }
 
+/**
+ * Nivel de pipeline para un coordinador, cuando la fase no lo trae.
+ *
+ * Antes `verifier` era 5 y `reviewer` 6: dos filas para el mismo gate. Con la
+ * fusión en `quality` el nivel 6 desaparece y librarian baja a 6, para que no
+ * quede un hueco que la TUI tenga que interpretar.
+ */
 function fallbackWorkerLevel(name: string): number {
   if (name === "product_manager") return 0
   if (name === "architecture" || name === "architect") return 1
   if (["backend", "frontend", "data_scientist"].includes(name)) return 2
   if (name === "security" || name === "test") return 3
   if (name === "devops") return 4
-  if (name === "verifier") return 5
-  if (name === "reviewer") return 6
-  if (name === "librarian" || name.startsWith("forensic")) return 7
+  if (name === "quality" || name === "verifier" || name === "reviewer") return 5
+  if (name === "librarian" || name.startsWith("forensic")) return 6
   return 2
 }
 
@@ -958,12 +1058,19 @@ async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> 
       const configuredModel = (await codeConfig.get(`provider_model_${provider.id}`))?.doc.value ?? ""
       const fallbackModel = (modelsByProvider.get(provider.id) ?? [])
         .sort((a, b) => a.name.localeCompare(b.name))[0]?.id ?? ""
+      // El estado de la clave sale del keystore, no de un literal. Con `true`
+      // fijo la columna Key de la TUI marcaba \u2713 para todos los providers y
+      // no daba ninguna pista de cuáles necesitaban clave.
+      const browserLogin = isFreeProvider(provider.id) || provider.is_free_tier === true
       return {
         id: provider.id,
         name: provider.name ?? provider.id,
         model: configuredModel || fallbackModel,
         is_active: provider.id === defaultProvider,
-        has_key: true,
+        has_key: browserLogin || await hasProviderApiKey(provider.id),
+        // hivecode-free y af\u00ednes hacen login por navegador: la TUI no debe
+        // pedirles una API key, no hay ninguna que pegar.
+        browser_login: browserLogin,
         // Los ids ya vienen filtrados por model_type/enabled en modelsByProvider.
         // La TUI los usa para listar solo los del provider activo.
         models: (modelsByProvider.get(provider.id) ?? [])
@@ -976,7 +1083,7 @@ async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> 
 
   let agents: any[] = []
   try {
-    const order = ["bee", "scout", "builder", "verifier", "reviewer", "spider"]
+    const order = ["bee", "scout", "builder", "verifier", "spider"]
     agents = (await (await col<AgentDoc>("agents")).scan())
       .map(entry => entry.doc)
       .filter(agent => !!agent.agent_type)
@@ -1019,6 +1126,18 @@ async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> 
         description: s.description ?? "",
         category: s.category ?? "",
         active: s.active,
+        // `tools` es lo que permite a la TUI responder "¿este agente puede
+        // usar esta skill?" — sin el no se puede marcar una como bloqueada, y
+        // ofrecer una whose tools el agente no tiene es peor que no ofrecerla.
+        tools: parseSkillTools(s.tools),
+        // Quién la recomienda. Hasta ahora el campo se guardaba y nadie lo leía.
+        preferida_por: s.preferred_agents ?? [],
+        // Clasificación calculada con la MISMA función que usa el runtime
+        // (`isMinimalSkill`). Si la vista calculara su propia regla, podría
+        // marcar como "siempre disponible" algo que el agente no puede cargar.
+        //   true  → todas sus tools están en la carga mínima: siempre disponible
+        //   false → depende de descubrirla con search_knowledge
+        siempre_disponible: isMinimalSkill(s.tools),
       }))
   } catch { /* skills puede no existir */ }
 

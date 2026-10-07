@@ -3,9 +3,9 @@
  *
  * The systemic bug these pin: the Scribe persisted recovery state to HiveDB but
  * every read served from an in-memory cache that started empty in each process,
- * so crash recovery never actually recovered anything. These tests exercise the
- * cross-process path — write with one Scribe instance, flush, then read with a
- * FRESH instance that only sees the data if it hydrates from HiveDB.
+ * so crash recovery never actually recovered anything. Reads now hit HiveDB
+ * directly, so these exercise the cross-process path — write with one Scribe
+ * instance, flush, then read with a FRESH instance that needs no hydration step.
  */
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test"
@@ -29,25 +29,23 @@ afterAll(() => {
 })
 
 describe("Scribe cross-process recovery", () => {
-  test("a fresh Scribe hydrates recovery points written by a prior instance", async () => {
+  test("a fresh Scribe reads recovery points written by a prior instance", async () => {
     const writer = new Scribe()
     const sessionId = writer.createSession(process.cwd())
     const taskId = writer.createTask(sessionId, "build the auth module", "auto")
-    writer.saveRecoveryPoint(taskId, null, [0, 1], [2, 3], 2)
+    await writer.saveRecoveryPoint(taskId, null, [0, 1], [2, 3], 2)
     await writer.flush()
 
-    // A brand-new instance (simulating a restarted process) sees nothing until it hydrates.
+    // A brand-new instance (simulating a restarted process) reads straight from
+    // HiveDB — there is no hydration step to forget.
     const restarted = new Scribe()
-    expect(restarted.getLatestRecoveryPoint(taskId)).toBeNull()
-
-    await restarted.hydrate()
-    const recovery = restarted.getLatestRecoveryPoint(taskId)
+    const recovery = await restarted.getLatestRecoveryPoint(taskId)
     expect(recovery).not.toBeNull()
     expect(recovery!.level).toBe(2) // exposed for resumeTask's startLevel
     expect(recovery!.completedPhases).toEqual([0, 1])
   })
 
-  test("hydrate surfaces interrupted (non-terminal) tasks for reconciliation", async () => {
+  test("interrupted (non-terminal) tasks are surfaced for reconciliation", async () => {
     const writer = new Scribe()
     const sessionId = writer.createSession(process.cwd())
     const running = writer.createTask(sessionId, "running task", "auto")
@@ -56,8 +54,7 @@ describe("Scribe cross-process recovery", () => {
     await writer.flush()
 
     const restarted = new Scribe()
-    await restarted.hydrate()
-    const interrupted = restarted.findInterruptedTasks().map((task) => task.id)
+    const interrupted = (await restarted.findInterruptedTasks()).map((task) => task.id)
     expect(interrupted).toContain(running)
     expect(interrupted).not.toContain(done)
   })

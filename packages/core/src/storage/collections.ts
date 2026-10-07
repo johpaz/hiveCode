@@ -59,6 +59,10 @@ export interface AgentDoc {
   model_id: string;
   tools_json: string | null;
   skills_json: string | null;
+  /** Capabilities this agent may use, when narrower than tools_json. */
+  tool_allowlist_json?: string | null;
+  /** MCP server ids this agent may connect to, when narrower than all. */
+  mcp_server_ids_json?: string | null;
   parent_id: string;
   max_iterations: number;
   /** Optional per-profile controls exposed by the Dashboard. */
@@ -212,7 +216,8 @@ export interface PlaybookDoc {
 export interface ReflectionDoc {
   id: string;
   trace_ids: string;
-  insight_type: "success_pattern" | "failure_pattern" | "optimization" | "ethics_violation";
+  /** `root_cause` / `learning_proposal` come from HiveDB's G9 harness evaluation. */
+  insight_type: "success_pattern" | "failure_pattern" | "optimization" | "ethics_violation" | "root_cause" | "learning_proposal";
   description: string;
   affected_tools: string | null;
   affected_agents: string | null;
@@ -266,6 +271,17 @@ export interface TraceDoc {
   error_message: string | null;
   duration_ms: number | null;
   tokens_used: number | null;
+  /**
+   * G9 causal stream this trace belongs to — one per agent-loop invocation, so
+   * `causalThread()` can reconstruct the decision chain that produced it.
+   */
+  causal_stream_id?: string | null;
+  /**
+   * Conditions this trace ran under, as `{provider}/{model}@{app}#{toolHash}`.
+   * A change in model or tool catalog makes traces non-comparable; the
+   * reflector uses this to notice a boundary inside its own batch.
+   */
+  run_epoch?: string | null;
   created_at: number;
 }
 
@@ -864,6 +880,11 @@ export interface UsageRollupDoc {
   toonJsonTokens: number;
   toonToonTokens: number;
   toonJsonBytes: number;
+  /** Jev decision plane: how many decisions ran, what they cost, what they saved. */
+  jevDecisions?: number;
+  jevCostUsd?: number;
+  jevSavedTokens?: number;
+  jevSavedCostUsd?: number;
   byProvider: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }>;
   byModel: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }>;
 }

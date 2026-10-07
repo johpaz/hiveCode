@@ -5,12 +5,13 @@ use crossterm::{
     cursor::Hide,
     cursor::MoveTo,
     cursor::Show,
-    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream,
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEvent,
             DisableBracketedPaste, EnableBracketedPaste},
     execute,
     terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::StreamExt;
+use tokio::io::{AsyncReadExt as _, BufReader};
 use tokio::time::{self, Duration};
 use tokio::signal::unix::{signal, SignalKind};
 
@@ -49,7 +50,10 @@ pub async fn run_headless() -> Result<()> {
     let emit = |canvas: &mut Canvas, state: &mut AppState, frame: u64, out: &mut dyn Write| {
         renderer::render(canvas, state);
         let rows = canvas.to_text_rows();
-        let tab = format!("{:?}", state.active_tab).to_lowercase();
+        // The tab goes out as its slug, not as the enum's Debug name: renaming a
+        // variant would silently break every E2E assertion that waits on
+        // `f.tab === "..."`. The slug is the stable public identifier.
+        let tab = state.active_tab.slug();
         let mode = format!("{:?}", state.session.mode).to_lowercase();
         let running = state.running;
         let row_json: Vec<String> = rows.iter().map(|r| {
@@ -67,6 +71,35 @@ pub async fn run_headless() -> Result<()> {
 
     // Initial frame (empty state)
     emit(&mut canvas, &mut state, frame, &mut stdout);
+
+    // Headless still reads stdin, so the E2E harness can drive real keystrokes
+    // (`\x1bOQ` = F2, `\r` = Enter, ...) through the same reducer the TTY mode
+    // uses. Without this only inbound messages could move the state machine, and
+    // the whole key-driven surface (settings hub, modals) would be untestable
+    // end-to-end.
+    //
+    // The read lives in its own task because `tokio::select!` needs a branch it
+    // can poll again on the next iteration, and an `async {}` wrapping a
+    // `BufReader` is consumed on its first poll. A channel hands the bytes over.
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(tokio::io::stdin());
+        let mut chunk = [0u8; 1024];
+        loop {
+            match reader.read(&mut chunk).await {
+                // 0 = stdin closed: no more keys will ever arrive.
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    // A chunk that splits a UTF-8 sequence is skipped; the rest
+                    // arrives in a later read.
+                    if let Ok(text) = std::str::from_utf8(&chunk[..n]) {
+                        if stdin_tx.send(text.to_string()).is_err() { break; }
+                    }
+                }
+            }
+        }
+    });
+    let mut stdin_buf = String::new();
 
     loop {
         tokio::select! {
@@ -89,11 +122,139 @@ pub async fn run_headless() -> Result<()> {
                 frame += 1;
                 emit(&mut canvas, &mut state, frame, &mut stdout);
             }
+            chunk = stdin_rx.recv() => {
+                let Some(chunk) = chunk else { break };
+                stdin_buf.push_str(&chunk);
+                if !drain_keys(&mut state, &mut stdin_buf, &ipc_ch.tx)? {
+                    return Ok(());
+                }
+                frame += 1;
+                emit(&mut canvas, &mut state, frame, &mut stdout);
+            }
             else => break,
         }
     }
 
     Ok(())
+}
+
+/// Consume el buffer de entrada aplicando cada tecla al reducer.
+/// Devuelve `false` cuando la tecla pide salir de la TUI.
+fn drain_keys(
+    state: &mut AppState,
+    stdin_buf: &mut String,
+    tx: &tokio::sync::mpsc::Sender<TuiMessage>,
+) -> Result<bool> {
+    // Un `\r` suelto no puede esperar más bytes, así que se decodifica de a un
+    // parche en lugar de por líneas completas.
+    while let Some((key, rest)) = next_key(stdin_buf) {
+        *stdin_buf = rest;
+        if handle_key_event(state, key) {
+            let _ = tx.try_send(TuiMessage::Exit);
+            return Ok(false);
+        }
+        for msg in state.pending_ipc.drain(..) {
+            let _ = tx.try_send(msg);
+        }
+    }
+    Ok(true)
+}
+
+
+
+/// Extrae la siguiente tecla de un buffer de entrada ANSI.
+///
+/// Cubre lo que los tests necesitan y lo que una terminal envía de verdad:
+/// teclas de control, `\r`/`\n`, caracteres UTF-8 completos y las secuencias
+/// CSI/SS3 de crossterm (F1-F4, flechas, Supr, Inicio/Fin). Devuelve `None`
+/// cuando el buffer está incompleto, para no descartar media secuencia.
+fn next_key(buf: &str) -> Option<(KeyEvent, String)> {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyEventState, KeyModifiers};
+
+    if buf.is_empty() {
+        return None;
+    }
+    let mut chars = buf.chars();
+    let first = chars.next()?;
+
+    let (code, modifiers, consumed): (KeyCode, KeyModifiers, usize) = match first {
+        '\x1b' => {
+            let rest: String = chars.collect();
+            let mut it = rest.chars();
+            match it.next() {
+                // SS3: F1-F4 y las flechas en modo aplicación.
+                Some('O') => match it.next() {
+                    Some('P') => (KeyCode::F(1), KeyModifiers::NONE, 3),
+                    Some('Q') => (KeyCode::F(2), KeyModifiers::NONE, 3),
+                    Some('R') => (KeyCode::F(3), KeyModifiers::NONE, 3),
+                    Some('S') => (KeyCode::F(4), KeyModifiers::NONE, 3),
+                    Some('A') => (KeyCode::Up, KeyModifiers::NONE, 3),
+                    Some('B') => (KeyCode::Down, KeyModifiers::NONE, 3),
+                    Some('C') => (KeyCode::Right, KeyModifiers::NONE, 3),
+                    Some('D') => (KeyCode::Left, KeyModifiers::NONE, 3),
+                    _ => return None,
+                },
+                // CSI:parameters~ (Supr = 3~, Inicio/Fin = 1~/4~) y CSI letter.
+                Some('[') => {
+                    let mut seq = String::new();
+                    for c in it.by_ref() {
+                        seq.push(c);
+                        if c.is_ascii_alphabetic() || c == '~' {
+                            break;
+                        }
+                    }
+                    let chars_of: Vec<char> = seq.chars().collect();
+                    let letter = *chars_of.last()?;
+                    let code = match letter {
+                        'A' => KeyCode::Up,
+                        'B' => KeyCode::Down,
+                        'C' => KeyCode::Right,
+                        'D' => KeyCode::Left,
+                        'H' => KeyCode::Home,
+                        'F' => KeyCode::End,
+                        '~' => match chars_of.first() {
+                            Some('1') | Some('7') => KeyCode::Home,
+                            Some('4') | Some('8') => KeyCode::End,
+                            Some('3') => KeyCode::Delete,
+                            _ => return None,
+                        },
+                        _ => return None,
+                    };
+                    // ESC inicial + '[' + los chars de la secuencia.
+                    (code, KeyModifiers::NONE, 2 + chars_of.len())
+                }
+                // ESC suelto: cancelar.
+                Some(_) => (KeyCode::Esc, KeyModifiers::NONE, 1),
+                // An ESC alone in the buffer resolves as Esc.
+                //
+                // A real terminal can send ESC by itself (cancel) or start a
+                // CSI/SS3 sequence, and telling those apart needs a timing
+                // heuristic. Headless mode has no such ambiguity: its stdin is a
+                // pipe and the harness writes one whole key at a time, so a
+                // trailing ESC can only be a cancel. Waiting for more bytes would
+                // leave `Esc` hanging forever.
+                None => (KeyCode::Esc, KeyModifiers::NONE, 1),
+            }
+        }
+        '\r' | '\n' => (KeyCode::Enter, KeyModifiers::NONE, 1),
+        '\t' => (KeyCode::Tab, KeyModifiers::NONE, 1),
+        '\x7f' | '\x08' => (KeyCode::Backspace, KeyModifiers::NONE, 1),
+        '\x03' => (KeyCode::Char('c'), KeyModifiers::CONTROL, 1),
+        // Un carácter ocupa un `char` del buffer, no sus bytes: un emoji son 4 bytes
+        // pero un solo `next_key`.
+        c => (KeyCode::Char(c), KeyModifiers::NONE, 1),
+    };
+
+    let key = KeyEvent { code, modifiers, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+    Some((key, skip_n_chars(buf, consumed)))
+}
+
+/// `buf` sin sus primeros `n` caracteres, contando UTF-8 y no bytes.
+fn skip_n_chars(buf: &str, n: usize) -> String {
+    buf.char_indices()
+        .nth(n)
+        .map(|(i, _)| buf[i..].to_string())
+        .unwrap_or_default()
 }
 
 pub async fn run() -> Result<()> {
@@ -293,7 +454,6 @@ fn apply_ipc_message(
         }
         BunMessage::Resume => {
             session.reenter()?;
-            state.dirty.full = true;
             TerminalEffect::Resumed
         }
         _ => TerminalEffect::None,

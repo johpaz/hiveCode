@@ -33,7 +33,7 @@ export interface ParsedPlan {
 
 const VALID_PHASES: PhaseName[] = [
   "product_manager", "backend", "frontend", "data_scientist",
-  "security", "test", "devops", "verifier", "reviewer",
+  "security", "test", "devops", "quality",
 ]
 
 /** Extract JSON from text (handles markdown code blocks) */
@@ -220,7 +220,6 @@ export function getDefaultPhases(): ParsedPhase[] {
     { name: "security", coordinator: "security",  description: "Security audit",                   dependsOn: ["backend", "frontend"] },
     { name: "test",     coordinator: "test",      description: "Generate and run tests",            dependsOn: ["backend", "frontend"] },
     { name: "devops",   coordinator: "devops",    description: "Prepare deployment pipeline",       dependsOn: ["security", "test"] },
-    { name: "verifier", coordinator: "verifier",  description: "Reproduce acceptance criteria against the running system", dependsOn: ["devops"] },
-    { name: "reviewer", coordinator: "reviewer",  description: "Final quality gate",                dependsOn: ["verifier"] },
+    { name: "quality", coordinator: "quality", description: "Quality gate: reproduce acceptance criteria against the running system, then review the code", dependsOn: ["devops"] },
   ]
 }

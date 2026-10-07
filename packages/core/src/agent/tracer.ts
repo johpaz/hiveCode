@@ -22,6 +22,10 @@ export interface TraceInput {
   errorMessage?: string | null
   durationMs?: number
   tokensUsed?: number
+  /** G9 causal stream this trace belongs to, for the reflector's thread analysis. */
+  causalStreamId?: string | null
+  /** Epoch fingerprint, so the reflector can spot a requalification boundary. */
+  runEpoch?: string | null
 }
 
 /**
@@ -46,6 +50,8 @@ export function saveTrace(trace: TraceInput): void {
         error_message: trace.errorMessage ?? null,
         duration_ms: trace.durationMs ?? null,
         tokens_used: trace.tokensUsed ?? null,
+        causal_stream_id: trace.causalStreamId ?? null,
+        run_epoch: trace.runEpoch ?? null,
         created_at: now,
       }, { expectedVersion: 0 })
 

@@ -2,8 +2,8 @@
  * Regression test for trace-sharing (Fase 4.5): compileWorkerContext's new
  * "DECISION TRACES" section reads ADRs via Scribe.readDecisions(), which must
  * carry `options`/`context` (what was considered, not just the final `decision`)
- * across a process restart — the same cross-process path Fase 2.1 fixed for
- * recovery points. This pins the data contract that section depends on.
+ * across a process restart. Reads go straight to HiveDB, so a fresh Scribe
+ * instance sees them with no hydration step. This pins that data contract.
  */
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test"
@@ -27,7 +27,7 @@ afterAll(() => {
 })
 
 describe("decision traces (blackboard trace-sharing)", () => {
-  test("a fresh Scribe hydrates the full trace — options considered, not just the decision", async () => {
+  test("a fresh Scribe reads the full trace — options considered, not just the decision", async () => {
     const writer = new Scribe()
     writer.writeDecision({
       id: "adr-1",
@@ -43,8 +43,7 @@ describe("decision traces (blackboard trace-sharing)", () => {
     await writer.flush()
 
     const restarted = new Scribe()
-    await restarted.hydrate()
-    const [adr] = restarted.readDecisions("active")
+    const [adr] = await restarted.readDecisions("active")
 
     expect(adr).toBeDefined()
     expect(adr.title).toBe("Rate limiting strategy")
@@ -69,8 +68,7 @@ describe("decision traces (blackboard trace-sharing)", () => {
     await writer.flush()
 
     const restarted = new Scribe()
-    await restarted.hydrate()
-    expect(restarted.readDecisions("active")).toHaveLength(0)
-    expect(restarted.readDecisions("superseded")).toHaveLength(1)
+    expect(await restarted.readDecisions("active")).toHaveLength(0)
+    expect(await restarted.readDecisions("superseded")).toHaveLength(1)
   })
 })

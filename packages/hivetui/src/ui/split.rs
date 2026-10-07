@@ -8,7 +8,6 @@ pub struct SplitPane {
     pub axis: Axis,
     pub gap: u16,
     pub constraints: Vec<Constraint>,
-    pub draggable: bool,
 }
 
 impl SplitPane {
@@ -17,7 +16,6 @@ impl SplitPane {
             axis,
             gap: 1,
             constraints: constraints.into(),
-            draggable: true,
         }
     }
 

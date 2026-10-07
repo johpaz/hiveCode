@@ -111,6 +111,79 @@ export interface EventMap {
     channel: string;
     userId: string;
   };
+  /** Jev served a decision and the caller is applying it. */
+  "jev:decision": {
+    agentId: string;
+    provider: string;
+    model: string;
+    kind: string;
+    summary: string;
+    savedTokens: number;
+    costUsd: number;
+    latencyMs: number;
+    eventId: string;
+    totals: { decisions: number; savedTokens: number; costUsd: number };
+  };
+  /** Availability of the decision plane: off / ready / cooling down. */
+  "jev:status": {
+    state: "off" | "ready" | "fallback";
+    lastError: string | null;
+    lastSuccessAt: number | null;
+    totals: { decisions: number; savedTokens: number; costUsd: number };
+  } | undefined;
+  /** An agent started a tool call. Always paired with a `tool:done` of the same `callId`. */
+  "tool:call": {
+    agentId: string;
+    tool: string;
+    /** Pairs this call with its completion. */
+    callId: string;
+    argsSummary: string;
+    beeState: string;
+    taskId: string | null;
+    at: number;
+  };
+  /** A tool call finished, successfully or not. */
+  "tool:done": {
+    agentId: string;
+    tool: string;
+    callId: string;
+    ok: boolean;
+    durationMs: number;
+    resultSummary: string;
+    taskId: string | null;
+    at: number;
+  };
+  /**
+   * An agent cannot advance until something else happens.
+   *
+   * `reason` is a short label (`"jev_secuencial"`, `"subagente"`,
+   * `"dependencia"`), not a sentence — it names the cause so the UI can group
+   * waiting agents by why they are stuck.
+   */
+  /**
+   * La carga efectiva de un agente en un turno.
+   *
+   * No es el perfil declarado: JEV poda y `search_knowledge` amplía, así que el
+   * conjunto cambia aunque no haya descubrimiento nuevo. La ficha del
+   * especialista lo necesita para no mentir.
+   */
+  "agent:loadout": {
+    agentId: string;
+    tools: string[];
+    skills: string[];
+    /** De dónde salió el conjunto de herramientas. */
+    origen: "perfil" | "jev_pruned";
+    /** Skills en la carga mínima: no dependen de descubrir nada. */
+    minimal: string[];
+    at: number;
+  };
+  "agent:waiting": {
+    agentId: string;
+    waitingFor: string[];
+    reason: string;
+    taskId: string | null;
+    at: number;
+  };
 }
 
 export type EventKey = keyof EventMap;

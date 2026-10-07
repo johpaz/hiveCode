@@ -78,6 +78,95 @@ describe("messagePriority", () => {
   })
 })
 
+// ─── Jev: el plano de decisión llega a la TUI ─────────────────────────────────
+//
+// Jev ya emitía `jev:decision` y `jev:status` en el event bus y nadie estaba
+// suscrito. Estos tests fijan el contrato del reenvío: el campo del bus que es
+// camelCase viaja como snake_case, igual que todos los demás campos del cable,
+// porque el lado Rust lo deserializa con serde contra nombres snake_case.
+
+describe("jev events", () => {
+  const totals = { decisions: 12, saved_tokens: 48_200, cost_usd: 0.021 }
+
+  it("jev_decision rides on normal so it is never dropped under load", () => {
+    // El plan lo dejó como pregunta abierta (#6). Decisión: `normal`. Es el
+    // rastro de razonamiento que el usuario lee, y mandarlo a `low` lo
+    // perdería justo cuando el enjambre está ocupado. El recorte lo hace la
+    // TUI, no el transporte.
+    const msg: BunMessage = {
+      type: "jev_decision",
+      agent_id: "agent-1", kind: "parallel", summary: "2 herramientas en paralelo",
+      saved_tokens: 0, cost_usd: 0.0001, latency_ms: 118, event_id: "jev:1", totals,
+    }
+    expect(messagePriority(msg)).toBe("normal")
+  })
+
+  it("jev_status rides on low — a stale availability dot is worth nothing", () => {
+    const msg: BunMessage = {
+      type: "jev_status", state: "ready", last_error: null, last_success_at: 1, totals,
+    }
+    expect(messagePriority(msg)).toBe("low")
+  })
+
+  it("a decision survives the envelope round-trip with its savings intact", () => {
+    const original: BunMessage = {
+      type: "jev_decision",
+      agent_id: "agent-7", kind: "context", summary: "18 → 6 mensajes · 3 tools",
+      saved_tokens: 8_200, cost_usd: 0.0003, latency_ms: 61,
+      event_id: "jev:m2k9:3", totals,
+    }
+
+    const back = unwrap(JSON.parse(serialize(wrap(messagePriority(original), original)))) as BunMessage
+
+    expect(back).toEqual(original)
+    if (back.type !== "jev_decision") throw new Error("tipo incorrecto")
+    expect(back.saved_tokens).toBe(8_200)
+    expect(back.latency_ms).toBe(61)
+    expect(back.event_id).toBe("jev:m2k9:3")
+    // El id estable es lo que permite deduplicar tras una reconexión.
+    expect(back.event_id).toContain("3")
+  })
+
+  it("an unavailable oracle is reported as off, not as an error", () => {
+    // `off` = no configurado. La UI lo pinta en DIM; si el campo se perdiera al
+    // serializar, la TUI asumiría "listo" y mostraría un oráculo que no existe.
+    const original: BunMessage = {
+      type: "jev_status", state: "off", last_error: null, last_success_at: null,
+      totals: { decisions: 0, saved_tokens: 0, cost_usd: 0 },
+    }
+    const back = unwrap(JSON.parse(serialize(wrap(messagePriority(original), original)))) as BunMessage
+    expect(back).toEqual(original)
+    if (back.type !== "jev_status") throw new Error("tipo incorrecto")
+    expect(back.state).toBe("off")
+    expect(back.last_error).toBeNull()
+  })
+
+  it("a cooling-down oracle keeps its error text", () => {
+    const original: BunMessage = {
+      type: "jev_status", state: "fallback", last_error: "OpenRouter HTTP 429",
+      last_success_at: 1_700_000_000, totals,
+    }
+    const back = unwrap(JSON.parse(serialize(wrap(messagePriority(original), original)))) as BunMessage
+    if (back.type !== "jev_status") throw new Error("tipo incorrecto")
+    expect(back.state).toBe("fallback")
+    expect(back.last_error).toBe("OpenRouter HTTP 429")
+  })
+
+  it("the re-emitted field names match what the Rust enum declares", () => {
+    // Espejo exacto de `BunMessage::JevDecision` en ipc/mod.rs. Si alguien
+    // renombra un campo en un lado, esta lista y serde dejan de coincidir.
+    const wire = {
+      type: "jev_decision",
+      agent_id: "a", kind: "iteration", summary: "s", saved_tokens: 1,
+      cost_usd: 0.1, latency_ms: 2, event_id: "e", totals,
+    }
+    expect(Object.keys(wire).sort()).toEqual([
+      "agent_id", "cost_usd", "event_id", "kind", "latency_ms",
+      "saved_tokens", "summary", "totals", "type",
+    ])
+  })
+})
+
 // ─── envelope wrap/unwrap ─────────────────────────────────────────────────────
 
 describe("envelope wrap/serialize/unwrap", () => {

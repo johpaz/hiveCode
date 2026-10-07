@@ -238,11 +238,15 @@ fn draw_right_no_provider(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &A
     draw_section_rule(canvas, x, row, w, "SETUP");
     row += 2;
     row += 1;
-    canvas.print(x, row, "  /provider add", Style::new().fg(AMBER_BRIGHT).bold());
-    canvas.print(x + 15, row, "  configurar provider de IA", Style::new().fg(DIM));
+    // F2 abre el hub: es el camino corto, con la clave en el mismo sitio.
+    canvas.print(x, row, "  F2", Style::new().fg(AMBER_BRIGHT).bold());
+    canvas.print(x + 15, row, "  elegir provider e introducir su API key", Style::new().fg(DIM));
+    row += 1;
+    canvas.print(x, row, "  /provider add", Style::new().fg(AMBER));
+    canvas.print(x + 16, row, "  dar de alta un provider nuevo", Style::new().fg(DIM));
     row += 1;
     canvas.print(x, row, "  /provider list", Style::new().fg(AMBER));
-    canvas.print(x + 16, row, "  ver providers disponibles", Style::new().fg(DIM));
+    canvas.print(x + 16, row, "  ver providers y su modelo activo", Style::new().fg(DIM));
     row += 2;
 
     canvas.print(x, row, "Escribe el comando y pulsa Enter", Style::new().fg(SECONDARY));
@@ -431,6 +435,7 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
 
 // ── Helpers públicos ──────────────────────────────────────────────────────────
 
+/// Agent colour. Delegates to `Theme::worker`, the single role → colour table.
 pub fn worker_color(name: &str) -> Color {
-    crate::widgets::components::worker_color(name)
+    crate::ui::Theme::worker(name)
 }

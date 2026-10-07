@@ -3,7 +3,8 @@ import {
   hiveNote, hiveSpinner,
 } from "../cli-ui.ts"
 import { col } from "@johpaz/hivecode-core/storage/hive"
-import { getHiveDbPath } from "@johpaz/hivecode-core/storage/hivedb"
+import { getHiveDbPath, findLegacyHiveDb } from "@johpaz/hivecode-core/storage/hivedb"
+import { preflightMigration, migrateLegacyDb } from "@johpaz/hivecode-core/storage/db-migrate"
 import type { AgentDoc, LearningProposalDoc, ProviderDoc, SkillDoc } from "@johpaz/hivecode-core/storage/collections"
 
 const SUPPORTED_LLM_PROVIDERS = new Set(["hiveagents", "openai", "anthropic", "gemini", "mistral", "deepseek", "kimi", "openrouter", "groq", "qwen", "nvidia", "codex", "opencode-go", "minimax", "hivecode-free"])
@@ -15,9 +16,60 @@ interface DoctorCheck {
   detail?: string
 }
 
+/**
+ * Move a cwd-relative database to the HiveDir location. Prints the preflight
+ * before asking, because the one outcome that cannot be undone is overwriting
+ * the destination — and the one that cannot be diagnosed later is a database
+ * that quietly went missing.
+ */
+async function migrateDbFlow(): Promise<void> {
+  hiveIntro("hivecode · Migración de base de datos")
+
+  const pre = preflightMigration()
+  if (!pre) {
+    hiveNote(`No hay base de datos antigua en ${process.cwd()}`, [])
+    hiveOutro("Nada que migrar")
+    return
+  }
+
+  const spinner = hiveSpinner("default")
+  spinner.start("Inspeccionando...")
+  spinner.stop(
+    `${pre.files.length} archivos · ${(pre.bytes / 1_000_000).toFixed(1)} MB`,
+  )
+
+  console.log(`\n  origen:  ${pre.from}`)
+  console.log(`  destino: ${pre.to}\n`)
+
+  if (pre.destinationOccupied) {
+    hiveNote("El destino YA tiene una base de datos. No se va a tocar.", [
+      "Movela a mano si queres reemplazarla:",
+      `  mv "${pre.to}" "${pre.to}.bak"`,
+    ])
+    hiveOutro("Cancelado — nada se movió")
+    return
+  }
+
+  const result = migrateLegacyDb()
+  if (!result.ok) {
+    hiveNote("No se pudo migrar:", [result.error ?? "error desconocido"])
+    hiveOutro("Migración fallida")
+    return
+  }
+
+  hiveOutro(`Base de datos migrada a ${pre.to}`)
+}
+
 export async function doctor(flags: string[] = []): Promise<void> {
 
   const fixMode = flags.includes("--fix")
+
+  // `--migrate-db` runs on its own: it moves the database, which is not
+  // something to bury in the middle of a diagnostic run.
+  if (flags.includes("--migrate-db")) {
+    await migrateDbFlow()
+    return
+  }
 
   hiveIntro("hivecode · Diagnóstico")
 
@@ -52,6 +104,23 @@ export async function doctor(flags: string[] = []): Promise<void> {
       status: "fail",
       message: "No se pudo conectar a la base de datos",
       detail: (err as Error).message,
+    })
+  }
+
+  // A legacy database in the cwd means the user has state the current process
+  // cannot see. Surfacing it is the whole point: silently starting empty would
+  // look like data loss with no explanation.
+  const legacy = findLegacyHiveDb()
+  if (legacy) {
+    const pre = preflightMigration()
+    checks.push({
+      name: "HiveDB",
+      status: "warn",
+      message: "Base de datos antigua en este directorio, no se está usando",
+      detail: pre
+        ? `${pre.from} → ${pre.to} · ${(pre.bytes / 1_000_000).toFixed(1)} MB en ${pre.files.length} archivos. `
+          + `Migrá con: hivecode doctor --migrate-db`
+        : legacy,
     })
   }
 

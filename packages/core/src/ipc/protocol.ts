@@ -137,14 +137,170 @@ export type BunMessage =
     }
   | { type: "resume_available"; task_id: string; checkpoint_id: string; reason: string }
   | { type: "phase_retry"; worker: string; attempt: number; max_attempts: number; reason: string }
+  /**
+   * An agent started a tool call. Always paired with a `tool_done` carrying the
+   * same `call_id`.
+   *
+   * Before this existed the TUI only received `current_action`, a free-text
+   * string the backend filled with "ejecutando &lt;phase&gt;" — it never said
+   * which tool was running or how long it would take.
+   *
+   * `args_summary` is truncated to 120 chars at the emitter: a 400 KB
+   * `fs_read` payload cannot be rendered in a 30-cell column.
+   */
+  | {
+      type: "tool_call"
+      agent: string
+      tool: string
+      call_id: string
+      args_summary: string
+      /** Coarse activity, reusing the classification from `toolToBeeState()`. */
+      bee_state: "thinking" | "searching" | "reading" | "writing" | "executing" | "done" | "error"
+      task_id?: string
+      at: number
+    }
+  /** A tool call finished, successfully or not. */
+  | {
+      type: "tool_done"
+      agent: string
+      tool: string
+      call_id: string
+      ok: boolean
+      duration_ms: number
+      result_summary: string
+      task_id?: string
+      at: number
+    }
+  /**
+   * An agent cannot advance until something else happens.
+   *
+   * `reason` names the cause (`"jev_secuencial"`, `"subagente"`,
+   * `"dependencia"`) rather than a sentence, so the UI can group waiting agents
+   * by why they are stuck.
+   */
+  | {
+      type: "esperando"
+      agent: string
+      esperando_a: string[]
+      razon: string
+      task_id?: string
+      at: number
+    }
+  /**
+   * La carga efectiva de un agente en este turno.
+   *
+   * No es el perfil declarado. JEV poda el conjunto y `search_knowledge` lo
+   * amplía, así que la lista cambia en cada turno aunque no haya nada nuevo
+   * que descubrir. Sin esto, la ficha del especialista anunciaría herramientas
+   * que el agente ya no tiene.
+   *
+   * Llega por agente y **reemplaza** la anterior: cada turno emite la suya.
+   */
+  | {
+      type: "carga_actual"
+      agent: string
+      tools: string[]
+      skills: string[]
+      /** De dónde salió el conjunto de herramientas. */
+      origen: "perfil" | "jev_pruned"
+      /** Skills en la carga mínima: disponibles sin descubrir nada. */
+      minimal: string[]
+      at: number
+    }
+  /**
+   * A Jev decision was served and the caller is applying it.
+   *
+   * Jev (the decision plane) already emits this on the event bus
+   * (`jev-decisions.ts` → `eventBus`) and nothing was subscribed. The TUI is
+   * the first consumer: this is the "why" behind an agent's behaviour — what it
+   * pruned, whether tools may run in parallel, which specialist it picked.
+   *
+   * Snake_case on the wire, like every other field here (`eventId` →
+   * `event_id`). `summary` already arrives truncated to 160 chars.
+   */
+  | {
+      type: "jev_decision"
+      agent_id: string
+      /** Which decision: "context" (prune + delegate), "parallel", "iteration". */
+      kind: string
+      summary: string
+      saved_tokens: number
+      cost_usd: number
+      latency_ms: number
+      /** Stable id, so the TUI can dedupe across a reconnect. */
+      event_id: string
+      totals: { decisions: number; saved_tokens: number; cost_usd: number }
+    }
+  /**
+   * Availability of the decision plane.
+   *
+   * `off` means "not configured" and must not be rendered as an error;
+   * `fallback` means it is cooling down after failures and deserves a warning.
+   */
+  | {
+      type: "jev_status"
+      state: "off" | "ready" | "fallback"
+      last_error: string | null
+      last_success_at: number | null
+      totals: { decisions: number; saved_tokens: number; cost_usd: number }
+    }
+  | {
+      type: "roster_snapshot"
+      /**
+       * The whole swarm, once. Sent on `init` and whenever an agent is created
+       * or archived — never in the hot path.
+       *
+       * It is `describeSwarmCapabilities()` serialized: one roster, one read of
+       * the capability fields. A second source would drift and the TUI would
+       * advertise tools an agent does not have.
+       *
+       * `mcp[].state` travels with it so the UI can mark blocked specialists
+       * before the first decision arrives, instead of waiting for `agentMcpOff`.
+       */
+      agentes: Array<{
+        id: string
+        /** Internal role: `backend`, `frontend`… what the bus and the logs use. */
+        rol: string
+        /** Visible alias: `Topo`, `Quetzal`… what the user reads. */
+        alias: string
+        funcion: string
+        /** 0 = commander … 5 = on-demand. Same scale as the TUI's `AgentTier`. */
+        nivel: number
+        tools: string[]
+        mcp: Array<{ name: string; state: "activo" | "disponible" | "apagado" }>
+      }>
+      mcp_servers: Array<{ id: string; name: string; tools: number; state: "activo" | "disponible" | "apagado" }>
+    }
   | {
       type: "settings_data"
       // `models` = ids de los modelos llm habilitados de ese provider, para que la TUI
-// pueda ofrecer solo los del provider activo sin volver a consultar.
-      providers: Array<{ id: string; name: string; model: string; is_active: boolean; has_key: boolean; models: string[] }>
+      // pueda ofrecer solo los del provider activo sin volver a consultar.
+      // `has_key` se consulta en el keystore (no se inventa): la columna Key de la
+      // TUI tiene que distinguir "clave guardada" de "falta API key".
+      // `browser_login` marca los que hacen PKCE contra el backend y no usan clave.
+      providers: Array<{ id: string; name: string; model: string; is_active: boolean; has_key: boolean; browser_login: boolean; models: string[] }>
       agents: Array<{ id: string; name: string; provider: string; model: string; effort: string; max_turns: number; max_input_tokens: number; max_output_tokens: number; max_cost_usd: number; permission_profile: string }>
       mcp: Array<{ id: string; name: string; url: string; enabled: boolean; has_headers: boolean }>
-      skills: Array<{ name: string; description: string; category: string; active: boolean }>
+      skills: Array<{
+        name: string
+        description: string
+        category: string
+        active: boolean
+        /** Tools que la skill documenta. Sin esto la TUI no puede decir si un
+         *  agente puede usarla, y ofrecer una cuyas tools el agente no tiene es
+         *  peor que no ofrecerla. */
+        tools: string[]
+        /** Roles que la recomiendan. El campo existía y nadie lo leía. */
+        preferida_por: string[]
+        /**
+         * `isMinimalSkill()` del runtime: todas las tools de la skill están en la
+         * carga mínima, así que está disponible sin descubrir nada.
+         *
+         * Lo calcula el backend con la misma función que usa el agente. Si la
+         * TUI tuviera su propia regla, podría discrepar del runtime.
+         */
+        siempre_disponible: boolean
+      }>
       github_connected: boolean
       github_repo: string | null
       telegram_active: boolean
@@ -164,6 +320,16 @@ export type TuiMessage =
   | { type: "exit" }
   | { type: "rollback"; checkpoint_id: string }
   | { type: "request_settings" }
+  /**
+   * Activar el provider que el usuario ya eligió en el hub de settings de la TUI,
+   * guardando su API key si viene.
+   *
+   * Sustituye a mandar `/provider set <id>` como `submit`: ese camino descartaba
+   * el id y Bun volvía a mostrar el desplegable con TODOS los providers, así que
+   * había que elegir dos veces el mismo. Aquí el id viaja explícito y el único
+   * campo que se puede preguntar es la clave.
+   */
+  | { type: "provider_activate"; provider_id: string; api_key?: string }
 
 // ── Priority helpers ──────────────────────────────────────────────────────────
 
@@ -177,6 +343,16 @@ const LOW_TYPES = new Set<BunMessage["type"]>([
   "memory_update", "librarian_progress", "dashboard_snapshot", "metrics_update",
   // High-volume token streams: they must never delay a critical alert.
   "assistant_chunk", "thought_chunk",
+  // Status flips are rare and tiny; a stale availability dot is worth nothing.
+  "jev_status",
+  // One snapshot of the whole swarm per agent created or archived. Rare enough
+  // to be safe on the lagging channel, and it must never delay a critical alert.
+  "roster_snapshot",
+  // `jev_decision` is deliberately NOT here. It stays on `normal` because it is
+  // the reasoning trail the user actually reads — the same thing Kimi surfaces
+  // as "the logical chain of reasoning and decision-making". Putting it on
+  // `low` would let it be dropped exactly when the swarm gets busy. The TUI
+  // collapses and caps it on its own side instead of losing it in transit.
 ])
 
 export function messagePriority(msg: BunMessage): IpcPriority {

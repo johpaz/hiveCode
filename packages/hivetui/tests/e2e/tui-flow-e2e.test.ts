@@ -16,6 +16,8 @@
  */
 
 import { beforeAll, describe, expect, test } from "bun:test"
+
+const assert = (cond: boolean) => { if (!cond) throw new Error("assertion failed") }
 import { existsSync } from "node:fs"
 import {
   BINARY, frameContains, frameText, startSession, waitForFrame,
@@ -69,8 +71,8 @@ describe("E2E flow: full auto-mode task lifecycle", () => {
         display_name: "FrontendEngineer", task_id: taskId, level: 2,
       }))
 
-      const parallel = await waitForFrame(s.iter, f => f.tab === "dashboard", 5000, "dashboard tab")
-      expect(parallel.tab).toBe("dashboard")
+      const parallel = await waitForFrame(s.iter, f => f.tab === "enjambre", 5000, "dashboard tab")
+      expect(parallel.tab).toBe("enjambre")
 
       // Streamed reasoning is the production narration channel.
       s.ipc.send({
@@ -104,7 +106,7 @@ describe("E2E flow: full auto-mode task lifecycle", () => {
       const diffFrame = await waitForFrame(
         s.iter, f => frameContains(f, "SENTINEL_DIFF"), 5000, "file diff",
       )
-      expect(diffFrame.tab).toBe("code")
+      expect(diffFrame.tab).toBe("codigo")
       expect(frameContains(diffFrame, "SENTINEL_DIFF")).toBe(true)
 
       // Checkpoint before finishing.
@@ -128,10 +130,10 @@ describe("E2E flow: full auto-mode task lifecycle", () => {
       s.ipc.send({ type: "status", running: false, msg: "Listo" })
 
       const done = await waitForFrame(
-        s.iter, f => !f.running && f.tab === "focus", 5000, "completed task on focus",
+        s.iter, f => !f.running && f.tab === "mesa", 5000, "completed task on focus",
       )
       expect(done.running).toBe(false)
-      expect(done.tab).toBe("focus")
+      expect(done.tab).toBe("mesa")
 
       const finalFrame = await waitForFrame(
         s.iter, f => frameContains(f, "SENTINEL_FINAL"), 5000, "final answer",
@@ -158,8 +160,8 @@ describe("E2E flow: full auto-mode task lifecycle", () => {
         task_id: taskId, level: 2,
       }))
 
-      const frame = await waitForFrame(s.iter, f => f.tab === "code", 5000, "code tab")
-      expect(frame.tab).toBe("code")
+      const frame = await waitForFrame(s.iter, f => f.tab === "codigo", 5000, "code tab")
+      expect(frame.tab).toBe("codigo")
       expect(frame.running).toBe(true)
     } finally {
       s.dispose()
@@ -207,7 +209,7 @@ describe("E2E flow: dashboard_snapshot", () => {
       s.ipc.send(workerUpdate("frontend", "maquetando", "running", { task_id: taskId, level: 2 }))
 
       const frame = await waitForFrame(
-        s.iter, f => f.tab === "dashboard" && frameContains(f, "SENTINEL_WORKER"),
+        s.iter, f => f.tab === "enjambre" && frameContains(f, "SENTINEL_WORKER"),
         5000, "hydrated worker on dashboard",
       )
 
@@ -280,10 +282,10 @@ describe("E2E flow: critical alerts", () => {
       }, { priority: "critical" })
 
       const halted = await waitForFrame(
-        s.iter, f => f.tab === "dashboard" && frameContains(f, "SENTINEL_HALT"),
+        s.iter, f => f.tab === "enjambre" && frameContains(f, "SENTINEL_HALT"),
         5000, "halt banner",
       )
-      expect(halted.tab).toBe("dashboard")
+      expect(halted.tab).toBe("enjambre")
       expect(frameContains(halted, "SENTINEL_HALT")).toBe(true)
     } finally {
       s.dispose()
@@ -302,7 +304,7 @@ describe("E2E flow: critical alerts", () => {
       const frame = await waitForFrame(
         s.iter, f => frameContains(f, "SENTINEL_FORENSIC"), 5000, "forensic alert",
       )
-      expect(frame.tab).toBe("dashboard")
+      expect(frame.tab).toBe("enjambre")
     } finally {
       s.dispose()
     }
@@ -372,10 +374,10 @@ describe("E2E flow: approval gates", () => {
 
       const frame = await waitForFrame(
         s.iter,
-        f => f.tab === "review" && /SENTINEL_VERDICT|SENTINEL_REVIEWED/.test(frameText(f)),
+        f => f.tab === "revision" && /SENTINEL_VERDICT|SENTINEL_REVIEWED/.test(frameText(f)),
         5000, "review verdict",
       )
-      expect(frame.tab).toBe("review")
+      expect(frame.tab).toBe("revision")
       expect(frameText(frame)).toMatch(/SENTINEL_VERDICT|SENTINEL_REVIEWED/)
     } finally {
       s.dispose()
@@ -392,9 +394,9 @@ describe("E2E flow: approval gates", () => {
       }, { priority: "critical" })
 
       const frame = await waitForFrame(
-        s.iter, f => f.tab === "dashboard", 5000, "resume prompt",
+        s.iter, f => f.tab === "enjambre", 5000, "resume prompt",
       )
-      expect(frame.tab).toBe("dashboard")
+      expect(frame.tab).toBe("enjambre")
     } finally {
       s.dispose()
     }
@@ -422,7 +424,7 @@ describe("E2E flow: streamed answer", () => {
         5000, "assembled answer after assistant_done",
       )
       expect(frameContains(done, "SENTINEL_STREAM_COMPLETO")).toBe(true)
-      expect(done.tab).toBe("focus")
+      expect(done.tab).toBe("mesa")
     } finally {
       s.dispose()
     }
@@ -474,7 +476,7 @@ describe("E2E flow: protocol robustness", () => {
       s.ipc.send(workerUpdate("frontend", "maquetando", "running", { task_id: taskId, level: 2 }))
 
       const frame = await waitForFrame(
-        s.iter, f => f.tab === "dashboard" && /librarian/i.test(frameText(f)),
+        s.iter, f => f.tab === "enjambre" && /librarian/i.test(frameText(f)),
         5000, "librarian activity on dashboard",
       )
       expect(frameText(frame)).toMatch(/librarian/i)
@@ -566,4 +568,136 @@ describe("E2E flow: protocol robustness", () => {
       s.dispose()
     }
   })
+})
+
+// ─── La ficha del especialista ────────────────────────────────────────────────
+//
+// El camino completo: el backend manda `roster_snapshot` + `carga_actual`, el
+// reducer los guarda, y la ficha los muestra. Estos tests no mockean nada —
+// escriben NDJSON real por el socket y leen los frames que emite el binario.
+
+describe("E2E flow: ficha del especialista", () => {
+  const ROSTER = {
+    type: "roster_snapshot" as const,
+    agentes: [
+      {
+        id: "agent-topo", rol: "backend", alias: "Topo", nivel: 2,
+        funcion: "Construye servicios y endpoints del backend.",
+        tools: ["fs_read", "fs_write"],
+        mcp: [],
+      },
+      {
+        id: "agent-quetzal", rol: "frontend", alias: "Quetzal", nivel: 2,
+        funcion: "Construye la interfaz y la verifica en navegador real.",
+        tools: ["fs_read", "fs_write"],
+        mcp: [{ name: "obscura", state: "apagado" as const }],
+      },
+    ],
+    mcp_servers: [{ id: "s1", name: "obscura", tools: 37, state: "apagado" as const }],
+  }
+
+  const LOADOUT = {
+    type: "carga_actual" as const,
+    agent: "agent-topo",
+    tools: ["fs_read"],
+    skills: ["busqueda_hivedb"],
+    origen: "jev_pruned" as const,
+    minimal: ["busqueda_hivedb"],
+    at: 1,
+  }
+
+  test("el roster alimenta el tab ENJAMBRE con los alias", async () => {
+    const s = await startSession("auto")
+    try {
+      // El backend emite las dos cosas: la tarjeta del enjambre y el roster.
+      // La tarjeta sigue viniendo de `worker_update`; el roster alimenta la
+      // ficha, TALLER y el badge del tabbar.
+      for (const rol of ["backend", "frontend"]) {
+        s.ipc.send({
+          type: "worker_update", worker: rol, phase: "editando", status: "running",
+        } as never)
+      }
+      s.ipc.send(ROSTER as never)
+      // Esperar a que el roster esté en pantalla antes de teclear: el socket y
+      // el stdin son canales distintos y `i` puede procesarse antes de que
+      // llegue el roster.
+      await waitForFrame(s.iter, f => frameContains(f, "2⬡"), 5000, "roster aplicado")
+      // `init` deja la vista en MESA; el usuario va a ENJAMBRE con la tecla 1.
+      s.type("1")
+      // El predicado exige vista Y contenido: esperar solo por el texto sería
+      // satisfied por un frame viejo, y esperar solo por la vista dejaría que
+      // una tarjeta vacía pasara por buena.
+      const frame = await waitForFrame(
+        s.iter,
+        f => f.tab === "enjambre" && frameContains(f, "@TOPO"),
+        5000, "alias en la tarjeta",
+      )
+      assert(frameContains(frame, "@QUETZAL"), "el segundo especialista tampoco")
+    } finally {
+      s.dispose()
+    }
+  }, 20_000)
+
+  test("la ficha muestra la carga efectiva y por qué JEV la podó", async () => {
+    const s = await startSession("auto")
+    try {
+      s.ipc.send(ROSTER as never)
+      await waitForFrame(s.iter, f => frameContains(f, "2⬡"), 5000, "roster aplicado")
+      s.ipc.send(LOADOUT as never)
+      await waitForFrame(s.iter, () => true, 3000, "carga aplicada")
+      // `i` abre la ficha del primer especialista del roster.
+      s.type("i")
+      const frame = await waitForFrame(
+        s.iter, f => frameContains(f, "CARGA AHORA"), 5000, "ficha abierta",
+      )
+      assert(frameContains(frame, "Construye servicios"), "falta la función del agente")
+      assert(frameContains(frame, "podada por jev"), "no explica el tamaño de la carga")
+      assert(frameContains(frame, "busqueda_hivedb"), "no lista las skills activas")
+    } finally {
+      s.dispose()
+    }
+  }, 20_000)
+
+  test("la ficha nombra el MCP que bloquea al especialista", async () => {
+    const s = await startSession("auto")
+    try {
+      s.ipc.send(ROSTER as never)
+      await waitForFrame(s.iter, f => frameContains(f, "1✗"), 5000, "roster aplicado")
+      // Doble `i`: abrir y avanzar al siguiente (Quetzal, el bloqueado).
+      s.type("ii")
+      const frame = await waitForFrame(
+        s.iter, f => frameContains(f, "obscura"), 5000, "MCP bloqueante visible",
+      )
+      assert(frameContains(frame, "Quetzal"))
+      assert(frameContains(frame, "bloqueado por MCP"))
+    } finally {
+      s.dispose()
+    }
+  }, 20_000)
+
+  test("sin roster la ficha lo dice en vez de abrirse vacía", async () => {
+    const s = await startSession("auto")
+    try {
+      s.type("i")
+      const frame = await waitForFrame(
+        s.iter, f => f.rows.join("\n").includes("aún no hay roster"), 5000, "aviso de roster vacío",
+      )
+      assert(frame.rows.join("\n").includes("aún no hay roster"))
+    } finally {
+      s.dispose()
+    }
+  }, 20_000)
+
+  test("el badge de TALLER cuenta a los agentes bloqueados", async () => {
+    const s = await startSession("auto")
+    try {
+      s.ipc.send(ROSTER as never)
+      const frame = await waitForFrame(
+        s.iter, f => frameContains(f, "1✗"), 5000, "badge de bloqueados",
+      )
+      assert(frameContains(frame, "TALLER"))
+    } finally {
+      s.dispose()
+    }
+  }, 20_000)
 })

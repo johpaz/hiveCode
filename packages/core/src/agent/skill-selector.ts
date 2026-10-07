@@ -24,22 +24,17 @@ import {
     replaceCapabilityDocs,
     type CapabilityDoc,
 } from "./capability-search"
+import { isMinimalSkill } from "./minimal-loadout"
 
 const log = logger.child("skill-selector")
 
 // ─── Minimal Skill Set ─────────────────────────────────────────────────────────
 
-/**
- * Skills mínimas que SIEMPRE están disponibles (asociadas a las tools iniciales)
- * - busqueda_hivedb: discovery central vía search_knowledge
- * - memory_manager: usa save_note (notas persistentes)
- * - task_orchestrator: usa notify (comunicación entre agentes)
- */
-export const MINIMAL_SKILL_NAMES = new Set([
-  "busqueda_hivedb",   // Core: cómo descubrir tools, MCP, skills, playbook
-  "memory_manager",    // Asociada a save_note
-  "task_orchestrator", // Asociada a notify y agent coordination
-])
+// No hay lista de skills minimaleas: se derivan de las tools del loadout
+// (minimal-loadout.ts). Una skill es mínima cuando todas las tools que
+// documenta ya están disponibles sin descubrimiento. Fijar los nombres a mano
+// ya divergió una vez — la lista pineaba skills cuyas tools no estaban en el
+// loadout, de modo que anunciaban capacidades que el modelo no tenía.
 
 // ─── Types ───────────────────────────────────────────────────────────────────────
 
@@ -266,16 +261,15 @@ export async function selectSkills(userMessage: string): Promise<SkillDescriptor
 // ─── Minimal Skills Loader ───────────────────────────────────────────────────
 
 /**
- * Load minimal skills that are ALWAYS available (associated with MINIMAL_TOOLS)
- * These are loaded at startup, not via semantic search.
- *
- * @returns Array of minimal skills (memory_manager, task_orchestrator)
+ * Skills whose documented tools are all already in the loadout, so they are
+ * always available without paying for discovery. Derived, not listed — see
+ * minimal-loadout.ts.
  */
 export async function getMinimalSkills(): Promise<SkillDescriptor[]> {
     try {
         const skillsCol = await col<SkillDoc>("skills")
         const skills = (await skillsCol.scan({}))
-            .filter(e => MINIMAL_SKILL_NAMES.has(e.doc.name) && e.doc.active)
+            .filter(e => e.doc.active && isMinimalSkill(e.doc.tools))
             .map(e => toSkillDescriptor(e.doc))
 
         log.info(`[skill-selector] Loaded ${skills.length} minimal skills: ${skills.map(s => s.name).join(", ")}`)

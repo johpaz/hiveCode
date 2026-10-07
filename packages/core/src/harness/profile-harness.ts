@@ -72,8 +72,9 @@ const FAIL_RE = /\b(?:VERDICT|VEREDICTO|STATUS|ESTADO)\s*:\s*(?:FAIL|FAILED|REJE
 
 function laneProfile(job: JobDoc): CoreAgentType {
   if (job.lane === "scout") return "scout"
-  if (job.lane === "verifier") return "verifier"
-  if (job.lane === "reviewer") return "reviewer"
+  // El gate fused usa el perfil `verifier`: es el que corre evidencia
+  // determinística. El `reviewer` canónico se elimina con la fusión.
+  if (job.lane === "quality" || job.lane === "verifier") return "verifier"
   if (job.lane === "spider") return "spider"
   return "builder"
 }
@@ -312,28 +313,27 @@ Respeta la spec, el plan, ownership, permisos y el workspace. Devuelve evidencia
       }
 
       let repairCycles = 0
-      let verification = ""
-      let review = ""
+      let quality = ""
       while (true) {
         await updateStage("reviewing")
-        verification = await invoke(
+        // Antes eran dos invocaciones: el `verifier` reproducía los criterios y
+        // el `reviewer` juzgaba el código con esa evidencia en el prompt. Ahora
+        // es un solo gate que hace las dos mitades en orden y emite un veredicto
+        // — la mitad de las llamadas del ciclo de review, y sin el desajuste de
+        // tener que decidir si "verificó bien pero revisó mal" cuenta como fallo.
+        quality = await invoke(
           "verifier",
-          `Verifica todos los criterios de aceptación de ${featureDir} contra el sistema real.
-No modifiques código. Incluye comandos/evidencia y termina con "VERDICT: PASS" o "VERDICT: FAIL".`,
+          `Quality gate for ${featureDir}. Do it in this order:
+1) Reproduce every acceptance criterion of ${featureDir} against the running
+   system — real commands, real output. "not reproducible" is NOT "passes".
+2) Then review the diff, spec, plan and tasks, and cross-check module contracts.
+
+Do not modify code. End with "VERDICT: PASS" or "VERDICT: FAIL".`,
           "verification",
         )
-        review = await invoke(
-          "reviewer",
-          `Revisa independientemente el diff, spec, plan, tasks y esta evidencia de Verifier:
-
-${verification}
-
-No modifiques código. Termina con "VERDICT: PASS" o "VERDICT: FAIL".`,
-          "review",
-        )
-        if (passed(verification) && passed(review)) break
+        if (passed(quality)) break
         if (repairCycles >= DEFAULT_MAX_REPAIR_CYCLES) {
-          throw new Error(`Verification/review did not converge after ${repairCycles} repair cycles`)
+          throw new Error(`Quality gate did not converge after ${repairCycles} repair cycles`)
         }
         repairCycles++
         await updateStage("executing", { nextAction: `repair_cycle_${repairCycles}` })
@@ -342,11 +342,8 @@ No modifiques código. Termina con "VERDICT: PASS" o "VERDICT: FAIL".`,
           `Repair cycle ${repairCycles}/${DEFAULT_MAX_REPAIR_CYCLES} for ${featureDir}.
 Fix only actionable failures below, preserve passing behavior, then run focused tests.
 
-VERIFIER:
-${verification}
-
-REVIEWER:
-${review}`,
+QUALITY GATE:
+${quality}`,
           "worker",
           true,
         )
@@ -357,11 +354,8 @@ ${review}`,
         `Consolida la tarea ${featureDir}. Llama speckit_converge con gaps=[] y la evidencia siguiente.
 Después responde al usuario con un resumen compacto de resultado, archivos y pruebas.
 
-VERIFIER:
-${verification}
-
-REVIEWER:
-${review}`,
+GATE DE CALIDAD (verificación + revisión):
+${quality}`,
         "harness",
       )
 

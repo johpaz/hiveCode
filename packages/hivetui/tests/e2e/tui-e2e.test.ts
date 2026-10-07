@@ -107,20 +107,20 @@ describe("E2E: modo PLAN", () => {
     const s = await startSession("plan")
     try {
       // 1. Init siempre arranca en Focus, aunque el modo sea PLAN.
-      expect(s.initFrame.tab).toBe("focus")
+      expect(s.initFrame.tab).toBe("mesa")
       expect(s.initFrame.mode).toBe("plan")
 
       // 2. StateUpdate mantiene Focus hasta que exista un plan aprobable.
       s.ipc.send({ type: "state_update", new_mode: "plan" })
       const waitingForPlan = await waitForFrame(
-        s.iter, (f) => f.mode === "plan" && f.tab === "focus", 5000, "waiting for plan",
+        s.iter, (f) => f.mode === "plan" && f.tab === "mesa", 5000, "waiting for plan",
       )
-      expect(waitingForPlan.tab).toBe("focus")
+      expect(waitingForPlan.tab).toBe("mesa")
 
       // 3. Bee empieza a razonar sin sacar la UI de Focus.
       s.ipc.send({ type: "history_append", role: "user", content: "Revisar el layout de PLAN" })
       s.ipc.send({ type: "status", running: true, msg: "generando plan" })
-      await waitForFrame(s.iter, (f) => f.running && f.tab === "focus", 5000, "running on focus")
+      await waitForFrame(s.iter, (f) => f.running && f.tab === "mesa", 5000, "running on focus")
       s.ipc.send({
         type: "thought_chunk",
         coordinator: "bee",
@@ -132,7 +132,7 @@ describe("E2E: modo PLAN", () => {
         (f) => frameContains(f, "Anali") || frameContains(f, "RAZON"),
         5000, "thought stream",
       )
-      expect(withThought.tab).toBe("focus")
+      expect(withThought.tab).toBe("mesa")
 
       // 4. Solo un plan estructurado habilita PLAN; el cuerpo largo exige scrollbar.
       s.ipc.send(STRUCTURED_PLAN())
@@ -176,8 +176,8 @@ describe("E2E: modo AUTO", () => {
         phase: "escribiendo archivos",
         status: "running",
       })
-      const inCode = await waitForFrame(s.iter, (f) => f.tab === "code", 5000, "code tab")
-      expect(inCode.tab).toBe("code")
+      const inCode = await waitForFrame(s.iter, (f) => f.tab === "codigo", 5000, "code tab")
+      expect(inCode.tab).toBe("codigo")
       expect(inCode.running).toBe(true)
 
       // 3. 3 Workers activos simultáneos (Bee puede llamar hasta 6)
@@ -188,7 +188,7 @@ describe("E2E: modo AUTO", () => {
       ] as const) {
         s.ipc.send({ type: "worker_update", task_id: "task-auto-1", worker, phase, status: "running" })
       }
-      const with3Workers = await waitForFrame(s.iter, (f) => f.tab === "dashboard", 5000, "dashboard tab")
+      const with3Workers = await waitForFrame(s.iter, (f) => f.tab === "enjambre", 5000, "dashboard tab")
       // Dos workers productivos del mismo nivel abren Dashboard.
       expect(frameContains(with3Workers, "⬡") || frameContains(with3Workers, "WORKERS")).toBe(true)
 
@@ -210,9 +210,9 @@ describe("E2E: modo AUTO", () => {
 
       // 6. Tarea terminada → debe volver a Focus
       const done = await waitForFrame(
-        s.iter, (f) => f.tab === "focus" && !f.running, 5000, "back to focus",
+        s.iter, (f) => f.tab === "mesa" && !f.running, 5000, "back to focus",
       )
-      expect(done.tab).toBe("focus")
+      expect(done.tab).toBe("mesa")
       expect(done.running).toBe(false)
       // La respuesta debe aparecer en Focus
       expect(frameContains(done, "JWT") || frameContains(done, "implement")).toBe(true)
@@ -241,8 +241,8 @@ describe("E2E: modo APPROVAL", () => {
         requested_changes: [],
         affected_files: ["src/auth/jwt.ts"],
       })
-      const inReview = await waitForFrame(s.iter, (f) => f.tab === "review", 5000, "review tab")
-      expect(inReview.tab).toBe("review")
+      const inReview = await waitForFrame(s.iter, (f) => f.tab === "revision", 5000, "review tab")
+      expect(inReview.tab).toBe("revision")
       expect(inReview.mode).toBe("approval")
 
       // 2. Archivos pendientes de aprobación con distintos niveles de riesgo
@@ -256,7 +256,7 @@ describe("E2E: modo APPROVAL", () => {
       const withFiles = await waitForFrame(
         s.iter, (f) => frameContains(f, "jwt") || frameContains(f, "auth"), 5000, "pending files",
       )
-      expect(withFiles.tab).toBe("review")
+      expect(withFiles.tab).toBe("revision")
 
       // 3. El strip de aprobación debe mostrar los hints de acción
       const hasApproveHint = frameContains(withFiles, "approve") || frameContains(withFiles, "APROBAR")
@@ -267,8 +267,8 @@ describe("E2E: modo APPROVAL", () => {
       // 4. Dev aprueba → modo vuelve a AUTO → AssistantDone → Focus
       s.ipc.send({ type: "state_update", new_mode: "auto" })
       s.ipc.send({ type: "assistant_done" })
-      const afterApproval = await waitForFrame(s.iter, (f) => f.tab === "focus", 5000, "focus after approval")
-      expect(afterApproval.tab).toBe("focus")
+      const afterApproval = await waitForFrame(s.iter, (f) => f.tab === "mesa", 5000, "focus after approval")
+      expect(afterApproval.tab).toBe("mesa")
     } finally {
       s.dispose()
     }
@@ -285,15 +285,15 @@ describe("E2E: ciclo completo PLAN → APPROVAL → AUTO", () => {
     try {
       // ── FASE 1: PLAN mode ─────────────────────────────────────────────────
       // Init y state_update mantienen Focus mientras el plan aun no existe.
-      expect(s.initFrame.tab).toBe("focus")
+      expect(s.initFrame.tab).toBe("mesa")
       expect(s.initFrame.mode).toBe("plan")
 
       s.ipc.send({ type: "state_update", new_mode: "plan" })
-      await waitForFrame(s.iter, (f) => f.tab === "focus" && f.mode === "plan", 5000, "focus in plan mode")
+      await waitForFrame(s.iter, (f) => f.tab === "mesa" && f.mode === "plan", 5000, "focus in plan mode")
 
       // Bee piensa en el plan mientras el usuario permanece en Focus.
       s.ipc.send({ type: "status", running: true, msg: "generando plan" })
-      await waitForFrame(s.iter, (f) => f.running && f.tab === "focus", 5000, "thinking on focus")
+      await waitForFrame(s.iter, (f) => f.running && f.tab === "mesa", 5000, "thinking on focus")
       for (const content of [
         "Analizando el contexto del proyecto",
         "Identificando dependencias",
@@ -301,7 +301,7 @@ describe("E2E: ciclo completo PLAN → APPROVAL → AUTO", () => {
       ]) {
         s.ipc.send({ type: "thought_chunk", coordinator: "bee", phase: "planning", content })
       }
-      const focusFrame = await waitForFrame(s.iter, (f) => f.tab === "focus", 5000, "focus with thoughts")
+      const focusFrame = await waitForFrame(s.iter, (f) => f.tab === "mesa", 5000, "focus with thoughts")
       expect(focusFrame.mode).toBe("plan")
 
       // Architecture genera ADR, fases y riesgos listos para aprobar.
@@ -323,8 +323,8 @@ describe("E2E: ciclo completo PLAN → APPROVAL → AUTO", () => {
         requested_changes: [],
         affected_files: ["src/core/module.ts"],
       })
-      const approvalFrame = await waitForFrame(s.iter, (f) => f.tab === "review", 5000, "review tab")
-      expect(approvalFrame.tab).toBe("review")
+      const approvalFrame = await waitForFrame(s.iter, (f) => f.tab === "revision", 5000, "review tab")
+      expect(approvalFrame.tab).toBe("revision")
 
       s.ipc.send({ type: "file_risk_update", path: "src/core/module.ts", risk: "high", operation: "create", agent: "backend" })
       s.ipc.send({ type: "file_risk_update", path: "src/core/types.ts",  risk: "low",  operation: "create", agent: "backend" })
@@ -337,8 +337,8 @@ describe("E2E: ciclo completo PLAN → APPROVAL → AUTO", () => {
       s.ipc.send({ type: "status", running: true, msg: "ejecutando workers…" })
       s.ipc.send({ type: "activity_update", task_id: "task-full-1", coordinator: "backend", phase: "codificando", status: "running" })
 
-      const codeFrame = await waitForFrame(s.iter, (f) => f.tab === "code", 5000, "code tab")
-      expect(codeFrame.tab).toBe("code")
+      const codeFrame = await waitForFrame(s.iter, (f) => f.tab === "codigo", 5000, "code tab")
+      expect(codeFrame.tab).toBe("codigo")
       expect(codeFrame.running).toBe(true)
 
       // Workers en paralelo
@@ -366,9 +366,9 @@ describe("E2E: ciclo completo PLAN → APPROVAL → AUTO", () => {
 
       // ── VERIFICACIÓN FINAL ────────────────────────────────────────────────
       const finalFrame = await waitForFrame(
-        s.iter, (f) => f.tab === "focus" && !f.running, 5000, "final focus frame",
+        s.iter, (f) => f.tab === "mesa" && !f.running, 5000, "final focus frame",
       )
-      expect(finalFrame.tab).toBe("focus")
+      expect(finalFrame.tab).toBe("mesa")
       expect(finalFrame.running).toBe(false)
       expect(finalFrame.mode).toBe("auto")
 

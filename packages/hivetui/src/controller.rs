@@ -11,12 +11,13 @@ use crossterm::{
 
 use crate::{
     ipc::TuiMessage,
-    state::{AppState, HistoryEntry, InfoModalState, ModalFieldKind, ModalState, ModelRows, ReplMode,
-            ReviewAction, ReviewConfirmState, Role, Selection, SettingsHubState, SettingsTab, TabId},
+    state::{AppState, ConfigModalState, HistoryEntry, InfoModalState, ModalAction, ModalField,
+            ModalFieldKind, ModalState, ModelRows, ReplMode, ReviewAction, ReviewConfirmState,
+            Role, Selection, SettingsHubState, SettingsTab, TabId},
     renderer::layout_areas,
     term::Rect,
     ui::{split_panes, Axis, Constraint, HitAction, SplitPane},
-    widgets::{command_popup, dashboard_layout, history, tabbar},
+    widgets::{command_popup, dashboard_layout, history, tabbar, taller_layout},
 };
 
 pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
@@ -60,23 +61,19 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => {
                 state.modal = ModalState::None;
-                state.dirty.full = true;
             }
             KeyCode::Tab => {
                 hub.active_tab = hub.active_tab.next();
                 hub.selected_row = 0;
                 hub.scroll_offset = 0;
-                state.dirty.full = true;
             }
             KeyCode::BackTab => {
                 hub.active_tab = hub.active_tab.prev();
                 hub.selected_row = 0;
                 hub.scroll_offset = 0;
-                state.dirty.full = true;
             }
             KeyCode::Up => {
                 hub.selected_row = hub.selected_row.saturating_sub(1);
-                state.dirty.full = true;
             }
             KeyCode::Down => {
                 let max = match hub.active_tab {
@@ -88,7 +85,6 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     _                      => 0,
                 }.saturating_sub(1);
                 hub.selected_row = (hub.selected_row + 1).min(max);
-                state.dirty.full = true;
             }
             KeyCode::Char('p') | KeyCode::Char('P') if hub.active_tab == SettingsTab::Models => {
                 // Cambiar de provider sin salir del tab: los modelos dependen del
@@ -99,7 +95,6 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     .and_then(|p| hub.providers.iter().position(|q| q.id == p.id))
                     .unwrap_or(0);
                 hub.scroll_offset = 0;
-                state.dirty.full = true;
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 let cmd = match hub.active_tab {
@@ -111,10 +106,9 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     SettingsTab::Github    => "/github connect",
                     SettingsTab::Telegram  => "/telegram connect",
                 };
-                state.modal = ModalState::None;
+                keep_hub_loading(state);
                 state.pending_ipc.push(TuiMessage::Submit { input: cmd.to_string() });
                 state.pending_ipc.push(TuiMessage::RequestSettings);
-                state.dirty.full = true;
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 // Delete del item seleccionado — envía el comando de remove al tab activo
@@ -130,10 +124,9 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     _ => None,
                 };
                 if let Some(c) = cmd {
-                    state.modal = ModalState::None;
+                    keep_hub_loading(state);
                     state.pending_ipc.push(TuiMessage::Submit { input: c });
                     state.pending_ipc.push(TuiMessage::RequestSettings);
-                    state.dirty.full = true;
                 }
             }
             KeyCode::Char(' ') => {
@@ -154,19 +147,28 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     _ => None,
                 };
                 if let Some(c) = cmd {
-                    state.modal = ModalState::None;
+                    keep_hub_loading(state);
                     state.pending_ipc.push(TuiMessage::Submit { input: c });
                     state.pending_ipc.push(TuiMessage::RequestSettings);
-                    state.dirty.full = true;
                 }
             }
             KeyCode::Enter => {
-                let cmd = match hub.active_tab {
-                    // Activar el provider seleccionado como default
-                    SettingsTab::Providers => {
-                        hub.providers.get(hub.selected_row)
-                            .map(|p| format!("/provider set {}", p.id))
+                // En Providers, Enter NO vuelve a mandar `/provider set`: Bun ignoraba
+                // el id y reabría el desplegable con TODOS los providers, obligando a
+                // elegir dos veces el mismo. Aquí se resuelve en la TUI.
+                if hub.active_tab == SettingsTab::Providers {
+                    let selected = hub.provider_at(hub.selected_row).map(|p| ProviderTarget {
+                        id: p.id.clone(),
+                        name: p.name.clone(),
+                        needs_key: p.needs_key(),
+                        browser_login: p.browser_login,
+                    });
+                    if let Some(target) = selected {
+                        activate_provider(state, &target);
                     }
+                    return false;
+                }
+                let cmd = match hub.active_tab {
                     // Cambiar el modelo. Con provider activo las filas son sus modelos, así que
                     // Enter aplica el modelo elegido. Sin provider activo las filas
                     // son providers y Enter elige el provider (modelo después).
@@ -191,10 +193,9 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     _ => None,
                 };
                 if let Some(c) = cmd {
-                    state.modal = ModalState::None;
+                    keep_hub_loading(state);
                     state.pending_ipc.push(TuiMessage::Submit { input: c });
                     state.pending_ipc.push(TuiMessage::RequestSettings);
-                    state.dirty.full = true;
                 }
             }
             _ => {}
@@ -213,11 +214,9 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
             // Strip horizontal: ←→ navegan las opciones
             KeyCode::Left | KeyCode::Up => {
                 approval.selected = approval.selected.saturating_sub(1);
-                state.dirty.full = true;
             }
             KeyCode::Right | KeyCode::Down => {
                 approval.selected = (approval.selected + 1).min(3);
-                state.dirty.full = true;
             }
             KeyCode::Enter => {
                 let selected = approval.selected;
@@ -233,7 +232,6 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 } else {
                     state.pending_ipc.push(TuiMessage::Submit { input });
                 }
-                state.dirty.full = true;
             }
             _ => {}
         }
@@ -246,14 +244,12 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => {
                 state.modal = ModalState::None;
-                state.dirty.full = true;
             }
             KeyCode::Enter => {
                 state.modal = ModalState::None;
                 state.pending_ipc.push(TuiMessage::Submit {
                     input: action.command().to_string(),
                 });
-                state.dirty.full = true;
             }
             _ => {}
         }
@@ -265,13 +261,42 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
     // teclear "hola" en modo Auto envía /halt.
     let typing = accepts_text(state);
 
-    if state.active_tab == TabId::Dashboard
+    // Atajo global: `i` abre la ficha del especialista enfocado. No vive en el
+    // handler de ENJAMBRE porque la pregunta "¿qué puede hacer este?" aplica
+    // desde cualquier vista, y con el auto-routing el usuario no elige en qué
+    // pestaña está.
+    if key.code == KeyCode::Char('i') && !typing && matches!(state.modal, ModalState::None) {
+        // Con la ficha ya abierta, `i` avanza al siguiente: reabrir el primero
+        // cada vez es lo contrario de lo que uno espera al pulsar dos veces.
+        if state.ficha_agent.is_some() {
+            move_ficha_selection(state, 1);
+            return false;
+        }
+        let target = state
+            .focused_worker
+            .as_deref()
+            .and_then(|name| state.roster.resolve(name))
+            .map(|a| a.id.clone())
+            .or_else(|| state.roster.agents().first().map(|a| a.id.clone()));
+        match target {
+            Some(id) => {
+                state.ficha_agent = Some(id);
+                return false;
+            }
+            None => {
+                state.status_msg = "aún no hay roster del enjambre".to_string();
+                return false;
+            }
+        }
+    }
+
+    if state.active_tab == TabId::Swarm
         && handle_dashboard_key(state, key.code, key.modifiers, typing)
     {
         return false;
     }
 
-    if state.active_tab != TabId::Dashboard
+    if state.active_tab != TabId::Swarm
         && handle_immersive_layout_key(state, key.code, key.modifiers, typing)
     {
         return false;
@@ -331,6 +356,40 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                         state.logs.visible = !state.logs.visible;
                         return false;
                     }
+                    // `/habilidades` abre el catálogo. Con un argumento, abre
+                    // además la ficha de ese agente para que cada skill diga si
+                    // él puede usarla.
+                    "/habilidades" | "/skills" => {
+                        state.active_tab = TabId::Taller;
+                        state.taller_section = taller_layout::Section::Habilidades;
+                        state.taller_scroll = 0;
+                        state.tab_locked = true;
+                        state.ficha_agent = (!arg.is_empty())
+                            .then(|| state.roster.resolve(arg).map(|a| a.id.clone()))
+                            .flatten();
+                        return false;
+                    }
+                    // `/ficha <agente>` abre la ficha directa.
+                    "/ficha" => {
+                        let target = if arg.is_empty() {
+                            state.focused_worker.clone()
+                        } else {
+                            state.roster.resolve(arg).map(|a| a.id.clone())
+                        };
+                        match target.and_then(|id| {
+                            state.roster.resolve(&id).map(|_| id)
+                        }) {
+                            Some(id) => {
+                                state.ficha_agent = Some(id);
+                                state.active_tab = TabId::Swarm;
+                                state.tab_locked = true;
+                            }
+                            None => {
+                                state.status_msg = format!("no encontré el agente «{arg}»");
+                            }
+                        }
+                        return false;
+                    }
                     "/clear" => {
                         state.history.entries.clear();
                         state.history.selected = None;
@@ -346,7 +405,6 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                             ReplMode::from(arg)
                         };
                         state.session.mode = new_mode;
-                        state.dirty.session = true;
                         state.pending_ipc.push(TuiMessage::ModeChange {
                             mode: state.session.mode.as_str().to_string(),
                         });
@@ -372,11 +430,15 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                                 state.active_tab = tab;
                             }
                         }
+                        // Cambiar de vista a mano rompe el auto-routing: el
+                        // usuario acaba de decir dónde quiere estar.
+                        state.tab_locked = true;
+                        state.taller_scroll = 0;
                         return false;
                     }
                     "/welcome" => {
                         state.show_welcome = true;
-                        state.active_tab = TabId::Focus;
+                        state.active_tab = TabId::Mesa;
                         return false;
                     }
                     _ => {
@@ -432,7 +494,6 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         };
         if let Some(action) = action {
             state.modal = ModalState::ReviewConfirm(ReviewConfirmState { action });
-            state.dirty.full = true;
             return false;
         }
     }
@@ -447,7 +508,6 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 ..Default::default()
             });
             state.pending_ipc.push(TuiMessage::RequestSettings);
-            state.dirty.full = true;
         }
         // Teclas 1-5 cambian de tab (solo cuando no se está escribiendo)
         (KeyModifiers::NONE, KeyCode::Char(n @ '1'..='5')) if state.input.value().is_empty() && !state.history_nav_mode => {
@@ -491,7 +551,6 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         }
         (_, KeyCode::BackTab) => {
             state.session.mode = state.session.mode.next();
-            state.dirty.session = true;
             state.pending_ipc.push(TuiMessage::ModeChange {
                 mode: state.session.mode.as_str().to_string(),
             });
@@ -504,10 +563,10 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
             state.history_hscroll = state.history_hscroll.saturating_add(2).min(5000);
             persist_hscroll_for_selected(state);
         }
-        (_, KeyCode::PageUp) if state.active_tab == TabId::Focus && !state.history_nav_mode => {
+        (_, KeyCode::PageUp) if state.active_tab == TabId::Mesa && !state.history_nav_mode => {
             state.history.scroll = state.history.scroll.saturating_sub(5);
         }
-        (_, KeyCode::PageDown) if state.active_tab == TabId::Focus && !state.history_nav_mode => {
+        (_, KeyCode::PageDown) if state.active_tab == TabId::Mesa && !state.history_nav_mode => {
             state.history.scroll = state.history.scroll.saturating_add(5);
         }
         (_, KeyCode::PageUp) if state.active_tab == TabId::Plan => {
@@ -516,10 +575,10 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         (_, KeyCode::PageDown) if state.active_tab == TabId::Plan => {
             state.plan.scroll = state.plan.scroll.saturating_add(5);
         }
-        (_, KeyCode::PageUp) if state.active_tab == TabId::Dashboard => {
+        (_, KeyCode::PageUp) if state.active_tab == TabId::Swarm => {
             state.dashboard_scroll = state.dashboard_scroll.saturating_sub(8);
         }
-        (_, KeyCode::PageDown) if state.active_tab == TabId::Dashboard => {
+        (_, KeyCode::PageDown) if state.active_tab == TabId::Swarm => {
             state.dashboard_scroll = state.dashboard_scroll.saturating_add(8);
         }
         (_, KeyCode::PageUp) => {
@@ -578,10 +637,10 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         (_, KeyCode::Down) if state.active_tab == TabId::Plan && state.input.value().is_empty() => {
             state.plan.scroll += 1;
         }
-        (_, KeyCode::Up) if state.active_tab == TabId::Dashboard && state.input.value().is_empty() => {
+        (_, KeyCode::Up) if state.active_tab == TabId::Swarm && state.input.value().is_empty() => {
             state.dashboard_scroll = state.dashboard_scroll.saturating_sub(1);
         }
-        (_, KeyCode::Down) if state.active_tab == TabId::Dashboard && state.input.value().is_empty() => {
+        (_, KeyCode::Down) if state.active_tab == TabId::Swarm && state.input.value().is_empty() => {
             state.dashboard_scroll += 1;
         }
         (_, KeyCode::Up) if !state.history_nav_mode => state.input.history_up(),
@@ -647,6 +706,92 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
     false
 }
 
+/// Lo que la TUI ya sabe del provider elegido en la fila `selected_row`.
+/// Se copia a valores propios para poder soltar el préstamo del hub y montar
+/// encima otro modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderTarget {
+    id: String,
+    name: String,
+    needs_key: bool,
+    browser_login: bool,
+}
+
+/// Deja el hub de settings montado, en estado "cargando".
+///
+/// Antes estas accioneshacían `state.modal = ModalState::None`, y como
+/// `SettingsData` solo se aplica si el hub está montado (`AppState::apply_message`),
+/// el refresco se descartaba: había que volver a pulsar F2 para ver el resultado.
+fn keep_hub_loading(state: &mut AppState) {
+    if let ModalState::Settings(hub) = &mut state.modal {
+        hub.loading = true;
+    }
+}
+
+/// Activa el provider elegido en el tab Providers.
+///
+/// - Sin clave y sin login de navegador → modal **local** con un único campo
+///   secreto. La clave viaja en `ProviderActivate`, así que Bun ya no necesita
+///   reabrir su propio desplegable de providers.
+/// - Con clave guardada, o con login de navegador → se activa directo.
+fn activate_provider(state: &mut AppState, target: &ProviderTarget) {
+    let hub = match &state.modal {
+        ModalState::Settings(hub) => Some(hub.clone()),
+        _ => None,
+    };
+
+    // El login de navegador (PKCE) no usa API key: preguntar por ella sería
+    // un formulario imposible de completar. Bun suspende la TUI y abre el browser.
+    if !target.browser_login && target.needs_key {
+        state.modal_focused = 0;
+        state.modal = ModalState::Config(ConfigModalState {
+            command: "provider_activate".to_string(),
+            title: format!("API key · {}", target.name),
+            fields: vec![ModalField {
+                key: "api_key".to_string(),
+                label: format!("Clave de {}", target.name),
+                kind: ModalFieldKind::Secret,
+                required: true,
+                ..Default::default()
+            }],
+            values: vec![String::new()],
+            cursors: vec![0],
+            focused: 0,
+            errors: vec![false],
+            action: Some(ModalAction::ProviderActivate { provider_id: target.id.clone() }),
+            return_to: hub,
+        });
+        return;
+    }
+
+    if let Some(mut hub) = hub {
+        hub.loading = true;
+        state.modal = ModalState::Settings(hub);
+    } else {
+        state.modal = ModalState::None;
+    }
+    state.pending_ipc.push(TuiMessage::ProviderActivate {
+        provider_id: target.id.clone(),
+        api_key: None,
+    });
+}
+
+/// Cierra un modal local y devuelve al usuario al hub de settings.
+fn close_to_settings_hub(state: &mut AppState, loading: bool) {
+    let ModalState::Config(modal) = &state.modal else {
+        state.modal = ModalState::None;
+        return;
+    };
+    match modal.return_to.clone() {
+        Some(mut hub) => {
+            hub.loading = loading;
+            state.modal = ModalState::Settings(hub);
+        }
+        // Un modal de Bun no tiene hub al que volver: se cierra del todo.
+        None => state.modal = ModalState::None,
+    }
+}
+
 fn handle_dashboard_key(
     state: &mut AppState,
     code: KeyCode,
@@ -658,7 +803,6 @@ fn handle_dashboard_key(
     if code == KeyCode::Esc && has_pending_confirm(state) {
         clear_pending_confirm(state);
         state.selection = None;
-        state.dirty.full = true;
         return true;
     }
     if typing {
@@ -669,7 +813,6 @@ fn handle_dashboard_key(
         KeyCode::Esc => {
             clear_pending_confirm(state);
             state.selection = None;
-            state.dirty.full = true;
             true
         }
         KeyCode::Left => {
@@ -681,10 +824,16 @@ fn handle_dashboard_key(
             true
         }
         KeyCode::Enter => {
+            // Una ficha abierta tiene prioridad: `Enter` la cierra en vez de
+            // disparar el rollback de un checkpoint que el usuario no está
+            // mirando.
+            if state.ficha_agent.is_some() {
+                state.ficha_agent = None;
+                return true;
+            }
             if state.dashboard.halt_confirm {
                 state.dashboard.halt_confirm = false;
                 state.pending_ipc.push(TuiMessage::Submit { input: "/halt".to_string() });
-                state.dirty.full = true;
                 return true;
             }
             if state.session.mode == ReplMode::Plan
@@ -692,7 +841,6 @@ fn handle_dashboard_key(
                 && !state.dashboard.halt.active
             {
                 state.pending_ipc.push(TuiMessage::Submit { input: "/approve auto".to_string() });
-                state.dirty.full = true;
                 return true;
             }
             confirm_or_send_dashboard_rollback(state);
@@ -703,21 +851,18 @@ fn handle_dashboard_key(
             if alt && state.session.mode == ReplMode::Approval && !state.dashboard.halt.active =>
         {
             state.modal = ModalState::ReviewConfirm(ReviewConfirmState { action: ReviewAction::Approve });
-            state.dirty.full = true;
             true
         }
         KeyCode::Char('r') | KeyCode::Char('R')
             if alt && state.session.mode == ReplMode::Approval && !state.dashboard.halt.active =>
         {
             state.modal = ModalState::ReviewConfirm(ReviewConfirmState { action: ReviewAction::Reject });
-            state.dirty.full = true;
             true
         }
         KeyCode::Char('m') | KeyCode::Char('M')
             if alt && state.session.mode == ReplMode::Approval && !state.dashboard.halt.active =>
         {
             state.modal = ModalState::ReviewConfirm(ReviewConfirmState { action: ReviewAction::Modify });
-            state.dirty.full = true;
             true
         }
         KeyCode::Char('h') | KeyCode::Char('H') if alt && state.session.mode == ReplMode::Auto => {
@@ -742,13 +887,71 @@ fn handle_immersive_layout_key(
     // Igual que en Dashboard: Esc cancela confirmaciones aunque se esté escribiendo.
     if code == KeyCode::Esc && has_pending_confirm(state) {
         clear_pending_confirm(state);
-        state.dirty.full = true;
         return true;
     }
     if typing {
         return false;
     }
     match code {
+        // ── Ficha del especialista ───────────────────────────────────────────
+        // `Esc` la cierra. Va antes que la navegación de checkpoints porque
+        // una ficha abierta convierte las flechas en "otro agente".
+        KeyCode::Esc if state.ficha_agent.is_some() => {
+            state.ficha_agent = None;
+            true
+        }
+        KeyCode::Left | KeyCode::Right if state.ficha_agent.is_some() => {
+            move_ficha_selection(state, if code == KeyCode::Right { 1 } else { -1 });
+            true
+        }
+        // `f` alterna el filtro por agente del stream de MESA. Con cinco
+        // agentes hablando a la vez, ver el de uno es la diferencia entre
+        // entender el enjambre y leer ruido.
+        KeyCode::Char('f') if !state.ficha_agent.is_some() => {
+            let candidato = state
+                .focused_worker
+                .clone()
+                .or_else(|| state.thought.visibles().last().map(|e| e.agent().to_string()));
+            if let Some(agent) = candidato {
+                state.thought.alternar_filtro(&agent);
+                let msg = match &state.thought.filtro {
+                    Some(a) => format!("stream filtrado por {a} · f para todos"),
+                    None => "stream de todos los agentes".to_string(),
+                };
+                state.status_msg = msg;
+            }
+            true
+        }
+        KeyCode::Char('s') if state.ficha_agent.is_some() => {
+            // Saltar a las habilidades de este agente, filtradas por lo que
+            // puede usar.
+            state.active_tab = TabId::Taller;
+            state.taller_section = taller_layout::Section::Habilidades;
+            state.taller_scroll = 0;
+            true
+        }
+        // ── TALLER: `←/→` cambian de sección, `↑/↓` hacen scroll ──────────
+        // Antes de ser un tab, esto eran las flechas de los checkpoints. Ahora la
+        // sección se recorre dentro de su propia vista, que es lo que el usuario
+        // espera al ver seis pestañas en el tabbar.
+        KeyCode::Left | KeyCode::Right if state.active_tab == TabId::Taller => {
+            state.taller_section = if code == KeyCode::Right {
+                state.taller_section.next()
+            } else {
+                state.taller_section.prev()
+            };
+            state.taller_scroll = 0;
+            true
+        }
+        KeyCode::Up | KeyCode::Down if state.active_tab == TabId::Taller => {
+            let delta: isize = if code == KeyCode::Down { 1 } else { -1 };
+            // El tope lo pone el número de filas de la sección: más allá, el
+            // scroll no movería nada y el usuario creería que la tecla falló.
+            let total = taller_layout::section_rows(state) as isize;
+            let next = state.taller_scroll as isize + delta;
+            state.taller_scroll = next.clamp(0, (total - 1).max(0)) as usize;
+            true
+        }
         KeyCode::Left => {
             move_checkpoint_selection(state, -1);
             true
@@ -760,7 +963,6 @@ fn handle_immersive_layout_key(
         KeyCode::Enter if state.dashboard.halt_confirm => {
             state.dashboard.halt_confirm = false;
             state.pending_ipc.push(TuiMessage::Submit { input: "/halt".to_string() });
-            state.dirty.full = true;
             true
         }
         KeyCode::Enter if state.checkpoints.selected.is_some() => {
@@ -769,7 +971,6 @@ fn handle_immersive_layout_key(
         }
         KeyCode::Enter if state.active_tab == TabId::Plan && state.session.mode == ReplMode::Plan => {
             state.pending_ipc.push(TuiMessage::Submit { input: "/approve auto".to_string() });
-            state.dirty.full = true;
             true
         }
         KeyCode::Char('h') | KeyCode::Char('H') if alt && state.session.mode == ReplMode::Auto => {
@@ -778,6 +979,28 @@ fn handle_immersive_layout_key(
         }
         _ => false,
     }
+}
+
+/// Cambia el especialista abierto en la ficha, en el orden del roster.
+///
+/// Recorre solo los que son operables: abrir la ficha de un agente bloqueado por
+/// un MCP apagado tiene sentido (dice por qué), pero saltarse el resto de la
+/// lista al navegar sería confuso.
+fn move_ficha_selection(state: &mut AppState, delta: isize) {
+    let roster = state.roster.agents();
+    if roster.is_empty() {
+        state.ficha_agent = None;
+        return;
+    }
+    let current = state
+        .ficha_agent
+        .as_deref()
+        .and_then(|id| roster.iter().position(|a| a.id.as_str() == id));
+    let next = match current {
+        Some(i) => (i as isize + delta).rem_euclid(roster.len() as isize),
+        None => 0,
+    } as usize;
+    state.ficha_agent = Some(roster[next].id.clone());
 }
 
 /// El usuario está componiendo texto (hay contenido en el input) o navegando el
@@ -799,7 +1022,6 @@ fn clear_pending_confirm(state: &mut AppState) {
 fn request_halt(state: &mut AppState) {
     state.dashboard.rollback_confirm_checkpoint = None;
     state.dashboard.halt_confirm = true;
-    state.dirty.full = true;
 }
 
 fn move_checkpoint_selection(state: &mut AppState, delta: isize) {
@@ -815,7 +1037,6 @@ fn move_checkpoint_selection(state: &mut AppState, delta: isize) {
     };
     state.checkpoints.selected = Some(next);
     clear_pending_confirm(state);
-    state.dirty.full = true;
 }
 
 fn confirm_or_send_dashboard_rollback(state: &mut AppState) {
@@ -846,15 +1067,14 @@ fn confirm_or_send_dashboard_rollback(state: &mut AppState) {
         state.checkpoints.selected = Some(idx);
         state.dashboard.rollback_confirm_checkpoint = Some(checkpoint_id);
     }
-    state.dirty.full = true;
 }
 
 pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
     match mouse.kind {
-        MouseEventKind::ScrollUp if state.active_tab == TabId::Focus && !state.history_nav_mode => {
+        MouseEventKind::ScrollUp if state.active_tab == TabId::Mesa && !state.history_nav_mode => {
             state.history.scroll = state.history.scroll.saturating_sub(3);
         }
-        MouseEventKind::ScrollDown if state.active_tab == TabId::Focus && !state.history_nav_mode => {
+        MouseEventKind::ScrollDown if state.active_tab == TabId::Mesa && !state.history_nav_mode => {
             state.history.scroll = state.history.scroll.saturating_add(3);
         }
         MouseEventKind::ScrollUp if state.active_tab == TabId::Plan => {
@@ -883,10 +1103,10 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
         MouseEventKind::ScrollDown if state.active_tab == TabId::Review => {
             state.adrs.scroll = state.adrs.scroll.saturating_add(3);
         }
-        MouseEventKind::ScrollUp if state.active_tab == TabId::Dashboard => {
+        MouseEventKind::ScrollUp if state.active_tab == TabId::Swarm => {
             state.dashboard_scroll = state.dashboard_scroll.saturating_sub(3);
         }
-        MouseEventKind::ScrollDown if state.active_tab == TabId::Dashboard => {
+        MouseEventKind::ScrollDown if state.active_tab == TabId::Swarm => {
             state.dashboard_scroll = state.dashboard_scroll.saturating_add(3);
         }
         MouseEventKind::ScrollUp => {
@@ -904,13 +1124,12 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                     return;
                 }
             }
-            if state.active_tab == TabId::Dashboard {
+            if state.active_tab == TabId::Swarm {
                 if let Some(area) = screen_rect_from_size(terminal::size().ok()) {
                     if let Some(checkpoint_idx) = dashboard_layout::checkpoint_at(state, area, mouse.column, mouse.row) {
                         state.checkpoints.selected = Some(checkpoint_idx);
                         state.dashboard.rollback_confirm_checkpoint = None;
                         state.selection = None;
-                        state.dirty.full = true;
                         return;
                     }
                     if let Some(worker) = dashboard_layout::worker_at(state, area, mouse.column, mouse.row) {
@@ -921,29 +1140,37 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                         state.history_hscroll = 0;
                         state.show_welcome = false;
                         state.selection = None;
-                        state.dirty.full = true;
                         return;
                     }
                 }
             }
-            // Click en la fila del tabbar (fila 2 — header ocupa 2 filas)
-            if state.active_tab != TabId::Dashboard && mouse.row == 2 {
-                if let Some((w, _h)) = terminal::size().ok() {
-                    let tabbar_area = crate::term::Rect::new(0, 2, w, 1);
-                    if let Some(tab) = tabbar::tab_at_col(tabbar_area, mouse.column, state) {
-                        state.active_tab = tab;
-                        if tab != TabId::Focus {
-                            state.history_nav_mode = false;
-                            state.history_hscroll = 0;
+            // Click en la fila del tabbar. El tabbar va justo debajo del header,
+            // cuya altura es configurable (1-5), así que su fila se deriva del
+            // layout y no de una constante.
+            if state.active_tab != TabId::Swarm {
+                if let Some((w, h)) = terminal::size().ok() {
+                    let tabbar_area = crate::term::Rect::new(
+                        0,
+                        state.panels.header_height.clamp(1, 5),
+                        w,
+                        1,
+                    );
+                    if tabbar_area.y < h {
+                        if let Some(tab) = tabbar::tab_at_col(tabbar_area, mouse.column, state) {
+                            state.active_tab = tab;
+                            if tab != TabId::Mesa {
+                                state.history_nav_mode = false;
+                                state.history_hscroll = 0;
+                            }
+                            state.show_welcome = false;
+                            state.selection = None;
+                            return;
                         }
-                        state.show_welcome = false;
-                        state.selection = None;
-                        return;
                     }
                 }
             }
             let history_area = content_rect_from_size(state, terminal::size().ok());
-            if state.active_tab == TabId::Focus {
+            if state.active_tab == TabId::Mesa {
                 if let Some(area) = history_area {
                     if let Some(entry_idx) = history::entry_at_y(state, area, mouse.row) {
                         persist_hscroll_for_selected(state);
@@ -964,7 +1191,6 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                         cursor: (mouse.column, mouse.row),
                         active: true,
                     });
-                    state.dirty.full = true;
                 }
             }
         }
@@ -972,7 +1198,6 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
             if let Some(ref mut sel) = state.selection {
                 if sel.active {
                     sel.cursor = (mouse.column, mouse.row);
-                    state.dirty.full = true;
                     return;
                 }
             }
@@ -986,13 +1211,12 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                 if sel.active {
                     sel.active = false;
                     state.pending_copy_request = true;
-                    state.dirty.full = true;
                 }
             }
         }
         MouseEventKind::Down(MouseButton::Right) => {
             let history_area = content_rect_from_size(state, terminal::size().ok());
-            if state.active_tab == TabId::Focus {
+            if state.active_tab == TabId::Mesa {
                 if let Some(area) = history_area {
                     if let Some(entry_idx) = history::entry_at_y(state, area, mouse.row) {
                         persist_hscroll_for_selected(state);
@@ -1018,7 +1242,7 @@ fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
                 return false;
             };
             state.active_tab = tab;
-            if tab != TabId::Focus {
+            if tab != TabId::Mesa {
                 state.history_nav_mode = false;
                 state.history_hscroll = 0;
             }
@@ -1032,7 +1256,6 @@ fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
         HitAction::SelectRow(i) => {
             if let ModalState::Settings(hub) = &mut state.modal {
                 hub.selected_row = i;
-                state.dirty.full = true;
                 return true;
             }
             false
@@ -1052,7 +1275,6 @@ fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
                         _           => hub.active_tab,
                     };
                     hub.selected_row = 0;
-                    state.dirty.full = true;
                 }
                 return true;
             }
@@ -1060,7 +1282,6 @@ fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
                 if let Ok(row) = row_str.parse::<usize>() {
                     if let ModalState::Settings(hub) = &mut state.modal {
                         hub.selected_row = row;
-                        state.dirty.full = true;
                     }
                 }
                 return true;
@@ -1089,7 +1310,6 @@ fn update_active_split_drag(state: &mut AppState, col: u16, row: u16) -> bool {
         "chrome:header" => {
             let height = row.saturating_sub(screen_area.y).saturating_add(1);
             state.panels.set_chrome_height(&id, height);
-            state.dirty.full = true;
             return true;
         }
         "chrome:input" => {
@@ -1098,13 +1318,11 @@ fn update_active_split_drag(state: &mut AppState, col: u16, row: u16) -> bool {
                 .saturating_sub(row)
                 .saturating_sub(state.panels.footer_height);
             state.panels.set_chrome_height(&id, height);
-            state.dirty.full = true;
             return true;
         }
         "chrome:footer" => {
             let height = screen_area.bottom().saturating_sub(row);
             state.panels.set_chrome_height(&id, height);
-            state.dirty.full = true;
             return true;
         }
         "code:main" | "plan:main" | "review:main" => percent_from_x(content_area, col),
@@ -1133,7 +1351,6 @@ fn update_active_split_drag(state: &mut AppState, col: u16, row: u16) -> bool {
     };
 
     state.panels.set_percent(&id, percent);
-    state.dirty.full = true;
     true
 }
 
@@ -1309,7 +1526,205 @@ mod tests {
                 timestamp: None,
             })
             .collect();
+        // La tab por defecto pasó a ser ENJAMBRE, donde la rueda desplaza el
+        // panel del enjambre y no el historial. Estos tests fijan MESA
+        // explícitamente porque lo que prueban es el scroll del chat.
+        state.active_tab = TabId::Mesa;
         state
+    }
+
+    // ── Provider + API key desde el hub de settings ────────────────────────────
+
+    fn provider_row(id: &str, has_key: bool, browser_login: bool) -> crate::state::SettingsProvider {
+        crate::state::SettingsProvider {
+            id: id.to_string(),
+            name: id.to_string(),
+            model: format!("{id}/default"),
+            is_active: false,
+            has_key,
+            browser_login,
+            models: vec![format!("{id}/default")],
+        }
+    }
+
+    fn hub_state(rows: Vec<crate::state::SettingsProvider>) -> AppState {
+        let mut state = AppState::default();
+        state.modal = ModalState::Settings(SettingsHubState {
+            providers: rows,
+            ..Default::default()
+        });
+        state
+    }
+
+    fn press(state: &mut AppState, code: KeyCode) {
+        handle_key_event(state, KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+    }
+
+    fn type_text(state: &mut AppState, text: &str) {
+        for c in text.chars() {
+            press(state, KeyCode::Char(c));
+        }
+    }
+
+    fn pending(state: &AppState) -> Vec<&TuiMessage> {
+        state.pending_ipc.iter().collect()
+    }
+
+    #[test]
+    fn enter_en_un_provider_sin_clave_pide_la_clave_sin_relistar_providers() {
+        let mut state = hub_state(vec![
+            provider_row("anthropic", true, false),
+            provider_row("openai", false, false),
+        ]);
+        if let ModalState::Settings(hub) = &mut state.modal {
+            hub.selected_row = 1;
+        }
+
+        press(&mut state, KeyCode::Enter);
+
+        // El modal es local: un único campo secreto, y el id del provider ya
+        // elegido viaja en la acción. No hay desplegable de providers.
+        let ModalState::Config(modal) = &state.modal else {
+            panic!("Enter sobre un provider sin clave debe abrir el formulario de clave");
+        };
+        assert_eq!(modal.fields.len(), 1, "no debe volver a preguntar el provider");
+        assert_eq!(modal.fields[0].key, "api_key");
+        assert_eq!(modal.fields[0].kind, ModalFieldKind::Secret, "la clave se enmascara");
+        assert!(modal.fields[0].required, "sin clave previa el campo es obligatorio");
+        assert_eq!(
+            modal.action,
+            Some(ModalAction::ProviderActivate { provider_id: "openai".to_string() }),
+        );
+        // Nada sale hacia Bun hasta que el usuario confirme.
+        assert!(pending(&state).is_empty(), "no debe enviar nada antes de confirmar");
+    }
+
+    #[test]
+    fn confirmar_la_clave_manda_el_id_y_vuelve_al_hub() {
+        let mut state = hub_state(vec![provider_row("openai", false, false)]);
+        press(&mut state, KeyCode::Enter);
+        type_text(&mut state, "sk-test-123");
+
+        press(&mut state, KeyCode::Enter);
+
+        let msgs = pending(&state);
+        assert!(
+            matches!(msgs[0], TuiMessage::ProviderActivate { provider_id, api_key }
+                if provider_id == "openai" && api_key.as_deref() == Some("sk-test-123")),
+            "esperaba ProviderActivate con la clave escrita, llegó {:?}",
+            msgs[0],
+        );
+        // El hub vuelve a estar montado: si no, el `SettingsData` de respuesta se
+        // descartaría y el usuario vería las filas viejas.
+        assert!(
+            matches!(&state.modal, ModalState::Settings(hub) if hub.loading),
+            "debe volver al hub en estado cargando, quedó {:?}",
+            state.modal,
+        );
+    }
+
+    #[test]
+    fn una_clave_solo_espacios_no_cuenta_como_clave_nueva() {
+        let mut state = hub_state(vec![provider_row("openai", false, false)]);
+        press(&mut state, KeyCode::Enter);
+        type_text(&mut state, "   ");
+
+        press(&mut state, KeyCode::Enter);
+
+        // `required` solo mira que no esté vacío, así que un campo de espacios sí
+        // pasa; el `.trim()` al construir el mensaje es lo que evita guardar "".
+        assert!(
+            matches!(pending(&state)[0], TuiMessage::ProviderActivate { api_key: None, .. }),
+            "una clave de espacios debe viajar como None, no como cadena vacía",
+        );
+    }
+
+    #[test]
+    fn provider_con_clave_se_activa_sin_abrir_modal() {
+        let mut state = hub_state(vec![provider_row("anthropic", true, false)]);
+        press(&mut state, KeyCode::Enter);
+
+        assert!(
+            matches!(&state.modal, ModalState::Settings(_)),
+            "no hay nada que preguntar: debe activar directo",
+        );
+        assert!(
+            matches!(pending(&state)[0], TuiMessage::ProviderActivate { provider_id, api_key: None }
+                if provider_id == "anthropic"),
+        );
+    }
+
+    #[test]
+    fn login_de_navegador_no_pregunta_api_key() {
+        // hivecode-free hace PKCE: pedirle una clave sería un callejón sin salida.
+        let mut state = hub_state(vec![provider_row("hivecode-free", false, true)]);
+        press(&mut state, KeyCode::Enter);
+
+        assert!(matches!(&state.modal, ModalState::Settings(_)), "no debe abrir formulario");
+        assert!(
+            matches!(pending(&state)[0], TuiMessage::ProviderActivate { provider_id, .. }
+                if provider_id == "hivecode-free"),
+        );
+    }
+
+    #[test]
+    fn esc_en_el_formulario_de_clave_vuelve_al_hub_sin_enviar_nada() {
+        let mut state = hub_state(vec![provider_row("openai", false, false)]);
+        press(&mut state, KeyCode::Enter);
+        state.pending_ipc.clear();
+
+        press(&mut state, KeyCode::Esc);
+
+        assert!(matches!(&state.modal, ModalState::Settings(hub) if !hub.loading));
+        assert!(
+            pending(&state).is_empty(),
+            "cancelar no debe mandar ProviderActivate ni ModalCancel",
+        );
+    }
+
+    #[test]
+    fn enter_ya_no_manda_provider_set_como_mensaje_de_chat() {
+        // El bug reportado: `/provider set <id>` hacía que Bun ignorara el id y
+        // volviera a pintar la lista de providers.
+        let mut state = hub_state(vec![provider_row("openai", false, false)]);
+        press(&mut state, KeyCode::Enter);
+
+        for msg in pending(&state) {
+            assert!(
+                !matches!(msg, TuiMessage::Submit { input } if input.starts_with("/provider set")),
+                "el hub ya no debe enviar `/provider set`: {:?}",
+                msg,
+            );
+        }
+    }
+
+    #[test]
+    fn las_acciones_del_hub_dejan_el_hub_montado_para_el_refresco() {
+        // Con el hub cerrado, el `SettingsData` de respuesta se descartaba y había
+        // que volver a pulsar F2.
+        let mut state = hub_state(vec![provider_row("openai", true, false)]);
+        press(&mut state, KeyCode::Char('d'));
+
+        assert!(
+            matches!(&state.modal, ModalState::Settings(hub) if hub.loading),
+            "tras una acción el hub debe quedarse montado cargando",
+        );
+    }
+
+    #[test]
+    fn el_modal_de_la_clave_solo_tiene_un_campo() {
+        let mut state = hub_state(vec![provider_row("openai", false, false)]);
+        press(&mut state, KeyCode::Enter);
+
+        let ModalState::Config(modal) = &state.modal else { panic!("se esperaba el formulario") };
+        // `handle_config_modal_key` sale temprano si no hay campos: un modal de
+        // cero campos sería un formulario imposible de cerrar con Enter.
+        assert!(!modal.fields.is_empty());
     }
 
     #[test]
@@ -1583,7 +1998,7 @@ mod tests {
     #[test]
     fn dashboard_scroll_uses_wheel_without_entering_history_navigation() {
         let mut state = mk_state_with_entries(3);
-        state.active_tab = TabId::Dashboard;
+        state.active_tab = TabId::Swarm;
         state.history_nav_mode = true;
         state.history.selected = Some(1);
 
@@ -1630,7 +2045,7 @@ mod tests {
     #[test]
     fn typing_in_dashboard_auto_mode_does_not_halt_the_swarm() {
         let mut state = mk_state_with_entries(1);
-        state.active_tab = TabId::Dashboard;
+        state.active_tab = TabId::Swarm;
         state.session.mode = ReplMode::Auto;
 
         type_str(&mut state, "hola");
@@ -1658,7 +2073,7 @@ mod tests {
     #[test]
     fn typing_in_dashboard_approval_mode_does_not_open_review_modal() {
         let mut state = mk_state_with_entries(1);
-        state.active_tab = TabId::Dashboard;
+        state.active_tab = TabId::Swarm;
         state.session.mode = ReplMode::Approval;
 
         type_str(&mut state, "arregla");
@@ -1670,7 +2085,7 @@ mod tests {
     #[test]
     fn halt_requires_a_second_confirmation() {
         let mut state = mk_state_with_entries(1);
-        state.active_tab = TabId::Dashboard;
+        state.active_tab = TabId::Swarm;
         state.session.mode = ReplMode::Auto;
 
         let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
@@ -1688,7 +2103,7 @@ mod tests {
     #[test]
     fn esc_cancels_halt_confirmation_even_while_typing() {
         let mut state = mk_state_with_entries(1);
-        state.active_tab = TabId::Dashboard;
+        state.active_tab = TabId::Swarm;
         state.session.mode = ReplMode::Auto;
 
         let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
@@ -1703,7 +2118,7 @@ mod tests {
 
     #[test]
     fn arrows_move_the_cursor_when_there_is_text_to_edit() {
-        for tab in [TabId::Plan, TabId::Code, TabId::Review, TabId::Dashboard] {
+        for tab in [TabId::Plan, TabId::Code, TabId::Review, TabId::Swarm] {
             let mut state = mk_state_with_entries(1);
             state.active_tab = tab;
             type_str(&mut state, "abc");
@@ -1725,7 +2140,6 @@ mod tests {
         assert!(update_active_split_drag(&mut state, 60, 6));
 
         assert!(state.panels.code_main_percent > 55);
-        assert!(state.dirty.full);
     }
 
     #[test]
@@ -1736,9 +2150,36 @@ mod tests {
         assert!(update_active_split_drag(&mut state, 0, 18));
 
         assert!(state.panels.input_height > 4);
-        assert!(state.dirty.full);
     }
 
+    #[test]
+    fn the_tabbar_row_follows_the_configured_header_height() {
+        // Regression: the click path hardcoded row 2, so a header taller or
+        // shorter than 2 rows made the tabs unclickable.
+        for header_height in 1..=5u16 {
+            let slot = crate::term::Rect::new(0, header_height, 120, 1);
+            let state = AppState::default();
+            let plan = tabbar::tab_regions(slot, &state)
+                .into_iter()
+                .find(|(tab, _)| *tab == TabId::Plan)
+                .map(|(_, rect)| rect)
+                .expect("plan region");
+
+            assert_eq!(
+                tabbar::tab_at_col(slot, plan.x, &state),
+                Some(TabId::Plan),
+                "header_height={header_height}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_height_change_moves_the_tabbar_with_it() {
+        let mut state = AppState::default();
+        assert_eq!(state.panels.header_height.clamp(1, 5), 2);
+        state.panels.set_chrome_height("chrome:header", 4);
+        assert_eq!(state.panels.header_height.clamp(1, 5), 4);
+    }
 }
 
 // ── Clipboard paste (Ctrl+V directo al portapapeles del sistema) ─────────────
@@ -1793,6 +2234,12 @@ fn handle_config_modal_key(state: &mut AppState, code: KeyCode) {
 
     match code {
         KeyCode::Esc => {
+            let ModalState::Config(modal) = &state.modal else { return };
+            // Modal local de la TUI: no hay nadie en Bun esperando un `modal_cancel`.
+            if modal.action.is_some() {
+                close_to_settings_hub(state, false);
+                return;
+            }
             let command = modal.command.clone();
             state.modal = ModalState::None;
             state.pending_ipc.push(TuiMessage::ModalCancel { command });
@@ -1832,19 +2279,46 @@ fn handle_config_modal_key(state: &mut AppState, code: KeyCode) {
         }
         KeyCode::Enter => {
             // Validar campos requeridos
-            let ModalState::Config(modal) = &state.modal else { return; };
+            let ModalState::Config(modal) = &state.modal else { return };
             let ok = modal.fields.iter().enumerate().all(|(i, f)| {
                 !f.required || !modal.values.get(i).map(String::is_empty).unwrap_or(true)
             });
-            if ok {
-                let ModalState::Config(modal) = &mut state.modal else { return; };
-                let command = modal.command.clone();
-                let values: std::collections::HashMap<String, String> = modal.fields.iter()
-                    .enumerate()
-                    .map(|(i, f)| (f.key.clone(), modal.values.get(i).cloned().unwrap_or_default()))
-                    .collect();
-                state.modal = ModalState::None;
-                state.pending_ipc.push(TuiMessage::ModalSubmit { command, values });
+            if !ok { return; }
+
+            // Modal local: la respuesta va en su propio mensaje IPC. Mandar
+            // `ModalSubmit` aqui dejaria la clave sin destino, porque en Bun no
+            // hay ningun `showConfigModal` parked que la escuche.
+            let local_action = {
+                let ModalState::Config(modal) = &state.modal else { return };
+                modal.action.clone()
+            };
+            match local_action {
+                Some(ModalAction::ProviderActivate { provider_id }) => {
+                    let api_key = {
+                        let ModalState::Config(modal) = &state.modal else { return };
+                        let raw = modal
+                            .fields
+                            .iter()
+                            .position(|f| f.key == "api_key")
+                            .and_then(|i| modal.values.get(i))
+                            .map(|v| v.trim().to_string())
+                            .unwrap_or_default();
+                        (!raw.is_empty()).then_some(raw)
+                    };
+                    close_to_settings_hub(state, true);
+                    state.pending_ipc.push(TuiMessage::ProviderActivate { provider_id, api_key });
+                }
+                // Modales de Bun: `command` identifica su handler.
+                None => {
+                    let ModalState::Config(modal) = &mut state.modal else { return };
+                    let command = modal.command.clone();
+                    let values: std::collections::HashMap<String, String> = modal.fields.iter()
+                        .enumerate()
+                        .map(|(i, f)| (f.key.clone(), modal.values.get(i).cloned().unwrap_or_default()))
+                        .collect();
+                    state.modal = ModalState::None;
+                    state.pending_ipc.push(TuiMessage::ModalSubmit { command, values });
+                }
             }
         }
         KeyCode::Backspace => {
@@ -1973,13 +2447,22 @@ Notas y Sistema
 
 Vistas (tabs)
 ═════════════
-1 / /layout focus      Vista principal de chat
-2 / /layout plan       Razonamiento + mapa de archivos
-3 / /layout code       Cambios en código + workers
-4 / /layout review     Revisión + aprobación
-5 / /layout dashboard  Panel de todos los workers
+1 / /layout enjambre   El enjambre en vivo: tool calls y esperas
+2 / /layout plan       Fases del plan y de quién depende cada una
+3 / /layout mesa        Chat + narración + razonamiento
+4 / /layout codigo      Cambios en código + workers
+5 / /layout revision    Revisión + aprobación
+6 / /layout taller      Agentes, herramientas, habilidades, MCP, registro
 /auto                  Reactivar navegación automática de layouts
 /welcome               Volver a la pantalla de bienvenida
+/habilidades           Catálogo de habilidades (de quién es cada una)
+/ficha <agente>        Ficha del especialista: qué puede y qué le falta
+
+Atajos
+══════
+i                      Ficha del especialista (global)
+f                      Filtrar el stream por agente
+s                      Habilidades del especialista abierto (en la ficha)
 
 Atajos de teclado
 ═════════════════

@@ -8,8 +8,10 @@ export type PhaseName =
   | "security"
   | "test"
   | "devops"
-  | "verifier"
-  | "reviewer"
+  /** Gate único de calidad: verifica los criterios del PRD, revisa el código y
+   *  cruza contratos entre módulos. Fusiona los antiguos `verifier` y
+   *  `reviewer`, que eran el mismo chequeo en dos momentos. */
+  | "quality"
   | "librarian"
   | "forensic"
 

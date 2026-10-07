@@ -1,7 +1,6 @@
 pub mod hit;
 pub mod layout;
 pub mod markdown;
-pub mod pane;
 pub mod scroll;
 pub mod split;
 pub mod table;
@@ -13,7 +12,6 @@ pub mod virtual_list;
 pub use hit::{HitAction, HitMap, MouseRegion};
 pub use layout::{split_rects, Axis, Constraint, FlexSpec};
 pub use markdown::{build_markdown_lines, render_markdown, MarkdownLine, MarkdownView};
-pub use pane::{render_pane, PaneStyle};
 pub use scroll::{render_vertical_scrollbar, ScrollbarState};
 pub use split::{render_split_handles, split_panes, SplitPane};
 pub use table::{render_data_table, DataTable, TableAlign, TableCell, TableColumn, TableState, TableWidth};

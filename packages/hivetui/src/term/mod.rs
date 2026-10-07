@@ -38,3 +38,13 @@ pub const PURPLE: Color = Color::Rgb { r: 129, g: 140, b: 248 }; // #818CF8 arch
 pub const CYAN:   Color = Color::Rgb { r: 52,  g: 211, b: 153 }; // #34D399 frontend
 pub const PINK:   Color = Color::Rgb { r: 251, g: 113, b: 133 }; // #FB7185 security
 pub const LAVENDER: Color = Color::Rgb { r: 167, g: 139, b: 250 }; // #A78BFA devops
+// ── Workers (extensión) ────────────────────────────────────────────────────
+//(product_manager / data_scientist ya competían por GREEN; reviewer y los roles
+// on-demand caían en SECONDARY, indistinguible del texto apagado. Un rol sin
+// color propio se lee como "inactivo", así que cada uno necesita tono propio.)
+pub const TEAL:   Color = Color::Rgb { r: 45, g: 212, b: 191 }; // #2DD4BF product_manager
+pub const MINT:   Color = Color::Rgb { r: 163, g: 230, b: 53 }; // #A3E635 data_scientist
+pub const CORAL:  Color = Color::Rgb { r: 251, g: 146, b: 60  }; // #FB923C forensic
+pub const SLATE:  Color = Color::Rgb { r: 148, g: 163, b: 184 }; // #94A3B8 librarian
+pub const SKY:    Color = Color::Rgb { r: 56, g: 189, b: 248 }; // #38BDF8 scout
+pub const ORCHID: Color = Color::Rgb { r: 192, g: 132, b: 252 }; // #C084FC spider

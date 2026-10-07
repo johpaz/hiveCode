@@ -7,6 +7,12 @@ import type { SessionMode } from "../workers/types"
  *   byte 2: workers_busy bitmask (7 bits: 0=bee, 1=architecture, 2=backend, 3=frontend, 4=security, 5=test, 6=devops)
  *   byte 3: flags (bit 0=pause, bit 1=cancel, bit 2=shutdown)
  *   bytes 4-7: padding/reserved
+ *
+ * El bitmask cubre 7 de los 14 coordinadores: librarian y forensic son
+ * on-demand, y product_manager y data_scientist no entran aquí. La fusión de
+ * `verifier`+`reviewer` en `quality` no cambia este mapa porque ninguno de los
+ * dos ocupaba un bit — el gate corre al final, cuando el pool ya se liberó.
+ * Ver COORDINATOR_NAMES en coordinator-manager.ts para la lista real del pool.
  */
 const BYTE_MODE = 0
 const BYTE_PHASE = 1

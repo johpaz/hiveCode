@@ -14,11 +14,26 @@ const log = logger.child("channel-notify")
 type SendFn = (channel: string, sessionId: string, message: string) => Promise<void>
 
 let _sendFn: SendFn | null = null
+/**
+ * La TUI como destino.
+ *
+ * Escribir por la TUI **es** hablar con un canal: es donde esta el usuario. Sin
+ * este sink, `report_progress` caia a su default (`"webchat"`), que no existe,
+ * y el modelo reintentaba en bucle. Antes de que exista un canal web real, el
+ * reporte tenia que llegar a la pantalla.
+ */
+let _tuiSendFn: ((message: string) => void) | null = null
 
 /** Llamar en server.ts una vez que channelManager esté listo */
 export function setChannelSendFn(fn: SendFn): void {
   _sendFn = fn
   log.info("[channel-notify] Send function registered")
+}
+
+/** Llamar desde el launcher de la TUI, con el envio al socket ya disponible. */
+export function setTuiSendFn(fn: (message: string) => void): void {
+  _tuiSendFn = fn
+  log.info("[channel-notify] TUI sink registered")
 }
 
 /**
@@ -45,8 +60,19 @@ export async function sendToUserChannel(
   channel: string,
   userId: string,
   message: string
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; delivered_to?: string }> {
+  // El gateway no está arrancado (sesión puramente TUI). La pantalla es el
+  // destino correcto, no un destino de reserva.
   if (!_sendFn) {
+    if (_tuiSendFn) {
+      try {
+        _tuiSendFn(message)
+        return { ok: true, delivered_to: "tui" as const }
+      } catch (err) {
+        log.warn(`[channel-notify] TUI send failed: ${(err as Error).message}`)
+        return { ok: false, error: (err as Error).message }
+      }
+    }
     log.warn("[channel-notify] No send function registered — message dropped")
     return { ok: false, error: "Channel send not initialized" }
   }
@@ -56,9 +82,22 @@ export async function sendToUserChannel(
 
   try {
     await _sendFn(channel, sessionId, message)
-    return { ok: true }
+    return { ok: true, delivered_to: channel }
   } catch (err) {
-    log.warn(`[channel-notify] Failed to send: ${(err as Error).message}`)
-    return { ok: false, error: (err as Error).message }
+    // El canal no existe o está caído. Si hay una TUI conectada, el mensaje
+    // sigue llegando: perder un reporte es peor que entregarlo donde el
+    // usuario puede verlo.
+    const motivo = (err as Error).message
+    if (_tuiSendFn) {
+      try {
+        _tuiSendFn(message)
+        log.warn(`[channel-notify] canal «${channel}» no disponible (${motivo}) — entregado a la TUI`)
+        return { ok: true, delivered_to: "tui" as const }
+      } catch {
+        // cae al error de abajo
+      }
+    }
+    log.warn(`[channel-notify] Failed to send: ${motivo}`)
+    return { ok: false, error: motivo }
   }
 }

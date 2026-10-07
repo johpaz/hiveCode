@@ -67,7 +67,7 @@ const COORDINATOR_NAMES: PhaseName[] = [
   "backend", "frontend",
   "data_scientist",
   "security", "test", "devops",
-  "verifier", "reviewer",
+  "quality",
 ]
 
 /** Circuit breaker: stop auto-restarting a coordinator after this many consecutive crashes. */
@@ -97,8 +97,7 @@ function spawnCoordinatorWorker(name: PhaseName): Bun.Worker {
     case "security":        return new (Worker as any)(new URL("./security.worker.ts",        import.meta.url), { smol }) as Bun.Worker
     case "test":            return new (Worker as any)(new URL("./test.worker.ts",            import.meta.url), { smol }) as Bun.Worker
     case "devops":          return new (Worker as any)(new URL("./devops.worker.ts",          import.meta.url), { smol }) as Bun.Worker
-    case "verifier":        return new (Worker as any)(new URL("./verifier.worker.ts",        import.meta.url), { smol }) as Bun.Worker
-    case "reviewer":        return new (Worker as any)(new URL("./reviewer.worker.ts",        import.meta.url), { smol }) as Bun.Worker
+    case "quality":         return new (Worker as any)(new URL("./quality.worker.ts",         import.meta.url), { smol }) as Bun.Worker
     case "librarian":       return new (Worker as any)(new URL("./librarian.worker.ts",       import.meta.url), { smol }) as Bun.Worker
     case "forensic":        return new (Worker as any)(new URL("./forensic.worker.ts",        import.meta.url), { smol }) as Bun.Worker
     default:                throw new Error(`Unknown coordinator: ${name}`)
@@ -153,10 +152,9 @@ export class CoordinatorManager extends CoordinatorBase {
     // Load and distribute secrets BEFORE creating workers
     await this.reloadSecrets()
 
-    // Rehydrate durable state from HiveDB so recovery/resume reads see prior
-    // sessions, then reconcile any task a previous process left mid-flight.
-    await this.scribe.hydrate()
-    this.reconcileInterruptedTasks()
+    // Reconcile any task a previous process left mid-flight. Recovery and resume
+    // reads go straight to HiveDB, so there is no hydration step.
+    await this.reconcileInterruptedTasks()
 
     // Load all tools from core
     try {
@@ -179,15 +177,14 @@ export class CoordinatorManager extends CoordinatorBase {
    * Boot-time reconciliation: a task left `running`/`planning` by a process that
    * died is not really running anymore. Move it to `paused` (resumable) when a
    * recovery point exists, or `failed` when it doesn't, and surface a
-   * `resume_available` signal so the TUI can offer to continue it. Runs after
-   * `scribe.hydrate()`, so the in-memory task/recovery-point caches are populated.
+   * `resume_available` signal so the TUI can offer to continue it.
    */
-  private reconcileInterruptedTasks(): void {
-    const interrupted = this.scribe.findInterruptedTasks()
+  private async reconcileInterruptedTasks(): Promise<void> {
+    const interrupted = await this.scribe.findInterruptedTasks()
     if (interrupted.length === 0) return
     log.info(`[coordinator-manager] 🔧 Reconciling ${interrupted.length} interrupted task(s) from a previous process`)
     for (const task of interrupted) {
-      const recovery = this.scribe.getLatestRecoveryPoint(task.id)
+      const recovery = await this.scribe.getLatestRecoveryPoint(task.id)
       if (recovery) {
         this.scribe.updateTaskStatus(task.id, "paused")
         log.info(`[coordinator-manager] ⏸️  Task ${task.id} paused at level ${recovery.completedPhases.length} — resume available`)
@@ -492,7 +489,7 @@ export class CoordinatorManager extends CoordinatorBase {
     const turnId = this.scribe.createTurn(this.activeSessionId, description)
 
     // Gather recent conversation history to give BEE context
-    const recentTurns = this.scribe.getRecentTurns(this.activeSessionId, 10)
+    const recentTurns = await this.scribe.getRecentTurns(this.activeSessionId, 10)
     const conversationHistory = recentTurns.map(t => ([
       { role: "user" as const,  content: t.userMessage,   createdAt: t.createdAt },
       { role: "agent" as const, content: t.agentResponse, createdAt: t.createdAt },
@@ -1068,9 +1065,9 @@ export class CoordinatorManager extends CoordinatorBase {
     })
     // Learning Harness — evaluate phases before marking completed
     try {
-      const taskEval = this.scribe.evaluateTaskPhases(taskId)
+      const taskEval = await this.scribe.evaluateTaskPhases(taskId)
       if (taskEval.hasFailures) {
-        const patterns = this.scribe.getFailurePatterns({ minOccurrences: 1 })
+        const patterns = await this.scribe.getFailurePatterns({ minOccurrences: 1 })
         if (patterns.length > 0 && taskEval.frictionPhase) {
           this.scribe.writeProposal({
             sourceAgent: "bee",
@@ -1305,8 +1302,8 @@ export class CoordinatorManager extends CoordinatorBase {
       for (const phaseDef of levelPhases) {
         const phase = phaseDef.coordinator
         const workspace = this.getTaskWorkspace(this.activeTaskId)
-        // Override model to most capable for reviewer
-        const effectiveModel = phase === "reviewer" ? (await this.getHighestCapabilityModel()) || model : model
+        // Override model to most capable for the quality gate
+const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityModel()) || model : model
         const task: CoordinatorTask = {
           taskId: this.activeTaskId || "current",
           phaseId: this.scribe.createPhase(this.activeTaskId || "current", phase, phase),
@@ -1482,14 +1479,16 @@ export class CoordinatorManager extends CoordinatorBase {
           broadcastPhaseEnd(this.activeTaskId, phase, phase, result.durationMs)
         }
 
-        // Post-reviewer: activate Librarian if approved
-        if (phase === "reviewer") {
+        // Post-quality: activate Librarian if approved
+        if (phase === "quality") {
           const structuredVerdict = result.structuredDecision as unknown as ReviewVerdict | undefined
           const verdict = structuredVerdict?.verdict ?? this.parseReviewerVerdict(result.narrativeEntry)
           if (structuredVerdict) {
             const unmet = structuredVerdict.criteria.filter((c) => !c.met)
             this.onIpcEvent?.("review_verdict_update", {
-              reviewer: "reviewer",
+              // The roster shows this as the alias; the internal name stays
+              // `quality` so the gate reads as one agent, not two.
+              reviewer: "quality",
               status: structuredVerdict.verdict,
               summary: structuredVerdict.reasons
                 || (unmet.length > 0
@@ -1603,7 +1602,7 @@ export class CoordinatorManager extends CoordinatorBase {
       log.warn(`[coordinator-manager] ✗ Cannot resume ${taskId}: no persisted plan`)
       return false
     }
-    const recovery = this.scribe.getLatestRecoveryPoint(taskId)
+    const recovery = await this.scribe.getLatestRecoveryPoint(taskId)
     const startLevel = recovery?.level ?? 0
     const phases = JSON.parse(plan.phases_json) as ParsedPhase[]
 
@@ -2001,8 +2000,10 @@ export class CoordinatorManager extends CoordinatorBase {
         architecture:    ["pattern", "contract"],
         security:        ["antipattern"],
         test:            ["forensic_lesson"],
-        verifier:        ["contract", "forensic_lesson"],
-        reviewer:        ["pattern", "antipattern", "contract", "convention", "forensic_lesson"],
+        // El gate fused hereda lo que ambos filtraban: verifica (contract,
+        // forensic_lesson) y además juzga calidad (pattern, antipattern,
+        // convention).
+        quality:         ["pattern", "antipattern", "contract", "convention", "forensic_lesson"],
       }
       const typeFilter = memoryTypeFilter[phase]
       const query = `${taskDescription} ${phase}`.toLowerCase()
@@ -2042,10 +2043,10 @@ export class CoordinatorManager extends CoordinatorBase {
     // assumptions the blackboard can't reconcile after the fact; seeing what was
     // considered and discarded (`options`/`context`) before they write is what
     // catches the conflict before it becomes a bug.
-    const traceReaders: PhaseName[] = ["backend", "frontend", "data_scientist", "reviewer", "verifier"]
+    const traceReaders: PhaseName[] = ["backend", "frontend", "data_scientist", "quality"]
     if (traceReaders.includes(phase)) {
       try {
-        const activeDecisions = this.scribe.readDecisions("active").slice(0, 5)
+        const activeDecisions = (await this.scribe.readDecisions("active")).slice(0, 5)
         if (activeDecisions.length > 0) {
           let traceSection = "# DECISION TRACES (ADRs activos)\nQué se decidió, qué se consideró y por qué — no solo el resultado:\n\n"
           for (const adr of activeDecisions) {
@@ -2061,7 +2062,7 @@ export class CoordinatorManager extends CoordinatorBase {
     // 5. Learning Harness — inject known failure patterns for Architecture coordinator
     if (phase === "architecture") {
       try {
-        const patterns = this.scribe.getFailurePatterns({ minOccurrences: 3 })
+        const patterns = await this.scribe.getFailurePatterns({ minOccurrences: 3 })
         if (patterns.length > 0) {
           const patternBlock = patterns
             .map(p => `- ${p.agent}/${p.failureType}: ${p.count} ocurrencias (última: ${p.lastSeen})`)

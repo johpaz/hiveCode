@@ -1,5 +1,5 @@
 use crate::{
-    state::{AppState, ModalState, ModelRows, SettingsTab},
+    state::{AppState, ModalState, ModelRows, ProviderKeyState, SettingsHubState, SettingsTab},
     term::{Canvas, Rect, Style, AMBER, CYAN, DIM, GREEN, RED, SECONDARY, WHITE, BG_ELEVATED},
     ui::{HitAction, HitMap, MouseRegion},
 };
@@ -81,6 +81,15 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &mut AppState, regist
                 hub.scroll_offset = hub.selected_row.saturating_sub(visible_rows - 1);
             }
         }
+        // El texto del footer se calcula antes del dispatch: los `render_*`
+        // reciben `&mut AppState`, y leer el hub después ya no prestaría.
+        let footer_hint = {
+            let ModalState::Settings(hub) = &state.modal else { return };
+            match hub.active_tab {
+                SettingsTab::Providers => Some(provider_footer_hint(hub)),
+                _ => None,
+            }
+        };
         let ModalState::Settings(hub) = &state.modal else { return };
         match hub.active_tab {
             SettingsTab::Providers => render_providers(canvas, content_area, state, register_hits),
@@ -91,13 +100,18 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &mut AppState, regist
             SettingsTab::Github    => render_github(canvas, content_area, state),
             SettingsTab::Telegram  => render_telegram(canvas, content_area, state),
         }
-    }
 
-    // Footer
-    let hint_y = area.bottom().saturating_sub(2);
-    canvas.print(area.x + 2, hint_y,
-        "Tab · ↑↓/clic · A añadir · D eliminar · Enter editar · Esc cerrar",
-        Style::new().fg(DIM));
+        // Footer: atajos + qué hace Enter sobre la fila seleccionada.
+        let hint_y = area.bottom().saturating_sub(2);
+        canvas.print(area.x + 2, hint_y,
+            "Tab · ↑↓/clic · A añadir · D eliminar · Enter editar · Esc cerrar",
+            Style::new().fg(DIM));
+        if let Some(hint) = footer_hint {
+            if hint_y > area.y + 3 {
+                canvas.print(area.x + 2, hint_y - 1, &truncate(&hint, area.w.saturating_sub(4) as usize), Style::new().fg(SECONDARY));
+            }
+        }
+    }
 
     // Registrar región del modal completo para capturar clics (evita que pasen al fondo)
     if register_hits {
@@ -172,8 +186,12 @@ fn render_providers(canvas: &mut Canvas, area: Rect, state: &mut AppState, regis
         let model = truncate(&p.model, 18);
         canvas.print(area.x + 2,  y, &id,    style);
         canvas.print(area.x + 16, y, &model, style);
-        canvas.print(area.x + 36, y, if p.has_key { "✓" } else { "?" },
-            if p.has_key { Style::new().fg(GREEN) } else { Style::new().fg(RED) });
+
+        // La columna Key refleja el keystore real (lo envía Bun), no un `true`
+        // fijo: `?` es un provider al que hay que escribirle clave, `~` uno que
+        // se autentica por navegador y no usa clave.
+        let key = p.key_state();
+        canvas.print(area.x + 36, y, key.glyph(), key_style(key));
         canvas.print(area.x + 42, y,
             if p.is_active { "● activo" } else { "○" },
             if p.is_active { Style::new().fg(GREEN).bold() } else { Style::new().fg(DIM) });
@@ -188,6 +206,34 @@ fn render_providers(canvas: &mut Canvas, area: Rect, state: &mut AppState, regis
         }
     }
     draw_scrollbar(canvas, area, offset, hub.providers.len(), visible);
+}
+
+/// Color de la columna `Key` según cómo esté autenticado el provider.
+fn key_style(state: ProviderKeyState) -> Style {
+    match state {
+        ProviderKeyState::Ready       => Style::new().fg(GREEN),
+        ProviderKeyState::Missing     => Style::new().fg(RED),
+        ProviderKeyState::BrowserLogin => Style::new().fg(AMBER),
+    }
+}
+
+/// Segunda línea del footer del tab Providers: qué va a pasar al pulsar Enter
+/// sobre la fila seleccionada. Antes `Enter` mandaba `/provider set <id>` y Bun
+/// respondía reabriendo el desplegable con todos los providers.
+fn provider_footer_hint(hub: &SettingsHubState) -> String {
+    let Some(p) = hub.provider_at(hub.selected_row) else {
+        return "Sin providers. A para añadir uno.".to_string();
+    };
+    match p.key_state() {
+        ProviderKeyState::Missing =>
+            format!("Enter → {} · te pedirá la API key", p.id),
+        ProviderKeyState::BrowserLogin =>
+            format!("Enter → {} · login de navegador (sin clave)", p.id),
+        ProviderKeyState::Ready if p.is_active =>
+            format!("Enter → {} · ya está activo con su clave", p.id),
+        ProviderKeyState::Ready =>
+            format!("Enter → activar {} · ya tiene clave", p.id),
+    }
 }
 
 fn render_mcp(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hits: bool) {
