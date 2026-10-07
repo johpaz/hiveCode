@@ -354,11 +354,8 @@ ${quality}`,
         `Consolida la tarea ${featureDir}. Llama speckit_converge con gaps=[] y la evidencia siguiente.
 Después responde al usuario con un resumen compacto de resultado, archivos y pruebas.
 
-VERIFIER:
-${verification}
-
-REVIEWER:
-${review}`,
+GATE DE CALIDAD (verificación + revisión):
+${quality}`,
         "harness",
       )
 

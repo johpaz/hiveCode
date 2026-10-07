@@ -1,5 +1,5 @@
 use crate::{
-    state::{AppState, McpState},
+    state::{AppState, McpState, RosterAgent, SkillFit},
     term::{
         Canvas, Rect, Style, AMBER_BRIGHT, AMBER_DIM, AMBER_SUBTLE, BG_PANEL,
         DIM, GREEN, RED, SECONDARY, WHITE, YELLOW,
@@ -68,7 +68,7 @@ impl Section {
         match self {
             Section::Enjambre => state.roster.by_id.len(),
             Section::Herramientas => state.roster.by_id.values().map(|a| a.tools.len()).sum(),
-            Section::Habilidades => state.skills.len(),
+            Section::Habilidades => state.library.skills.len(),
             Section::Mcp => state.roster.mcp_servers.len(),
             Section::Registro => state.logs.entries.len(),
             Section::Github => 1,
@@ -91,7 +91,7 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState, section: Sectio
     match section {
         Section::Enjambre => render_agents(canvas, body, state, scroll, rows),
         Section::Herramientas => render_tools(canvas, body, state, scroll, rows),
-        Section::Habilidades => render_skills(canvas, body, state, scroll, rows),
+        Section::Habilidades => render_skills(canvas, body, state, scroll, rows, ficha_agent(state)),
         Section::Mcp => render_mcp(canvas, body, state, scroll, rows),
         Section::Registro => render_logs(canvas, body, state, scroll, rows),
         Section::Github => render_flag(canvas, body, "github", state.github_connected, state.github_repo.as_deref()),
@@ -198,22 +198,83 @@ fn render_tools(canvas: &mut Canvas, area: Rect, state: &AppState, scroll: usize
     }
 }
 
-fn render_skills(canvas: &mut Canvas, area: Rect, state: &AppState, scroll: usize, rows: usize) {
-    if state.skills.is_empty() {
+/// Catálogo de habilidades.
+///
+/// Cuando hay un especialista abierto, cada fila dice si *ese* agente puede
+/// usarla y por qué. Es la respuesta directa a "¿puedo pedirle esto?", y es la
+/// que hoy no existe en ninguna parte.
+fn render_skills(
+    canvas: &mut Canvas,
+    area: Rect,
+    state: &AppState,
+    scroll: usize,
+    rows: usize,
+    focus: Option<&RosterAgent>,
+) {
+    if state.library.is_empty() {
         empty(canvas, area, "sin habilidades cargadas");
         return;
     }
-    for (i, skill) in state.skills.iter().skip(scroll).take(rows).enumerate() {
+
+    // Con un agente abierto, la columna derecha dice si le sirve.
+    let fit_x = area.x + 74;
+    let show_fit = focus.is_some() && area.w > 96;
+    if let Some(agent) = focus.filter(|_| show_fit) {
+        canvas.print(
+            fit_x.saturating_sub(2),
+            area.y.saturating_sub(1).max(area.y),
+            &format!("para {}", ellipsize_cells(&agent.alias, 16)),
+            Style::new().fg(AMBER_DIM),
+        );
+    }
+
+    for (i, skill) in state.library.skills.iter().skip(scroll).take(rows).enumerate() {
         let y = area.y + i as u16;
-        let dot_style = if skill.active {
-            Style::new().fg(GREEN)
-        } else {
+        let fit = focus.map(|a| skill.fit_for(&a.tools)).unwrap_or(SkillFit::Always);
+
+        let dot_style = if !skill.active {
             Style::new().fg(DIM)
+        } else if show_fit {
+            match fit {
+                SkillFit::Always => Style::new().fg(GREEN),
+                SkillFit::Discoverable => Style::new().fg(SECONDARY),
+                SkillFit::Blocked => Style::new().fg(RED),
+            }
+        } else {
+            Style::new().fg(GREEN)
         };
-        canvas.print(area.x + 1, y, if skill.active { "●" } else { "○" }, dot_style);
+        let glyph = if show_fit { fit.glyph() } else if skill.active { "●" } else { "○" };
+        canvas.print(area.x + 1, y, glyph, dot_style);
         canvas.print(area.x + 3, y, &ellipsize_cells(&skill.name, 28), Style::new().fg(WHITE));
         canvas.print(area.x + 33, y, &ellipsize_cells(&skill.category, 16), Style::new().fg(SECONDARY));
-        canvas.print(area.x + 51, y, &ellipsize_cells(&skill.description, area.w.saturating_sub(54) as usize), Style::new().fg(DIM));
+
+        // Con agente abierto, el motivo de un bloqueo es lo que hay que leer:
+        // "bloqueada" sin decir qué tool falta no es accionable.
+        let detail = if show_fit && fit == SkillFit::Blocked {
+            let missing = skill.missing_tools(&focus.map(|a| a.tools.clone()).unwrap_or_default());
+            format!("le falta {}", missing.join(" "))
+        } else {
+            skill.description.clone()
+        };
+        canvas.print(
+            area.x + 51,
+            y,
+            &ellipsize_cells(&detail, (fit_x.saturating_sub(area.x + 52)) as usize),
+            Style::new().fg(if fit == SkillFit::Blocked && show_fit { RED } else { DIM }),
+        );
+
+        if show_fit {
+            canvas.print(
+                fit_x,
+                y,
+                fit.label(),
+                Style::new().fg(match fit {
+                    SkillFit::Always => GREEN,
+                    SkillFit::Discoverable => SECONDARY,
+                    SkillFit::Blocked => RED,
+                }),
+            );
+        }
     }
 }
 
@@ -294,6 +355,11 @@ pub fn section_rows(state: &AppState) -> usize {
     clamp(state.taller_section).row_count(state)
 }
 
+/// El especialista abierto en la ficha, si lo hay.
+pub fn ficha_agent(state: &AppState) -> Option<&RosterAgent> {
+    state.ficha_agent.as_ref().and_then(|id| state.roster.resolve(id))
+}
+
 /// Estado del tab: la sección activa vive en `AppState`.
 pub fn render_for_state(canvas: &mut Canvas, area: Rect, state: &AppState) {
     render(canvas, area, state, state.taller_section, state.taller_scroll);
@@ -308,7 +374,7 @@ pub fn section_label(state: &AppState) -> &'static str {
 mod tests {
     use super::*;
     use crate::ipc::{IpcRosterAgent, IpcRosterMcpRef};
-    use crate::state::{RosterAgent, RosterState, SkillSummary};
+    use crate::state::{RosterAgent, RosterState, SkillCard};
 
     fn agent(rol: &str, alias: &str, nivel: u8, tools: &[&str], mcp: &[(&str, &str)]) -> IpcRosterAgent {
         IpcRosterAgent {
@@ -418,9 +484,17 @@ mod tests {
     #[test]
     fn skills_show_their_active_state() {
         let mut state = AppState::default();
-        state.skills = vec![
-            SkillSummary { name: "git_workflow".into(), category: "git".into(), description: "commits y PRs".into(), active: true },
-            SkillSummary { name: "voice_output".into(), category: "voice".into(), description: "habla".into(), active: false },
+        state.library.skills = vec![
+            SkillCard {
+                name: "git_workflow".into(), description: "commits y PRs".into(),
+                category: "git".into(), active: true,
+                tools: vec!["git_commit".into()], preferida_por: vec![], siempre_disponible: false,
+            },
+            SkillCard {
+                name: "voice_output".into(), description: "habla".into(),
+                category: "voice".into(), active: false,
+                tools: vec![], preferida_por: vec![], siempre_disponible: false,
+            },
         ];
         state.taller_section = Section::Habilidades;
 
@@ -467,7 +541,7 @@ mod tests {
         assert_eq!(Section::Herramientas.row_count(&state), 3);
         assert_eq!(Section::Habilidades.row_count(&state), 0);
 
-        state.skills = vec![SkillSummary::default()];
+        state.library.skills = vec![SkillCard::default()];
         assert_eq!(Section::Habilidades.row_count(&state), 1);
     }
 

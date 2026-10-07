@@ -34,6 +34,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./gateway": "./src/gateway/index.ts",
+    "./gateway/channel-notify": "./src/gateway/channel-notify.ts",
     "./gateway/task-streaming": "./src/gateway/task-streaming.ts",
     "./gateway/helpers/path": "./src/gateway/helpers/path.ts",
     "./agent/service": "./src/agent/service.ts",

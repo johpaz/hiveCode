@@ -1,4 +1,5 @@
 pub mod activity_toast;
+pub mod agent_card;
 pub mod checkpoint_bar;
 pub mod code_layout;
 pub mod command_popup;

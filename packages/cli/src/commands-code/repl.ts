@@ -6,8 +6,10 @@ import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
 import { eventBus } from "@johpaz/hivecode-core/events/event-bus"
 import { getJevStatus } from "@johpaz/hivecode-core/agent/jev-decisions"
+import { agentAlias } from "@johpaz/hivecode-core/agent/agent-identity"
 import { describeSwarmCapabilities } from "@johpaz/hivecode-core/agent/jev-planner"
 import { getAgentService } from "@johpaz/hivecode-core/agent/service"
+import { setTuiSendFn } from "@johpaz/hivecode-core/gateway/channel-notify"
 import { maybeLoadHiveAgentsModelFromDb } from "@johpaz/hivecode-core/agent/hiveagents-loader"
 import {
   isCancel, hiveSelect, hiveNote, hiveOutro, hiveSpinner,
@@ -421,6 +423,19 @@ export async function repl(): Promise<void> {
     // Wire live IPC events (file_risk_update, conflict_alert, etc.) to TUI socket
     _tuiIpcSend = (msg: any) => tuiControl.send?.(msg)
 
+    // La TUI es un destino válido para `notify` y `report_progress`: si el
+    // gateway no está arrancado, el reporte cae a la pantalla en vez de fallar
+    // contra un canal inexistente.
+    setTuiSendFn((message) => {
+      _tuiIpcSend?.({
+        type: "history_append",
+        role: "system",
+        content: message,
+        agent: "progress",
+      })
+      _tuiIpcSend?.({ type: "status", running: true, msg: message })
+    })
+
     // ── JEV → TUI ────────────────────────────────────────────────────────────
     // The decision plane already emits `jev:decision` and `jev:status` on the
     // event bus (packages/core/src/agent/jev-decisions.ts) and nothing was
@@ -507,6 +522,19 @@ export async function repl(): Promise<void> {
           razon: w.reason,
           task_id: w.taskId ?? undefined,
           at: w.at,
+        })
+      }),
+      // Carga efectiva del turno. Llega por agente y reemplaza la anterior:
+      // cada turno emite la suya, y JEV puede haber podado el conjunto.
+      eventBus.on("agent:loadout", (l) => {
+        _tuiIpcSend?.({
+          type: "carga_actual",
+          agent: l.agentId,
+          tools: l.tools,
+          skills: l.skills,
+          origen: l.origen,
+          minimal: l.minimal,
+          at: l.at,
         })
       }),
     ]
@@ -606,27 +634,16 @@ export async function repl(): Promise<void> {
           timestamp: new Date().toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" }),
         })
       }
-      // Send activity_update so the CODE tab workers panel shows live status
-      const displayMap: Record<string, string> = {
-        bee: "Bee",
-        architecture: "Architecture",
-        backend: "BackendEngineer",
-        frontend: "FrontendEngineer",
-        security: "SecurityAuditor",
-        test: "QAEngineer",
-        devops: "DevOpsEngineer",
-        product_manager: "ProductManager",
-        data_scientist: "DataScientist",
-        verifier: "Verifier",
-        reviewer: "CodeReviewer",
-      }
+      // Send activity_update so the CODE tab workers panel shows live status.
+      // El nombre visible sale de `agent-identity` —la misma tabla que
+      // consume el roster— en vez de una copia local que ya iba en inglés.
       tuiControl.send?.({
         type: "activity_update",
         task_id: taskId,
         coordinator: chunk.coordinator,
         phase: chunk.phase,
-        status: chunk.phase === "thinking" || chunk.phase === "reason" ? "running" : "running",
-        display_name: displayMap[chunk.coordinator] || chunk.coordinator,
+        status: "running",
+        display_name: agentAlias(chunk.coordinator),
         activity: content.slice(0, 80),
       })
     })

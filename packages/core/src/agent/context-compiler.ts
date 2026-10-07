@@ -150,6 +150,21 @@ export async function compileContext(opts: {
    * already the pruned set from the run that checkpointed them.
    */
   skipJev?: boolean
+  /**
+   * Se llama una vez por compilación con la carga **efectiva** de este turno.
+   *
+   * No es el perfil declarado: JEV poda el conjunto y `search_knowledge` lo
+   * amplía, así que lo que el agente tiene delante cambia cada turno. La ficha
+   * del especialista usa esto para no mentir.
+   */
+  onLoadout?: (loadout: {
+    tools: string[]
+    skills: string[]
+    /** De dónde salió el conjunto de herramientas. */
+    origen: "perfil" | "jev_pruned"
+    /** Las skills que están en la carga mínima: no dependen de descubrir nada. */
+    minimal: string[]
+  }) => void
 }): Promise<CompiledContext> {
   const { agentId, threadId, mcpManager, userMessage, isolated, taskContext, causalStreamId, skipJev } = opts
 
@@ -671,6 +686,28 @@ export async function compileContext(opts: {
   }
 
   const finalTools = jevToolsForLLM ?? toolsForLLM
+
+  // ── Telemetría de carga para la TUI ─────────────────────────────────────
+  // `finalTools` y `allSkills` son la verdad de ESTE turno, y cambian en cada
+  // uno: JEV poda el conjunto, y `search_knowledge` lo amplía. Mostrar el
+  // `tools_json`/`skills_json` declarado sería mostrar una lista que ya no es la
+  // que el agente tiene delante.
+  //
+  // Se emite después de resolver las dos fuentes para que `origen` diga de
+  // dónde salió cada elemento.
+  if (opts.onLoadout) {
+    try {
+      opts.onLoadout({
+        tools: finalTools.map(t => t.function.name).filter(Boolean),
+        skills: allSkills.map(s => s.name),
+        origen: jevToolsForLLM ? "jev_pruned" : "perfil",
+        minimal: minimalSkills.map(s => s.name),
+      })
+    } catch (err) {
+      // Observabilidad: nunca debe romper la compilación del contexto.
+      log.warn(`[context-compiler] onLoadout falló: ${(err as Error).message}`)
+    }
+  }
 
   if (systemPromptExtraCausal) {
     systemPrompt += systemPromptExtraCausal

@@ -1347,7 +1347,7 @@ mod swarm_tests {
     fn a_legacy_agent_without_telemetry_still_shows_something() {
         // El swarm puede no haber enviado nada todavía: un panel en blanco
         // parecería un bug.
-        let mut state = AppState::default();
+        let state = AppState::default();
         let mut w = worker("backend");
         w.current_action = Some("implementando endpoint".to_string());
 
@@ -1359,7 +1359,7 @@ mod swarm_tests {
     fn a_legacy_agent_with_nothing_falls_back_to_an_explicit_placeholder() {
         // Un worker sin `detail` tampoco: entonces sí, el placeholder. Un panel
         // en blanco parecería un bug.
-        let mut state = AppState::default();
+        let state = AppState::default();
         let mut w = Worker::new("backend");
         w.detail = None;
         let (line, _) = agent_live_line(&state, &w);

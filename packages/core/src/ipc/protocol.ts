@@ -187,6 +187,27 @@ export type BunMessage =
       at: number
     }
   /**
+   * La carga efectiva de un agente en este turno.
+   *
+   * No es el perfil declarado. JEV poda el conjunto y `search_knowledge` lo
+   * amplía, así que la lista cambia en cada turno aunque no haya nada nuevo
+   * que descubrir. Sin esto, la ficha del especialista anunciaría herramientas
+   * que el agente ya no tiene.
+   *
+   * Llega por agente y **reemplaza** la anterior: cada turno emite la suya.
+   */
+  | {
+      type: "carga_actual"
+      agent: string
+      tools: string[]
+      skills: string[]
+      /** De dónde salió el conjunto de herramientas. */
+      origen: "perfil" | "jev_pruned"
+      /** Skills en la carga mínima: disponibles sin descubrir nada. */
+      minimal: string[]
+      at: number
+    }
+  /**
    * A Jev decision was served and the caller is applying it.
    *
    * Jev (the decision plane) already emits this on the event bus
@@ -260,7 +281,26 @@ export type BunMessage =
       providers: Array<{ id: string; name: string; model: string; is_active: boolean; has_key: boolean; browser_login: boolean; models: string[] }>
       agents: Array<{ id: string; name: string; provider: string; model: string; effort: string; max_turns: number; max_input_tokens: number; max_output_tokens: number; max_cost_usd: number; permission_profile: string }>
       mcp: Array<{ id: string; name: string; url: string; enabled: boolean; has_headers: boolean }>
-      skills: Array<{ name: string; description: string; category: string; active: boolean }>
+      skills: Array<{
+        name: string
+        description: string
+        category: string
+        active: boolean
+        /** Tools que la skill documenta. Sin esto la TUI no puede decir si un
+         *  agente puede usarla, y ofrecer una cuyas tools el agente no tiene es
+         *  peor que no ofrecerla. */
+        tools: string[]
+        /** Roles que la recomiendan. El campo existía y nadie lo leía. */
+        preferida_por: string[]
+        /**
+         * `isMinimalSkill()` del runtime: todas las tools de la skill están en la
+         * carga mínima, así que está disponible sin descubrir nada.
+         *
+         * Lo calcula el backend con la misma función que usa el agente. Si la
+         * TUI tuviera su propia regla, podría discrepar del runtime.
+         */
+        siempre_disponible: boolean
+      }>
       github_connected: boolean
       github_repo: string | null
       telegram_active: boolean

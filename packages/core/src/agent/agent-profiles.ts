@@ -2,7 +2,10 @@ import { col, toIndexable } from "../storage/hive"
 import type { AgentDoc } from "../storage/collections"
 import { obscuraToolNames } from "../tools/web/obscura"
 
-export const CORE_AGENT_TYPES = ["bee", "scout", "builder", "verifier", "reviewer", "spider"] as const
+/** Perfiles canónicos. `reviewer` se fusionó con `verifier`: los dos eran el
+ *  mismo gate en dos momentos, y el de calidad hereda su `id` para que las
+ *  corridas en curso y los datos ya persistidos sigan resolviendo. */
+export const CORE_AGENT_TYPES = ["bee", "scout", "builder", "verifier", "spider"] as const
 export type CoreAgentType = typeof CORE_AGENT_TYPES[number]
 
 export type AgentPermissionProfile =
@@ -95,8 +98,8 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
   },
   verifier: {
     id: "verifier",
-    name: "Verifier",
-    description: "Reproduce criterios de aceptación contra el sistema real y aporta evidencia.",
+    name: "Quality Gate",
+    description: "Gate único de calidad: verifica los criterios de aceptación y revisa el código.",
     role: "worker",
     permissionProfile: "verify",
     maxTurns: 24,
@@ -108,33 +111,27 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
       "browser_click", "browser_fill", "browser_type", "browser_select_option",
       "browser_press_key", "browser_wait_for", "browser_wait_for_text",
       "browser_evaluate", "browser_screenshot",
-      "speckit_artifact_read", "speckit_validate",
-    ],
-    skills: ["test_driven_development", "browser_automate", "code_analysis"],
-    systemPrompt: [
-      "Eres Verifier de hiveCode. No cambies código fuente. Reproduce cada criterio de aceptación",
-      "contra el sistema real y registra comando, resultado y evidencia. No confíes en afirmaciones",
-      "de Builder; marca cada criterio como cumple, no cumple o no reproducible.",
-    ].join(" "),
-    enabled: true,
-  },
-  reviewer: {
-    id: "reviewer",
-    name: "Reviewer",
-    description: "Gate independiente de calidad, seguridad, contratos y alineación con la spec.",
-    role: "worker",
-    permissionProfile: "review",
-    maxTurns: 24,
-    tools: [
-      ...READ_TOOLS,
-      "check_types", "code_test", "code_build",
+      // `speckit_converge` venía del reviewer y `speckit_validate` era de
+      // ambos: el gate necesita las dos, la convergencia la cierra el mismo rol
+      // que decide.
       "speckit_artifact_read", "speckit_validate", "speckit_converge",
     ],
-    skills: ["code_review", "code_security_audit", "code_analysis"],
+    // Las tres del verifier (reproducir, automatizar, entender) más las dos
+    // del reviewer (juzgar calidad, auditar seguridad). La fusión no puede
+    // dejar al gate sin criterio para rechazar.
+    skills: [
+      "test_driven_development", "browser_automate", "code_analysis",
+      "code_review", "code_security_audit",
+    ],
     systemPrompt: [
-      "Eres Reviewer de hiveCode. No modifiques código. Revisa el diff en contexto limpio,",
-      "la especificación, el plan, las tareas y la evidencia del Verifier. Emite un veredicto",
-      "estructurado con hallazgos accionables y bloquea desviaciones o criterios incumplidos.",
+      "Eres el gate de calidad de hiveCode. No cambies código fuente. Trabaja en dos mitades,",
+      "en orden: (1) reproduce cada criterio de aceptación contra el sistema real y registra",
+      "comando, resultado y evidencia — no confíes en afirmaciones de Builder, y marca cada",
+      "criterio como cumple, no cumple o no reproducible; (2) revisa el diff en contexto limpio,",
+      "la especificación, el plan y las tareas, y cruza los contratos entre módulos. Emite un",
+      "veredicto estructurado con hallazgos accionables y bloquea desviaciones o criterios",
+      "incumplidos. Detectar que un test fue debilitado para aprobar es motivo de rechazo",
+      "automático.",
     ].join(" "),
     enabled: true,
   },

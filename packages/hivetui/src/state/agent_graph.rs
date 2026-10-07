@@ -43,7 +43,9 @@ pub fn tier_for(name: &str) -> AgentTier {
         "architecture" | "product_manager" => AgentTier::Planning,
         "backend" | "frontend" | "data_scientist" => AgentTier::Engineering,
         "security" | "test" | "devops" => AgentTier::Quality,
-        "verifier" | "reviewer" => AgentTier::Gate,
+        // El gate fused. `verifier` y `reviewer` siguen aceptándose porque un
+        // plan archivado o una corrida en curso puede venir con el nombre viejo.
+        "quality" | "verifier" | "reviewer" => AgentTier::Gate,
         "forensic" | "forensic_agent" | "librarian" => AgentTier::OnDemand,
         _ => AgentTier::Engineering, // fallback para agentes custom
     }
@@ -100,11 +102,9 @@ const EDGES: &[(&str, &str)] = &[
     ("data_scientist", "test"),
     ("test", "devops"),
     ("security", "devops"),
-    ("devops", "verifier"),
-    ("verifier", "reviewer"),
-    ("test", "reviewer"),
-    ("reviewer", "bee"),
-    ("reviewer", "librarian"),
+    ("devops", "quality"),
+    ("quality", "bee"),
+    ("quality", "librarian"),
     ("backend", "forensic"),
     ("frontend", "forensic"),
     ("test", "forensic"),

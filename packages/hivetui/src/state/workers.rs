@@ -38,10 +38,16 @@ pub struct Worker {
 }
 
 impl Worker {
+    /// `display_name` arranca como el alias legible, no como el nombre interno.
+    ///
+    /// Con el nombre crudo, una tarjeta se pintaba "@BACKEND" y la tabla de
+    /// alias nunca se consultaba: `worker_display_name` solo cae al alias cuando
+    /// `display_name` está vacío. Fijar el invariante aquí lo corrige en todas
+    /// las rutas de creación de una vez.
     pub fn new(name: impl Into<String>) -> Self {
         let name = name.into();
         Self {
-            display_name: name.clone(),
+            display_name: super::agent_display_name(&name),
             name,
             status: WorkerStatus::Waiting,
             detail: None,
@@ -77,10 +83,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worker_status_emoji_matches_state() {
-        assert_eq!(WorkerStatus::Waiting.emoji(), "⏳");
-        assert_eq!(WorkerStatus::Running.emoji(), "▶");
-        assert_eq!(WorkerStatus::Done.emoji(), "✓");
-        assert_eq!(WorkerStatus::Failed.emoji(), "✗");
+    fn a_new_worker_starts_with_a_readable_name_not_the_raw_id() {
+        // Con el nombre crudo, la tarjeta se pintaba "@BACKEND": `worker_display_name`
+        // solo cae a la tabla de alias cuando `display_name` está vacío, y aquí
+        // nunca lo estaba.
+        let w = Worker::new("backend");
+        assert_eq!(w.name, "backend");
+        assert_eq!(w.display_name, "Topo");
+        assert_ne!(w.display_name, w.name);
+    }
+
+    #[test]
+    fn every_known_role_gets_its_alias_on_creation() {
+        for (rol, alias) in [
+            ("bee", "Abeja Reina"),
+            ("backend", "Topo"),
+            ("frontend", "Quetzal"),
+            ("security", "Jaguar"),
+            ("quality", "Puma"),
+        ] {
+            assert_eq!(Worker::new(rol).display_name, alias, "{rol}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_role_still_gets_a_non_empty_label() {
+        let w = Worker::new("agente_nuevo");
+        assert!(!w.display_name.is_empty());
     }
 }

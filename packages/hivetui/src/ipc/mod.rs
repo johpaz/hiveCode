@@ -517,6 +517,26 @@ pub enum BunMessage {
         #[serde(default)]
         mcp_servers: Vec<IpcRosterMcp>,
     },
+    /// La carga efectiva de un agente en este turno.
+    ///
+    /// No es el perfil declarado: JEV poda el conjunto y el descubrimiento lo
+    /// amplía, así que la lista cambia aunque no haya nada nuevo que encontrar.
+    /// Reemplaza la anterior del mismo agente.
+    CargaActual {
+        agent: String,
+        #[serde(default)]
+        tools: Vec<String>,
+        #[serde(default)]
+        skills: Vec<String>,
+        /// De dónde salió el conjunto de herramientas.
+        #[serde(default)]
+        origen: String,
+        /// Skills en la carga mínima: disponibles sin descubrir nada.
+        #[serde(default)]
+        minimal: Vec<String>,
+        #[serde(default)]
+        at: u64,
+    },
 
     /// Captura cualquier tipo de mensaje desconocido — evita que serde falle
     /// y corrompa el canal IPC cuando TypeScript agrega nuevos tipos.
@@ -784,6 +804,20 @@ pub struct IpcSettingsSkill {
     pub description: String,
     pub category: String,
     pub active: bool,
+    /// Tools que la skill documenta. Sin esto la TUI no puede decir si un agente
+    /// puede usarla, y ofrecer una cuyas tools el agente no tiene es peor que
+    /// no ofrecerla.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// Roles que la recomiendan. El campo existía en la DB y nadie lo leía.
+    #[serde(default)]
+    pub preferida_por: Vec<String>,
+    /// `isMinimalSkill()` del runtime: todas las tools de la skill están en la
+    /// carga mínima, así que está disponible sin descubrir nada. Lo calcula el
+    /// backend con la misma función que usa el agente; si la TUI tuviera su
+    /// propia regla, podría discrepar.
+    #[serde(default)]
+    pub siempre_disponible: bool,
 }
 
 /// Definición de campo de modal que llega del servidor Bun.

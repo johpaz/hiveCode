@@ -14,6 +14,7 @@ mod jev;
 mod modal;
 mod panels;
 mod roster;
+mod skills;
 mod plan;
 mod review;
 mod routing;
@@ -46,12 +47,13 @@ pub use modal::{
 pub use panels::PanelLayoutState;
 pub use plan::{ApiContract, PlanEntry, PlanPhase, PlanRisk, PlanState};
 pub use review::{ReviewCategory, ReviewCriterion, ReviewState, ReviewVerdict};
-pub use roster::{McpRef, McpState, RosterAgent, RosterState, SkillSummary};
+pub use roster::{Loadout, McpRef, McpState, RosterAgent, RosterState, SkillSummary};
+pub use skills::{SkillCard, SkillFit, SkillLibrary};
 pub use routing::{LayoutRoutingState, LayoutStage};
 pub use session::{ReplMode, SessionState, TabId};
 pub use swarm::{BeeState, SwarmState, ToolCall, WaitingAgent};
 pub use tasks::{TaskProjection, TaskProjectionState};
-pub use thought::{ThoughtChunk, ThoughtStreamState};
+pub use thought::{StreamEntry, ThoughtChunk, ThoughtStreamState};
 pub use workers::{Worker, WorkerState, WorkerStatus};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -97,12 +99,16 @@ pub struct AppState {
     pub swarm: SwarmState,
     /// El enjambre: alias, rol, función, tools y estado de MCP por especialista.
     pub roster: RosterState,
+    /// La carga efectiva por agente del último turno, indexada por id.
+    pub loadout: std::collections::HashMap<String, Loadout>,
+    /// Catálogo de habilidades, para `/habilidades` y la ficha.
+    pub library: SkillLibrary,
     /// Sección activa del TALLER y su scroll.
     pub taller_section: crate::widgets::taller_layout::Section,
     pub taller_scroll: usize,
-    /// Habilidades disponibles (pobladas por `roster_snapshot`/`settings_data`).
-    pub skills: Vec<SkillSummary>,
-    /// Estado de GitHub y Telegram para el TALLER.
+    /// Especialista abierto en la ficha, y su posición en la lista de secciones.
+    pub ficha_agent: Option<String>,
+    pub taller_agents_scroll: usize,
     pub github_connected: bool,
     pub github_repo: Option<String>,
     pub telegram_active: bool,
@@ -202,6 +208,7 @@ fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
         BunMessage::ToolDone { .. } => "tool_done",
         BunMessage::Esperando { .. } => "esperando",
         BunMessage::RosterSnapshot { .. } => "roster_snapshot",
+        BunMessage::CargaActual { .. } => "carga_actual",
         BunMessage::Unknown => "unknown",
     }
 }
@@ -514,7 +521,10 @@ impl AppState {
         } else {
             let mut worker = Worker::new(name.clone());
             worker.status = status;
-            worker.display_name = display_name.unwrap_or(name);
+            // Sin `display_name` del backend, caer en el **nombre crudo** saltaría
+            // la tabla de alias y mostraría "@BACKEND" en vez de "@TOPO". El
+            // invariante es que `display_name` siempre sea legible.
+            worker.display_name = display_name.unwrap_or_else(|| agent_display_name(&name));
             worker.detail = phase;
             worker.activity = activity;
             worker.token_count = token_count.unwrap_or(0);
@@ -955,13 +965,15 @@ impl AppState {
                 }
             }
 
-            // ── Stream de pensamiento ──────────────────────────────────────────
+            // ── Stream de narración ─────────────────────────────────────────────
+            // `thought_chunk` y `narrative_chunk` entran al MISMO array: antes
+            // se funnelizaban indistintamente y `content_type` se parseaba para
+            // tirarse. `push_chunk` los separa en Razonamiento y Narracion.
             BunMessage::ThoughtChunk { task_id, coordinator, phase, content } => {
                 self.harness.last_agent = Some(coordinator.clone());
                 self.harness.last_phase = Some(phase.clone());
                 self.harness.last_activity = Some(short_event_text(&content));
-                self.thought.chunks.push(ThoughtChunk { coordinator, phase, content });
-                if self.thought.chunks.len() > 100 { self.thought.chunks.remove(0); }
+                self.thought.push_chunk(ThoughtChunk { coordinator, phase, content });
                 if let Some(chunk) = self.thought.chunks.last() {
                     let coordinator = chunk.coordinator.clone();
                     let phase = chunk.phase.clone();
@@ -974,8 +986,7 @@ impl AppState {
                 self.harness.last_agent = Some(coordinator.clone());
                 self.harness.last_phase = Some(phase.clone());
                 self.harness.last_activity = Some(short_event_text(&content));
-                self.thought.chunks.push(ThoughtChunk { coordinator, phase, content });
-                if self.thought.chunks.len() > 100 { self.thought.chunks.remove(0); }
+                self.thought.push_chunk(ThoughtChunk { coordinator, phase, content });
                 if let Some(chunk) = self.thought.chunks.last() {
                     let coordinator = chunk.coordinator.clone();
                     let phase = chunk.phase.clone();
@@ -1082,6 +1093,15 @@ impl AppState {
             BunMessage::JevDecision { agent_id, kind, summary, saved_tokens,
                                       cost_usd, latency_ms, event_id, totals } => {
                 self.jev.totals = JevTotals::from(&totals);
+                // La decisión va también al stream: es el "por qué" del agente,
+                // y en MESA es lo queKimi llama la cadena de razonamiento.
+                self.thought.push(StreamEntry::Decision {
+                    agent: agent_id.clone(),
+                    ts: 0,
+                    kind: kind.clone(),
+                    summary: summary.clone(),
+                    saved_tokens,
+                });
                 self.jev.record(JevDecision {
                     agent_id,
                     kind,
@@ -1109,7 +1129,7 @@ impl AppState {
             // ── Telemetría del enjambre ─────────────────────────────────────────
             BunMessage::ToolCall { agent, tool, call_id, args_summary,
                                    bee_state, task_id, at } => {
-                self.swarm.start_call(ToolCall {
+                let call = ToolCall {
                     call_id,
                     agent: agent.clone(),
                     tool,
@@ -1119,14 +1139,28 @@ impl AppState {
                     settled: false,
                     ok: None,
                     duration_ms: None,
-                });
+                };
                 // An agent that just ran something is not waiting on anything.
                 self.swarm.clear_waiting(&agent);
+                self.thought.push_tool_start(&call, at);
+                self.swarm.start_call(call);
                 let _ = task_id;
             }
             BunMessage::ToolDone { agent, tool, call_id, ok, duration_ms,
                                    result_summary, task_id, at } => {
                 let settled = self.swarm.settle_call(&call_id, ok, duration_ms);
+                // El cierre va al stream aunque el `tool_call` se hubiera
+                // perdido: así la lista muestra la tool cerrada y no un spinner
+                // eterno.
+                self.thought.push(StreamEntry::ToolDone {
+                    agent: agent.clone(),
+                    ts: at,
+                    call_id: call_id.clone(),
+                    tool: tool.clone(),
+                    ok,
+                    duracion_ms: duration_ms,
+                    resumen: result_summary.clone(),
+                });
                 if !settled {
                     // El `tool_call` se perdió en el canal `low`. Sin esto el
                     // spinner de esa tool giraría para siempre; lo registramos
@@ -1148,13 +1182,29 @@ impl AppState {
                 let _ = task_id;
             }
             BunMessage::Esperando { agent, esperando_a, razon, task_id, at } => {
-                self.swarm.set_waiting(WaitingAgent {
-                    agent,
+                let waiting = WaitingAgent {
+                    agent: agent.clone(),
                     waiting_for: esperando_a,
                     reason: razon,
                     since: at,
-                });
+                };
+                self.thought.push_waiting(&waiting);
+                self.swarm.set_waiting(waiting);
                 let _ = task_id;
+            }
+            BunMessage::CargaActual { agent, tools, skills, origen, minimal, at } => {
+                // Reemplaza, no acumula: cada turno emite la suya y la anterior
+                // ya no describe lo que el agente tiene delante.
+                self.loadout.insert(
+                    agent,
+                    Loadout {
+                        tools,
+                        skills,
+                        pruned: origen == "jev_pruned",
+                        minimal,
+                        at,
+                    },
+                );
             }
             // ── Roster del enjambre ─────────────────────────────────────────────
             // Snapshot completo: reemplaza, no acumula. Un agente archivado
@@ -1834,5 +1884,130 @@ mod tests {
         let verdict = state.review.verdict.as_ref().expect("verdict");
         assert_eq!(verdict.summary, "Listo para aprobar con una observacion menor.");
         assert_eq!(verdict.affected_files, vec!["src/app.ts".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod loadout_tests {
+    use super::*;
+    use crate::ipc::BunMessage;
+
+    fn state_with_roster() -> AppState {
+        let mut state = AppState::default();
+        state.roster.apply(vec![crate::ipc::IpcRosterAgent {
+            id: "agent-1".into(),
+            rol: "backend".into(),
+            alias: "Topo".into(),
+            funcion: "Construye servicios.".into(),
+            nivel: 2,
+            tools: vec!["fs_read".into(), "fs_write".into()],
+            mcp: vec![],
+        }]);
+        state
+    }
+
+    #[test]
+    fn a_loadout_replaces_the_previous_one_for_that_agent() {
+        // Cada turno emite la suya; la anterior ya no describe lo que el agente
+        // tiene delante. Acumular las dos sería mentir.
+        let mut state = state_with_roster();
+        state.apply_message(BunMessage::CargaActual {
+            agent: "agent-1".into(),
+            tools: vec!["fs_read".into(), "fs_write".into()],
+            skills: vec!["busqueda_hivedb".into()],
+            origen: "perfil".into(),
+            minimal: vec!["busqueda_hivedb".into()],
+            at: 1,
+        });
+        state.apply_message(BunMessage::CargaActual {
+            agent: "agent-1".into(),
+            tools: vec!["fs_read".into()],
+            skills: vec![],
+            origen: "jev_pruned".into(),
+            minimal: vec![],
+            at: 2,
+        });
+
+        let loadout = &state.loadout["agent-1"];
+        assert_eq!(loadout.tools.len(), 1, "la carga anterior sigue ahí");
+        assert!(loadout.pruned, "no marca que JEV podó");
+        assert_eq!(loadout.at, 2);
+    }
+
+    #[test]
+    fn the_pruned_flag_survives_the_wire() {
+        let mut state = state_with_roster();
+        state.apply_message(BunMessage::CargaActual {
+            agent: "agent-1".into(),
+            tools: vec![],
+            skills: vec![],
+            origen: "jev_pruned".into(),
+            minimal: vec![],
+            at: 1,
+        });
+        assert!(state.loadout["agent-1"].pruned);
+    }
+
+    #[test]
+    fn loadouts_of_different_agents_do_not_overwrite_each_other() {
+        let mut state = state_with_roster();
+        for agent in ["agent-1", "agent-2"] {
+            state.apply_message(BunMessage::CargaActual {
+                agent: agent.into(),
+                tools: vec![format!("{agent}-tool")],
+                skills: vec![],
+                origen: "perfil".into(),
+                minimal: vec![],
+                at: 1,
+            });
+        }
+        assert_eq!(state.loadout.len(), 2);
+        assert!(state.loadout["agent-2"].tool("agent-2-tool"));
+    }
+
+    #[test]
+    fn a_loadout_is_keyed_by_id_so_the_card_can_find_it() {
+        // La ficha busca por `agent.id`, no por rol: es como llegan los eventos.
+        let mut state = state_with_roster();
+        state.apply_message(BunMessage::CargaActual {
+            agent: "agent-1".into(),
+            tools: vec!["fs_read".into()],
+            skills: vec![],
+            origen: "perfil".into(),
+            minimal: vec![],
+            at: 1,
+        });
+        let agent = &state.roster.by_id["agent-1"];
+        assert!(state.loadout.get(&agent.id).is_some());
+        // Y no por rol: un id no es un rol.
+        assert!(state.loadout.get(&agent.rol).is_none());
+    }
+
+    #[test]
+    fn skills_from_settings_land_in_the_library_with_their_tools() {
+        let mut state = AppState::default();
+        state.library = SkillLibrary { skills: vec![] };
+        // El payload llega por `settings_data`; aquí se comprueba el tipo.
+        let payload = crate::ipc::IpcSettingsSkill {
+            name: "browser_automate".into(),
+            description: "21 tools".into(),
+            category: "web".into(),
+            active: true,
+            tools: vec!["browser_click".into(), "browser_fill".into()],
+            preferida_por: vec!["frontend".into()],
+            siempre_disponible: false,
+        };
+        let card = SkillCard {
+            name: payload.name,
+            description: payload.description,
+            category: payload.category,
+            active: payload.active,
+            tools: payload.tools,
+            preferida_por: payload.preferida_por,
+            siempre_disponible: payload.siempre_disponible,
+        };
+        assert_eq!(card.tools.len(), 2);
+        assert!(card.prefers_role("frontend"));
+        assert_eq!(card.fit_for(&["fs_read".to_string()]), crate::state::SkillFit::Blocked);
     }
 }

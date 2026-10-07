@@ -160,6 +160,23 @@ export interface EventMap {
    * `"dependencia"`), not a sentence — it names the cause so the UI can group
    * waiting agents by why they are stuck.
    */
+  /**
+   * La carga efectiva de un agente en un turno.
+   *
+   * No es el perfil declarado: JEV poda y `search_knowledge` amplía, así que el
+   * conjunto cambia aunque no haya descubrimiento nuevo. La ficha del
+   * especialista lo necesita para no mentir.
+   */
+  "agent:loadout": {
+    agentId: string;
+    tools: string[];
+    skills: string[];
+    /** De dónde salió el conjunto de herramientas. */
+    origen: "perfil" | "jev_pruned";
+    /** Skills en la carga mínima: no dependen de descubrir nada. */
+    minimal: string[];
+    at: number;
+  };
   "agent:waiting": {
     agentId: string;
     waitingFor: string[];

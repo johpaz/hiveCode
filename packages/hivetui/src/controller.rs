@@ -261,6 +261,35 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
     // teclear "hola" en modo Auto envía /halt.
     let typing = accepts_text(state);
 
+    // Atajo global: `i` abre la ficha del especialista enfocado. No vive en el
+    // handler de ENJAMBRE porque la pregunta "¿qué puede hacer este?" aplica
+    // desde cualquier vista, y con el auto-routing el usuario no elige en qué
+    // pestaña está.
+    if key.code == KeyCode::Char('i') && !typing && matches!(state.modal, ModalState::None) {
+        // Con la ficha ya abierta, `i` avanza al siguiente: reabrir el primero
+        // cada vez es lo contrario de lo que uno espera al pulsar dos veces.
+        if state.ficha_agent.is_some() {
+            move_ficha_selection(state, 1);
+            return false;
+        }
+        let target = state
+            .focused_worker
+            .as_deref()
+            .and_then(|name| state.roster.resolve(name))
+            .map(|a| a.id.clone())
+            .or_else(|| state.roster.agents().first().map(|a| a.id.clone()));
+        match target {
+            Some(id) => {
+                state.ficha_agent = Some(id);
+                return false;
+            }
+            None => {
+                state.status_msg = "aún no hay roster del enjambre".to_string();
+                return false;
+            }
+        }
+    }
+
     if state.active_tab == TabId::Swarm
         && handle_dashboard_key(state, key.code, key.modifiers, typing)
     {
@@ -325,6 +354,40 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     }
                     "/logs" if arg.is_empty() => {
                         state.logs.visible = !state.logs.visible;
+                        return false;
+                    }
+                    // `/habilidades` abre el catálogo. Con un argumento, abre
+                    // además la ficha de ese agente para que cada skill diga si
+                    // él puede usarla.
+                    "/habilidades" | "/skills" => {
+                        state.active_tab = TabId::Taller;
+                        state.taller_section = taller_layout::Section::Habilidades;
+                        state.taller_scroll = 0;
+                        state.tab_locked = true;
+                        state.ficha_agent = (!arg.is_empty())
+                            .then(|| state.roster.resolve(arg).map(|a| a.id.clone()))
+                            .flatten();
+                        return false;
+                    }
+                    // `/ficha <agente>` abre la ficha directa.
+                    "/ficha" => {
+                        let target = if arg.is_empty() {
+                            state.focused_worker.clone()
+                        } else {
+                            state.roster.resolve(arg).map(|a| a.id.clone())
+                        };
+                        match target.and_then(|id| {
+                            state.roster.resolve(&id).map(|_| id)
+                        }) {
+                            Some(id) => {
+                                state.ficha_agent = Some(id);
+                                state.active_tab = TabId::Swarm;
+                                state.tab_locked = true;
+                            }
+                            None => {
+                                state.status_msg = format!("no encontré el agente «{arg}»");
+                            }
+                        }
                         return false;
                     }
                     "/clear" => {
@@ -761,6 +824,13 @@ fn handle_dashboard_key(
             true
         }
         KeyCode::Enter => {
+            // Una ficha abierta tiene prioridad: `Enter` la cierra en vez de
+            // disparar el rollback de un checkpoint que el usuario no está
+            // mirando.
+            if state.ficha_agent.is_some() {
+                state.ficha_agent = None;
+                return true;
+            }
             if state.dashboard.halt_confirm {
                 state.dashboard.halt_confirm = false;
                 state.pending_ipc.push(TuiMessage::Submit { input: "/halt".to_string() });
@@ -823,6 +893,43 @@ fn handle_immersive_layout_key(
         return false;
     }
     match code {
+        // ── Ficha del especialista ───────────────────────────────────────────
+        // `Esc` la cierra. Va antes que la navegación de checkpoints porque
+        // una ficha abierta convierte las flechas en "otro agente".
+        KeyCode::Esc if state.ficha_agent.is_some() => {
+            state.ficha_agent = None;
+            true
+        }
+        KeyCode::Left | KeyCode::Right if state.ficha_agent.is_some() => {
+            move_ficha_selection(state, if code == KeyCode::Right { 1 } else { -1 });
+            true
+        }
+        // `f` alterna el filtro por agente del stream de MESA. Con cinco
+        // agentes hablando a la vez, ver el de uno es la diferencia entre
+        // entender el enjambre y leer ruido.
+        KeyCode::Char('f') if !state.ficha_agent.is_some() => {
+            let candidato = state
+                .focused_worker
+                .clone()
+                .or_else(|| state.thought.visibles().last().map(|e| e.agent().to_string()));
+            if let Some(agent) = candidato {
+                state.thought.alternar_filtro(&agent);
+                let msg = match &state.thought.filtro {
+                    Some(a) => format!("stream filtrado por {a} · f para todos"),
+                    None => "stream de todos los agentes".to_string(),
+                };
+                state.status_msg = msg;
+            }
+            true
+        }
+        KeyCode::Char('s') if state.ficha_agent.is_some() => {
+            // Saltar a las habilidades de este agente, filtradas por lo que
+            // puede usar.
+            state.active_tab = TabId::Taller;
+            state.taller_section = taller_layout::Section::Habilidades;
+            state.taller_scroll = 0;
+            true
+        }
         // ── TALLER: `←/→` cambian de sección, `↑/↓` hacen scroll ──────────
         // Antes de ser un tab, esto eran las flechas de los checkpoints. Ahora la
         // sección se recorre dentro de su propia vista, que es lo que el usuario
@@ -872,6 +979,28 @@ fn handle_immersive_layout_key(
         }
         _ => false,
     }
+}
+
+/// Cambia el especialista abierto en la ficha, en el orden del roster.
+///
+/// Recorre solo los que son operables: abrir la ficha de un agente bloqueado por
+/// un MCP apagado tiene sentido (dice por qué), pero saltarse el resto de la
+/// lista al navegar sería confuso.
+fn move_ficha_selection(state: &mut AppState, delta: isize) {
+    let roster = state.roster.agents();
+    if roster.is_empty() {
+        state.ficha_agent = None;
+        return;
+    }
+    let current = state
+        .ficha_agent
+        .as_deref()
+        .and_then(|id| roster.iter().position(|a| a.id.as_str() == id));
+    let next = match current {
+        Some(i) => (i as isize + delta).rem_euclid(roster.len() as isize),
+        None => 0,
+    } as usize;
+    state.ficha_agent = Some(roster[next].id.clone());
 }
 
 /// El usuario está componiendo texto (hay contenido en el input) o navegando el
@@ -2326,6 +2455,14 @@ Vistas (tabs)
 6 / /layout taller      Agentes, herramientas, habilidades, MCP, registro
 /auto                  Reactivar navegación automática de layouts
 /welcome               Volver a la pantalla de bienvenida
+/habilidades           Catálogo de habilidades (de quién es cada una)
+/ficha <agente>        Ficha del especialista: qué puede y qué le falta
+
+Atajos
+══════
+i                      Ficha del especialista (global)
+f                      Filtrar el stream por agente
+s                      Habilidades del especialista abierto (en la ficha)
 
 Atajos de teclado
 ═════════════════

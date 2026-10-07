@@ -3,7 +3,8 @@ use crate::{
     term::{Canvas, Rect, Style, AMBER, AMBER_BRIGHT, BG_MAIN, DIM},
     ui::{split_panes, truncate_cells, Axis, Constraint, HitAction, MouseRegion, SplitPane},
     widgets::{
-        activity_toast, checkpoint_bar, code_layout, command_popup, config_modal, conflict_bar,
+        activity_toast, agent_card, checkpoint_bar, code_layout, command_popup, config_modal,
+        conflict_bar,
         dashboard_layout, focus_layout, header, info_modal, input, logs_panel,
         plan_approval_modal, plan_layout, review_layout, settings_hub, statusbar, tabbar,
         taller_layout, welcome,
@@ -104,6 +105,11 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
     // Welcome fullscreen overlay — cubre todo (header, tabbar, contenido, input)
     if state.show_welcome && state.history.entries.is_empty() {
         welcome::render(canvas, area, state);
+        // La ficha va ENCIMA del welcome: si el usuario la abre con `i` sin
+        // haber escrito nada, espera una respuesta, no otra pantalla de bienvenida.
+        if state.ficha_agent.is_some() {
+            agent_card::render_overlay(canvas, area, state);
+        }
         return (0, 0);
     }
 
@@ -133,6 +139,12 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
     if state.logs.visible {
         let areas = layout_areas(area, &state.panels);
         logs_panel::render(canvas, areas.content, state);
+    }
+
+    // Ficha del especialista — overlay centrado. Responde "¿qué sabe hacer este
+    // y qué puede pedirle?".
+    if state.ficha_agent.is_some() {
+        agent_card::render_overlay(canvas, area, state);
     }
 
     cursor_position(state, input_area)

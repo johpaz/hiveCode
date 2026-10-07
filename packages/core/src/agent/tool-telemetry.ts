@@ -117,6 +117,35 @@ export function emitToolDone(input: {
 }
 
 /**
+ * La carga efectiva de un agente en un turno.
+ *
+ * No es el perfil declarado. JEV poda el conjunto de herramientas y
+ * `search_knowledge` lo amplía, así que lo que el agente tiene delante cambia en
+ * cada turno aunque no haya descubierto nada nuevo. La ficha del especialista
+ * muestra esto para no anunciar herramientas que ya no tiene.
+ */
+export function emitLoadout(input: {
+  agentId: string
+  tools: string[]
+  skills: string[]
+  origen: "perfil" | "jev_pruned"
+  minimal: string[]
+}): void {
+  try {
+    eventBus.emit("agent:loadout", {
+      agentId: input.agentId,
+      tools: input.tools.slice(0, 80),
+      skills: input.skills.slice(0, 30),
+      origen: input.origen,
+      minimal: input.minimal.slice(0, 30),
+      at: Date.now(),
+    })
+  } catch {
+    // Telemetría nunca es una dependencia dura.
+  }
+}
+
+/**
  * Un agente que no puede seguir porque depende de otro.
  *
  * `razon` es una etiqueta corta y legible: `"jev_secuencial"` cuando Jev decidió

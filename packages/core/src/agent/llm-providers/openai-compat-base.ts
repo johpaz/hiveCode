@@ -458,6 +458,40 @@ function appendToolCallArguments(current: string, chunk: string): string {
 }
 
 /**
+ * Formato nativo de llamada de herramienta que emiten varios modelos sin
+ * tool-calling estructurado (Mistral y sus derivados: Qwen Instruct, los GGUF
+ * de llama.cpp, muchos modelos de Ollama).
+ *
+ *     <tool_call>
+ *     <function>fs_list
+ *     <parameter>path
+ *     .
+ *     </parameter>
+ *     </function>
+ *     </tool_call>
+ *
+ * El nombre va como *contenido* de `<function>` —no como atributo— y los
+ * argumentos son pares `<parameter>clave\nvalor\n</parameter>`. **No hay JSON**,
+ * así que el parser de JSON no matchea nada y el XML crudo se cuela en el chat.
+ *
+ * Se cubren también la variante `[TOOL_CALL] ... [/TOOL_CALL]` y la de atributos
+ * (`<function=name>`, `<parameter=key>`): los templates de chat varían entre sí
+ * aunque el modelo sea el mismo.
+ */
+// El separador invisible aparece en la apertura y en el cierre, y no siempre en
+// ambos: algunos templates lo emiten solo al abrir. Se acepta en los dos.
+const MISTRAL_BLOCK = /<\u200b?tool_call>([\s\S]*?)(?:<\/?\u200b?tool_call>|\[\/TOOL_CALL\])/g
+const MISTRAL_FN_ATTR = /<function\s+name\s*=\s*"([\w.-]+)"\s*>/
+const MISTRAL_FN_OPEN = /<function(?:\s*=\s*"?([\w.-]+)"?)?\s*>/
+const MISTRAL_PARAM_ATTR = /<parameter\s+name\s*=\s*"([\w.-]+)"\s*>([\s\S]*?)(?:<\/parameter>|\/parameter>)/g
+const MISTRAL_PARAM = /<parameter(?:\s*=\s*"?([\w.-]+)"?)?\s*>([\s\S]*?)(?:<\/parameter>|\/parameter>)/g
+
+/** Recorta el valor y colapsa el whitespace que el modelo indenta. */
+function cleanParamValue(raw: string): string {
+  return raw.replace(/^\s+|\s+$/g, "").replace(/\s+/g, " ")
+}
+
+/**
  * Extrae tool_calls del texto cuando el modelo falla en generar tool_calls nativos.
  * Soporta formatos comunes de Gemma, Qwen y otros modelos que emiten JSON embebido.
  */
@@ -469,9 +503,35 @@ export function extractToolCallsFromText(
   const tool_calls: LLMToolCall[] = []
   let extractedContent = content
 
+  // ── Formato nativo (Mistral y derivados) ────────────────────────────────
+  // Va primero: si el modelo emite esto no hay JSON que buscar, y los regex de
+  // JSON no matchean nada.
+  MISTRAL_BLOCK.lastIndex = 0
+  let block = MISTRAL_BLOCK.exec(content)
+  while (block !== null) {
+    const inner = block[1]
+    const name = mistralFunctionName(inner)
+    if (name) {
+      const args = mistralArguments(inner)
+      tool_calls.push({
+        id: crypto.randomUUID(),
+        type: "function",
+        function: {
+          name: toolNameMap.get(name) ?? name,
+          arguments: Object.keys(args).length > 0 ? JSON.stringify(args) : "{}",
+        },
+      })
+      extractedContent = extractedContent.replace(block[0], "").trim()
+    }
+    block = MISTRAL_BLOCK.exec(content)
+  }
+
+  // El cierre también lleva a veces el separador invisible. Si solo se acepta la
+  // apertura limpia, este parser falla en silencio y el JSON acaba en el chat igual
+  // que el formato nativo.
   const regexes = [
-    /<tool_call>\s*({[\s\S]*?})\s*<\/tool_call>/g,
-    /<function_call>\s*({[\s\S]*?})\s*<\/function_call>/g,
+    /<\u200b?tool_call>\s*({[\s\S]*?})\s*<\/?\u200b?tool_call>/g,
+    /<\u200b?function_call>\s*({[\s\S]*?})\s*<\/?\u200b?function_call>/g,
     /```(?:tool_call|json)\s*({[\s\S]*?})\s*```/g,
   ]
 
@@ -534,4 +594,47 @@ export function extractToolCallsFromText(
   }
 
   return { content: extractedContent, tool_calls }
+}
+
+/** Nombre de la función del bloque Mistral: por atributo, o por contenido. */
+function mistralFunctionName(inner: string): string | null {
+  const byAttr = MISTRAL_FN_ATTR.exec(inner)
+  if (byAttr?.[1]) return byAttr[1]
+  const open = MISTRAL_FN_OPEN.exec(inner)
+  if (!open) return null
+  // `<function>fs_list` — el nombre es la primera palabra antes de la siguiente
+  // etiqueta.
+  if (open[1]) return open[1]
+  const after = inner.slice(open.index + open[0].length)
+  const stop = after.search(/<\/?(?:function|parameter)/)
+  const word = cleanParamValue(stop === -1 ? after : after.slice(0, stop)).split(/\s/)[0] ?? ""
+  return /^[A-Za-z_][\w.-]*$/.test(word) ? word : null
+}
+
+/** Argumentos del bloque Mistral. Un parámetro sin clave se descarta. */
+function mistralArguments(inner: string): Record<string, string> {
+  const args: Record<string, string> = {}
+  MISTRAL_PARAM_ATTR.lastIndex = 0
+  let p = MISTRAL_PARAM_ATTR.exec(inner)
+  while (p !== null) {
+    args[p[1]] = cleanParamValue(p[2])
+    p = MISTRAL_PARAM_ATTR.exec(inner)
+  }
+  if (Object.keys(args).length === 0) {
+    MISTRAL_PARAM.lastIndex = 0
+    let q = MISTRAL_PARAM.exec(inner)
+    while (q !== null) {
+      // Dos formas, y confundirlas vacía el valor:
+      //   `<parameter=key>value</parameter>` — la clave es el atributo y TODO el
+      //     cuerpo es el valor.
+      //   `<parameter>key\nvalue\n</parameter>` — la clave es la primera línea
+      //     y el valor, todo lo que sigue.
+      const conAtributo = Boolean(q[1])
+      const key = conAtributo ? q[1] : (cleanParamValue(q[2].split("\n")[0] ?? "")).split(/\s/)[0] ?? ""
+      const value = conAtributo ? cleanParamValue(q[2]) : cleanParamValue(q[2].split("\n").slice(1).join("\n"))
+      if (key && value !== "") args[key] = value
+      q = MISTRAL_PARAM.exec(inner)
+    }
+  }
+  return args
 }

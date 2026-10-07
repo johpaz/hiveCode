@@ -13,6 +13,8 @@ import { logger, onLogEntry, removeLogListener, type LogEntry } from "@johpaz/hi
 import { createIpcServer } from "@johpaz/hivecode-core/ipc/server"
 import type { BunMessage as CoreBunMessage, TuiMessage as CoreTuiMessage } from "@johpaz/hivecode-core/ipc/protocol"
 import { broadcastUiMessage, registerUiMessageHandler } from "@johpaz/hivecode-core/ipc/ui-broadcast"
+import { agentAlias } from "@johpaz/hivecode-core/agent/agent-identity"
+import { parseSkillTools, isMinimalSkill } from "@johpaz/hivecode-core/agent/minimal-loadout"
 import { col } from "@johpaz/hivecode-core/storage/hive"
 import type {
   AdrDoc,
@@ -607,23 +609,17 @@ function phaseStatusForTui(status: string): string {
   return status
 }
 
+/**
+ * Nombre visible de un agente.
+ *
+ * Antes era una tabla local con nombres en inglés (`"BackendEngineer"`) que ya
+ * se había desincronizado de la tabla del lado Rust. Ahora sale de
+ * `agent-identity`, la misma que consume `describeSwarmCapabilities()` y que la
+ * TUI recibe por `roster_snapshot` — tres antes, una sola ahora.
+ */
 function displayNameForAgent(name: string): string {
-  const names: Record<string, string> = {
-    bee: "Bee",
-    product_manager: "ProductManager",
-    architecture: "Architecture",
-    architect: "Architecture",
-    backend: "BackendEngineer",
-    frontend: "FrontendEngineer",
-    data_scientist: "DataScientist",
-    security: "SecurityAuditor",
-    test: "QAEngineer",
-    devops: "DevOpsEngineer",
-    verifier: "Verifier",
-    reviewer: "CodeReviewer",
-    librarian: "Librarian",
-  }
-  return names[name] ?? name
+  if (name === "architect") return "Cóndor"
+  return agentAlias(name)
 }
 
 async function scanDocs<T>(collection: string): Promise<T[]> {
@@ -1016,15 +1012,21 @@ function buildDashboardLevels(workers: any[]): Array<{ level: number; label: str
   })
 }
 
+/**
+ * Nivel de pipeline para un coordinador, cuando la fase no lo trae.
+ *
+ * Antes `verifier` era 5 y `reviewer` 6: dos filas para el mismo gate. Con la
+ * fusión en `quality` el nivel 6 desaparece y librarian baja a 6, para que no
+ * quede un hueco que la TUI tenga que interpretar.
+ */
 function fallbackWorkerLevel(name: string): number {
   if (name === "product_manager") return 0
   if (name === "architecture" || name === "architect") return 1
   if (["backend", "frontend", "data_scientist"].includes(name)) return 2
   if (name === "security" || name === "test") return 3
   if (name === "devops") return 4
-  if (name === "verifier") return 5
-  if (name === "reviewer") return 6
-  if (name === "librarian" || name.startsWith("forensic")) return 7
+  if (name === "quality" || name === "verifier" || name === "reviewer") return 5
+  if (name === "librarian" || name.startsWith("forensic")) return 6
   return 2
 }
 
@@ -1081,7 +1083,7 @@ async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> 
 
   let agents: any[] = []
   try {
-    const order = ["bee", "scout", "builder", "verifier", "reviewer", "spider"]
+    const order = ["bee", "scout", "builder", "verifier", "spider"]
     agents = (await (await col<AgentDoc>("agents")).scan())
       .map(entry => entry.doc)
       .filter(agent => !!agent.agent_type)
@@ -1124,6 +1126,18 @@ async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> 
         description: s.description ?? "",
         category: s.category ?? "",
         active: s.active,
+        // `tools` es lo que permite a la TUI responder "¿este agente puede
+        // usar esta skill?" — sin el no se puede marcar una como bloqueada, y
+        // ofrecer una whose tools el agente no tiene es peor que no ofrecerla.
+        tools: parseSkillTools(s.tools),
+        // Quién la recomienda. Hasta ahora el campo se guardaba y nadie lo leía.
+        preferida_por: s.preferred_agents ?? [],
+        // Clasificación calculada con la MISMA función que usa el runtime
+        // (`isMinimalSkill`). Si la vista calculara su propia regla, podría
+        // marcar como "siempre disponible" algo que el agente no puede cargar.
+        //   true  → todas sus tools están en la carga mínima: siempre disponible
+        //   false → depende de descubrirla con search_knowledge
+        siempre_disponible: isMinimalSkill(s.tools),
       }))
   } catch { /* skills puede no existir */ }
 

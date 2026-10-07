@@ -45,7 +45,7 @@ import {
   type RepeatTrackerSnapshot,
 } from "./run-store"
 import { broadcastThinking } from "../gateway/task-streaming"
-import { emitToolCall, emitToolDone, emitWaiting, summarizeArgs } from "./tool-telemetry"
+import { emitLoadout, emitToolCall, emitToolDone, emitWaiting, summarizeArgs } from "./tool-telemetry"
 
 /**
  * Execute a tool by name from the available tools list
@@ -575,6 +575,10 @@ export async function* runAgent(
     // The restored messages are already the pruned set from the run that
     // checkpointed them; pruning them again would compound the loss.
     skipJev: isResume,
+    // La ficha del especialista muestra la carga de ESTE turno, no el perfil
+    // declarado: JEV poda y el descubrimiento amplía, así que la lista cambia
+    // aunque el agente no haya descubierto nada nuevo.
+    onLoadout: (loadout) => emitLoadout({ agentId: opts.agentId, ...loadout }),
   })
 
   // Conditions this run executes under, stamped on every trace it produces.

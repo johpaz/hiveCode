@@ -45,6 +45,10 @@ const IDENTIDADES: Record<string, AgentIdentity> = {
   devops:         { alias: "Águila",      funcion: "Entrega. Empaqueta, despliega, abre el PR.",                          nivel: 3 },
   // Capa 4 fusiona `verifier` y `reviewer` en un solo rol de calidad.
   quality:        { alias: "Puma",        funcion: "Calidad. Reproduce los criterios y revisa el código. Nunca escribe.", nivel: 4 },
+  // El perfil canónico conserva el `id` `verifier` (cambiarlo rompería los
+  // agentes ya persistidos), así que su fila tiene que existir aquí también o
+  // el roster lo mostraría como un rol desconocido.
+  verifier:       { alias: "Puma",        funcion: "Calidad. Reproduce los criterios y revisa el código. Nunca escribe.", nivel: 4 },
   forensic:       { alias: "Zorro",       funcion: "Perito. Responde «por qué falló» y recomienda relanzar o escalar.",    nivel: 5 },
   librarian:      { alias: "Armadillo",   funcion: "Cronista. Destila la sesión en memoria persistente.",                 nivel: 5 },
 

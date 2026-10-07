@@ -119,6 +119,38 @@ pub struct McpRef {
     pub state: McpState,
 }
 
+/// La carga efectiva de un agente en el último turno.
+///
+/// No es el perfil declarado. JEV poda el conjunto y el descubrimiento lo
+/// amplía, así que lo que el agente tiene delante cambia aunque no haya nada
+/// nuevo que encontrar.
+#[derive(Debug, Clone, Default)]
+pub struct Loadout {
+    pub tools: Vec<String>,
+    pub skills: Vec<String>,
+    /// JEV podó el conjunto en este turno. Explica por qué es más corto que la
+    /// carga base, en vez de dejar que el usuario lo note como un bug.
+    pub pruned: bool,
+    /// Skills en la carga mínima: disponibles sin descubrir nada.
+    pub minimal: Vec<String>,
+    pub at: u64,
+}
+
+impl Loadout {
+    pub fn skill(&self, name: &str) -> bool {
+        self.skills.iter().any(|s| s == name)
+    }
+
+    pub fn tool(&self, name: &str) -> bool {
+        self.tools.iter().any(|t| t == name)
+    }
+
+    /// Resumen de una línea: "5 herramientas · 2 habilidades".
+    pub fn summary(&self) -> String {
+        format!("{} herramientas · {} habilidades", self.tools.len(), self.skills.len())
+    }
+}
+
 /// Una habilidad, resumida para el TALLER.
 ///
 /// No es el catálogo completo: al TALLER le basta nombre, categoría, descripción
