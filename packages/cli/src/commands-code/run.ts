@@ -8,6 +8,7 @@ import { CoordinatorManager } from "@johpaz/hivecode-code/workers/coordinator-ma
 import { listenModeToggle, stopModeToggle } from "@johpaz/hivecode-code/modes/keyboard"
 import { classifyError } from "@johpaz/hivecode-code/errors"
 import { FailureRecoveryScheduler } from "@johpaz/hivecode-code/recovery"
+import { shortId } from "@johpaz/hivecode-core/storage/ids"
 
 export async function run(description?: string, flags: string[] = [], options?: { keyboard?: boolean; exitOnError?: boolean; manager?: CoordinatorManager; quiet?: boolean }): Promise<void> {
   const exitOnError = options?.exitOnError ?? true
@@ -103,7 +104,7 @@ export async function run(description?: string, flags: string[] = [], options?: 
 
     // Success outro
     const taskId = manager.getActiveTaskId()
-    if (!quiet) hiveOutro(`Tarea completada${taskId ? ` · ID: ${taskId.slice(0, 8)}` : ""}`)
+    if (!quiet) hiveOutro(`Tarea completada${taskId ? ` · ID: ${shortId(taskId)}` : ""}`)
   } catch (err) {
     const hiveErr = classifyError(err)
     if (!quiet) hiveNote(`Fallo (${hiveErr.errorClass})`, [hiveErr.message])

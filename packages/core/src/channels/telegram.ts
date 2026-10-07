@@ -2,6 +2,7 @@ import { Bot, GrammyError, InputFile, type Context } from "grammy";
 import { BaseChannel, type ChannelConfig, type IncomingMessage, type OutboundMessage } from "./base.ts";
 import { logger } from "../utils/logger.ts";
 import { col } from "../storage/hive.ts";
+import { shortId } from "../storage/ids.ts";
 import type { ChannelDoc, CodeConfigDoc, CodeNarrativeDoc, CodeTaskDoc, ProviderDoc } from "../storage/collections.ts";
 
 export interface TelegramConfig extends ChannelConfig {
@@ -113,7 +114,7 @@ export class TelegramChannel extends BaseChannel {
         if (data.startsWith("cancel_task:")) {
           const taskId = data.slice("cancel_task:".length);
           await updateTaskStatus(taskId, "cancelled");
-          await ctx.editMessageText(`❌ Tarea <code>${taskId.slice(0, 8)}</code> cancelada.`, { parse_mode: "HTML" });
+          await ctx.editMessageText(`❌ Tarea <code>${shortId(taskId)}</code> cancelada.`, { parse_mode: "HTML" });
         } else if (data === "cancel_abort") {
           await ctx.editMessageText("↩️ Cancelación abortada.");
         } else if (data.startsWith("approve_phase:")) {
@@ -258,7 +259,7 @@ export class TelegramChannel extends BaseChannel {
         }
         const lines = tasks.map(t =>
           `${t.status === "completed" ? "✅" : t.status === "failed" ? "❌" : "🔄"} ` +
-          `<code>${t.id.slice(0, 8)}</code> — ${t.description?.slice(0, 50)}`
+          `<code>${shortId(t.id)}</code> — ${t.description?.slice(0, 50)}`
         );
         await ctx.reply(`📋 <b>Últimas tareas:</b>\n\n${lines.join("\n")}`, { parse_mode: "HTML" });
       } catch (e) {
@@ -342,7 +343,7 @@ export class TelegramChannel extends BaseChannel {
         const task = await latestTask(["running"]);
         if (!task) { await ctx.reply("💤 Sin tarea activa para pausar."); return; }
         await updateTaskStatus(task.id, "paused");
-        await ctx.reply(`⏸ Tarea <code>${task.id.slice(0, 8)}</code> pausada.`, { parse_mode: "HTML" });
+        await ctx.reply(`⏸ Tarea <code>${shortId(task.id)}</code> pausada.`, { parse_mode: "HTML" });
       } catch (e) {
         await ctx.reply(`❌ Error: ${(e as Error).message}`);
       }
@@ -354,7 +355,7 @@ export class TelegramChannel extends BaseChannel {
         const task = await latestTask(["paused"]);
         if (!task) { await ctx.reply("💤 Sin tarea pausada para reanudar."); return; }
         await updateTaskStatus(task.id, "running");
-        await ctx.reply(`▶️ Tarea <code>${task.id.slice(0, 8)}</code> reanudada.`, { parse_mode: "HTML" });
+        await ctx.reply(`▶️ Tarea <code>${shortId(task.id)}</code> reanudada.`, { parse_mode: "HTML" });
       } catch (e) {
         await ctx.reply(`❌ Error: ${(e as Error).message}`);
       }
@@ -366,7 +367,7 @@ export class TelegramChannel extends BaseChannel {
         const task = await latestTask(["running", "planning"]);
         if (!task) { await ctx.reply("💤 Sin tarea activa para cancelar."); return; }
         await ctx.reply(
-          `⚠️ ¿Cancelar tarea <code>${task.id.slice(0, 8)}</code>?\n<i>${task.description?.slice(0, 60)}</i>`,
+          `⚠️ ¿Cancelar tarea <code>${shortId(task.id)}</code>?\n<i>${task.description?.slice(0, 60)}</i>`,
           {
             parse_mode: "HTML",
             reply_markup: {

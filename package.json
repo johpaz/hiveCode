@@ -46,6 +46,7 @@
     "./channels/base": "./packages/core/src/channels/base.ts",
     "./channels/telegram": "./packages/core/src/channels/telegram.ts",
     "./storage/hive": "./packages/core/src/storage/hive.ts",
+    "./storage/ids": "./packages/core/src/storage/ids.ts",
     "./storage/hivedb": "./packages/core/src/storage/hivedb.ts",
     "./storage/db-migrate": "./packages/core/src/storage/db-migrate.ts",
     "./storage/causal-events": "./packages/core/src/storage/causal-events.ts",

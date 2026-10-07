@@ -1,4 +1,5 @@
 import { col } from "@johpaz/hivecode-core/storage/hive"
+import { formatIdCandidates, resolveIdFragment, shortId } from "@johpaz/hivecode-core/storage/ids"
 import type {
   CodeFileSnapshotDoc,
   CodeNarrativeDoc,
@@ -10,13 +11,27 @@ function nowIso(): string {
   return new Date().toISOString()
 }
 
-async function findTask(id: string): Promise<{ id: string; doc: CodeTaskDoc; version: number } | null> {
-  const tasks = await col<CodeTaskDoc>("codeTasks")
-  const exact = await tasks.get(id)
-  if (exact) return { id, doc: exact.doc, version: exact.version }
-  const rows = await tasks.scan()
-  const match = rows.find((entry) => entry.id.startsWith(id) || entry.id.includes(id))
-  return match ? { id: match.id, doc: match.doc, version: match.version } : null
+/** `"ambiguous"` marks a fragment that matched several tasks — see findTask. */
+type TaskMatch = { id: string; doc: CodeTaskDoc; version: number } | "ambiguous" | null;
+
+/**
+ * Resolve a task id the user typed. Refuses to guess: with UUIDv7 a leading
+ * 8-char prefix is shared by every task started in the same ~65s window, and
+ * `cancel` / `rollback` act on whatever comes back.
+ */
+async function findTask(id: string): Promise<TaskMatch> {
+  const result = await resolveIdFragment<CodeTaskDoc>("codeTasks", id)
+  if (result.kind === "hit") return result.match
+  if (result.kind === "ambiguous") {
+    console.log(`\n"${id}" coincide con ${result.candidates.length} tareas:`)
+    console.log(formatIdCandidates(result.candidates.map((candidate) => ({
+      id: candidate.id,
+      label: `${candidate.doc.status.padEnd(10)} ${candidate.doc.description.slice(0, 50)}`,
+    }))))
+    console.log("\nRepite con más caracteres del id.")
+    return "ambiguous"
+  }
+  return null
 }
 
 export async function tasks(subcommand?: string, args?: string[]): Promise<void> {
@@ -35,7 +50,7 @@ export async function tasks(subcommand?: string, args?: string[]): Promise<void>
           pending: "⏳", planning: "📋", running: "🔄", paused: "⏸️",
           completed: "✅", failed: "❌", cancelled: "🚫",
         }
-        console.log(` ${statusIcon[r.status] || "◻"} ${r.id.slice(0, 8)} — ${r.description.slice(0, 60)} [${r.status}]`)
+        console.log(` ${statusIcon[r.status] || "◻"} ${shortId(r.id)} — ${r.description.slice(0, 60)} [${r.status}]`)
         if (r.branch_name) console.log(`    branch: ${r.branch_name}`)
         if (r.pr_url) console.log(`    PR: ${r.pr_url}`)
       }
@@ -45,6 +60,7 @@ export async function tasks(subcommand?: string, args?: string[]): Promise<void>
       const id = args?.[0]
       if (!id) { console.log("Usage: hivecode task status <id>"); return }
       const task = await findTask(id)
+      if (task === "ambiguous") return
       if (!task) { console.log("Task not found."); return }
       console.log(`\nTask: ${task.doc.id}`)
       console.log(`Description: ${task.doc.description}`)
@@ -82,9 +98,9 @@ export async function tasks(subcommand?: string, args?: string[]): Promise<void>
       const id = args?.[0]
       if (!id) { console.log("Usage: hivecode task cancel <id>"); return }
       const task = await findTask(id)
-      if (task) {
-        await (await col<CodeTaskDoc>("codeTasks")).put(task.id, { ...task.doc, status: "cancelled", completed_at: nowIso() }, { expectedVersion: task.version })
-      }
+      if (task === "ambiguous") return
+      if (!task) { console.log("Task not found."); return }
+      await (await col<CodeTaskDoc>("codeTasks")).put(task.id, { ...task.doc, status: "cancelled", completed_at: nowIso() }, { expectedVersion: task.version })
       console.log("✅ Task cancelled.")
       break
     }
@@ -92,6 +108,7 @@ export async function tasks(subcommand?: string, args?: string[]): Promise<void>
       const id = args?.[0]
       if (!id) { console.log("Usage: hivecode task rollback <id>"); return }
       const task = await findTask(id)
+      if (task === "ambiguous") return
       if (!task) { console.log("Task not found."); return }
       const snapshots = (await (await col<CodeFileSnapshotDoc>("codeFileSnapshots")).findBy("task_id", task.doc.id))
         .map((entry) => entry.doc)
@@ -116,9 +133,13 @@ export async function tasks(subcommand?: string, args?: string[]): Promise<void>
       const id = args?.[0]
       if (!id) { console.log("Usage: hivecode task resume <id>"); return }
       const task = await findTask(id)
-      if (task && (task.doc.status === "paused" || task.doc.status === "pending")) {
-        await (await col<CodeTaskDoc>("codeTasks")).put(task.id, { ...task.doc, status: "running" }, { expectedVersion: task.version })
+      if (task === "ambiguous") return
+      if (!task) { console.log("Task not found."); return }
+      if (task.doc.status !== "paused" && task.doc.status !== "pending") {
+        console.log(`Task is ${task.doc.status} — nothing to resume.`)
+        break
       }
+      await (await col<CodeTaskDoc>("codeTasks")).put(task.id, { ...task.doc, status: "running" }, { expectedVersion: task.version })
       console.log("✅ Task resumed.")
       break
     }

@@ -167,4 +167,20 @@ describe("session picker", () => {
 
     expect(resumed.switchSession).toEqual({ sessionId, projectPath: PROJECT })
   })
+
+  test("an ambiguous fragment is refused with the candidates, not resolved", async () => {
+    const first = await seedSession(PROJECT, "primera sesión")
+    const second = await seedSession(PROJECT, "segunda sesión")
+    const shared = first.slice(0, 8)
+    expect(shared).toBe(second.slice(0, 8))
+
+    const result = await parseInternalCommand(`/session resume ${shared}`, undefined, ctxFor(PROJECT, "none"))
+
+    // Refusing is the point: this fragment names two conversations, and the
+    // caller behind it re-wires the whole runtime onto the answer.
+    expect(result.switchSession).toBeUndefined()
+    expect(result.output).toContain("coincide con 2 sesiones")
+    expect(result.output).toContain(first.slice(-8))
+    expect(result.output).toContain(second.slice(-8))
+  })
 })

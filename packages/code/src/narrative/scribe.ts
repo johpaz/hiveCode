@@ -1,5 +1,4 @@
-import { col, updateDoc } from "@johpaz/hivecode-core/storage/hive"
-import { getHiveDbPath } from "@johpaz/hivecode-core/storage/hivedb"
+import { col, ensureIndexes, updateDoc } from "@johpaz/hivecode-core/storage/hive"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import type {
   CodeDecisionDoc,
@@ -103,60 +102,36 @@ function mapSnapshot(r: CodeFileSnapshotDoc): FileSnapshot {
   }
 }
 
+/**
+ * Secondary indexes every indexed read below depends on. Ensured here rather
+ * than assumed from `ensureHiveDb()` so a Scribe works regardless of bootstrap
+ * ordering, and so an indexed read fails loudly on a missing index instead of
+ * silently returning an empty result.
+ */
+const REQUIRED_INDEXES: ReadonlyArray<readonly [string, string]> = [
+  ["codeTasks", "status"],
+  ["codeTasks", "session_id"],
+  ["codeTurns", "session_id"],
+  ["codeNarrative", "task_id"],
+  ["codeDecisions", "status"],
+  ["codeDecisions", "task_id"],
+  ["codeFileSnapshots", "task_id"],
+  ["codeRecoveryPoints", "task_id"],
+  ["learningFailures", "task_id"],
+  ["learningFailures", "resolved"],
+]
+
 export class Scribe {
   private queue = Promise.resolve()
 
-  /**
-   * Secondary indexes every indexed read below depends on. `createIndex` is
-   * idempotent (bootstrap.ts calls it on every boot), so this is safe to run
-   * against an already-bootstrapped database. Done here rather than assumed from
-   * `ensureHiveDb()` so a Scribe works regardless of bootstrap ordering, and so
-   * an indexed read fails loudly on a missing index instead of silently
-   * returning an empty result.
-   */
-  private static readonly REQUIRED_INDEXES: ReadonlyArray<readonly [string, string]> = [
-    ["codeTasks", "status"],
-    ["codeTasks", "session_id"],
-    ["codeTurns", "session_id"],
-    ["codeNarrative", "task_id"],
-    ["codeDecisions", "status"],
-    ["codeDecisions", "task_id"],
-    ["codeFileSnapshots", "task_id"],
-    ["codeRecoveryPoints", "task_id"],
-    ["learningFailures", "task_id"],
-    ["learningFailures", "resolved"],
-  ]
-
-  private static indexesReady: Promise<void> | null = null
-  private static indexesPath: string | null = null
-
-  private static ensureIndexes(): Promise<void> {
-    // Keyed by resolved DB path: a test (or a caller) can repoint HIVE_DB_PATH at a
-    // fresh database, and the memo must not claim indexes exist on the new one.
-    const path = getHiveDbPath()
-    if (Scribe.indexesReady && Scribe.indexesPath === path) return Scribe.indexesReady
-    Scribe.indexesPath = path
-    Scribe.indexesReady = (async () => {
-      for (const [collection, field] of Scribe.REQUIRED_INDEXES) {
-        await (await col(collection)).createIndex(field)
-      }
-    })().catch((err) => {
-      // Let the next call retry rather than caching a rejected promise forever.
-      Scribe.indexesReady = null
-      Scribe.indexesPath = null
-      throw err
-    })
-    return Scribe.indexesReady
-  }
-
   /** Read every doc in a collection — only for the rare query no index covers. */
   private static async loadAll<T>(collection: string): Promise<T[]> {
-    await Scribe.ensureIndexes()
+    await ensureIndexes(REQUIRED_INDEXES)
     return (await (await col<T>(collection)).scan()).map((entry) => entry.doc)
   }
 
   private static async loadBy<T>(collection: string, field: string, value: string | number | boolean): Promise<T[]> {
-    await Scribe.ensureIndexes()
+    await ensureIndexes(REQUIRED_INDEXES)
     return (await (await col<T>(collection)).findBy(field, value)).map((entry) => entry.doc)
   }
 

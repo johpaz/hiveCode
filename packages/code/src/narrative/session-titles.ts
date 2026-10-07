@@ -13,12 +13,12 @@
  * comparison fails and no later task renames the session. If the call fails,
  * the provisional survives and the next task retries.
  */
-import { col, updateDoc } from "@johpaz/hivecode-core/storage/hive"
+import { col, ensureIndexes, updateDoc } from "@johpaz/hivecode-core/storage/hive"
 import type { AgentDoc, CodeConfigDoc, CodeSessionDoc, CodeTurnDoc } from "@johpaz/hivecode-core/storage/collections"
 import { fromIndexable } from "@johpaz/hivecode-core/storage/hive"
-import { getHiveDbPath } from "@johpaz/hivecode-core/storage/hivedb"
 import { callLLM, resolveProviderConfig } from "@johpaz/hivecode-core/agent/llm-client"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
+import { shortId } from "@johpaz/hivecode-core/storage/ids"
 import { PROVISIONAL_TITLE_LIMIT } from "./scribe"
 
 const log = logger.child("session-titles")
@@ -27,28 +27,14 @@ const log = logger.child("session-titles")
 const MAX_TITLE_CHARS = 80
 
 /**
- * `findBy` needs a previous createIndex; the calls are idempotent (bootstrap.ts
- * runs the same ones on every boot), so this is safe on a fresh database and a
- * no-op on a bootstrapped one. Memoized per resolved DB path, so a test that
- * repoints HIVE_DB_PATH at a new database does not inherit the memo.
+ * The indexes the naming path queries. `createIndex` is idempotent (bootstrap.ts
+ * runs the same calls on every boot), so this is a no-op on a bootstrapped
+ * database and a self-heal on a fresh one.
  */
-let indexesReady: Promise<void> | null = null
-let indexesPath: string | null = null
-
-async function ensureIndexes(): Promise<void> {
-  const dbPath = getHiveDbPath()
-  if (indexesReady && indexesPath === dbPath) return indexesReady
-  indexesPath = dbPath
-  indexesReady = (async () => {
-    await (await (await col<CodeTurnDoc>("codeTurns")).createIndex("session_id"))
-    await (await (await col<AgentDoc>("agents")).createIndex("role"))
-  })().catch((err) => {
-    indexesReady = null
-    indexesPath = null
-    throw err
-  })
-  return indexesReady
-}
+const NAMING_INDEXES: ReadonlyArray<readonly [string, string]> = [
+  ["codeTurns", "session_id"],
+  ["agents", "role"],
+]
 
 /**
  * Strip the decorations a model tends to add around a title: wrapping quotes,
@@ -74,7 +60,7 @@ export type TitleLLM = (userMessage: string) => Promise<{ content: string; stop_
 
 /** The production call — resolves its own provider, same precedence as compaction.ts. */
 const defaultTitleLLM: TitleLLM = async (userMessage) => {
-  await ensureIndexes()
+  await ensureIndexes(NAMING_INDEXES)
   const coordinator = (await (await col<AgentDoc>("agents")).findBy("role", "coordinator"))[0]?.doc
 
   let provider = fromIndexable(coordinator?.provider_id)
@@ -115,8 +101,7 @@ export async function nameSessionFromFirstMessage(
   const session = (await (await col<CodeSessionDoc>("codeSessions")).get(sessionId))?.doc
   if (!session) return
 
-  // `findBy` needs a previous createIndex; `ensureIndexes` covers it.
-  await ensureIndexes()
+    await ensureIndexes(NAMING_INDEXES)
   const turns = await col<CodeTurnDoc>("codeTurns")
   const firstTurn = (await turns.findBy("session_id", sessionId))
     .map((entry) => entry.doc)
@@ -133,7 +118,7 @@ export async function nameSessionFromFirstMessage(
 
   // An error surfaces as content with stop_reason "error" — never save that.
   if (response.stop_reason === "error") {
-    log.warn(`[session-titles] Naming call failed for ${sessionId.slice(0, 8)} — keeping provisional title`)
+    log.warn(`[session-titles] Naming call failed for ${shortId(sessionId)} — keeping provisional title`)
     return
   }
 
@@ -141,5 +126,5 @@ export async function nameSessionFromFirstMessage(
   if (!title || title === session.title) return
 
   await updateDoc<CodeSessionDoc>("codeSessions", sessionId, { title })
-  log.info(`[session-titles] Session ${sessionId.slice(0, 8)} named: ${title}`)
+  log.info(`[session-titles] Session ${shortId(sessionId)} named: ${title}`)
 }

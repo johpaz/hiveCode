@@ -13,6 +13,7 @@ import {
   hiveNote, hiveSpinner, hiveConfirm, isCancel,
 } from "../cli-ui.ts"
 import { col } from "@johpaz/hivecode-core/storage/hive"
+import { formatIdCandidates, resolveIdFragment, shortId } from "@johpaz/hivecode-core/storage/ids"
 import type {
   CodeFileChangeDoc,
   CodeNarrativeDoc,
@@ -33,13 +34,28 @@ function nowIso(): string {
   return new Date().toISOString()
 }
 
-async function findTask(taskId: string): Promise<{ id: string; doc: CodeTaskDoc; version: number } | null> {
-  const tasks = await col<CodeTaskDoc>("codeTasks")
-  const exact = await tasks.get(taskId)
-  if (exact) return { id: taskId, doc: exact.doc, version: exact.version }
-  const rows = await tasks.scan()
-  const match = rows.find((entry) => entry.id === taskId || entry.id.startsWith(taskId))
-  return match ? { id: match.id, doc: match.doc, version: match.version } : null
+/** `"ambiguous"` marks a fragment that matched several tasks — see findTask. */
+type TaskMatch = { id: string; doc: CodeTaskDoc; version: number } | "ambiguous" | null;
+
+/**
+ * Resolve a task id the user typed. Refuses to guess: with UUIDv7 a leading
+ * 8-char prefix is shared by every task started in the same ~65s window, and
+ * both callers here (`task resume`, `task debug`) act on the result.
+ */
+async function findTask(taskId: string): Promise<TaskMatch> {
+  const result = await resolveIdFragment<CodeTaskDoc>("codeTasks", taskId)
+  if (result.kind === "hit") return result.match
+  if (result.kind === "ambiguous") {
+    hiveOutro(`"${taskId}" coincide con ${result.candidates.length} tareas:`, "error")
+    hiveNote("Repite con m\u00e1s caracteres", [
+      formatIdCandidates(result.candidates.map((candidate) => ({
+        id: candidate.id,
+        label: `${candidate.doc.status.padEnd(10)} ${candidate.doc.description.slice(0, 50)}`,
+      }))),
+    ])
+    process.exit(1)
+  }
+  return null
 }
 
 // ─── Mode History ────────────────────────────────────────────────────────────
@@ -92,7 +108,7 @@ export async function taskRollback(taskId?: string): Promise<void> {
   hiveIntro("hivecode · Rollback")
 
   const spinner = hiveSpinner("default")
-  spinner.start(`Revirtiendo tarea ${taskId.slice(0, 8)}...`)
+  spinner.start(`Revirtiendo tarea ${shortId(taskId)}...`)
 
   try {
     const config = await loadConfig()
@@ -105,7 +121,7 @@ export async function taskRollback(taskId?: string): Promise<void> {
     }, { configurable: { workspace: process.cwd() } })
 
     if ((result as any)?.ok) {
-      spinner.stop(`Tarea ${taskId.slice(0, 8)} revertida`)
+      spinner.stop(`Tarea ${shortId(taskId)} revertida`)
       const info = (result as any).result
       hiveNote("Rollback completado", [
         `Archivos restaurados: ${info?.filesRestored || "N/A"}`,
@@ -137,14 +153,15 @@ export async function taskResume(taskId?: string): Promise<void> {
 
   const task = await findTask(taskId)
 
-  if (!task) {
+  // findTask exits the process itself when the fragment was ambiguous.
+  if (!task || task === "ambiguous") {
     hiveOutro(`Tarea no encontrada: ${taskId}`, "error")
     process.exit(1)
   }
 
   const resumable = task.doc.status === "paused" || task.doc.status === "failed"
   if (!resumable) {
-    hiveOutro(`La tarea ${task.doc.id.slice(0, 8)} no es reanudable (estado: ${task.doc.status})`, "error")
+    hiveOutro(`La tarea ${shortId(task.doc.id)} no es reanudable (estado: ${task.doc.status})`, "error")
     process.exit(1)
   }
 
@@ -277,10 +294,11 @@ export async function taskDebug(taskId?: string, flags: string[] = []): Promise<
     process.exit(1)
   }
 
-  // Support short IDs (first 8 chars)
+  // Accepts the short id shown in listings, or the full one.
   const task = await findTask(taskId)
 
-  if (!task) {
+  // findTask exits the process itself when the fragment was ambiguous.
+  if (!task || task === "ambiguous") {
     hiveOutro(`Tarea no encontrada: ${taskId}`, "error")
     process.exit(1)
   }
@@ -290,7 +308,7 @@ export async function taskDebug(taskId?: string, flags: string[] = []): Promise<
     return idx !== -1 ? Number(flags[idx + 1]) : null
   })()
 
-  hiveIntro(`hivecode · Debug · ${task.doc.id.slice(0, 8)}`)
+  hiveIntro(`hivecode · Debug · ${shortId(task.doc.id)}`)
 
   const w = process.stdout.columns || 100
 

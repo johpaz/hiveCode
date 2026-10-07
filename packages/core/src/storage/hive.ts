@@ -2,12 +2,42 @@
  * Shared HiveDB collection helpers.
  */
 
-import { getHiveDb } from "./hivedb";
+import { getHiveDb, getHiveDbPath } from "./hivedb";
 
 const MAX_RETRIES = 5;
 
 export const NO_PARENT = "__none__";
 export const BROADCAST = "*";
+
+/**
+ * Secondary indexes already created, keyed by `<db path>|<collection>|<field>`.
+ *
+ * Keyed by database path as well as collection/field because a caller (notably a
+ * test) can repoint HIVE_DB_PATH at a brand-new database, and the memo must not
+ * claim an index exists on a store it was never created against.
+ */
+const ensuredIndexes = new Set<string>();
+
+/**
+ * Create the given secondary indexes if they are missing.
+ *
+ * `createIndex` is idempotent — bootstrap.ts runs the same calls on every boot —
+ * so calling this on an already-bootstrapped database is a no-op. Callers use it
+ * so an indexed `findBy` fails loudly on a fresh database instead of silently
+ * returning nothing, and so they do not each reimplement the memo.
+ *
+ * An index is marked only after it is actually created, so a failure retries on
+ * the next call rather than being cached as done.
+ */
+export function ensureIndexes(specs: ReadonlyArray<readonly [string, string]>): Promise<void> {
+  const dbPath = getHiveDbPath();
+  const missing = specs.filter(([collection, field]) => !ensuredIndexes.has(`${dbPath}|${collection}|${field}`));
+  if (missing.length === 0) return Promise.resolve();
+  return Promise.all(missing.map(async ([collection, field]) => {
+    await (await col(collection)).createIndex(field);
+    ensuredIndexes.add(`${dbPath}|${collection}|${field}`);
+  })).then(() => undefined);
+}
 
 export function toIndexable(value: string | null | undefined): string {
   return value ?? NO_PARENT;

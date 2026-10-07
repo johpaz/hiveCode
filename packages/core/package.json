@@ -70,6 +70,7 @@
     "./utils/logger": "./src/utils/logger.ts",
     "./utils/retry": "./src/utils/retry.ts",
     "./storage/hive": "./src/storage/hive.ts",
+    "./storage/ids": "./src/storage/ids.ts",
     "./storage/hivedb": "./src/storage/hivedb.ts",
     "./storage/causal-events": "./src/storage/causal-events.ts",
     "./storage/db-migrate": "./src/storage/db-migrate.ts",
