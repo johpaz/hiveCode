@@ -210,9 +210,10 @@ async function getActiveSession(): Promise<CodeSessionDoc | null> {
   const active = (await (await col<CodeSessionDoc>("codeSessions")).findBy("status", "active"))
     .map((entry) => entry.doc)
     .sort(byRecency)
-  if (active.length > 0) return active[0]
-  // No active session (a fresh process, or right after `/session new`).
-  return (await scanDocs<CodeSessionDoc>("codeSessions")).sort(byRecency)[0] ?? null
+  // No recency fallback. "No active session" is a real state — a fresh process
+  // has none, and `/session new` just closed the only one — and returning the
+  // newest closed session here is how a dead conversation got reported as live.
+  return active[0] ?? null
 }
 
 /**
@@ -271,23 +272,34 @@ async function listRecentSessionsWithTurns(
   }))
 }
 
-async function getCtx(): Promise<ContextState> {
-  const session = await getActiveSession()
-  const sessionId = session?.id ?? "none"
+/**
+ * Build the context a bare command runs against.
+ *
+ * `sessionId` is what the running process believes its session is, and callers
+ * should pass it: the database cannot know that `/session new` just closed the
+ * session it would otherwise pick as "most recent", so deriving it here made the
+ * parser report a closed conversation as the live one.
+ *
+ * `undefined` derives it from the database (for callers with no runtime to ask);
+ * `null` says there is deliberately no session.
+ */
+async function getCtx(sessionId?: string | null): Promise<ContextState> {
+  const resolvedId = sessionId === undefined ? (await getActiveSession())?.id ?? null : sessionId || null
+  // Primary-key read of the session we were told about — never a recency guess.
+  const session = resolvedId ? await getDoc<CodeSessionDoc>("codeSessions", resolvedId) : null
   const provider = await getCodeConfig("default_provider")
   const model = provider ? await getCodeConfig(`provider_model_${provider}`) : ""
   const rawMode = await getCodeConfig("default_mode")
   const mode = rawMode === "plan" || rawMode === "approval" || rawMode === "auto" ? rawMode : "approval"
-  const projectPath = session?.project_path ?? process.cwd()
 
   return {
-    sessionId,
+    sessionId: session?.id ?? "none",
     activeProvider: provider,
     activeModel: model,
     activeMode: mode as "plan" | "approval" | "auto",
     activeMcp: [],
     activeSkills: [],
-    projectPath,
+    projectPath: session?.project_path ?? process.cwd(),
   }
 }
 

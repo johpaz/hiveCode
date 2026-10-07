@@ -285,9 +285,18 @@ async function handleInternalCommand(
   currentMode: ReplMode,
   provider: string,
   model: string,
+  /**
+   * The session this process is actually on, straight from the manager.
+   *
+   * The parser must not derive it: the database still lists the session that
+   * `/session new` just closed as the most recent one, so deriving made every
+   * bare command (`/session status`, `/compact`, the picker marker) talk about
+   * a closed conversation. `null` after `/session new` is the honest answer.
+   */
+  sessionId: string | null,
   ui?: import("@johpaz/hivecode-code/coordinator/command-parser").UiCallbacks,
 ): Promise<{ output: string; newMode?: ReplMode; newProvider?: string; newModel?: string; quickMenu?: MenuItem[]; switchSession?: { sessionId: string | null; projectPath?: string } }> {
-  const ctx = await getCtx()
+  const ctx = await getCtx(sessionId)
 
   const result = await parseInternalCommand(input, undefined, {
     ...ctx,
@@ -786,6 +795,7 @@ export async function repl(): Promise<void> {
         if (input.startsWith("/")) {
           const result = await handleInternalCommand(
             input, currentMode, currentProvider, currentModel,
+            manager.getSessionId(),
             {
               suspendTui:  async () => { await tuiControl.suspend!() },
               resumeTui:   () => { tuiControl.resume!() },

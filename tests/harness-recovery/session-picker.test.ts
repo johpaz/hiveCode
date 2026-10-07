@@ -184,3 +184,48 @@ describe("session picker", () => {
     expect(result.output).toContain(second.slice(-8))
   })
 })
+
+/**
+ * The closed-session lie this pins.
+ *
+ * `getCtx` used to pick the session itself, taking "most recent" whenever
+ * nothing was marked active. `/session new` closes the only session and leaves
+ * the process with none — so the closed session was still the most recent, and
+ * every bare command reported it as live: `/session status` printed
+ * "Estado: closed", the picker flagged it "◀ activa", and `/compact` targeted
+ * a dead conversation.
+ *
+ * The parser now takes the session from the process that owns it. `null` means
+ * "deliberately none", which is the truth right after `/session new`.
+ */
+describe("session context after /session new", () => {
+  test("a deliberately absent session is reported as absent, not as the closed one", async () => {
+    const sessionId = await seedSession(PROJECT, "trabajo terminado", "arregla el login")
+
+    // What the REPL passes once `/session new` has run endSession().
+    const result = await parseInternalCommand("/session status", undefined, ctxFor(PROJECT, "none"))
+
+    expect(result.output).toContain("No hay sesión activa")
+    expect(result.output).not.toContain(sessionId.slice(-8))
+    expect(result.output).not.toContain("closed")
+  })
+
+  test("the picker marks no session as active once none is open", async () => {
+    await seedSession(PROJECT, "trabajo terminado", "arregla el login")
+
+    const result = await parseInternalCommand("/session list", undefined, ctxFor(PROJECT, "none"))
+
+    // The row is still listed — it is history — but nothing claims to be live.
+    expect(result.output).toContain("arregla el login")
+    expect(result.output).not.toContain("◀")
+  })
+
+  test("an explicit session is still reported", async () => {
+    const sessionId = await seedSession(PROJECT, "trabajo en curso", "arregla el login")
+
+    const result = await parseInternalCommand("/session status", undefined, ctxFor(PROJECT, sessionId))
+
+    expect(result.output).toContain(sessionId.slice(-8))
+    expect(result.output).toContain("Turnos:")
+  })
+})
