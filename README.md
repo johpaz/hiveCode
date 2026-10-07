@@ -89,6 +89,7 @@ La tab activa se enruta automáticamente según el estado de Bun (PLAN → Focus
 | `settings_hub` | `F2` o `Ctrl+Shift+S` — providers, modelos, agentes, MCP, skills, GitHub, Telegram |
 | `config_modal` | `Enter` en un provider del hub — introducir su API key sin volver a elegirlo |
 | `info_modal` | `?` — ayuda contextual del tab activo |
+| `resume_badge` | `Enter` ×2 sobre `[▶ RESUME]` — reanuda una tarea que quedó a medias si el proceso murió. La primera pulsación arma, la segunda reanuda |
 
 ### Elegir provider e introducir su API key
 
@@ -469,6 +470,29 @@ hivecode exit                          # Detener el sistema
 /help [comando]                       Ayuda detallada
 ```
 
+### Sesiones
+
+Una sesión nace con tu **primer mensaje**, no al abrir la TUI: abrir y cerrar sin
+escribir no deja filas huéfanas en el selector. Su nombre es ese pedido — el
+agente lo titula en segundo plano con una llamada corta, y si esa llamada falla
+queda el texto del mensaje, así que nunca ves una sesión sin nombre.
+
+```
+/session list                  Sesiones de este proyecto, con su título y fecha
+/session resume                Elige una de la lista (TUI) · /session resume <id> por consola
+/session new                   Cierra la actual; el siguiente mensaje abre otra
+/session status                Detalle de la sesión activa
+```
+
+El id corto que ves (8 caracteres) es la **cola aleatoria** del id, no la cabeza:
+un UUIDv7 empieza con un timestamp en milisegundos, así que la cola es lo único
+que distingue una sesión de otra. `/session resume` con un fragmento que coincide
+con varias sesiones te devuelve los candidatos en vez de elegir una por su cuenta.
+
+Si el proceso se muere con una tarea a medias, al arrancar la TUI lo detecta y lo
+ofrece con el badge `▶ RESUME` en el panel del enjambre: `Enter` para armarlo,
+`Enter` otra vez para continuarlo desde su último punto de recuperación.
+
 ---
 
 ## Configuración de providers
@@ -514,7 +538,7 @@ PRAGMA mmap_size    = 268435456;  -- 256 MB
 | `providers` | Providers configurados (la API key real se guarda en `Bun.secrets`) |
 | `models` | Modelos disponibles por provider |
 | `agents` | Agente/coordinadores y sus prompts |
-| `code_sessions` | Sesiones de trabajo |
+| `codeSessions` | Sesiones de trabajo. Se crean con el primer mensaje del usuario y llevan `title`: el nombre que le pone el agente a ese pedido |
 | `codeTasks` | Tareas con modo, status, tokens |
 | `code_task_phases` | Fases por coordinador |
 | `code_narrative` | Historial narrativo estructurado (HiveDB index) |
@@ -535,8 +559,7 @@ PRAGMA mmap_size    = 268435456;  -- 256 MB
 
 | Tabla | Contenido |
 |-------|-----------|
-| `sessions` | Metadata de la sesión |
-| `messages` | Historial de mensajes |
+| `codeTurns` | Turnos de la sesión: mensaje del usuario y respuesta del agente |
 | `agent_context` | Blackboard: decisiones, constraints, observaciones (HiveDB index) |
 | `agent_conflicts` | Conflictos detectados y sus resoluciones |
 | `worker_activity` | Actividad por worker con `level` y timestamps |

@@ -2545,9 +2545,17 @@ Notas y Sistema
 /doctor   Diagnóstico del sistema
 /version  Versión de hivecode
 /env      Variables de entorno seguras
-/session new
+
+Sesiones
+──────────────
+/session list     Sesiones de este proyecto, con su título
+/session resume   Reanudar una sesión (TUI) o por id
+/session new      Cerrar la actual; el siguiente mensaje abre otra
+/session status   Estado de la sesión activa
 /compact  Compactar contexto
-/status   Estado de la sesión
+
+El badge [▶ RESUME] del panel del enjambre reanuda una tarea que quedó
+a medias: Enter para armarlo, Enter otra vez para continuarla.
 
 Vistas (tabs)
 ═════════════
