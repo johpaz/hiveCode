@@ -127,6 +127,16 @@ fn draw_right_base(canvas: &mut Canvas, x: u16, y: u16, _w: u16, version: &str) 
 }
 
 /// Boot lines dinámicas — reflejan el estado real recibido vía IPC y persistido en HiveDB.
+/// The last 8 chars of a session id — the part that is random.
+///
+/// A UUIDv7 leads with a millisecond timestamp, so the first 8 chars are shared
+/// by every session started inside the same ~65s window. This matches the short
+/// id the `/session` picker shows and accepts.
+fn short_session_id(id: &str) -> String {
+    let chars: Vec<char> = id.chars().collect();
+    chars[chars.len().saturating_sub(8)..].iter().collect()
+}
+
 fn draw_boot_lines(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &AppState) -> u16 {
     let mut row = y;
 
@@ -147,7 +157,8 @@ fn draw_boot_lines(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &AppState
         "iniciando workers...".to_string()
     };
     let db_txt = if has_session {
-        format!("HiveDB · sesión {}", &state.session.session_id.get(..8).unwrap_or("?"))
+        // The tail, not the head — see `short_session_id`.
+        format!("HiveDB · sesión {}", short_session_id(&state.session.session_id))
     } else {
         "HiveDB · blackboard".to_string()
     };

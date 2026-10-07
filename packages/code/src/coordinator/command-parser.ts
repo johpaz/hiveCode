@@ -4,6 +4,7 @@ import { callLLM, resolveProviderConfig } from "@johpaz/hivecode-core/agent/llm-
 import { saveScratchpadNote, getScratchpad, deleteScratchpadNote } from "@johpaz/hivecode-core/agent/conversation-store"
 import { hasProviderApiKey, storeProviderApiKey, encryptConfig, isFreeProvider } from "@johpaz/hivecode-core/storage/crypto"
 import { col, nextId } from "@johpaz/hivecode-core/storage/hive"
+import { getHiveDbPath } from "@johpaz/hivecode-core/storage/hivedb"
 import type {
   CodeConfigDoc,
   CodeFileSnapshotDoc,
@@ -203,6 +204,7 @@ async function upsertMcpServerDoc(id: string, patch: Partial<McpServerDoc> & { n
  * return the session we just left behind.
  */
 async function getActiveSession(): Promise<CodeSessionDoc | null> {
+  await ensureSessionIndexes()
   const byRecency = (a: CodeSessionDoc, b: CodeSessionDoc) =>
     (b.last_active || b.created_at || b.id).localeCompare(a.last_active || a.created_at || a.id)
   const active = (await (await col<CodeSessionDoc>("codeSessions")).findBy("status", "active"))
@@ -213,22 +215,95 @@ async function getActiveSession(): Promise<CodeSessionDoc | null> {
   return (await scanDocs<CodeSessionDoc>("codeSessions")).sort(byRecency)[0] ?? null
 }
 
+/**
+ * The indexes the session commands below query. `createIndex` is idempotent —
+ * bootstrap.ts runs the same calls on every boot — so this is a no-op on a
+ * bootstrapped database and a self-heal on a fresh one. Without it a `findBy`
+ * on a missing index throws instead of returning nothing.
+ *
+ * Keyed by resolved DB path: the memo must not claim an index exists on a
+ * different database than the one it was created against.
+ */
+let sessionIndexesReady: Promise<void> | null = null
+let sessionIndexesPath: string | null = null
+
+function ensureSessionIndexes(): Promise<void> {
+  const dbPath = getHiveDbPath()
+  if (sessionIndexesReady && sessionIndexesPath === dbPath) return sessionIndexesReady
+  sessionIndexesPath = dbPath
+  sessionIndexesReady = (async () => {
+    const sessions = await col<CodeSessionDoc>("codeSessions")
+    await sessions.createIndex("project_path")
+    await sessions.createIndex("status")
+    await (await col<CodeTurnDoc>("codeTurns")).createIndex("session_id")
+  })().catch((err) => {
+    sessionIndexesReady = null
+    sessionIndexesPath = null
+    throw err
+  })
+  return sessionIndexesReady
+}
+
 async function getSessionTurns(sessionId: string): Promise<CodeTurnDoc[]> {
+  await ensureSessionIndexes()
   return (await (await col<CodeTurnDoc>("codeTurns")).findBy("session_id", sessionId))
     .map((entry) => entry.doc)
     .sort((a, b) => a.created_at.localeCompare(b.created_at))
 }
 
-async function listRecentSessionsWithTurns(limit = 15): Promise<Array<CodeSessionDoc & { turns: number }>> {
-  const sessions = (await scanDocs<CodeSessionDoc>("codeSessions"))
-    .sort((a, b) => b.last_active.localeCompare(a.last_active))
+/** Trim a title to one line that fits a picker row without wrapping. */
+function fitTitle(title: string, max = 44): string {
+  const oneLine = title.replace(/\s+/g, " ").trim()
+  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}\u2026` : oneLine
+}
+
+/**
+ * The short id shown in the picker and used to resume a session.
+ *
+ * NOT the first 8 hex chars: a UUIDv7 leads with a 48-bit millisecond
+ * timestamp, so ids minted seconds apart share their first 8 characters — every
+ * session started inside the same ~65s window looks identical, and resuming by
+ * prefix picks whichever sorted first. The tail is random.
+ */
+function shortSessionId(id: string): string {
+  return id.slice(-8)
+}
+
+/** Accept the tail form above and the historical leading form. */
+function matchesSessionId(session: CodeSessionDoc, arg: string): boolean {
+  return shortSessionId(session.id) === arg || session.id.startsWith(arg)
+}
+
+/**
+ * Recent sessions for the picker, most recent first.
+ *
+ * Scoped to one project via the `codeSessions.project_path` index — the picker
+ * is for "where was I in THIS repo", so sessions from other projects are noise.
+ *
+ * `label` is the session's name: its `title` when the renamer has run, else the
+ * first user message. Sessions predating the field therefore still read as the
+ * request that started them, which is what the title would have said anyway.
+ */
+async function listRecentSessionsWithTurns(
+  limit = 15,
+  projectPath?: string,
+): Promise<Array<CodeSessionDoc & { turns: number; label: string }>> {
+  await ensureSessionIndexes()
+  const collection = await col<CodeSessionDoc>("codeSessions")
+  const rows = projectPath
+    ? (await collection.findBy("project_path", projectPath)).map((entry) => entry.doc)
+    : (await collection.scan()).map((entry) => entry.doc)
+
+  const sessions = rows
+    .sort((a, b) => (b.last_active || b.created_at).localeCompare(a.last_active || a.created_at))
     .slice(0, limit)
-  const counts = await Promise.all(sessions.map(async (session) => ({
-    id: session.id,
-    turns: (await getSessionTurns(session.id)).length,
-  })))
-  const countMap = new Map(counts.map((entry) => [entry.id, entry.turns]))
-  return sessions.map((session) => ({ ...session, turns: countMap.get(session.id) ?? 0 }))
+
+  return Promise.all(sessions.map(async (session) => {
+    const turns = await getSessionTurns(session.id)
+    // No title and no turns: created but the task never got to record one.
+    const title = session.title ?? turns[0]?.user_message ?? "sin turnos"
+    return { ...session, turns: turns.length, label: fitTitle(title) }
+  }))
 }
 
 async function getCtx(): Promise<ContextState> {
@@ -1898,7 +1973,7 @@ async function handleSessionCommand(
   const [action, idArg] = args
 
   if (!action) {
-    const current = ctx.sessionId && ctx.sessionId !== "none" ? ctx.sessionId.slice(0, 8) : "ninguna"
+    const current = ctx.sessionId && ctx.sessionId !== "none" ? shortSessionId(ctx.sessionId) : "ninguna"
     return {
       handled: true,
       output: [
@@ -1933,22 +2008,22 @@ async function handleSessionCommand(
       }
       return {
         handled: true,
-        output: `  \u2713 Sesi\u00f3n ${ctx.sessionId.slice(0, 8)} cerrada \u2014 la pr\u00f3xima tarea abre una nueva.`,
+        output: `  \u2713 Sesi\u00f3n ${shortSessionId(ctx.sessionId)} cerrada \u2014 la pr\u00f3xima tarea abre una nueva.`,
         switchSession: { sessionId: null },
       }
     }
 
     case "list": {
-      const rows = await listRecentSessionsWithTurns(15)
+      const rows = await listRecentSessionsWithTurns(15, ctx.projectPath || process.cwd())
 
-      if (!rows.length) return { handled: true, output: "  No hay sesiones registradas." }
+      if (!rows.length) return { handled: true, output: "  No hay sesiones registradas en este proyecto." }
 
       const lines = ["", "  Sesiones recientes:", ""]
       for (const r of rows) {
-        const active = r.id === ctx.sessionId ? " \u25c0 activa" : ""
+        const active = r.id === ctx.sessionId ? " \u25c0" : ""
         const date = r.last_active.slice(0, 16).replace("T", " ")
-        const project = r.project_path.split("/").pop() ?? r.project_path
-        lines.push(`  ${r.id.slice(0, 8)}  ${r.status.padEnd(6)}  ${String(r.turns).padStart(3)} turnos  ${date}  ${project}${active}`)
+        const turns = `${r.turns} turnos`
+        lines.push(`  ${shortSessionId(r.id)}  ${date}  ${turns.padStart(10)}  ${r.label}${active}`)
       }
       lines.push("")
       lines.push("  Usa /session resume <id> para reanudar")
@@ -1957,22 +2032,23 @@ async function handleSessionCommand(
     }
 
     case "resume": {
-      const sessions = await listRecentSessionsWithTurns(15)
+      const sessions = await listRecentSessionsWithTurns(15, ctx.projectPath || process.cwd())
 
       // Sin argumento: abrir modal de selecci\u00f3n si la TUI lo soporta
       if (!idArg) {
         if (ui?.showConfigModal && sessions.length > 0) {
+          // The option string doubles as the parse target: `resume` reads back
+          // the 8-char id prefix, so the id must stay first.
           const options = sessions.map(s => {
             const date = s.last_active.slice(0, 16).replace("T", " ")
-            const project = s.project_path.split("/").pop() ?? s.project_path
             const mark = s.id === ctx.sessionId ? " \u25c0" : ""
-            return `${s.id.slice(0, 8)}  ${date}  ${project} (${s.turns} turnos)${mark}`
+            return `${shortSessionId(s.id)}  ${date}  ${s.label} (${s.turns} turnos)${mark}`
           })
           const values = await ui.showConfigModal("session_resume", "Reanudar Sesi\u00f3n", [
             { key: "session", label: "Sesi\u00f3n", placeholder: "", required: true, secret: false, field_type: "select", options },
           ])
           if (!values) return { handled: true, output: "  Cancelado." }
-          // El valor seleccionado empieza con el id de 8 chars
+          // El valor seleccionado empieza con el id corto
           const selectedId = values["session"]?.slice(0, 8)
           if (!selectedId) return { handled: true, output: "  \u2717 Selecci\u00f3n inv\u00e1lida." }
           // Re-invocar con el id como argumento
@@ -1982,20 +2058,20 @@ async function handleSessionCommand(
       }
 
       const row = (await scanDocs<CodeSessionDoc>("codeSessions"))
-        .filter((session) => session.id.startsWith(idArg))
+        .filter((session) => matchesSessionId(session, idArg))
         .sort((a, b) => b.last_active.localeCompare(a.last_active))[0] ?? null
 
       if (!row) return { handled: true, output: `  \u2717 No se encontr\u00f3 sesi\u00f3n con prefijo: ${idArg}` }
 
       if (row.id === ctx.sessionId) {
-        return { handled: true, output: `  \u00b7 Ya est\u00e1s en la sesi\u00f3n ${row.id.slice(0, 8)}.` }
+        return { handled: true, output: `  \u00b7 Ya est\u00e1s en la sesi\u00f3n ${shortSessionId(row.id)}.` }
       }
 
       const turns = (await getSessionTurns(row.id)).length
       const project = row.project_path.split("/").pop() ?? row.project_path
       return {
         handled: true,
-        output: `  \u2713 Sesi\u00f3n reanudada: ${row.id.slice(0, 8)}  (${project}, ${turns} turnos)`,
+        output: `  \u2713 Sesi\u00f3n reanudada: ${shortSessionId(row.id)}  (${project}, ${turns} turnos)`,
         switchSession: { sessionId: row.id, projectPath: row.project_path },
       }
     }
@@ -2006,14 +2082,14 @@ async function handleSessionCommand(
 
       const row = await getDoc<CodeSessionDoc>("codeSessions", sid)
 
-      if (!row) return { handled: true, output: `  \u2717 Sesi\u00f3n no encontrada en DB: ${sid.slice(0, 8)}` }
+      if (!row) return { handled: true, output: `  \u2717 Sesi\u00f3n no encontrada en DB: ${shortSessionId(sid)}` }
 
       const turns = (await getSessionTurns(sid)).length
       return {
         handled: true,
         output: [
           "",
-          `  ID:       ${row.id.slice(0, 8)}`,
+          `  ID:       ${shortSessionId(row.id)}`,
           `  Proyecto: ${row.project_path}`,
           `  Estado:   ${row.status}`,
           `  Creada:   ${row.created_at.slice(0, 16).replace("T", " ")}`,
