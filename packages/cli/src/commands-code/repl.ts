@@ -286,7 +286,7 @@ async function handleInternalCommand(
   provider: string,
   model: string,
   ui?: import("@johpaz/hivecode-code/coordinator/command-parser").UiCallbacks,
-): Promise<{ output: string; newMode?: ReplMode; newProvider?: string; newModel?: string; quickMenu?: MenuItem[] }> {
+): Promise<{ output: string; newMode?: ReplMode; newProvider?: string; newModel?: string; quickMenu?: MenuItem[]; switchSession?: { sessionId: string | null; projectPath?: string } }> {
   const ctx = await getCtx()
 
   const result = await parseInternalCommand(input, undefined, {
@@ -302,6 +302,7 @@ async function handleInternalCommand(
     newProvider: result.newState?.activeProvider,
     newModel:    result.newState?.activeModel,
     quickMenu:   result.menu,
+    switchSession: result.switchSession,
   }
 }
 
@@ -398,12 +399,14 @@ export async function repl(): Promise<void> {
       send: ((msg: import("./tui-launcher").BunMessage) => void) | null
       showConfigModal: ((cmd: string, title: string, fields: import("./tui-launcher").ModalField[]) => Promise<Record<string, string> | null>) | null
       showInfoModal: ((title: string, content: string) => Promise<void>) | null
+      refreshSession: ((sessionId: string) => Promise<void>) | null
     } = {
       suspend: null,
       resume: null,
       send: null,
       showConfigModal: null,
       showInfoModal: null,
+      refreshSession: null,
     }
 
     // Wire live IPC events (file_risk_update, conflict_alert, etc.) to TUI socket
@@ -810,6 +813,21 @@ export async function repl(): Promise<void> {
           // Si el comando cambió el provider (o su clave), recargar secrets
           // para que los workers la vean en la siguiente tarea.
           if (result.newProvider) await manager.reloadSecrets()
+
+          // `/session resume` y `/session new`: el manager es el único que
+          // escribe el doc de sesión y ya emitió `session_changed` (la TUI
+          // limpia los paneles de la sesión anterior). Aquí solo hay que
+          // reenviar el snapshot de la sesión a la que entramos.
+          if (result.switchSession) {
+            const target = result.switchSession.sessionId
+            if (target === null) {
+              manager.endSession()
+            } else if (target !== manager.getSessionId()) {
+              manager.switchSession(target, result.switchSession.projectPath ?? init.projectPath)
+              await tuiControl.refreshSession?.(target)
+            }
+          }
+
           return {
             output:      result.output,
             newMode:     result.newMode,

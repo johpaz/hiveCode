@@ -239,6 +239,16 @@ export class Scribe {
     log.info(`[scribe] Session closed: ${sessionId}`)
   }
 
+  /**
+   * Mark a session as the active one. Called when a session is resumed, so the
+   * status column in the picker and any reader filtering on `status` agree on
+   * which session is live.
+   */
+  openSession(sessionId: string): void {
+    this.patch<CodeSessionDoc>("codeSessions", sessionId, { status: "active", last_active: nowIso() })
+    log.info(`[scribe] Session active: ${sessionId}`)
+  }
+
   createTurn(sessionId: string, userMessage: string): string {
     const id = Bun.randomUUIDv7()
     const doc: CodeTurnDoc = {

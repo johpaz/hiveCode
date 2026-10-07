@@ -163,6 +163,12 @@ export interface TuiCallbacks {
     send: ((msg: BunMessage) => void) | null
     showConfigModal: ((command: string, title: string, fields: ModalField[]) => Promise<Record<string, string> | null>) | null
     showInfoModal: ((title: string, content: string) => Promise<void>) | null
+    /**
+     * Re-send the full snapshot for `sessionId` after `/session resume`. The
+     * caller is responsible for having already emitted `session_changed`, which
+     * is what clears the previous session's panels in the TUI.
+     */
+    refreshSession: ((sessionId: string) => Promise<void>) | null
   }
 }
 
@@ -233,6 +239,9 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
       callbacks.tuiControl.send = send
       callbacks.tuiControl.showConfigModal = showConfigModal
       callbacks.tuiControl.showInfoModal = showInfoModal
+      callbacks.tuiControl.refreshSession = async (sessionId: string) => {
+        await sendSessionSnapshot(send, sessionId, "session-switch")
+      }
     }
 
     // ── Bridge: React UI WebSocket → same handler as Rust TUI ────────────────
@@ -317,6 +326,40 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
 
 // ── Message router ────────────────────────────────────────────────────────────
 
+/**
+ * Rebuild the TUI's view of a session: transcript, checkpoints, file risks,
+ * ADRs, tasks and the dashboard.
+ *
+ * Sent on `ready`, and again after `/session resume` — the `session_changed`
+ * message clears the previous session's panels first, so the frames that follow
+ * repopulate them. Safe for an empty session id: every loader is a no-op.
+ */
+async function sendSessionSnapshot(
+  send: (m: BunMessage) => void,
+  sessionId: string,
+  label: string,
+): Promise<void> {
+  try {
+    await sendHistorySnapshot(send, sessionId)
+
+    // Checkpoint timeline (last 20, sent oldest-first)
+    const cps = await loadCheckpoints(sessionId)
+    for (const cp of cps) {
+      send({ type: "checkpoint_created", checkpoint_id: cp.id,
+             description: cp.description, file_count: cp.file_count,
+             agent: cp.created_by ?? "system" })
+    }
+
+    await sendFileSnapshots(send, sessionId)
+    await sendAdrSnapshot(send)
+    await sendCodeTaskSnapshot(send, sessionId)
+
+    await sendDashboardSnapshot(send, sessionId, cps)
+  } catch (e) {
+    logger.warn(`[tui-ipc] ${label} snapshot failed:`, (e as Error).message)
+  }
+}
+
 async function handleTuiMessage(
   msg: TuiMessage,
   send: (m: BunMessage) => void,
@@ -338,25 +381,7 @@ async function handleTuiMessage(
         workers:       callbacks.workers,
       })
       // Dump session state so TUI can rebuild on startup
-      try {
-        await sendHistorySnapshot(send, callbacks.sessionId)
-
-        // Checkpoint timeline (last 20, sent oldest-first)
-        const cps = await loadCheckpoints(callbacks.sessionId)
-        for (const cp of cps) {
-          send({ type: "checkpoint_created", checkpoint_id: cp.id,
-                 description: cp.description, file_count: cp.file_count,
-                 agent: cp.created_by ?? "system" })
-        }
-
-        await sendFileSnapshots(send, callbacks.sessionId)
-        await sendAdrSnapshot(send)
-        await sendCodeTaskSnapshot(send, callbacks.sessionId)
-
-        await sendDashboardSnapshot(send, callbacks.sessionId, cps)
-      } catch (e) {
-        logger.warn("[tui-ipc] init snapshot failed:", (e as Error).message)
-      }
+      await sendSessionSnapshot(send, callbacks.sessionId, "init")
       send({ type: "status", running: false, msg: "Listo · escribe tu tarea" })
       break
 

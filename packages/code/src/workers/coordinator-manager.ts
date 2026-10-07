@@ -311,6 +311,43 @@ export class CoordinatorManager extends CoordinatorBase {
     }
   }
 
+  /**
+   * Resume an existing session: the current one is closed and everything from
+   * now on — turns, tasks, narrative, subsystem state — goes to `sessionId`.
+   *
+   * The CoordinatorManager owns this write. The command parser only asks, so
+   * there is exactly one place that flips a session's status; when two writers
+   * existed, `/session resume` closed one session while the coordinator kept
+   * writing to the other.
+   */
+  switchSession(sessionId: string, projectPath: string): void {
+    if (this.activeSessionId === sessionId) return
+    if (this.activeSessionId) {
+      log.info(`[coordinator-manager] Closing session ${this.activeSessionId} in favour of ${sessionId}`)
+      this.scribe.closeSession(this.activeSessionId)
+    }
+    // A task of the previous session must never keep writing into the new one.
+    this.activeTaskId = null
+    this.scribe.openSession(sessionId)
+    this.activateSession(sessionId, projectPath)
+    log.info(`[coordinator-manager] Switched session: ${sessionId} (${projectPath})`)
+    this.onIpcEvent?.("session_changed", { session_id: sessionId })
+  }
+
+  /**
+   * Close the session and return to the pre-session state — exactly where a
+   * fresh process starts. The next user message creates a new session, so
+   * `/session new` needs no eager session creation of its own.
+   */
+  endSession(): void {
+    if (!this.activeSessionId) return
+    this.scribe.closeSession(this.activeSessionId)
+    this.activeSessionId = null
+    this.activeTaskId = null
+    log.info("[coordinator-manager] Session closed — next message starts a new one")
+    this.onIpcEvent?.("session_changed", { session_id: "" })
+  }
+
   getSessionId(): string | null {
     return this.activeSessionId
   }
@@ -1607,7 +1644,11 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
       .sort((a, b) => b.updatedAt - a.updatedAt)[0]
     if (profileTask) {
       this.activeTaskId = taskId
-      if (!this.activeSessionId) this.activeSessionId = profileTask.sessionId
+      // Adopting another process's session must re-wire the subsystems, not just
+      // reassign the id — they were bound to the previous session.
+      if (this.activeSessionId !== profileTask.sessionId) {
+        this.switchSession(profileTask.sessionId, process.cwd())
+      }
       const workspace = await this.ensureTaskWorkspace(taskId, profileTask.mutating)
       const configuredProvider = await getCodeConfig("default_provider")
       const configuredModel = configuredProvider
@@ -1648,7 +1689,7 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
     const phases = JSON.parse(plan.phases_json) as ParsedPhase[]
 
     this.activeTaskId = taskId
-    if (!this.activeSessionId) this.activeSessionId = this.scribe.createSession(process.cwd())
+    this.ensureSession()
     const turnId = this.scribe.createTurn(this.activeSessionId, `Resume task ${taskId}`)
     this.scribe.updateTaskStatus(taskId, "running")
     log.info(`[coordinator-manager] ▶️  Resuming task ${taskId} at level ${startLevel} (${phases.length} phase(s) in plan)`)

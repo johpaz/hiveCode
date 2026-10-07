@@ -66,6 +66,15 @@ export interface CommandResult {
   output?: string
   menu?: MenuItem[]
   newState?: Partial<ContextState>
+  /**
+   * A session change the user asked for. The parser NEVER writes a session doc
+   * itself — the CoordinatorManager owns that write, so there is exactly one
+   * place that opens and closes sessions.
+   *
+   * `sessionId: null` means "close the current session and go back to the
+   * pre-session state"; the next user message opens a new one.
+   */
+  switchSession?: { sessionId: string | null; projectPath?: string }
 }
 
 export interface ProviderRow {
@@ -186,10 +195,22 @@ async function upsertMcpServerDoc(id: string, patch: Partial<McpServerDoc> & { n
   await servers.put(id, doc, { expectedVersion: existing?.version ?? 0 })
 }
 
+/**
+ * The session a bare command should act on.
+ *
+ * Filters on `status: "active"` rather than trusting `last_active`: closing a
+ * session stamps it with the NEWEST timestamp, so a date sort alone would
+ * return the session we just left behind.
+ */
 async function getActiveSession(): Promise<CodeSessionDoc | null> {
-  const sessions = await scanDocs<CodeSessionDoc>("codeSessions")
-  return sessions
-    .sort((a, b) => (b.last_active || b.created_at || b.id).localeCompare(a.last_active || a.created_at || a.id))[0] ?? null
+  const byRecency = (a: CodeSessionDoc, b: CodeSessionDoc) =>
+    (b.last_active || b.created_at || b.id).localeCompare(a.last_active || a.created_at || a.id)
+  const active = (await (await col<CodeSessionDoc>("codeSessions")).findBy("status", "active"))
+    .map((entry) => entry.doc)
+    .sort(byRecency)
+  if (active.length > 0) return active[0]
+  // No active session (a fresh process, or right after `/session new`).
+  return (await scanDocs<CodeSessionDoc>("codeSessions")).sort(byRecency)[0] ?? null
 }
 
 async function getSessionTurns(sessionId: string): Promise<CodeTurnDoc[]> {
@@ -1902,29 +1923,18 @@ async function handleSessionCommand(
 
   switch (action) {
     case "new": {
-      const projectPath = ctx.projectPath || process.cwd()
-      const newId = Bun.randomUUIDv7()
-      if (ctx.sessionId && ctx.sessionId !== "none") {
-        const existing = await getVersionedDoc<CodeSessionDoc>("codeSessions", ctx.sessionId)
-        if (existing) {
-          await (await col<CodeSessionDoc>("codeSessions")).put(ctx.sessionId, {
-            ...existing.doc,
-            status: "closed",
-            last_active: nowIso(),
-          }, { expectedVersion: existing.version })
+      // No eager session: closing is enough. The next message opens the new one,
+      // which is also what keeps this from creating a nameless picker row.
+      if (!ctx.sessionId || ctx.sessionId === "none") {
+        return {
+          handled: true,
+          output: "  No hay sesi\u00f3n activa \u2014 escribe tu tarea y se abrir\u00e1 una nueva.",
         }
       }
-      await (await col<CodeSessionDoc>("codeSessions")).put(newId, {
-        id: newId,
-        project_path: projectPath,
-        status: "active",
-        created_at: nowIso(),
-        last_active: nowIso(),
-      }, { expectedVersion: 0 })
       return {
         handled: true,
-        output: `  \u2713 Nueva sesi\u00f3n: ${newId.slice(0, 8)}...`,
-        newState: { sessionId: newId },
+        output: `  \u2713 Sesi\u00f3n ${ctx.sessionId.slice(0, 8)} cerrada \u2014 la pr\u00f3xima tarea abre una nueva.`,
+        switchSession: { sessionId: null },
       }
     }
 
@@ -1977,23 +1987,8 @@ async function handleSessionCommand(
 
       if (!row) return { handled: true, output: `  \u2717 No se encontr\u00f3 sesi\u00f3n con prefijo: ${idArg}` }
 
-      if (ctx.sessionId && ctx.sessionId !== "none" && ctx.sessionId !== row.id) {
-        const current = await getVersionedDoc<CodeSessionDoc>("codeSessions", ctx.sessionId)
-        if (current) {
-          await (await col<CodeSessionDoc>("codeSessions")).put(ctx.sessionId, {
-            ...current.doc,
-            status: "closed",
-            last_active: nowIso(),
-          }, { expectedVersion: current.version })
-        }
-      }
-      const target = await getVersionedDoc<CodeSessionDoc>("codeSessions", row.id)
-      if (target) {
-        await (await col<CodeSessionDoc>("codeSessions")).put(row.id, {
-          ...target.doc,
-          status: "active",
-          last_active: nowIso(),
-        }, { expectedVersion: target.version })
+      if (row.id === ctx.sessionId) {
+        return { handled: true, output: `  \u00b7 Ya est\u00e1s en la sesi\u00f3n ${row.id.slice(0, 8)}.` }
       }
 
       const turns = (await getSessionTurns(row.id)).length
@@ -2001,7 +1996,7 @@ async function handleSessionCommand(
       return {
         handled: true,
         output: `  \u2713 Sesi\u00f3n reanudada: ${row.id.slice(0, 8)}  (${project}, ${turns} turnos)`,
-        newState: { sessionId: row.id, projectPath: row.project_path },
+        switchSession: { sessionId: row.id, projectPath: row.project_path },
       }
     }
 
