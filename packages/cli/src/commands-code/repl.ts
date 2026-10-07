@@ -19,6 +19,7 @@ import {
 import { loadInitialState, saveMode } from "./repl-state"
 import type { ReplMode } from "./repl-state"
 import { parseInternalCommand, getCtx } from "@johpaz/hivecode-code/coordinator/command-parser"
+import { applySessionSwitch } from "./session-commands"
 import { shortId } from "@johpaz/hivecode-core/storage/ids"
 import type { MenuItem } from "@johpaz/hivecode-code/coordinator/command-parser"
 import { plan as runPlan } from "./plan"
@@ -864,13 +865,11 @@ export async function repl(): Promise<void> {
           // limpia los paneles de la sesión anterior). Aquí solo hay que
           // reenviar el snapshot de la sesión a la que entramos.
           if (result.switchSession) {
-            const target = result.switchSession.sessionId
-            if (target === null) {
-              manager.endSession()
-            } else if (target !== manager.getSessionId()) {
-              manager.switchSession(target, result.switchSession.projectPath ?? init.projectPath)
-              await tuiControl.refreshSession?.(target)
-            }
+            await applySessionSwitch(result.switchSession, {
+              manager,
+              refreshSession: tuiControl.refreshSession,
+              defaultProjectPath: init.projectPath,
+            })
           }
 
           return {

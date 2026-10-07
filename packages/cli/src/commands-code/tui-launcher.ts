@@ -161,6 +161,12 @@ export interface TuiCallbacks {
    * have no runtime behind them, and the badge says so rather than failing.
    */
   onTaskResume?:  (taskId: string) => Promise<void>
+  /**
+   * Called with the spawned binary once it exists. Production has no use for
+   * this; a test needs it to write keystrokes and read rendered frames, which
+   * is the only way to exercise the real process instead of a stand-in.
+   */
+  onSpawn?:       (proc: { pid: number; stdin?: unknown; stdout?: unknown; stderr?: unknown; kill: () => void }) => void
   /** Mutable ref populated by launchTui so callers can suspend/resume/send/showModal */
   tuiControl?:    {
     suspend: (() => Promise<void>) | null
@@ -179,7 +185,22 @@ export interface TuiCallbacks {
 
 // ── Main launcher ─────────────────────────────────────────────────────────────
 
-export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
+/**
+ * How the TUI binary is wired to this process's stdio.
+ *
+ * Defaults to the real terminal. Tests pass pipes so the real binary can be
+ * driven — in headless mode it reads keystrokes from stdin and writes rendered
+ * frames to stdout — which is the only way to exercise the socket and the
+ * protocol against the actual process rather than a stand-in.
+ */
+export interface TuiStdio {
+  stdin: "pipe" | 0
+  stdout: "pipe" | 1
+  stderr: "pipe" | 2 | "ignore"
+  env?: Record<string, string>
+}
+
+export async function launchTui(callbacks: TuiCallbacks, stdio?: TuiStdio): Promise<void> {
   const binPath = tuiBinPath()
   if (!binPath) {
     throw new Error(
@@ -308,12 +329,19 @@ export async function launchTui(callbacks: TuiCallbacks): Promise<void> {
     process.stderr.write(`[tui] launching: ${binPath}\n`)
     process.stderr.write(`[tui] IPC: ${ipcServer.endpoint}\n`)
     const proc = Bun.spawn([binPath], {
-      stdin:  0,
-      stdout: 1,
-      stderr: 2,
-      env:    { ...process.env, HIVECODE_IPC: ipcServer.endpoint },
+      stdin:  stdio?.stdin ?? 0,
+      stdout: stdio?.stdout ?? 1,
+      stderr: stdio?.stderr ?? 2,
+      env:    { ...process.env, ...stdio?.env, HIVECODE_IPC: ipcServer.endpoint },
     })
     process.stderr.write(`[tui] PID: ${proc.pid}\n`)
+    callbacks.onSpawn?.({
+      pid: proc.pid,
+      stdin: proc.stdin,
+      stdout: proc.stdout,
+      stderr: proc.stderr,
+      kill: () => { proc.kill() },
+    })
 
     proc.exited.then((code) => {
       process.stderr.write(`[tui] hivetui exited with code: ${code}\n`)

@@ -149,10 +149,12 @@ fn drain_keys(
     // parche en lugar de por líneas completas.
     while let Some((key, rest)) = next_key(stdin_buf) {
         *stdin_buf = rest;
+        let history_before = state.history.entries.len();
         if handle_key_event(state, key) {
             let _ = tx.try_send(TuiMessage::Exit);
             return Ok(false);
         }
+        submit_typed_message(state, history_before, tx);
         for msg in state.pending_ipc.drain(..) {
             let _ = tx.try_send(msg);
         }
@@ -161,6 +163,34 @@ fn drain_keys(
 }
 
 
+
+/// Convierte "Enter añadió una entrada de usuario" en el `Submit` que espera Bun.
+///
+/// Vive fuera del bucle TTY porque headless necesita exactamente lo mismo: allí
+/// `drain_keys` solo drenaba `pending_ipc`, y como el brazo de Enter de la TUI
+/// escribe en el historial en vez de en `pending_ipc`, teclear un mensaje y pulsar
+/// Enter nunca llegaba a Bun. El harness no podía ejercitar el camino más básico
+/// de la TUI.
+fn submit_typed_message(
+    state: &mut AppState,
+    history_before: usize,
+    tx: &tokio::sync::mpsc::Sender<TuiMessage>,
+) {
+    if state.history.entries.len() <= history_before {
+        return;
+    }
+    let Some(last) = state.history.entries.last() else {
+        return;
+    };
+    if last.role != Role::User {
+        return;
+    }
+    let _ = tx.try_send(TuiMessage::Submit { input: last.content.clone() });
+    // tui-launcher nunca envía status{running:true} antes del resultado, así que
+    // lo marcamos aquí para activar la live-activity de Focus y el routing
+    // post-tarea.
+    state.running = true;
+}
 
 /// Extrae la siguiente tecla de un buffer de entrada ANSI.
 ///
@@ -326,19 +356,7 @@ pub async fn run() -> Result<()> {
                             should_quit = true;
                         }
                         // Si Enter añadió una entrada de usuario, enviarla a Bun
-                        if state.history.entries.len() > before {
-                            if let Some(last) = state.history.entries.last() {
-                                if last.role == Role::User {
-                                    let _ = ipc_ch.tx.try_send(TuiMessage::Submit {
-                                        input: last.content.clone(),
-                                    });
-                                    // tui-launcher nunca envía status{running:true} antes del
-                                    // resultado, así que lo marcamos aquí para activar la
-                                    // live-activity de Focus y el routing post-tarea.
-                                    state.running = true;
-                                }
-                            }
-                        }
+                        submit_typed_message(&mut state, before, &ipc_ch.tx);
                         // Drenar mensajes IPC pendientes escritos por el controller
                         for msg in state.pending_ipc.drain(..) {
                             let _ = ipc_ch.tx.try_send(msg);
