@@ -31,11 +31,13 @@ const JEV_ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
 const TIMEOUT_MS: Record<OracleKind, number> = { jev: 3000, kev: 5000 }
 const COOLDOWN_MS = 60_000
 /**
- * Kev serves an 8192-token context. State plus questions beyond this many
- * characters (~5.7k tokens at 3.5 chars/token, leaving room for the answers)
- * would be rejected upstream, so Kev is skipped instead of asked.
+ * Kev runs 8192 tokens over 2 slots: each request gets 4096 (measured: a
+ * 21k-character body is rejected with "4161 tokens exceeds 4096"). JSON with
+ * identifiers tokenizes at roughly 3 characters per token, so anything past
+ * ~9k characters is skipped rather than asked — it would be a 400, or a slow
+ * answer that blocks the shared slot, for a decision the classic path makes anyway.
  */
-export const KEV_MAX_REQUEST_CHARS = 20_000
+export const KEV_MAX_REQUEST_CHARS = 9_000
 /** Consecutive times the runtime found an oracle wrong before it is put aside. */
 export const DISTRUST_STRIKES = 3
 export const DISTRUST_MS = 5 * 60_000

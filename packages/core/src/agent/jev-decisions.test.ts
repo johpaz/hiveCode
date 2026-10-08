@@ -111,7 +111,7 @@ describe("oracle resolution: Jev, then Kev, then classic", () => {
     keys.hiveagents = "ha-key"
     await setProvider("hiveagents", { enabled: true, active: true })
     let called = false
-    const result = await askJev({ history: "x".repeat(25_000) }, QUESTIONS, {
+    const result = await askJev({ history: "x".repeat(12_000) }, QUESTIONS, {
       fetcher: (async () => { called = true; return ok({ type: "noul", noul: 0.5 }) }) as unknown as typeof fetch,
     })
     expect(result).toBeNull()

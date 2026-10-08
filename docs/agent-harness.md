@@ -65,6 +65,6 @@ Prioridad, en `resolveOracles` (`agent/jev-decisions.ts`):
 3. **Clásico**: sin oráculo, el compilador y el loop corren como siempre.
 
 `askJev` prueba los oráculos en ese orden: si Jev falla o está en cooldown se intenta Kev, y si ambos fallan
-devuelve `null` y el turno sigue por el camino clásico. Kev sirve un contexto de 8192 tokens: una petición de
+devuelve `null` y el turno sigue por el camino clásico. Kev reparte 8192 tokens en 2 slots (4096 por petición, medido): una petición de
 más de `KEV_MAX_REQUEST_CHARS` se salta Kev en vez de pedirla. `recordOracleOverruled` aparta a un oráculo
 durante 5 minutos tras 3 decisiones que el runtime tuvo que corregir.
