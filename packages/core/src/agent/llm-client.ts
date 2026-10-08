@@ -1,3 +1,4 @@
+import { createProviderAdapter, SUPPORTED_LLM_PROVIDERS } from "../services/provider-capabilities";
 /**
  * LLM client — direct official SDKs, no abstraction layers.
  *
@@ -11,21 +12,6 @@
 
 import { logger } from "../utils/logger"
 import { getProviderApiKey, isFreeProvider } from "../storage/crypto"
-import { GeminiProvider } from "./llm-providers/gemini"
-import { AnthropicProvider } from "./llm-providers/anthropic"
-import { OpenAIProvider } from "./llm-providers/openai"
-import { GroqProvider } from "./llm-providers/groq"
-import { MistralProvider } from "./llm-providers/mistral"
-import { OpenRouterProvider } from "./llm-providers/openrouter"
-import { DeepSeekProvider } from "./llm-providers/deepseek"
-import { KimiProvider } from "./llm-providers/kimi"
-import { NvidiaProvider } from "./llm-providers/nvidia"
-import { QwenProvider } from "./llm-providers/qwen"
-import { CodexProvider } from "./llm-providers/codex"
-import { OpenCodeGoProvider } from "./llm-providers/opencode-go"
-import { MiniMaxProvider } from "./llm-providers/minimax"
-import { HivecodeFreeProvider } from "./llm-providers/hivecode-free"
-import { HiveAgentsProvider } from "./llm-providers/hiveagents"
 import type { LLMProvider } from "./llm-providers/interface"
 
 const log = logger.child("llm-client")
@@ -167,27 +153,11 @@ export async function resolveCallOptionsFromDb(
 // ─── Provider factory ─────────────────────────────────────────────────────────
 
 function getProvider(provider: string): LLMProvider {
-  switch (provider) {
-    case "gemini":
-    case "google":       return new GeminiProvider()
-    case "anthropic":    return new AnthropicProvider()
-    case "openai":      return new OpenAIProvider()
-    case "groq":        return new GroqProvider()
-    case "mistral":     return new MistralProvider()
-    case "openrouter":  return new OpenRouterProvider()
-    case "deepseek":    return new DeepSeekProvider()
-    case "kimi":        return new KimiProvider()
-    case "nvidia":      return new NvidiaProvider()
-    case "qwen":        return new QwenProvider()
-    case "codex":        return new CodexProvider()
-    case "opencode-go":  return new OpenCodeGoProvider()
-    case "minimax":      return new MiniMaxProvider()
-    case "hivecode-free": return new HivecodeFreeProvider()
-    case "hiveagents":   return new HiveAgentsProvider()
-    default:
-      log.warn(`[llm-client] Unhandled provider "${provider}" — falling back to OpenAI-compatible endpoint`)
-      return new OpenAIProvider()
+  const adapter = createProviderAdapter(provider)
+  if (!SUPPORTED_LLM_PROVIDERS.has(provider === "google" ? "gemini" : provider)) {
+    log.warn(`Unhandled provider "${provider}" — using OpenAI-compatible endpoint`)
   }
+  return adapter
 }
 
 // ─── Public API ────────────────────────────────────────────────────────────────

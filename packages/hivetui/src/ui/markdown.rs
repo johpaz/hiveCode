@@ -9,15 +9,33 @@ use crate::{
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarkdownLine {
+    /// Texto visible, sin marcadores de markdown inline.
     pub text: String,
     pub style: Style,
     pub indent: u16,
+    /// Tramos con estilo propio (negrita, código). Vacío cuando toda la línea
+    /// usa `style`; si no, la concatenación de los tramos es `text`.
+    pub spans: Vec<(String, Style)>,
 }
 
 impl MarkdownLine {
     pub fn new(text: impl Into<String>, style: Style, indent: u16) -> Self {
-        Self { text: text.into(), style, indent }
+        Self { text: text.into(), style, indent, spans: Vec::new() }
     }
+}
+
+/// Pinta una línea con sus tramos. Devuelve la columna final.
+pub fn print_line(canvas: &mut Canvas, x: u16, y: u16, line: &MarkdownLine) -> u16 {
+    if line.spans.is_empty() {
+        canvas.print(x, y, &line.text, line.style);
+        return x.saturating_add(crate::ui::text::cell_width(&line.text) as u16);
+    }
+    let mut cx = x;
+    for (text, style) in &line.spans {
+        canvas.print(cx, y, text, *style);
+        cx = cx.saturating_add(crate::ui::text::cell_width(text) as u16);
+    }
+    cx
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -36,7 +54,7 @@ pub fn render_markdown(canvas: &mut Canvas, area: Rect, content: &str, view: Mar
     let scroll = view.scroll.min(max_scroll);
 
     for (idx, line) in lines.iter().skip(scroll).take(body_h).enumerate() {
-        canvas.print(area.x + line.indent, area.y + idx as u16, &line.text, line.style);
+        print_line(canvas, area.x + line.indent, area.y + idx as u16, line);
     }
 
     if max_scroll > 0 {
@@ -112,19 +130,19 @@ pub fn build_markdown_lines(content: &str, width: usize) -> Vec<MarkdownLine> {
         if trimmed.is_empty() {
             out.push(MarkdownLine::new("", Style::new().fg(SECONDARY), 0));
         } else if let Some(text) = trimmed.strip_prefix("### ") {
-            push_wrapped(&mut out, text, width, Style::new().fg(AMBER_DIM).bold(), 0);
+            push_inline(&mut out, "", text, width, Style::new().fg(AMBER_DIM).bold(), 0);
         } else if let Some(text) = trimmed.strip_prefix("## ") {
-            push_wrapped(&mut out, text, width, Style::new().fg(AMBER).bold(), 0);
+            push_inline(&mut out, "", text, width, Style::new().fg(AMBER).bold(), 0);
         } else if let Some(text) = trimmed.strip_prefix("# ") {
-            push_wrapped(&mut out, text, width, Style::new().fg(AMBER_BRIGHT).bold(), 0);
+            push_inline(&mut out, "", text, width, Style::new().fg(AMBER_BRIGHT).bold(), 0);
         } else if let Some(text) = trimmed.strip_prefix("> ") {
-            push_wrapped(&mut out, text, width.saturating_sub(2), Style::new().fg(DIM), 2);
+            push_inline(&mut out, "", text, width.saturating_sub(2), Style::new().fg(DIM), 2);
         } else if let Some(text) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
-            push_wrapped(&mut out, &format!("• {text}"), width.saturating_sub(2), Style::new().fg(SECONDARY), 1);
+            push_inline(&mut out, "• ", text, width.saturating_sub(2), Style::new().fg(SECONDARY), 1);
         } else if is_numbered_list(trimmed) {
-            push_wrapped(&mut out, trimmed, width.saturating_sub(2), Style::new().fg(SECONDARY), 1);
+            push_inline(&mut out, "", trimmed, width.saturating_sub(2), Style::new().fg(SECONDARY), 1);
         } else {
-            push_wrapped(&mut out, trimmed, width, Style::new().fg(WHITE), 0);
+            push_inline(&mut out, "", trimmed, width, Style::new().fg(WHITE), 0);
         }
     }
 
@@ -135,9 +153,129 @@ pub fn build_markdown_lines(content: &str, width: usize) -> Vec<MarkdownLine> {
     out
 }
 
-fn push_wrapped(out: &mut Vec<MarkdownLine>, text: &str, width: usize, style: Style, indent: u16) {
-    for line in wrap_cells(text, width.max(1), Overflow::WordWrap) {
-        out.push(MarkdownLine::new(line, style, indent));
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Inline {
+    Plain,
+    Bold,
+    Code,
+}
+
+fn find_char(chars: &[char], from: usize, target: char) -> Option<usize> {
+    (from..chars.len()).find(|&i| chars[i] == target)
+}
+
+fn find_bold_close(chars: &[char], from: usize) -> Option<usize> {
+    (from..chars.len().saturating_sub(1)).find(|&i| chars[i] == '*' && chars[i + 1] == '*')
+}
+
+/// Quita los marcadores de markdown inline y anota qué estilo lleva cada
+/// carácter resultante. Cubre `**negrita**`, `` `código` ``, `*cursiva*` (sin
+/// estilo propio: la terminal no la pinta, pero tampoco se ven los `*`) y
+/// `[texto](url)`. Un marcador sin pareja se deja tal cual.
+fn parse_inline(text: &str) -> (String, Vec<Inline>) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut plain = String::with_capacity(text.len());
+    let mut kinds: Vec<Inline> = Vec::with_capacity(chars.len());
+    let mut bold = false;
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+        let base = if bold { Inline::Bold } else { Inline::Plain };
+
+        if c == '`' {
+            if let Some(end) = find_char(&chars, i + 1, '`').filter(|&e| e > i + 1) {
+                for &ch in &chars[i + 1..end] {
+                    plain.push(ch);
+                    kinds.push(Inline::Code);
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        if c == '*' && chars.get(i + 1) == Some(&'*') && (bold || find_bold_close(&chars, i + 2).is_some()) {
+            bold = !bold;
+            i += 2;
+            continue;
+        }
+        if c == '*' && chars.get(i + 1).is_some_and(|n| !n.is_whitespace() && *n != '*') {
+            let close = (i + 2..chars.len()).find(|&j| {
+                chars[j] == '*' && !chars[j - 1].is_whitespace() && chars.get(j + 1) != Some(&'*')
+            });
+            if let Some(end) = close {
+                for &ch in &chars[i + 1..end] {
+                    plain.push(ch);
+                    kinds.push(base);
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        if c == '[' {
+            if let Some(close) = find_char(&chars, i + 1, ']').filter(|&c| chars.get(c + 1) == Some(&'(')) {
+                if let Some(paren) = find_char(&chars, close + 2, ')') {
+                    let label: String = chars[i + 1..close].iter().collect();
+                    let url: String = chars[close + 2..paren].iter().collect();
+                    let shown = if url.is_empty() || label == url { label } else { format!("{label} ({url})") };
+                    for ch in shown.chars() {
+                        plain.push(ch);
+                        kinds.push(base);
+                    }
+                    i = paren + 1;
+                    continue;
+                }
+            }
+        }
+        plain.push(c);
+        kinds.push(base);
+        i += 1;
+    }
+    (plain, kinds)
+}
+
+/// El texto sin marcadores de markdown inline. Para vistas de una línea
+/// (previews, razonamiento) que no pintan estilos por tramo.
+pub fn strip_inline(text: &str) -> String {
+    parse_inline(text).0
+}
+
+fn push_inline(out: &mut Vec<MarkdownLine>, prefix: &str, text: &str, width: usize, style: Style, indent: u16) {
+    let (plain, kinds) = parse_inline(text);
+    let source: Vec<char> = plain.chars().collect();
+    let styled = kinds.iter().any(|k| *k != Inline::Plain);
+    let mut cursor = 0usize;
+
+    let full = format!("{prefix}{plain}");
+    for line in wrap_cells(&full, width.max(1), Overflow::WordWrap) {
+        let mut md = MarkdownLine::new(line.clone(), style, indent);
+        if styled {
+            let mut spans: Vec<(String, Style)> = Vec::new();
+            for ch in line.chars() {
+                // Salta los espacios que el wrap descartó; si el carácter no viene
+                // del texto (el prefijo `• `), se queda con el estilo base.
+                let mut probe = cursor;
+                while probe < source.len() && source[probe] != ch && source[probe].is_whitespace() {
+                    probe += 1;
+                }
+                let kind = if probe < source.len() && source[probe] == ch {
+                    cursor = probe + 1;
+                    kinds[probe]
+                } else {
+                    Inline::Plain
+                };
+                let span_style = match kind {
+                    Inline::Plain => style,
+                    Inline::Bold => style.bold(),
+                    Inline::Code => Style::new().fg(GREEN),
+                };
+                match spans.last_mut() {
+                    Some((text, last)) if *last == span_style => text.push(ch),
+                    _ => spans.push((ch.to_string(), span_style)),
+                }
+            }
+            md.spans = spans;
+        }
+        out.push(md);
     }
 }
 
@@ -150,7 +288,7 @@ fn parse_table_row(line: &str) -> Vec<String> {
     line.trim()
         .trim_matches('|')
         .split('|')
-        .map(|cell| cell.trim().to_string())
+        .map(|cell| strip_inline(cell.trim()))
         .collect()
 }
 
@@ -235,5 +373,46 @@ mod tests {
         assert!(lines.iter().any(|line| line.text.contains("const x")));
         assert!(lines.iter().any(|line| line.text.contains("one")));
         assert!(lines.iter().all(|line| crate::ui::text::cell_width(&line.text) <= 30));
+    }
+
+    fn flat(lines: &[MarkdownLine]) -> String {
+        lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn inline_bold_loses_its_markers_and_keeps_its_style() {
+        let lines = build_markdown_lines("¡Hola! Soy **BEE**, tu Lead.", 60);
+        assert_eq!(lines[0].text, "¡Hola! Soy BEE, tu Lead.");
+        let bold: Vec<_> = lines[0].spans.iter().filter(|(_, st)| st.bold).collect();
+        assert_eq!(bold.len(), 1);
+        assert_eq!(bold[0].0, "BEE");
+        let joined: String = lines[0].spans.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(joined, lines[0].text);
+    }
+
+    #[test]
+    fn inline_code_links_and_italic() {
+        let lines = build_markdown_lines("usa `bun test` y *mira* [docs](https://x.dev)", 80);
+        assert_eq!(lines[0].text, "usa bun test y mira docs (https://x.dev)");
+        assert!(lines[0].spans.iter().any(|(t, st)| t == "bun test" && st.fg == GREEN));
+    }
+
+    #[test]
+    fn unpaired_markers_are_left_alone() {
+        assert_eq!(strip_inline("2 * 3 * 4"), "2 * 3 * 4");
+        assert_eq!(strip_inline("a ** b"), "a ** b");
+        assert_eq!(strip_inline("un ` suelto"), "un ` suelto");
+    }
+
+    #[test]
+    fn bold_survives_wrapping_and_bullets() {
+        let lines = build_markdown_lines("- uno **dos tres cuatro** cinco", 14);
+        assert!(flat(&lines).contains("• uno"));
+        assert!(!flat(&lines).contains("**"));
+        for l in lines.iter().filter(|l| !l.spans.is_empty()) {
+            let joined: String = l.spans.iter().map(|(t, _)| t.as_str()).collect();
+            assert_eq!(joined, l.text);
+        }
+        assert!(lines.iter().flat_map(|l| &l.spans).any(|(t, st)| st.bold && t.contains("dos")));
     }
 }

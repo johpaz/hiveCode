@@ -33,6 +33,12 @@ export interface ProviderDoc {
 }
 
 export interface ModelDoc {
+  catalog_managed?: boolean;
+  catalog_wire_id?: string;
+  catalog_last_seen_at?: number;
+  catalog_missing_since_slot?: number;
+  catalog_enabled_before_deprecation?: boolean;
+  deprecated_at?: number | null;
   id: string;
   provider_id: string;
   name: string;
@@ -140,6 +146,9 @@ export interface ToolDoc {
 }
 
 export interface SkillDoc {
+  metadata?: string;
+  source_path?: string;
+  catalog_managed?: boolean;
   id: string;
   name: string;
   description: string | null;

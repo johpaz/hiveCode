@@ -6,6 +6,7 @@
  */
 
 import type { IndexDoc } from "@johpaz/hive-db";
+import { createHash } from "node:crypto";
 import { getHiveDb } from "../storage/hivedb";
 import { logger } from "../utils/logger";
 
@@ -101,11 +102,35 @@ export function applyRelativeCutoff(hits: CapabilityHit[], ratio = 0.3): Capabil
   return hits.filter((hit) => hit.score >= ratio * top);
 }
 
+interface CatalogManifest { hashes: Record<string, string> }
+const catalogWrites = new WeakMap<object, Promise<void>>();
+
+/** Reconcile a complete catalog; persist fingerprints only after index writes succeed. */
 export async function replaceCapabilityDocs(type: CapabilityType, docs: CapabilityDoc[]): Promise<void> {
   const db = await getHiveDb();
-  await db.deleteByFilter({ field: "type", value: type });
-  if (docs.length === 0) return;
-  await db.upsertBatch(docs.map(toIndexDoc));
+  const operation = (catalogWrites.get(db) ?? Promise.resolve()).catch(() => {}).then(async () => {
+    if (docs.some(doc => doc.type !== type)) throw new Error("Capability catalog type mismatch");
+    const indexed = docs.map(toIndexDoc);
+    if (new Set(indexed.map(doc => doc.id)).size !== indexed.length) throw new Error("Duplicate capability ID");
+    const manifests = db.collection<CatalogManifest>("capabilityCatalogs");
+    const previous = await manifests.get(type);
+    const hashes: Record<string, string> = Object.create(null);
+    for (const doc of indexed) {
+      doc.filters = [...(doc.filters ?? [])].sort((a, b) => a.field.localeCompare(b.field) || a.value.localeCompare(b.value));
+      hashes[doc.id] = createHash("sha256").update(JSON.stringify(doc)).digest("hex");
+    }
+    // Adopt pre-manifest installations once, including obsolete documents whose IDs are unknown.
+    if (!previous) await db.deleteByFilter({ field: "type", value: type });
+    const changed = indexed.filter(doc => previous?.doc.hashes[doc.id] !== hashes[doc.id]);
+    const removed = Object.keys(previous?.doc.hashes ?? {}).filter(id => !Object.hasOwn(hashes, id));
+    if (changed.length) await db.upsertBatch(changed);
+    for (const id of removed) await db.deleteDoc(id);
+    if (!previous || changed.length || removed.length) {
+      await manifests.put(type, { hashes }, { expectedVersion: previous?.version ?? 0 });
+    }
+  });
+  catalogWrites.set(db, operation);
+  await operation;
 }
 
 export async function upsertCapabilityDocs(docs: CapabilityDoc[]): Promise<void> {

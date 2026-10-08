@@ -94,6 +94,35 @@ export async function updateDoc<T extends object>(
   throw new Error(`updateDoc: too much contention on ${collection}/${id}`);
 }
 
+/**
+ * Read-modify-write of one doc, retried on version conflict.
+ *
+ * `agents/<id>` is written from several places at once (the tracer bumps
+ * `lastTraceAt` on every trace), so a plain get → put with `expectedVersion`
+ * loses the race and surfaces as "version conflict" in the middle of a task.
+ * `mutate` runs again on the fresh doc each attempt; return `null` to skip.
+ */
+export async function mutateDoc<T extends object>(
+  collection: string,
+  id: string,
+  mutate: (current: T | null) => T | null,
+): Promise<T | null> {
+  const c = await col<T>(collection);
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const existing = await c.get(id);
+    const next = mutate(existing?.doc ?? null);
+    if (next === null) return null;
+    try {
+      await c.put(id, next, { expectedVersion: existing?.version ?? 0 });
+      return next;
+    } catch (err) {
+      if (attempt === MAX_RETRIES - 1) throw err;
+      // Version conflict: retry on a fresh read.
+    }
+  }
+  throw new Error(`mutateDoc: too much contention on ${collection}/${id}`);
+}
+
 export async function updateManyByIndex<T extends object>(
   collection: string,
   field: string,

@@ -1,7 +1,7 @@
 /**
  * Workspace Guard — enforces that filesystem tool paths stay inside the agent workspace.
  *
- * If the agent has no workspace configured the guard is a no-op and all paths are allowed.
+ * If the agent has no workspace configured, access is rejected.
  * If a workspace is set, any path that resolves outside it is rejected with a clear error.
  */
 

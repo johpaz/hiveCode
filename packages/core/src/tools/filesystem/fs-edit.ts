@@ -1,3 +1,4 @@
+import { backupIfExists } from "./backup";
 /**
  * fs_edit - Edit specific lines or sections of a file
  * 
@@ -11,19 +12,7 @@ import { logger } from "../../utils/logger.ts";
 import { resolveInWorkspace, getWorkspace } from "./workspace-guard.ts";
 const log = logger.child("fs-edit");
 
-async function backupIfExists(filePath: string): Promise<string | null> {
-  try {
-    if (!await Bun.file(filePath).exists()) return null
-    const ts = Date.now()
-    const bak = `${filePath}.hive-bak.${ts}`
-    await Bun.write(bak, Bun.file(filePath))
-    log.debug(`Backup created: ${bak}`)
-    return bak
-  } catch {
-    log.warn(`Backup failed for ${filePath}, proceeding without backup`)
-    return null
-  }
-}
+
 
 export const fsEditTool: Tool = {
   name: "fs_edit",
@@ -81,7 +70,7 @@ export const fsEditTool: Tool = {
       };
     }
 
-    const backup = await backupIfExists(filePath);
+    const backup = await backupIfExists(filePath, log);
 
     let newContent: string;
       let occurrences = 0;

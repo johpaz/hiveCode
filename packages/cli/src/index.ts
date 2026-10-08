@@ -42,6 +42,7 @@ const HELP = `
   hivecode exit                Detener el sistema
   hivecode free                Modelos hivecode-free (requiere login)
 
+  dev reset-records           Reiniciar registros y reconstruir catálogos
   --version, -v                Mostrar versión
   --help, -h                   Mostrar esta ayuda
 `
@@ -57,7 +58,8 @@ async function ensureGlobalInit(): Promise<void> {
     await bootstrap()
     _dbInitialized = true
   } catch (err) {
-    logger.error("[cli] ❌ Error de inicialización:", (err as Error).message)
+    const detail = err instanceof Error ? err.message : String(err)
+    logger.error(`[cli] ❌ Error de inicialización: ${detail}`)
     process.exit(1)
   }
 }
@@ -68,6 +70,13 @@ async function main(): Promise<void> {
   const normalizedArgs = args[0]?.includes("\\") || args[0]?.includes("/") ? args.slice(1) : args
   const command = normalizedArgs[0]
   const flags = normalizedArgs.filter(a => a.startsWith("--"))
+
+  if (command === "dev") {
+    if (normalizedArgs[1] !== "reset-records") throw new Error("Uso: hivecode dev reset-records")
+    const { resetRecords } = await import("@johpaz/hivecode-core/storage/reset-records")
+    await resetRecords()
+    return
+  }
 
   const skipInit = command !== undefined && ["--help", "-h", "--version", "-v", "upgrade", "exit"].includes(command)
   if (!skipInit) await ensureGlobalInit()

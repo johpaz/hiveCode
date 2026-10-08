@@ -65,29 +65,7 @@ pub fn pulse_color(primary: Color, alternate: Color, tick: u8) -> Color {
     if tick % 4 < 2 { primary } else { alternate }
 }
 
-pub fn text_width(text: &str) -> usize {
-    text.chars()
-        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(1).max(1))
-        .sum()
-}
-
-pub fn truncate_cells(text: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-
-    let mut out = String::new();
-    let mut width = 0usize;
-    for ch in text.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
-        if width + ch_width > max_width {
-            break;
-        }
-        out.push(ch);
-        width += ch_width;
-    }
-    out
-}
+pub use crate::ui::text::{cell_width as text_width, truncate_cells};
 
 pub fn push_wrapped_lines(
     lines: &mut Vec<StyledLine>,

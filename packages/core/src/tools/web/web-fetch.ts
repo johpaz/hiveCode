@@ -1,3 +1,4 @@
+import { fetchTaskResource } from "../../runtime/task-execution";
 /**
  * web_fetch - Fetch plain content from a URL
  * 
@@ -30,7 +31,7 @@ export const webFetchTool: Tool = {
     log.info(`Fetching: ${url}`);
 
     try {
-      const response = await fetch(url, {
+      const response = await fetchTaskResource(url, {
         headers: {
           "User-Agent": "Mozilla/5.0 (compatible; HiveBot/1.0)",
         },

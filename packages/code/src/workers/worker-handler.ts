@@ -1,6 +1,6 @@
 import { callLLM } from "@johpaz/hivecode-core/agent/llm-client"
 import type { LLMMessage, LLMToolDef, LLMToolCall } from "@johpaz/hivecode-core/agent/llm-client"
-import { readWorkerSecrets } from "./secrets"
+import { resolveWorkerApiKey as resolveApiKey } from "./secrets"
 import { getSubAgent, isValidSubAgent, SUBAGENT_WORKER_PATH } from "./subagent-registry"
 import type {
   CoordinatorTask, CoordinatorResult,
@@ -156,20 +156,6 @@ function compactMessagesIfNeeded(messages: LLMMessage[], model: string): LLMMess
   }
 
   return result
-}
-
-/** Resolve API key using getEnvironmentData → task.secrets → env fallback.
- *  Each provider uses its own independent key — no sharing between providers. */
-function resolveApiKey(provider: string, taskSecrets?: Record<string, string>): string {
-  const envKey = `${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`
-  const envSecrets = readWorkerSecrets()
-  if (envSecrets?.[envKey]) return envSecrets[envKey]
-  if (envSecrets?.["LLM_API_KEY"]) return envSecrets["LLM_API_KEY"]
-  if (taskSecrets?.[envKey]) return taskSecrets[envKey]
-  if (taskSecrets?.["LLM_API_KEY"]) return taskSecrets["LLM_API_KEY"]
-  const envValue = process.env[envKey] || process.env.LLM_API_KEY || ""
-  if (envValue) return envValue
-  throw new Error(`No API key found for provider "${provider}"`)
 }
 
 /** Build system prompt for a coordinator with tool instructions */
@@ -420,6 +406,7 @@ class WorkerAgent {
   private iterations = 0
   private pendingToolResolvers = new Map<string, (result: unknown) => void>()
   private isRunning = false
+  private taskAbort = new AbortController()
   private totalTokensIn = 0
   private totalTokensOut = 0
 
@@ -428,11 +415,19 @@ class WorkerAgent {
     this.systemPrompt = buildSystemPrompt(systemPrompt, coordinatorName)
   }
 
+  cancelTask(taskId: string): void {
+    if (this.task?.taskId !== taskId) return;
+    this.taskAbort.abort(new Error("Task cancelled"));
+    for (const resolve of this.pendingToolResolvers.values()) resolve({ ok: false, error: "Task cancelled" });
+    this.pendingToolResolvers.clear();
+  }
+
   async startTask(task: CoordinatorTask, tools: LLMToolDef[]): Promise<CoordinatorResult> {
     if (this.isRunning) {
       throw new Error("Worker is already running a task")
     }
     this.isRunning = true
+    this.taskAbort = new AbortController()
     this.task = task
     this.iterations = 0
     this.messages = []
@@ -487,6 +482,7 @@ class WorkerAgent {
       // Agent loop with tool execution
       let finalContent = ""
 while (this.iterations < MAX_ITERATIONS) {
+        this.taskAbort.signal.throwIfAborted()
         this.iterations++
         // Each iteration gets a unique streamId so thinking chunks from
         // the same LLM call are grouped into one streaming block,
@@ -568,7 +564,7 @@ while (this.iterations < MAX_ITERATIONS) {
           tools: this.tools.length > 0 ? this.tools : undefined,
           temperature: 0.3,
           maxTokens: 8192,
-          signal: controller.signal,
+          signal: AbortSignal.any([controller.signal, this.taskAbort.signal]),
           onToken,
         })
 
@@ -789,8 +785,18 @@ while (this.iterations < MAX_ITERATIONS) {
     }
 
     return new Promise((resolve) => {
+      this.taskAbort.signal.throwIfAborted()
       let resolved = false
       const worker = new (Worker as any)(SUBAGENT_WORKER_PATH, { smol: true }) as Bun.Worker
+      const abort = () => {
+        if (resolved) return
+        resolved = true
+        worker.terminate()
+        resolve(JSON.stringify({ ok: false, error: "Task cancelled" }))
+      }
+      this.taskAbort.signal.addEventListener("abort", abort, { once: true })
+      worker.addEventListener("close", () => this.taskAbort.signal.removeEventListener("abort", abort), { once: true })
+      if (this.taskAbort.signal.aborted) abort()
 
       worker.onmessage = (msg: MessageEvent) => {
         if (resolved) return
@@ -839,6 +845,7 @@ while (this.iterations < MAX_ITERATIONS) {
 
   /** Request tool execution from the main thread and wait for result */
   private executeToolViaMainThread(tc: LLMToolCall): Promise<unknown> {
+    this.taskAbort.signal.throwIfAborted()
     return new Promise((resolve) => {
       const toolCallId = tc.id
       this.pendingToolResolvers.set(toolCallId, resolve)
@@ -882,6 +889,8 @@ export function createWorkerHandler(systemPrompt: string, coordinatorName: strin
   self.onmessage = async (event) => {
     const rawData = event.data as string | ManagerToWorkerMessage
     const msg = typeof rawData === "string" ? JSON.parse(rawData) as ManagerToWorkerMessage : rawData
+
+    if (msg.type === "CANCEL_TASK" && msg.taskId) { agent.cancelTask(msg.taskId); return }
 
     if (msg.type === "TASK" && msg.task) {
       currentTask = msg.task

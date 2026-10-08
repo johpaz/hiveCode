@@ -1,10 +1,13 @@
+import { SUPPORTED_LLM_PROVIDERS, providerCredentialName } from "@johpaz/hivecode-core/services/provider-capabilities"
 /**
  * Secret management for workers.
  *
  * Reads API keys exclusively from Bun.secrets (OS keystore).
  * Distributes secrets to workers via setEnvironmentData + postMessage fallback.
  *
- * No env var fallbacks — all secrets must be stored via:
+ * Provider keys are loaded from the keystore. Worker resolution also accepts
+ * provider-specific credentials distributed to the task.
+ * Store configured provider keys via:
  *   bunx @johpaz/hivecode secret set provider.<id>
  */
 
@@ -13,7 +16,7 @@ import { col } from "@johpaz/hivecode-core/storage/hive"
 import type { ProviderDoc } from "@johpaz/hivecode-core/storage/collections"
 
 const logPrefix = "[secrets]"
-const SUPPORTED_LLM_PROVIDERS = new Set(["hiveagents", "openai", "anthropic", "gemini", "mistral", "deepseek", "kimi", "openrouter", "groq", "qwen", "nvidia", "codex", "opencode-go", "minimax", "hivecode-free"])
+
 
 export interface HiveSecrets {
   provider: string
@@ -22,9 +25,7 @@ export interface HiveSecrets {
   distributedAt: number
 }
 
-function providerEnvKey(providerId: string): string {
-  return `${providerId.toUpperCase().replace(/-/g, "_")}_API_KEY`
-}
+const providerEnvKey = providerCredentialName
 
 /**
  * Load enabled provider keys from the OS keystore, translating the canonical
@@ -52,7 +53,7 @@ export async function loadSecrets(): Promise<Record<string, string>> {
   if (found > 0) {
     console.info(`${logPrefix} ✅ Loaded ${found} provider key(s) from Bun.secrets (OS keystore)`)
   } else {
-    console.warn(`${logPrefix} ⚠️  No provider keys found in Bun.secrets. Configure one with /provider add`)
+    console.warn(`${logPrefix} ⚠️  No provider keys found in Bun.secrets. Configure one in Ctrl+S → Providers`)
   }
 
   if (missing.length > 0) {
@@ -67,7 +68,7 @@ export async function loadSecrets(): Promise<Record<string, string>> {
  */
 export function getApiKey(secrets: Record<string, string>, provider: string): string {
   const envKey = providerEnvKey(provider)
-  return secrets[envKey] || secrets["LLM_API_KEY"] || ""
+  return secrets[envKey] || ""
 }
 
 /**
@@ -130,4 +131,13 @@ export function readWorkerSecrets(): Record<string, string> | undefined {
   }
 
   return undefined
+}
+
+/** Resolve worker credentials in the existing provider-specific credentials distributed from the OS keystore. */
+export function resolveWorkerApiKey(provider: string, taskSecrets?: Record<string, string>): string {
+  const envKey = providerEnvKey(provider)
+  const envSecrets = readWorkerSecrets()
+  if (envSecrets?.[envKey]) return envSecrets[envKey]
+  if (taskSecrets?.[envKey]) return taskSecrets[envKey]
+  throw new Error(`No API key found for provider "${provider}"`)
 }

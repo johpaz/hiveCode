@@ -1,10 +1,11 @@
+import { readChannelConfig } from "../services/channel-config";
 import type { Config } from "../config/loader.ts";
 import { logger } from "../utils/logger.ts";
 import type { IChannel, IncomingMessage, MessageHandler } from "./base.ts";
 import { createTelegramChannel, type TelegramConfig } from "./telegram.ts";
 import { col } from "../storage/hive.ts";
 import type { ChannelDoc, UserChannelDoc } from "../storage/collections.ts";
-import { decryptConfig } from "../storage/crypto.ts";
+import { deserializeConfig } from "../storage/crypto.ts";
 
 export class ChannelManager {
   private config: Config;
@@ -50,14 +51,7 @@ export class ChannelManager {
   }
 
   private async loadStoredChannelConfig(channel: string, accountId: string): Promise<Record<string, unknown>> {
-    const entry = await (await col<UserChannelDoc>("userChannels")).get(`default:${channel}:${accountId}`);
-    if (!entry) return {};
-    try {
-      const encrypted = JSON.parse(entry.doc.config) as { encrypted: string; iv: string };
-      return decryptConfig(encrypted.encrypted, encrypted.iv);
-    } catch {
-      try { return JSON.parse(entry.doc.config); } catch { return {}; }
-    }
+    return readChannelConfig(channel, accountId);
   }
 
   private async initializeFromConfig(): Promise<void> {
@@ -97,7 +91,7 @@ export class ChannelManager {
           if (!botToken) {
             try {
               botToken = await (Bun as any).secrets?.get?.({ service: "hive-code", name: "telegram.bot_token" }) ?? "";
-            } catch { /* Bun.secrets not available */ }
+            } catch { throw new Error("Telegram credential keystore is unavailable"); }
           }
           const rawPolicy = (config.dmPolicy as string) ?? "open";
           const dmPolicy: "open" | "allowlist" | "pairing" =

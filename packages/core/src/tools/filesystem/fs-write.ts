@@ -1,3 +1,4 @@
+import { backupIfExists } from "./backup";
 /**
  * fs_write - Create or overwrite file in agent workspace
  * 
@@ -13,19 +14,7 @@ import * as path from "node:path";
 
 const log = logger.child("fs-write");
 
-async function backupIfExists(filePath: string): Promise<string | null> {
-  try {
-    if (!await Bun.file(filePath).exists()) return null
-    const ts = Date.now()
-    const bak = `${filePath}.hive-bak.${ts}`
-    await Bun.write(bak, Bun.file(filePath))
-    log.debug(`Backup created: ${bak}`)
-    return bak
-  } catch {
-    log.warn(`Backup failed for ${filePath}, proceeding without backup`)
-    return null
-  }
-}
+
 
 export const fsWriteTool: Tool = {
   name: "fs_write",
@@ -58,7 +47,7 @@ export const fsWriteTool: Tool = {
 
     try {
       // Bun.write automatically creates parent directories if they don't exist
-      const backup = await backupIfExists(filePath);
+      const backup = await backupIfExists(filePath, log);
 
       await Bun.write(filePath, content);
 

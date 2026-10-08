@@ -180,9 +180,14 @@ fn classification_reason(action: &str) -> &'static str {
 }
 
 fn clean_reasoning(content: &str) -> String {
-    content
-        .replace("<think>", "")
-        .replace("</think>", "")
-        .trim()
-        .to_string()
+    // Una sola línea: `print` descarta los saltos y pegaba las palabras
+    // ("hiveCode" + "Estad…" → "hiveCodeEstad…").
+    crate::ui::strip_inline(
+        &content
+            .replace("<think>", "")
+            .replace("</think>", "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }

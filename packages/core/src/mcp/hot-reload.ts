@@ -11,144 +11,80 @@
 import { col } from "../storage/hive";
 import type { McpServerDoc } from "../storage/collections";
 import { logger } from "../utils/logger";
-import { decryptConfig } from "../storage/crypto";
+import { serverRuntimeConfig } from "./server-config";
 import { syncMCPToolsToDB, syncMCPToolsToIndex, clearMCPToolsFromDB } from "./tool-sync";
 import type { MCPClientManager } from "@johpaz/hivecode-mcp";
 
 const log = logger.child("mcp:hot-reload");
 
-let _watchInterval: Timer | null = null;
-let _lastKnownServers = new Set<string>();
+let interval: ReturnType<typeof setInterval> | null = null;
+let pending: Promise<void> | null = null;
+let known = new Set<string>();
+const toolSignatures = new Map<string, string>();
+let manager: MCPClientManager | null = null;
 
-/**
- * Start watching for MCP server changes
- * Checks every 2 seconds for new/removed servers
- */
-export function startMCPHotReload(mcpManager: MCPClientManager): void {
-  if (_watchInterval) {
-    log.warn("MCP Hot Reload already running");
-    return;
-  }
-
-  log.info("Starting MCP Hot Reload watcher (2s interval)");
-
-  // Initial sync - sync all currently connected servers
-  syncMCPServers(mcpManager).then(() => {
-    log.info("Initial MCP server sync complete");
-  }).catch(err => {
-    log.error(`Initial MCP server sync failed: ${err.message}`);
-  });
-
-  // Watch for changes
-  _watchInterval = setInterval(() => {
-    syncMCPServers(mcpManager);
-  }, 2000);
+export function startMCPHotReload(next: MCPClientManager): void {
+  if (interval) return;
+  manager = next;
+  const tick = () => {
+    if (pending) return;
+    pending = syncMCPServers(next).catch(error => log.error(`MCP sync failed: ${error.message}`))
+      .finally(() => { pending = null; });
+  };
+  tick();
+  interval = setInterval(tick, 2000);
+  interval.unref?.();
 }
 
-/**
- * Stop watching
- */
-export function stopMCPHotReload(): void {
-  if (_watchInterval) {
-    clearInterval(_watchInterval);
-    _watchInterval = null;
-    log.info("MCP Hot Reload stopped");
-  }
+export async function stopMCPHotReload(): Promise<void> {
+  if (interval) clearInterval(interval);
+  interval = null;
+  await pending;
+  await manager?.disconnectAll();
+  manager = null;
+  known.clear();
+  toolSignatures.clear();
 }
 
-/**
- * Sync MCP servers from HiveDB to MCP Manager.
- * Note: Only server status is tracked, tools are loaded at runtime
- */
 async function syncMCPServers(mcpManager: MCPClientManager): Promise<void> {
-  try {
-    const serversCol = await col<McpServerDoc>("mcpServers");
-    const dbServers = (await serversCol.findBy("enabled", true)).map((entry) => entry.doc);
-
-    const currentServerNames = new Set(dbServers.map(s => s.id || s.name));
-
-    // Detect new servers
-    for (const server of dbServers) {
-      const serverName = server.id || server.name;
-
-      if (!_lastKnownServers.has(serverName)) {
-        log.info(`New MCP server detected: ${serverName} - connecting...`);
-
-        try {
-          const mcpServerConfig: any = {
-            transport: server.transport,
-            command: server.command,
-            args: server.args ? JSON.parse(server.args) : [],
-            url: server.url,
-            enabled: true,
-          };
-
-          if (server.headers_encrypted && server.headers_iv) {
-            mcpServerConfig.headers = decryptConfig(server.headers_encrypted, server.headers_iv);
-          }
-
-          // Update MCP Manager config (auto-connects new servers)
-          const currentConfig = (mcpManager as any).config || { servers: {} };
-          await mcpManager.updateConfig({
-            ...currentConfig,
-            servers: {
-              ...currentConfig.servers,
-              [serverName]: mcpServerConfig,
-            },
-          });
-
-          // Wait a bit for connection to establish
-          await new Promise(resolve => setTimeout(resolve, 500));
-
-          // Get tools count and update status
-          const tools = mcpManager.getServerTools(serverName) || [];
-          await patchServer(serverName, { status: "connected", tools_count: tools.length });
-
-          // Persist MCP tool definitions to HiveDB and the capability index
-          // Use server.name (human-readable) for mcpToolId consistency with context-compiler
-          await syncMCPToolsToDB(server.id || server.name, server.name || serverName, tools);
-          await syncMCPToolsToIndex();
-
-          log.info(`MCP server ${serverName} connected: ${tools.length} tools available`);
-        } catch (err) {
-          log.error(`Failed to connect MCP server ${serverName}: ${(err as Error).message}`);
-          await patchServer(serverName, { status: "error" });
-        }
-      }
-    }
-
-    // Detect removed servers
-    for (const oldServerName of _lastKnownServers) {
-      if (!currentServerNames.has(oldServerName)) {
-        log.info(`MCP server removed: ${oldServerName} - disconnecting...`);
-
-        try {
-          // Remove from MCP Manager
-          const currentConfig = (mcpManager as any).config || { servers: {} };
-          delete currentConfig.servers[oldServerName];
-          await mcpManager.updateConfig(currentConfig);
-
-          // Delete MCP tool definitions from HiveDB and the capability index
-          await clearMCPToolsFromDB(oldServerName);
-
-          await patchServer(oldServerName, { status: "disconnected", tools_count: 0 });
-
-          log.info(`MCP server ${oldServerName} disconnected`);
-        } catch (err) {
-          log.error(`Failed to disconnect MCP server ${oldServerName}: ${(err as Error).message}`);
-        }
-      }
-    }
-
-    _lastKnownServers = currentServerNames;
-  } catch (err) {
-    log.error(`MCP server sync failed: ${(err as Error).message}`);
-  }
-}
-
-async function patchServer(id: string, patch: Partial<McpServerDoc>): Promise<void> {
   const servers = await col<McpServerDoc>("mcpServers");
-  const entry = await servers.get(id);
-  if (!entry) return;
-  await servers.put(id, { ...entry.doc, ...patch }, { expectedVersion: entry.version });
+  const rows = await servers.scan();
+  const enabled = rows.filter(row => row.doc.enabled);
+  const invalid = new Set<string>();
+  const current = new Set(enabled.map(row => row.doc.id || row.doc.name));
+  const config = mcpManager.getConfig();
+  const runtime = { ...config.servers };
+  let toolsDirty = false;
+  for (const name of known) delete runtime[name];
+  for (const row of rows) {
+    const name = row.doc.id || row.doc.name;
+    // Disabled database entries also override any static configuration.
+    if (!row.doc.enabled) delete runtime[name];
+    else {
+      try { runtime[name] = await serverRuntimeConfig(row.doc); }
+      catch {
+        delete runtime[name]; invalid.add(name);
+        log.error(`MCP configuration cannot be decrypted or parsed: ${name}`);
+      }
+    }
+  }
+  await mcpManager.updateConfig({ ...config, servers: runtime });
+  for (const row of rows) {
+    const name = row.doc.id || row.doc.name;
+    const status = !row.doc.enabled ? "disconnected" : invalid.has(name) ? "error" : mcpManager.getServerStatus(name) ?? "disconnected";
+    const tools = status === "connected" ? mcpManager.getServerTools(name) : [];
+    if (row.doc.status !== status || row.doc.tools_count !== tools.length) {
+      const latest = await servers.get(row.id);
+      if (latest && latest.doc.enabled === row.doc.enabled) await servers.put(row.id, { ...latest.doc, status, tools_count: tools.length }, { expectedVersion: latest.version });
+    }
+    const signature = JSON.stringify([row.doc.name, tools]);
+    if (toolSignatures.get(row.id) !== signature) {
+      await syncMCPToolsToDB(row.id, row.doc.name, tools);
+      toolSignatures.set(row.id, signature);
+      toolsDirty = true;
+    }
+  }
+  for (const name of known) if (!current.has(name)) { await clearMCPToolsFromDB(name); toolSignatures.delete(name); toolsDirty = true; }
+  if (toolsDirty) await syncMCPToolsToIndex();
+  known = current;
 }

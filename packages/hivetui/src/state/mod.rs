@@ -129,6 +129,7 @@ pub struct AppState {
     pub running: bool,
     /// Índice seleccionado en el popup de comandos `/`.
     pub command_popup_selected: usize,
+    pub command_menu: Vec<crate::ipc::IpcCommandMenuItem>,
     /// Campo enfocado dentro del modal de config.
     pub modal_focused: usize,
     /// Mensajes IPC pendientes de enviar (escritos por controller, drenados por app.rs).
@@ -659,7 +660,12 @@ impl AppState {
                 if let Some(m) = new_model { self.session.model = m; }
                 if let Some(t) = new_token_count { self.session.token_count = t; }
             }
-            BunMessage::SessionChanged { session_id } => {
+            BunMessage::SessionChanged { session_id, fresh: true } => {
+                // Sesión creada lazy por el primer mensaje: el turno ya está en
+                // el historial local. Sólo se adopta la id.
+                self.session.session_id = session_id;
+            }
+            BunMessage::SessionChanged { session_id, fresh: false } => {
                 // La sesión activa cambió (creada lazy al primer mensaje, o
                 // cambiada con `/session resume`). Todo lo que cuelga de la
                 // sesión anterior se suelta; Bun reenvía el snapshot de la
@@ -998,6 +1004,9 @@ impl AppState {
                     self.route_after_worker_activity(&coordinator, &phase, "thinking", Some(&content));
                 }
             }
+            BunMessage::NarrativeChunk { coordinator, phase, content, replay: true, .. } => {
+                self.thought.push_chunk(ThoughtChunk { coordinator, phase, content });
+            }
             BunMessage::NarrativeChunk { task_id, coordinator, phase, content, .. } => {
                 self.harness.last_agent = Some(coordinator.clone());
                 self.harness.last_phase = Some(phase.clone());
@@ -1085,6 +1094,7 @@ impl AppState {
                         id: m.id, name: m.name, url: m.url, enabled: m.enabled, has_headers: m.has_headers,
                     }).collect();
                     hub.skills = skills.into_iter().map(|s| SettingsSkill {
+                        id: if s.id.is_empty() { s.name.clone() } else { s.id },
                         name: s.name, description: s.description,
                         category: s.category, active: s.active,
                     }).collect();
@@ -1567,8 +1577,11 @@ impl AppState {
             }
 
             // ── No-ops ─────────────────────────────────────────────────────────
-            BunMessage::QuickMenu { .. }
-            | BunMessage::Suspend
+            BunMessage::QuickMenu { items } => {
+                self.command_menu = items;
+                self.command_popup_selected = 0;
+            }
+            BunMessage::Suspend
             | BunMessage::Resume
             | BunMessage::ContextUpdate { .. } => {}
         }
@@ -1790,7 +1803,7 @@ mod tests {
         assert_eq!(state.history.entries.len(), 3);
         assert_eq!(state.session.session_id, "old-session-1");
 
-        state.apply_message(BunMessage::SessionChanged { session_id: "new-session-2".to_string() });
+        state.apply_message(BunMessage::SessionChanged { session_id: "new-session-2".to_string(), fresh: false });
 
         // The id moves; the transcript of the previous session does not survive.
         assert_eq!(state.session.session_id, "new-session-2");
@@ -1798,11 +1811,27 @@ mod tests {
     }
 
     #[test]
+    fn fresh_session_keeps_the_first_message_the_user_just_typed() {
+        let mut state = AppState::default();
+        state.history.entries.push(HistoryEntry {
+            role: Role::User,
+            content: "hola".to_string(),
+            agent: None,
+            timestamp: None,
+        });
+
+        state.apply_message(BunMessage::SessionChanged { session_id: "s-1".to_string(), fresh: true });
+
+        assert_eq!(state.session.session_id, "s-1");
+        assert_eq!(state.history.entries.len(), 1);
+    }
+
+    #[test]
     fn session_changed_preserves_the_chosen_mode() {
         let mut state = AppState::default();
         state.session.mode = ReplMode::Auto;
 
-        state.apply_message(BunMessage::SessionChanged { session_id: "s-1".to_string() });
+        state.apply_message(BunMessage::SessionChanged { session_id: "s-1".to_string(), fresh: false });
 
         // Switching sessions is not a mode change — the user's choice stands.
         assert_eq!(state.session.mode, ReplMode::Auto);
@@ -2053,6 +2082,7 @@ mod loadout_tests {
         state.library = SkillLibrary { skills: vec![] };
         // El payload llega por `settings_data`; aquí se comprueba el tipo.
         let payload = crate::ipc::IpcSettingsSkill {
+            id: "test".into(),
             name: "browser_automate".into(),
             description: "21 tools".into(),
             category: "web".into(),

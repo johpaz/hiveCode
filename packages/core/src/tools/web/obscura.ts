@@ -1,3 +1,4 @@
+import { spawnTaskProcess } from "../../runtime/task-execution";
 /**
  * Browser automation via Obscura (https://obscura.sh) — direct MCP 2.0 client.
  *
@@ -163,7 +164,7 @@ class ObscuraMcpSession {
     }
 
     log.info(`[obscura] starting MCP server: ${bin} ${args.join(" ")}`)
-    const proc = Bun.spawn([bin, ...args], {
+    const proc = spawnTaskProcess([bin, ...args], {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",

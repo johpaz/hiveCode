@@ -1,7 +1,6 @@
+import { listModelChoices as getModelsForProvider, listCatalogModels, listCatalogProviders } from "@johpaz/hivecode-core/services/provider-catalog-read"
 import { createInterface } from "node:readline/promises"
 import { stdin, stdout } from "node:process"
-import { col } from "@johpaz/hivecode-core/storage/hive"
-import type { ModelDoc } from "@johpaz/hivecode-core/storage/collections"
 import {
   HIVEAGENTS_MODEL_ID,
   HIVEAGENTS_OPENAI_BASE_URL,
@@ -75,6 +74,9 @@ function secretQuestion(message: string): Promise<string | symbol> {
     const cleanup = () => {
       stdin.setRawMode(false)
       stdin.removeListener("data", onKey)
+      // resume() above left the stream flowing; without this Bun keeps reading
+      // the TTY after the wizard and steals keystrokes from the child TUI.
+      stdin.pause()
       stdout.write("\n")
     }
 
@@ -257,19 +259,7 @@ export interface ProviderSetupResult {
   model: string
 }
 
-async function getModelsForProvider(providerId: string): Promise<{ value: string; label: string }[]> {
-  try {
-    const models = await col<ModelDoc>("models")
-    const rows = await models.findBy("provider_id", providerId)
-    return rows
-      .map((entry) => entry.doc)
-      .filter((model) => model.model_type === "llm" && model.enabled)
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((model) => ({ value: model.id, label: model.name }))
-  } catch {
-    return []
-  }
-}
+
 
 export async function runProviderSetupWizard(
   knownProviders: string[] = [],
@@ -279,10 +269,11 @@ export async function runProviderSetupWizard(
   hiveIntro(`hivecode v${version} · Configurar provider`)
 
   let provider = preferredProvider?.trim() ?? ""
-  if (!provider && knownProviders.length > 0) {
+  const catalogProviders = await listCatalogProviders()
+  if (!provider && catalogProviders.length > 0) {
     const selected = await hiveSelect({
       message: "Provider:",
-      options: knownProviders.map((value) => ({ value, label: value })),
+      options: catalogProviders.map(p => ({ value: p.id, label: p.name })),
     })
     if (isCancel(selected)) return null
     provider = selected as string
@@ -302,11 +293,14 @@ export async function runProviderSetupWizard(
       return null
     }
     hiveNote(`Sesión iniciada como ${result.email ?? "usuario"}`, ["hivecode-free ✓"])
-    // El token ya fue guardado en Bun.secrets por runAuthCli
-    // kimi-k2.6 dejó de servir: NVIDIA responde 404 "not found for account" en
-    // cuentas normales. DeepSeek V4 Flash responde en ~0,5 s con tool calling
-    // desde una cuenta gratuita (verificado 2026-09-10).
-    return { provider, apiKey: "", baseUrl: "", model: "hivecode-free/deepseek-ai/deepseek-v4-flash-0731" }
+    const models = await getModelsForProvider(provider)
+    if (!models.length) {
+      hiveNote("Sin modelos disponibles", ["El catálogo de la BD no tiene modelos habilitados para este provider."])
+      return null
+    }
+    const selected = await hiveSelect({ message: `Modelo para ${provider}:`, options: models })
+    if (isCancel(selected)) return null
+    return { provider, apiKey: "", baseUrl: "", model: selected as string }
   }
 
   const apiKey = await hiveText({
@@ -330,7 +324,8 @@ export async function runProviderSetupWizard(
     }
   }
 
-  const baseUrl = await hiveText({ message: "Base URL opcional", placeholder: "https://api.anthropic.com" })
+  const configuredBaseUrl = catalogProviders.find(p => p.id === provider)?.base_url ?? ""
+  const baseUrl = await hiveText({ message: "Base URL opcional (Enter conserva la configurada)", placeholder: configuredBaseUrl || "https://api..." })
   if (isCancel(baseUrl)) return null
 
   let model = ""
@@ -358,7 +353,7 @@ export async function runProviderSetupWizard(
   return {
     provider,
     apiKey,
-    baseUrl: isCancel(baseUrl) ? "" : baseUrl,
+    baseUrl: baseUrl || configuredBaseUrl,
     model,
   }
 }

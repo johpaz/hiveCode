@@ -12,7 +12,7 @@
  *    Rationale: Prevents cascade effects where a bad selection in one turn affects
  *    future turns. Forces fresh evaluation each time.
  * 
- * 2. Maximum 4 tools per turn: Keeps token count low and prevents overwhelming
+ * 2. Maximum 12 tools per turn: Keeps token count low and prevents overwhelming
  *    the LLM with irrelevant tools. Forces prioritization.
  * 
  * 3. Relative relevance cutoff: HiveDB BM25 scores are positive and

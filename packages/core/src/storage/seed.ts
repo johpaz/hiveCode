@@ -1,3 +1,4 @@
+import { syncSkillCatalog } from "../services/skill-catalog";
 import * as path from "node:path"
 import type { Collection } from "@johpaz/hive-db"
 import { SkillLoader, getClaudeSkillsDirs } from "@johpaz/hivecode-skills"
@@ -222,13 +223,13 @@ export const SEED_DATA: SeedData = {
     { id: "kimi", name: "Kimi (Moonshot)", baseUrl: "https://api.moonshot.ai/v1" },
     { id: "openrouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
     { id: "groq", name: "Groq", baseUrl: "https://api.groq.com/openai/v1" },
-    { id: "elevenlabs", name: "ElevenLabs", baseUrl: "https://api.elevenlabs.io/v1" },
+    { id: "elevenlabs", name: "ElevenLabs", baseUrl: "https://api.elevenlabs.io/v1", category: "tts" },
     { id: "qwen", name: "Qwen (Alibaba)", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", category: "llm" },
     { id: "nvidia", name: "NVIDIA NIM", baseUrl: "https://integrate.api.nvidia.com/v1" },
     { id: "codex", name: "OpenAI Codex", baseUrl: "https://api.openai.com/v1" },
     { id: "opencode-go", name: "OpenCode Go", baseUrl: "https://opencode.ai/zen/go/v1" },
     { id: "minimax", name: "MiniMax", baseUrl: "https://api.minimaxi.com/v1" },
-    { id: "piper", name: "Piper (Local TTS)" },
+    { id: "piper", name: "Piper (Local TTS)", category: "tts" },
     { id: "hiveagents", name: "HiveAgents", baseUrl: "https://llm.hiveagents.io/v1", category: "llm" },
   ],
 
@@ -552,7 +553,7 @@ async function reseedToolsAndSkills(): Promise<void> {
   }
   log.info(`[seed] ✅ ${SEED_DATA.tools.length} tools re-seeded en HiveDB`);
 
-  await deleteAll(skills);
+
   const skillLoader = new SkillLoader({
     workspacePath: process.env.HIVE_HOME || process.cwd(),
     skills: {
@@ -564,28 +565,7 @@ async function reseedToolsAndSkills(): Promise<void> {
   });
 
   const realSkills = skillLoader.loadAllSkills();
-  for (const skill of realSkills) {
-    const version = typeof skill.version === "string" ? skill.version : String(skill.version || "0.0.1");
-    await skills.put(skill.name, {
-      id: skill.name,
-      name: skill.name,
-      description: skill.description || "",
-      version,
-      author: skill.author || "Anonymous",
-      icon: skill.icon || "skill",
-      category: skill.category || "general",
-      permissions: JSON.stringify(skill.permissions || []),
-      dependencies: JSON.stringify(skill.dependencies || []),
-      tools: (skill.tools || []).join(","),
-      triggers: (skill.triggers || []).join(","),
-      preferred_agents: JSON.stringify(skill.preferred_agents || []),
-      body: skill.content || "",
-      version_num: parseVersionMajor(version),
-      active: true,
-      created_at: now,
-      updated_at: now,
-    }, { expectedVersion: 0 });
-  }
+  await syncSkillCatalog(realSkills);
   log.info(`[seed] ✅ ${realSkills.length} skills re-seeded en HiveDB`);
 }
 
@@ -615,7 +595,7 @@ export async function seedAllData(force = false): Promise<void> {
     const providers = await col<ProviderDoc>("providers");
     for (const provider of SEED_DATA.providers) {
       const existing = await providers.get(provider.id);
-      const baseUrl = provider.baseUrl ?? null;
+      const baseUrl = existing?.doc.base_url ?? provider.baseUrl ?? null;
       const doc: ProviderDoc = {
         id: provider.id,
         name: provider.name,
@@ -646,12 +626,13 @@ export async function seedAllData(force = false): Promise<void> {
     const seedModelIds = new Set(SEED_DATA.models.map((model) => model.id));
     const existingModels = await models.scan();
     for (const entry of existingModels) {
-      if (!seedModelIds.has(entry.id)) await models.delete(entry.id);
+      if (!seedModelIds.has(entry.id) && !entry.doc.catalog_managed) await models.delete(entry.id);
     }
 
     for (const model of SEED_DATA.models) {
       const existing = await models.get(model.id);
       await putDoc(models, model.id, {
+        ...existing?.doc,
         id: model.id,
         provider_id: model.providerId,
         name: model.name,
@@ -668,7 +649,7 @@ export async function seedAllData(force = false): Promise<void> {
 
     const agents = await col<AgentDoc>("agents");
     for (const agent of await agents.scan()) {
-      if (!seedModelIds.has(agent.doc.model_id)) {
+      if (!await models.get(agent.doc.model_id)) {
         const isHiveAgents = agent.doc.provider_id === "hiveagents";
         await putDoc(agents, agent.id, {
           ...agent.doc,

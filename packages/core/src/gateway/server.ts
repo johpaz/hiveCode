@@ -1,3 +1,7 @@
+import { createStreamingCallbacks } from "./streaming-callbacks";
+import { findMcpServer as findMcpServer } from "../mcp/server-config";
+import { serverRuntimeConfig } from "../mcp/server-config";
+import { startProviderCatalogScheduler } from "../services/provider-catalog";
 import type { Config } from "../config/loader";
 import { loadConfig, getHiveDir } from "../config/loader";
 import { logger, onLogEntry } from "../utils/logger";
@@ -111,23 +115,9 @@ async function connectMcpServer(
   server: Record<string, any>,
   mcpName: string
 ): Promise<void> {
-  const mcpServerConfig: any = {
-    transport: server.transport as string,
-    command: server.command as string | null,
-    args: server.args ? JSON.parse(server.args as string) : [],
-    url: server.url as string | null,
-    enabled: true,
-  }
+  const mcpServerConfig = await serverRuntimeConfig(server as import("../storage/collections").McpServerDoc);
 
-  if (server.headers_encrypted && server.headers_iv) {
-    try {
-      mcpServerConfig.headers = decryptConfig(server.headers_encrypted, server.headers_iv);
-    } catch {
-      logger.warn(`[MCP] Failed to decrypt headers for ${mcpName}`);
-    }
-  }
-
-  const currentConfig = mcp.config || { servers: {} }
+  const currentConfig = mcp.getConfig()
   const newServersConfig = { ...currentConfig.servers }
   newServersConfig[mcpName] = mcpServerConfig
 
@@ -149,12 +139,7 @@ async function getCoordinatorAgent(): Promise<AgentDoc | null> {
   return (await (await col<AgentDoc>("agents")).findBy("role", "coordinator")).map((entry) => entry.doc)[0] ?? null;
 }
 
-async function findMcpServer(idOrName: string) {
-  const servers = await col<McpServerDoc>("mcpServers");
-  const byId = await servers.get(idOrName);
-  if (byId) return byId;
-  return (await servers.scan()).find((entry) => entry.doc.name === idOrName);
-}
+
 
 async function patchMcpServer(idOrName: string, patch: Partial<McpServerDoc>): Promise<McpServerDoc | null> {
   const servers = await col<McpServerDoc>("mcpServers");
@@ -179,7 +164,7 @@ export async function startGateway(config: Config): Promise<void> {
 
   const host = config.gateway?.host ?? "127.0.0.1";
   const port = config.gateway?.port ?? 16120;
-  const pidFile = expandPath(config.gateway?.pidFile ?? "~/.hivecode/gateway.pid");
+  const pidFile = expandPath(config.gateway?.pidFile ?? path.join(getHiveDir(), "gateway.pid"));
 
   // FIX 2 — startTime para calcular uptime en /status y /api/agents
   const startTime = Date.now();
@@ -1820,64 +1805,8 @@ export async function startGateway(config: Config): Promise<void> {
                   maxSteps: DEFAULT_INTERACTIVE_MAX_STEPS,
                   threadId: unifiedSessionId,
                   userId,
-                  onToken: async (token: string) => {
-                    if (signal.aborted) return;
-                    streamedContent += token;
-                    // Send chunk to client
-                    ws.send(JSON.stringify({
-                      type: "message",
-                      id: messageId,
-                      sessionId: unifiedSessionId,
-                      content: token,
-                      isChunk: true,
-                      isStep: false,
-                    } as OutboundMessage));
-                  },
-                  onStep: async (step) => {
-                    if (signal.aborted) return;
-
-                    // "text" = el agente narra lo que esta pensando/haciendo
-                    if (step.type === "text" && step.message) {
-                      const trimmedMessage = (typeof step.message === "string" ? step.message : "").trim();
-                      if (trimmedMessage) {
-                        ws.send(JSON.stringify({
-                          type: "progress",
-                          sessionId: unifiedSessionId,
-                          content: trimmedMessage,
-                        } as OutboundMessage));
-                      }
-                      return;
-                    }
-
-                    // "tool_call" = el agente va a ejecutar una herramienta → narrar al usuario
-                    if (step.type === "tool_call" && step.toolName) {
-                      const narration = getNarration(step.toolName);
-                      ws.send(JSON.stringify({
-                        type: "progress",
-                        sessionId: unifiedSessionId,
-                        content: narration,
-                      } as OutboundMessage));
-                      return;
-                    }
-
-                    // "tool_result" = resultado de herramienta → solo si pide enviarse al usuario
-                    if (step.type === "tool_result" && step.message) {
-                      try {
-                        const result = JSON.parse(step.message);
-                        if (result._sendToUser || result.status) {
-                          const userMessage = result.message || result.status || "";
-                          if (userMessage) {
-                            ws.send(JSON.stringify({
-                              type: "progress",
-                              sessionId: unifiedSessionId,
-                              content: userMessage,
-                            } as OutboundMessage));
-                          }
-                          return;
-                        }
-                      } catch { }
-                    }
-                  },
+                  signal,
+                  ...createStreamingCallbacks({send: message => ws.send(message), signal, sessionId: unifiedSessionId, messageId, appendToken: token => { streamedContent += token }, narration: getNarration}),
                 });
 
                 // Use streamed content from onToken, fallback to response.content
@@ -2078,64 +2007,7 @@ export async function startGateway(config: Config): Promise<void> {
                 threadId: unifiedSessionId,
                 userId,
                 signal,
-                onToken: async (token: string) => {
-                  if (signal.aborted) return;
-                  streamedContent += token;
-                  // Send chunk to client
-                  ws.send(JSON.stringify({
-                    type: "message",
-                    id: messageId,
-                    sessionId: unifiedSessionId,
-                    content: token,
-                    isChunk: true,
-                    isStep: false,
-                  } as OutboundMessage));
-                },
-                onStep: async (step) => {
-                  if (signal.aborted) return;
-
-                  // "text" = el agente narra lo que esta pensando/haciendo
-                  if (step.type === "text" && step.message) {
-                    const trimmedMessage = (typeof step.message === "string" ? step.message : "").trim();
-                    if (trimmedMessage) {
-                      ws.send(JSON.stringify({
-                        type: "progress",
-                        sessionId: unifiedSessionId,
-                        content: trimmedMessage,
-                      } as OutboundMessage));
-                    }
-                    return;
-                  }
-
-                  // "tool_call" = el agente va a ejecutar una herramienta → narrar al usuario
-                  if (step.type === "tool_call" && step.toolName) {
-                    const narration = getNarration(step.toolName);
-                    ws.send(JSON.stringify({
-                      type: "progress",
-                      sessionId: unifiedSessionId,
-                      content: narration,
-                    } as OutboundMessage));
-                    return;
-                  }
-
-                  // "tool_result" = resultado de herramienta → solo si pide enviarse al usuario
-                  if (step.type === "tool_result" && step.message) {
-                    try {
-                      const result = JSON.parse(step.message);
-                      if (result._sendToUser || result.status) {
-                        const userMessage = result.message || result.status || "";
-                        if (userMessage) {
-                          ws.send(JSON.stringify({
-                            type: "progress",
-                            sessionId: unifiedSessionId,
-                            content: userMessage,
-                          } as OutboundMessage));
-                        }
-                        return;
-                      }
-                    } catch { }
-                  }
-                },
+                ...createStreamingCallbacks({send: message => ws.send(message), signal, sessionId: unifiedSessionId, messageId, appendToken: token => { streamedContent += token }, narration: getNarration}),
               });
 
               // Use streamed content from onToken, fallback to response.content
@@ -2290,6 +2162,8 @@ export async function startGateway(config: Config): Promise<void> {
     }
   });
 
+  const stopProviderCatalogScheduler = startProviderCatalogScheduler();
+
   log.info(`Gateway started successfully`);
 
   // Terminal-only mode — no UI, no browser
@@ -2301,6 +2175,7 @@ export async function startGateway(config: Config): Promise<void> {
   // FIX 7 — SIGTERM: graceful shutdown with full cleanup
   process.on("SIGTERM", async () => {
     log.info("Received SIGTERM, shutting down gracefully...");
+    await stopProviderCatalogScheduler();
     watchers.forEach((close) => close());
 
     const mcp = agent?.getMCPManager();
@@ -2317,7 +2192,8 @@ export async function startGateway(config: Config): Promise<void> {
     // MCP hot-reload — stop polling interval
     try {
       const { stopMCPHotReload } = await import("../mcp/hot-reload");
-      stopMCPHotReload();
+      await stopMCPHotReload();
+      await (await import("../services/skill-catalog")).stopSkillCatalogReload();
       log.info("MCP hot-reload stopped");
     } catch { }
 

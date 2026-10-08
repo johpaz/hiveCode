@@ -1,21 +1,18 @@
 {
   "name": "@johpaz/hivecode-cli",
   "version": "0.1.0",
-  "description": "hivecode CLI — Multi-AI coding tool. Console-first.",
+  "description": "hivecode CLI \u2014 Multi-AI coding tool. Console-first.",
   "bin": {
     "hivecode": "./dist/hivecode.js"
   },
   "main": "./dist/hivecode.js",
   "license": "hivecode-NC-1.0",
   "files": [
-    "dist/hivecode.js",
-    "dist/hivecode.cmd",
-    "dist/hivecode.ps1",
+    "dist/",
     "README.md"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outfile dist/hivecode.js --target bun",
-    "postbuild": "bun run scripts/postbuild.ts",
+    "build": "cargo build --release --manifest-path ../hivetui/Cargo.toml && bun scripts/build.ts",
     "test": "bun test"
   },
   "dependencies": {

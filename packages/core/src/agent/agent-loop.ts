@@ -1,3 +1,4 @@
+import { runWithTaskSignal } from "../runtime/task-execution"
 /**
  * Agent Loop — native implementation, no LangGraph.
  *
@@ -23,6 +24,7 @@ import { callLLM, resolveProviderConfig, type LLMMessage } from "./llm-client"
 import { addMessage } from "./conversation-store"
 import { saveTrace, recordLLMUsage } from "./tracer"
 import { maybeCompact, clearOldToolResults } from "./compaction"
+import { capToolResult, fitLoopMessages, messageBudget, messageTokens } from "./context-budget"
 import type { MCPClientManager } from "@johpaz/hivecode-mcp"
 import { compileContext } from "./context-compiler"
 import { jevWantsParallel } from "./jev-planner"
@@ -57,7 +59,7 @@ async function executeTool(
   allTools: Array<{ name: string; execute?: (params: Record<string, unknown>, config?: any) => Promise<unknown> }>,
   toolName: string,
   args: unknown,
-  config: { user_id?: string; thread_id?: string; channel?: string; workspace?: string | null }
+  config: { user_id?: string; thread_id?: string; channel?: string; workspace?: string | null; signal?: AbortSignal }
 ): Promise<unknown> {
   const tool = allTools.find(t => t.name === toolName)
   if (!tool?.execute) {
@@ -65,7 +67,7 @@ async function executeTool(
   }
   try {
     const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args
-    return await tool.execute(parsedArgs as Record<string, unknown>, { configurable: config })
+    return await runWithTaskSignal(config.signal, () => tool.execute(parsedArgs as Record<string, unknown>, { configurable: config, signal: config.signal }))
   } catch (err) {
     return {
       error: true,
@@ -603,6 +605,22 @@ export async function* runAgent(
     messages.push({ role: "user", content: opts.userMessage })
   }
 
+  // What actually goes to the model each call: old tool results cleared harder
+  // as the window fills, then whole oldest turns dropped if that is not enough.
+  // `messages` itself stays complete for persistence and checkpoints.
+  const prepareMessages = (all: LLMMessage[], tools: unknown): LLMMessage[] => {
+    const budget = messageBudget(providerCfg.contextWindow, tools)
+    let prepared = clearOldToolResults(all) as LLMMessage[]
+    if (prepared.reduce((sum, m) => sum + messageTokens(m), 0) > budget * 0.7) {
+      prepared = clearOldToolResults(all, 2) as LLMMessage[]
+    }
+    const fit = fitLoopMessages(prepared, budget)
+    if (fit.dropped > 0 || fit.messages !== prepared) {
+      log.info(`[agent-loop] Context budget: ${all.length} → ${fit.messages.length} msgs (dropped ${fit.dropped}), ~${fit.tokens}/${budget} tokens`)
+    }
+    return fit.messages
+  }
+
   let iterations = 0
   let totalInputTokens = 0
   let totalOutputTokens = 0
@@ -764,7 +782,7 @@ export async function* runAgent(
     const response = await callProfileLLM({
       ...providerCfg,
       ...profileCallOptions,
-      messages: clearOldToolResults(messages) as LLMMessage[],
+      messages: prepareMessages(messages, ctx.tools),
       tools: ctx.tools.length > 0 ? ctx.tools : undefined,
       signal: opts.signal,
       onToken: opts.onToken,
@@ -1010,7 +1028,9 @@ export async function* runAgent(
         taskId: opts.threadId,
       })
 
+      opts.signal?.throwIfAborted()
       const toolResultJS = await executeTool(ctx.allTools, toolName, tc.function.arguments, {
+        signal: opts.signal,
         user_id: opts.userId,
         thread_id: opts.threadId,
         channel: opts.channel,
@@ -1018,7 +1038,9 @@ export async function* runAgent(
       })
       
       const toolMs = Math.round(performance.now() - tTool)
-      const toolResultLLM = formatToolResult(toolResultJS, cleanModel)
+      // One result never gets to take the window: an fs_list of a whole repo used
+      // to go in whole and the next call died with a 400.
+      const toolResultLLM = capToolResult(formatToolResult(toolResultJS, cleanModel), providerCfg.contextWindow)
       const toolError = !!(
         toolResultJS
         && typeof toolResultJS === "object"
@@ -1331,7 +1353,7 @@ export async function* runAgent(
       const synthesis = await callProfileLLM({
         ...providerCfg,
         ...profileCallOptions,
-        messages: clearOldToolResults(messages) as LLMMessage[],
+        messages: prepareMessages(messages, undefined),
         tools: undefined, // no tools — force text response
         signal: opts.signal,
         onToken: opts.onToken,

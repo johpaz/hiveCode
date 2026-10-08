@@ -1,4 +1,4 @@
-import { col, toIndexable } from "../storage/hive"
+import { col, mutateDoc, toIndexable } from "../storage/hive"
 import type { AgentDoc } from "../storage/collections"
 import { obscuraToolNames } from "../tools/web/obscura"
 
@@ -183,51 +183,47 @@ export async function ensureCoreAgentProfiles(userId = "default"): Promise<void>
 
   for (const type of CORE_AGENT_TYPES) {
     const definition = CORE_AGENT_DEFINITIONS[type]
-    const existing = await agents.get(type)
-    const inheritedProvider = existing?.doc.provider_id
-      ?? (type === "bee" ? existingCoordinator?.provider_id : undefined)
-      ?? toIndexable(null)
-    const inheritedModel = existing?.doc.model_id
-      ?? (type === "bee" ? existingCoordinator?.model_id : undefined)
-      ?? toIndexable(null)
+    await mutateDoc<AgentDoc>("agents", type, (current) => {
+      const existing = current ? { doc: current } : null
+      const inheritedProvider = existing?.doc.provider_id
+        ?? (type === "bee" ? existingCoordinator?.provider_id : undefined)
+        ?? toIndexable(null)
+      const inheritedModel = existing?.doc.model_id
+        ?? (type === "bee" ? existingCoordinator?.model_id : undefined)
+        ?? toIndexable(null)
 
-    const doc: AgentDoc = {
-      id: type,
-      user_id: existing?.doc.user_id ?? userId,
-      name: definition.name,
-      description: definition.description,
-      system_prompt: definition.systemPrompt,
-      tone: existing?.doc.tone ?? "direct",
-      role: definition.role,
-      agent_type: type,
-      status: existing?.doc.status ?? "idle",
-      enabled: type === "bee" ? true : existing?.doc.enabled ?? definition.enabled,
-      provider_id: inheritedProvider,
-      model_id: inheritedModel,
-      fallback_provider_id: existing?.doc.fallback_provider_id ?? toIndexable(null),
-      fallback_model_id: existing?.doc.fallback_model_id ?? toIndexable(null),
-      effort: existing?.doc.effort ?? "medium",
-      max_input_tokens: existing?.doc.max_input_tokens ?? 0,
-      max_output_tokens: existing?.doc.max_output_tokens ?? 0,
-      max_cost_usd: existing?.doc.max_cost_usd ?? 0,
-      tools_json: JSON.stringify(definition.tools),
-      skills_json: JSON.stringify(definition.skills),
-      permission_profile: definition.permissionProfile,
-      user_instructions: existing?.doc.user_instructions ?? "",
-      config_version: (existing?.doc.config_version ?? 0) + (existing ? 0 : 1),
-      parent_id: type === "bee" ? toIndexable(null) : "bee",
-      max_iterations: existing?.doc.max_iterations ?? definition.maxTurns,
-      workspace: existing?.doc.workspace ?? null,
-      lastTraceAt: existing?.doc.lastTraceAt,
-      created_at: existing?.doc.created_at ?? now,
-      updated_at: now,
-    }
-
-    if (existing) {
-      await agents.put(type, doc, { expectedVersion: existing.version })
-    } else {
-      await agents.put(type, doc, { expectedVersion: 0 })
-    }
+      return {
+        id: type,
+        user_id: existing?.doc.user_id ?? userId,
+        name: definition.name,
+        description: definition.description,
+        system_prompt: definition.systemPrompt,
+        tone: existing?.doc.tone ?? "direct",
+        role: definition.role,
+        agent_type: type,
+        status: existing?.doc.status ?? "idle",
+        enabled: type === "bee" ? true : existing?.doc.enabled ?? definition.enabled,
+        provider_id: inheritedProvider,
+        model_id: inheritedModel,
+        fallback_provider_id: existing?.doc.fallback_provider_id ?? toIndexable(null),
+        fallback_model_id: existing?.doc.fallback_model_id ?? toIndexable(null),
+        effort: existing?.doc.effort ?? "medium",
+        max_input_tokens: existing?.doc.max_input_tokens ?? 0,
+        max_output_tokens: existing?.doc.max_output_tokens ?? 0,
+        max_cost_usd: existing?.doc.max_cost_usd ?? 0,
+        tools_json: JSON.stringify(definition.tools),
+        skills_json: JSON.stringify(definition.skills),
+        permission_profile: definition.permissionProfile,
+        user_instructions: existing?.doc.user_instructions ?? "",
+        config_version: (existing?.doc.config_version ?? 0) + (existing ? 0 : 1),
+        parent_id: type === "bee" ? toIndexable(null) : "bee",
+        max_iterations: existing?.doc.max_iterations ?? definition.maxTurns,
+        workspace: existing?.doc.workspace ?? null,
+        lastTraceAt: existing?.doc.lastTraceAt,
+        created_at: existing?.doc.created_at ?? now,
+        updated_at: now,
+      } satisfies AgentDoc
+    })
   }
 }
 

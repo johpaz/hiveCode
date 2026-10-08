@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "description": "hivecode core — Multi-AI coding engine",
+  "description": "hivecode core \u2014 Multi-AI coding engine",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
   "types": "./src/index.ts",
@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@johpaz/hive-db": "^0.5.1",
+    "@johpaz/hive-db": "^0.7.0",
     "@johpaz/hivecode-mcp": "workspace:*",
     "@johpaz/hivecode-skills": "workspace:*",
     "@anthropic-ai/sdk": "^0.98.0",
@@ -34,6 +34,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./gateway": "./src/gateway/index.ts",
+    "./services/provider-catalog": "./src/services/provider-catalog.ts",
+    "./services/provider-catalog-read": "./src/services/provider-catalog-read.ts",
     "./gateway/channel-notify": "./src/gateway/channel-notify.ts",
     "./gateway/task-streaming": "./src/gateway/task-streaming.ts",
     "./gateway/helpers/path": "./src/gateway/helpers/path.ts",
@@ -69,6 +71,7 @@
     "./utils": "./src/utils/logger.ts",
     "./utils/logger": "./src/utils/logger.ts",
     "./utils/retry": "./src/utils/retry.ts",
+    "./storage/code-config": "./src/storage/code-config.ts",
     "./storage/hive": "./src/storage/hive.ts",
     "./storage/ids": "./src/storage/ids.ts",
     "./storage/hivedb": "./src/storage/hivedb.ts",
@@ -91,7 +94,7 @@
     "./tools/speckit": "./src/tools/speckit/index.ts",
     "./tools/cron": "./src/tools/cron/index.ts",
     "./tools/filesystem": "./src/tools/filesystem/index.ts",
-"./tools/filesystem/workspace-guard": "./src/tools/filesystem/workspace-guard.ts",
+    "./tools/filesystem/workspace-guard": "./src/tools/filesystem/workspace-guard.ts",
     "./tools/web": "./src/tools/web/index.ts",
     "./tools/web/browser-detector": "./src/tools/web/browser-detector.ts",
     "./ipc": "./src/ipc/index.ts",
@@ -100,6 +103,15 @@
     "./ipc/server": "./src/ipc/server.ts",
     "./ipc/ui-broadcast": "./src/ipc/ui-broadcast.ts",
     "./auth/auth-cli": "./src/auth/auth-cli.ts",
-    "./events/event-bus": "./src/events/event-bus.ts"
+    "./events/event-bus": "./src/events/event-bus.ts",
+    "./runtime/process-identity": "./src/runtime/process-identity.ts",
+    "./storage/reset-records": "./src/storage/reset-records.ts",
+    "./services/provider-capabilities": "./src/services/provider-capabilities.ts",
+    "./runtime/task-execution": "./src/runtime/task-execution.ts",
+    "./utils/search-snippet": "./src/utils/search-snippet.ts",
+    "./services/narrative-mapping": "./src/services/narrative-mapping.ts",
+    "./services/skill-catalog": "./src/services/skill-catalog.ts",
+    "./services/diagnostics": "./src/services/diagnostics.ts",
+    "./services/channel-config": "./src/services/channel-config.ts"
   }
 }

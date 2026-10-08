@@ -4,7 +4,7 @@
 
 `hivecode` es un harness de ingeniería de software con cinco perfiles estables: **BEE**, **Scout**, **Builder**, **Verifier** y **Reviewer**. Solo activa agentes bajo demanda, limita la concurrencia global a tres y usa Spec Kit nativo como protocolo obligatorio para features, arquitectura, migraciones y refactors amplios.
 
-> **Runtime:** Bun >= 1.3.13
+> **Runtime:** Bun >= 1.4.2
 > **Base de datos:** HiveDB WAL — única fuente de verdad
 > **TUI:** Rust + crossterm, renderer custom (`packages/hivetui/`)
 > **Licencia:** hivecode-NC-1.0 (no comercial)
@@ -606,9 +606,23 @@ dist/
 
 ## Requisitos
 
-- [Bun](https://bun.sh) >= 1.3.13
+- [Bun](https://bun.sh) >= 1.4.2
 - [Rust](https://rustup.rs) + [crossterm](https://crates.io/crates/crossterm) (para compilar el TUI en `packages/hivetui/`)
 - Git
+
+### Sandbox del shell por sistema operativo
+
+El sandbox de `shell_executor` está **apagado por defecto** (`sandbox.enabled: false`, o `HIVE_SANDBOX=1`).
+
+| Sistema | Aislamiento | Notas |
+|---|---|---|
+| Linux | bubblewrap (`bwrap`) | Instálalo con tu gestor de paquetes. |
+| macOS | Seatbelt (`sandbox-exec`) | Viene con el sistema. |
+| Windows | **WSL2** | Ejecuta hivecode dentro de una distro WSL2: ahí es Linux y usa bwrap. |
+
+Windows nativo no está soportado por `shell_executor` (no hay `/bin/sh`), igual que el sandbox de Claude Code. WSL1 tampoco sirve: no tiene namespaces, así que `bwrap` no funciona. Actualiza la distro con `wsl --set-version <distro> 2`.
+
+Con `sandbox.enabled: true` y sin proveedor disponible, el comando corre **sin aislamiento** y solo queda un aviso en el log. Pon `sandbox.failIfUnavailable: true` para que falle en su lugar.
 
 ---
 

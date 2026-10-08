@@ -1,4 +1,5 @@
-import { encryptConfig, decryptConfig } from "../../storage/crypto"
+import { channelConfigId as configDocId, storeChannelConfig as putUserChannel, readChannelConfig as getStoredChannelConfig } from "../../services/channel-config";
+import { encryptConfig, deserializeConfig } from "../../storage/crypto"
 import { col } from "../../storage/hive"
 import type { ChannelDoc, UserChannelDoc } from "../../storage/collections"
 
@@ -340,38 +341,6 @@ function channelDoc(id: string, type: string, patch: Partial<ChannelDoc> = {}): 
   }
 }
 
-function configDocId(userId: string, channel: string, accountId: string): string {
-  return `${userId}:${channel}:${accountId}`
-}
-
-async function putUserChannel(userId: string, channel: string, accountId: string, config: Record<string, unknown>, active: boolean): Promise<void> {
-  const userChannels = await col<UserChannelDoc>("userChannels")
-  const id = configDocId(userId, channel, accountId)
-  const existing = await userChannels.get(id)
-  const encrypted = encryptConfig(config || {})
-  await userChannels.put(id, {
-    id,
-    user_id: userId,
-    channel,
-    account_id: accountId,
-    config: JSON.stringify(encrypted),
-    active,
-    created_at: existing?.doc.created_at ?? Date.now(),
-    updated_at: Date.now(),
-  }, { expectedVersion: existing?.version ?? 0 })
-}
-
 async function deleteUserChannel(userId: string, channel: string, accountId: string): Promise<void> {
   await (await col<UserChannelDoc>("userChannels")).delete(configDocId(userId, channel, accountId))
-}
-
-async function getStoredChannelConfig(channel: string, accountId: string): Promise<Record<string, unknown>> {
-  const entry = await (await col<UserChannelDoc>("userChannels")).get(configDocId("default", channel, accountId))
-  if (!entry) return {}
-  try {
-    const encrypted = JSON.parse(entry.doc.config) as { encrypted: string; iv: string }
-    return decryptConfig(encrypted.encrypted, encrypted.iv)
-  } catch {
-    try { return JSON.parse(entry.doc.config) } catch { return {} }
-  }
 }

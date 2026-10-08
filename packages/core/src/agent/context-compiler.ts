@@ -33,6 +33,7 @@ import { syncPlaybookToIndex } from "./playbook-selector"
 import { describeSwarmCapabilities, planJevContext } from "./jev-planner"
 import { emitJevDecision } from "./jev-decisions"
 import { getRecentMessages, getSummary, getScratchpad, toAPIMessages } from "./conversation-store"
+import { relevantConversationMemory } from "./conversation-memory"
 import { formatContext, estimateTokens } from "../utils/toon"
 import { buildSystemPromptWithProjects } from "./prompt-builder"
 import { createAllTools } from "../tools/index"
@@ -711,6 +712,19 @@ export async function compileContext(opts: {
 
   if (systemPromptExtraCausal) {
     systemPrompt += systemPromptExtraCausal
+  }
+
+  if (!isWorker) {
+    try {
+      const query = typeof userMessage === "string" ? userMessage : userMessage
+        .filter(part => part.type === "text").map(part => (part as { text: string }).text).join("\n");
+      systemPrompt += await relevantConversationMemory({
+        threadId, query,
+        excludeSummary: summary && totalTokens > TOKEN_COMPACT_THRESHOLD ? summary.summary : undefined,
+      });
+    } catch {
+      log.warn("[context-compiler] Conversation memory unavailable for this turn")
+    }
   }
 
   log.info(

@@ -4,6 +4,10 @@ use crate::{
     widgets::components::{agent_display_name, render_scrollbar, worker_color},
 };
 
+/// Etiqueta del turno del usuario, para distinguirlo de los `⬡ agente`.
+const USER_LABEL: &str = "TÚ ";
+const USER_COMPACT_PREFIX: &str = "TÚ ▸ ";
+
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     if state.history.entries.is_empty() {
         render_empty(canvas, area, state);
@@ -82,19 +86,19 @@ fn render_compact_turns(canvas: &mut Canvas, area: Rect, state: &AppState, expan
             canvas.print(check_x, y, ellipsis, Style::new().fg(DIM));
         } else {
             let (prefix, pfx_style) = match entry.role {
-                Role::User      => ("▸ ", Style::new().fg(AMBER_DIM)),
+                Role::User      => (USER_COMPACT_PREFIX, Style::new().fg(AMBER_DIM)),
                 Role::Assistant => ("  ", Style::new().fg(DIM)),
                 Role::System    => ("⚙ ", Style::new().fg(DIM)),
                 Role::Shell     => ("$ ", Style::new().fg(DIM)),
                 Role::Thinking  => ("… ", Style::new().fg(DIM)),
             };
 
-            let max_content = avail_w.saturating_sub(prefix.len() + 3).min(80);
+            let max_content = avail_w.saturating_sub(prefix.chars().count() + 3).min(80);
             let shown = clean_preview(&entry.content, max_content);
             let ellipsis = if entry.content.lines().count() > 1 || entry.content.len() > avail_w { "…" } else { "✓" };
 
             canvas.print(area.x + 1, y, prefix, pfx_style);
-            canvas.print(area.x + 1 + prefix.len() as u16, y, &shown, Style::new().fg(DIM));
+            canvas.print(area.x + 1 + prefix.chars().count() as u16, y, &shown, Style::new().fg(DIM));
             let check_x = area.right().saturating_sub(2);
             canvas.print(check_x, y, ellipsis, Style::new().fg(DIM));
         }
@@ -138,9 +142,11 @@ fn render_expanded_turn(canvas: &mut Canvas, area: Rect, state: &AppState, last_
 
     if let Some(q) = question {
         let q_line: String = q.lines().next().unwrap_or("").chars()
-            .take(area.w.saturating_sub(4) as usize).collect();
-        canvas.print(area.x + 1, y, "▸ ", Style::new().fg(AMBER).bold());
-        canvas.print(area.x + 3, y, &q_line, Style::new().fg(WHITE).bold());
+            .take(area.w.saturating_sub(4 + USER_LABEL.chars().count() as u16) as usize).collect();
+        canvas.print(area.x + 1, y, USER_LABEL, Style::new().fg(AMBER_DIM).bold());
+        let label_w = USER_LABEL.chars().count() as u16;
+        canvas.print(area.x + 1 + label_w, y, "▸ ", Style::new().fg(AMBER).bold());
+        canvas.print(area.x + 3 + label_w, y, &q_line, Style::new().fg(WHITE).bold());
         y += 1;
     }
 
@@ -179,7 +185,13 @@ fn render_expanded_turn(canvas: &mut Canvas, area: Rect, state: &AppState, last_
         response_overflows = max_scroll > 0;
 
         for line in response_lines.iter().skip(scroll).take(visible_h) {
-            if line.inline_code {
+            if !line.spans.is_empty() {
+                let mut cx = area.x + 2 + line.indent;
+                for (text, style) in &line.spans {
+                    canvas.print(cx, y, text, *style);
+                    cx = cx.saturating_add(crate::ui::cell_width(text) as u16);
+                }
+            } else if line.inline_code {
                 print_line_with_inline_code(
                     canvas,
                     area.x + 2 + line.indent,
@@ -381,6 +393,8 @@ struct ResponseLine {
     style: Style,
     inline_code: bool,
     indent: u16,
+    /// Tramos con estilo propio (negrita, código); vacío si la línea es de un solo estilo.
+    spans: Vec<(String, Style)>,
 }
 
 /// Extrae un fragmento limpio para la vista compacta:
@@ -409,7 +423,7 @@ fn clean_preview(content: &str, max_chars: usize) -> String {
         .find(|l| !l.is_empty())
         .unwrap_or("");
 
-    first.chars().take(max_chars).collect()
+    crate::ui::strip_inline(first).chars().take(max_chars).collect()
 }
 
 fn build_response_lines(content: &str, width: usize) -> Vec<ResponseLine> {
@@ -417,6 +431,7 @@ fn build_response_lines(content: &str, width: usize) -> Vec<ResponseLine> {
         .into_iter()
         .map(|line| ResponseLine {
             inline_code: line.text.contains('`') && line.style.bg != BG_ELEVATED,
+            spans: line.spans,
             text: line.text,
             style: line.style,
             indent: line.indent,

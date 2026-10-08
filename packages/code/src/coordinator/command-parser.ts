@@ -1,8 +1,12 @@
+import { readChannelConfig, storeChannelConfig } from "@johpaz/hivecode-core/services/channel-config";
+import { renderRuntimeDiagnostics } from "@johpaz/hivecode-core/services/diagnostics";
+import packageInfo from "../../../../package.json"
+import { getCodeConfig, setCodeConfig } from "@johpaz/hivecode-core/storage/code-config"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { runReflector } from "../agent/reflector"
 import { callLLM, resolveProviderConfig } from "@johpaz/hivecode-core/agent/llm-client"
 import { saveScratchpadNote, getScratchpad, deleteScratchpadNote } from "@johpaz/hivecode-core/agent/conversation-store"
-import { hasProviderApiKey, storeProviderApiKey, encryptConfig, isFreeProvider } from "@johpaz/hivecode-core/storage/crypto"
+import { hasProviderApiKey, storeProviderApiKey, encryptConfig, serializeConfig, deserializeConfig, isFreeProvider } from "@johpaz/hivecode-core/storage/crypto"
 import { col, ensureIndexes, nextId } from "@johpaz/hivecode-core/storage/hive"
 import { formatIdCandidates, resolveIdFragment, shortId } from "@johpaz/hivecode-core/storage/ids"
 import type {
@@ -14,6 +18,7 @@ import type {
   CodeSessionDoc,
   CodeSessionModeDoc,
   CodeTaskDoc,
+  CodeTaskPhaseDoc,
   CodeTraceDoc,
   CodeTurnDoc,
   McpServerDoc,
@@ -57,6 +62,7 @@ export interface UiCallbacks {
   runTelegramConnectWizard?: () => Promise<Record<string, any> | null>
   showConfigModal?: (command: string, title: string, fields: ModalField[]) => Promise<Record<string, string> | null>
   showInfoModal?: (title: string, content: string) => Promise<void>
+  cancelTask?: (taskId: string) => Promise<void>
   executeTask?: (task: string, mode: string) => Promise<string>
   /** Start or restart a channel in the running gateway (called after saving channel config to DB) */
   startChannel?: (type: string, accountId: string, config: Record<string, unknown>) => Promise<void>
@@ -85,7 +91,7 @@ export interface ProviderRow {
   enabled: boolean
 }
 
-const VERSION = "1.0.0"
+const VERSION = packageInfo.version
 const GIT_HASH = process.env.GIT_HASH || "dev"
 
 type DbCompat = unknown
@@ -104,16 +110,6 @@ async function getDoc<T>(collection: string, id: string): Promise<T | null> {
 
 async function getVersionedDoc<T>(collection: string, id: string) {
   return (await col<T>(collection)).get(id)
-}
-
-async function getCodeConfig(key: string): Promise<string> {
-  return (await getDoc<CodeConfigDoc>("codeConfig", key))?.value ?? ""
-}
-
-async function setCodeConfig(key: string, value: string | null): Promise<void> {
-  const codeConfig = await col<CodeConfigDoc>("codeConfig")
-  const existing = await codeConfig.get(key)
-  await codeConfig.put(key, { key, value, updated_at: Date.now() }, { expectedVersion: existing?.version ?? 0 })
 }
 
 async function deleteCodeConfig(key: string): Promise<void> {
@@ -325,49 +321,25 @@ function renderProviderList(providers: ProviderRow[], activeId: string, modelMap
   ].join("\n")
 }
 
-const ALL_COMMANDS = [
+export const COMMAND_CATALOG = [
+  { command: "/exit", category: "tui", description: "salir de hivecode" },
+  { command: "/compact", category: "tui", description: "compactar contexto de la sesión" },
+  { command: "/stop", category: "tui", description: "detener tarea en curso" },
+  { command: "/logs", category: "tui", description: "mostrar u ocultar logs" },
+  { command: "/timeline", category: "tui", description: "mostrar u ocultar trabajadores" },
+  { command: "/copy", category: "tui", description: "navegar y copiar historial" },
   { command: "/ace status", category: "ace", description: "estado del aprendizaje adaptativo" },
   { command: "/ace playbook list", category: "ace", description: "reglas aprendidas del playbook" },
   { command: "/ace playbook reset", category: "ace", description: "reiniciar playbook" },
   { command: "/ace reflector run", category: "ace", description: "forzar analisis de trazas" },
   { command: "/doctor", category: "system", description: "diagnostico completo del sistema" },
-  { command: "/env", category: "system", description: "variables de entorno no sensibles" },
-  { command: "/plan", category: "task", description: "diseñar tarea sin ejecutar" },
   { command: "/run", category: "task", description: "ejecutar tarea en modo actual" },
-  { command: "/github status", category: "github", description: "estado de token github" },
-  { command: "/github whoami", category: "github", description: "usuario autenticado en github" },
-  { command: "/github set-repo", category: "github", description: "vincular repositorio github" },
-  { command: "/github connect", category: "github", description: "conectar con github (token PAT)" },
-  { command: "/github disconnect", category: "github", description: "desconectar github" },
   { command: "/help", category: "system", description: "ayuda de comandos" },
   { command: "/logs list", category: "logs", description: "ver logs del sistema" },
   { command: "/logs follow", category: "logs", description: "seguir logs en tiempo real" },
-  { command: "/mcp list", category: "mcp", description: "listar servidores mcp" },
-  { command: "/mcp add", category: "mcp", description: "agregar servidor mcp" },
-  { command: "/mcp connect", category: "mcp", description: "conectar servidor mcp" },
-  { command: "/mcp load", category: "mcp", description: "cargar config mcp desde archivo" },
-  { command: "/mcp enable", category: "mcp", description: "habilitar servidor mcp" },
-  { command: "/mcp disable", category: "mcp", description: "deshabilitar servidor mcp" },
-  { command: "/mcp test", category: "mcp", description: "probar servidor mcp" },
-  { command: "/mode get", category: "mode", description: "ver modo actual" },
-  { command: "/mode set", category: "mode", description: "cambiar modo plan approval auto" },
-  { command: "/mode history", category: "mode", description: "historial de cambios de modo" },
-  { command: "/modelo list", category: "modelo", description: "listar modelos disponibles" },
-  { command: "/modelo set", category: "modelo", description: "cambiar modelo activo" },
-  { command: "/modelo info", category: "modelo", description: "informacion del modelo" },
   { command: "/narrative show", category: "narrative", description: "mostrar entradas del narrativo" },
   { command: "/narrative search", category: "narrative", description: "buscar en narrativo con HiveDB" },
   { command: "/narrative export", category: "narrative", description: "exportar narrativo completo" },
-  { command: "/provider list", category: "provider", description: "listar providers configurados" },
-  { command: "/provider add", category: "provider", description: "agregar provider de ia" },
-  { command: "/provider set", category: "provider", description: "cambiar provider activo" },
-  { command: "/provider test", category: "provider", description: "probar conexion al provider" },
-  { command: "/provider status", category: "provider", description: "estado de todos los providers" },
-  { command: "/skill list", category: "skill", description: "listar skills disponibles" },
-  { command: "/skill enable", category: "skill", description: "habilitar skill" },
-  { command: "/skill disable", category: "skill", description: "deshabilitar skill" },
-  { command: "/skill info", category: "skill", description: "informacion de skill" },
-  { command: "/skill add", category: "skill", description: "importar skill desde archivo" },
   { command: "/task list", category: "task", description: "listar tareas recientes" },
   { command: "/task status", category: "task", description: "estado detallado de tarea" },
   { command: "/task cancel", category: "task", description: "cancelar tarea en curso" },
@@ -376,12 +348,10 @@ const ALL_COMMANDS = [
   { command: "/session resume", category: "session", description: "reanudar sesion por id" },
   { command: "/session new", category: "session", description: "iniciar nueva sesion" },
   { command: "/session status", category: "session", description: "ver sesion activa" },
-  { command: "/telegram status", category: "telegram", description: "estado de telegram" },
-  { command: "/telegram connect", category: "telegram", description: "conectar telegram" },
-  { command: "/telegram disconnect", category: "telegram", description: "desconectar telegram" },
-  { command: "/telegram edit", category: "telegram", description: "editar configuracion telegram" },
   { command: "/version", category: "system", description: "version de hivecode" },
-]
+].map(command => ({ ...command, visible: true }))
+
+export const ALL_COMMANDS = COMMAND_CATALOG.filter(command => command.visible)
 
 export function syncCommandsToIndex(_db?: DbCompat): void {
   // Kept as a compatibility export for older callers. Command suggestions now
@@ -540,31 +510,7 @@ async function handleAuthCommand(
 }
 
 async function runDoctor(_db: DbCompat): Promise<string> {
-  const checks: string[] = []
-  try {
-    const bunVer = process.versions.bun ?? "unknown"
-    checks.push(`  \u2713 Bun ${bunVer}`)
-  } catch { checks.push("  \u2717 Bun version check failed") }
-
-  try {
-    const providers = (await (await col<ProviderDoc>("providers")).scan())
-      .map((entry) => entry.doc)
-      .filter((provider) => provider.enabled)
-    checks.push(`  \u2713 Providers: ${providers.length} enabled`)
-  } catch { checks.push("  \u2717 Provider check failed") }
-
-  try {
-    await col("meta")
-    checks.push("  \u2713 HiveDB disponible")
-  } catch { checks.push("  \u2717 HiveDB check failed") }
-
-  return [
-    "",
-    "  Diagn\u00f3stico del sistema:",
-    "",
-    ...checks,
-    "",
-  ].join("\n")
+  return renderRuntimeDiagnostics()
 }
 
 const HELP_CATEGORIES: Record<string, { desc: string; commands: string[] }> = {
@@ -577,7 +523,7 @@ const HELP_CATEGORIES: Record<string, { desc: string; commands: string[] }> = {
   narrative: { desc: "Buscar en el historial", commands: ["/narrative show", "/narrative search", "/narrative export"] },
   ace:       { desc: "Aprendizaje adaptativo", commands: ["/ace status", "/ace playbook list", "/ace playbook reset", "/ace reflector run"] },
   github:    { desc: "Integraci\u00f3n con GitHub", commands: ["/github status", "/github whoami", "/github set-repo", "/github connect", "/github disconnect"] },
-  system:    { desc: "Sistema y diagn\u00f3stico", commands: ["/doctor", "/version", "/env", "/help"] },
+  system:    { desc: "Sistema y diagn\u00f3stico", commands: ["/doctor", "/version", "/help"] },
 }
 
 function renderHelp(topic?: string): string {
@@ -659,15 +605,7 @@ function renderHelp(topic?: string): string {
     return `  comando no encontrado: ${topic}\n\n  Escribe /help para ver la lista completa\n`
   }
 
-  const output: string[] = ["", "  Categor\u00edas:", ""]
-  for (const [cat, info] of Object.entries(HELP_CATEGORIES)) {
-    output.push(`  \u25b8 /${cat.padEnd(12)} ${info.desc}`)
-  }
-  output.push("")
-  output.push("  Escribe: /help <comando>  para detalles")
-  output.push("  Ejemplo: /help /provider set")
-  output.push("")
-  return output.join("\n")
+  return ["Comandos disponibles", "", ...ALL_COMMANDS.map(item => `${item.command.padEnd(24)} ${item.description}`), "", "Ctrl+S: Providers, Modelos, GitHub, MCP, Skills y Telegram.", "Shift+Tab: cambiar modo.", "Escribe /help <comando> para detalles."].join("\n")
 }
 
 async function handleProviderCommand(
@@ -1025,9 +963,27 @@ async function handleModelCommand(
     }
 
     case "set": {
+      // A row already selected in Settings is a complete choice; do not reopen a modal.
+      if (rest[0] && rest[1]) {
+        const providerId = rest[0]
+        const modelId = rest[1]
+        const provider = (await (await col<ProviderDoc>("providers")).get(providerId))?.doc
+        const model = (await (await col<ModelDoc>("models")).get(modelId))?.doc
+        if (!provider?.enabled || (!provider.active && providerId !== ctx.activeProvider)) {
+          return { handled: true, output: "Activa el provider antes de seleccionar su modelo." }
+        }
+        if (!model || model.provider_id !== providerId || !model.enabled || model.deprecated_at != null || model.model_type !== "llm") {
+          return { handled: true, output: "El modelo no está disponible para este provider." }
+        }
+        await setCodeConfig(`provider_model_${providerId}`, modelId)
+        await setCodeConfig("default_provider", providerId)
+        return { handled: true, output: `Modelo confirmado: ${modelId} [${providerId}]`,
+          newState: { activeProvider: providerId, activeModel: modelId } }
+      }
+
       if (ui?.showConfigModal) {
         const enabledProviders = (await listProviderDocs())
-          .filter((provider) => provider.enabled)
+          .filter((provider) => provider.enabled && provider.category === "llm" && (provider.active || provider.id === ctx.activeProvider))
           .sort((a, b) => a.id.localeCompare(b.id))
           .map((provider) => ({ id: provider.id }))
         const providers = (await Promise.all(enabledProviders.map(async p => ({
@@ -1040,7 +996,7 @@ async function handleModelCommand(
         // Modelos por provider, ya filtrados a los que están habilitados.
         const providerIds = new Set(providers.map(p => p.id))
         const dbModels = (await scanDocs<ModelDoc>("models"))
-          .filter((model) => model.enabled && providerIds.has(model.provider_id))
+          .filter((model) => model.enabled && model.deprecated_at == null && model.model_type === "llm" && providerIds.has(model.provider_id))
           .sort((a, b) => a.provider_id.localeCompare(b.provider_id) || a.id.localeCompare(b.id))
         const modelsOf = (pid: string) => dbModels.filter(m => m.provider_id === pid).map(m => m.id)
 
@@ -1276,13 +1232,15 @@ async function handleMcpCommand(
         let headersEncrypted: string | null = null
         let headersIv: string | null = null
         if (values.headers && values.headers.trim()) {
+          let headersObj: unknown
+          try { headersObj = JSON.parse(values.headers.trim()) }
+          catch { return { handled: true, output: "  Headers inválidos: debe ser JSON válido" } }
           try {
-            const headersObj = JSON.parse(values.headers.trim())
-            const enc = encryptConfig(headersObj)
+            const enc = await encryptConfig(headersObj)
             headersEncrypted = enc.encrypted
             headersIv = enc.iv
           } catch {
-            return { handled: true, output: "  Headers inv\u00e1lidos: debe ser JSON v\u00e1lido" }
+            return { handled: true, output: "  No se pudieron proteger los headers: revisa la disponibilidad del keystore del sistema" }
           }
         }
         await upsertMcpServerDoc(id, {
@@ -1354,7 +1312,12 @@ async function handleMcpCommand(
         `  Habilitado: ${row.enabled ? "s\u00ed" : "no"}`,
         row.tools_count ? `  Tools: ${row.tools_count}` : null,
       ].filter(Boolean)
-      return { handled: true, output: lines.join("\n") }
+      const output = lines.join("\n")
+      if (ui?.showInfoModal) {
+        await ui.showInfoModal("Detalles del servidor MCP", output)
+        return { handled: true, output: "" }
+      }
+      return { handled: true, output }
     }
     case "test": {
       const name = rest[0]
@@ -1375,7 +1338,14 @@ async function handleMcpCommand(
       }
     }
     case "load": {
-      const filePath = rest[0]
+      let filePath = rest[0]
+      if (!filePath && ui?.showConfigModal) {
+        const values = await ui.showConfigModal("mcp_load", "Importar servidores MCP", [
+          { key: "path", label: "Ruta del archivo JSON", placeholder: "./mcp.json", required: true, secret: false, field_type: "text" },
+        ])
+        if (!values) return { handled: true, output: "  Importación cancelada" }
+        filePath = values.path.trim()
+      }
       if (!filePath) return { handled: true, output: "uso: /mcp load <path>\nejemplo: /mcp load ./mcp.json" }
       try {
         const content = await Bun.file(filePath).text()
@@ -1415,6 +1385,7 @@ async function handleMcpCommand(
 async function handleSkillCommand(
   args: string[],
   _db: DbCompat,
+  ui?: UiCallbacks,
 ): Promise<CommandResult> {
   const [action, ...rest] = args
 
@@ -1470,25 +1441,23 @@ async function handleSkillCommand(
       if (!name) return { handled: true, output: "uso: /skill info <nombre>" }
       const row = await getDoc<SkillDoc>("skills", name)
       if (!row) return { handled: true, output: `  Skill no encontrada: ${name}` }
-      const preview = row.body ? row.body.slice(0, 300).replace(/\n/g, "\n  │    ") : "N/A"
-      return {
-        handled: true,
-        output: [
-          "",
-          `  ID:          ${row.id}`,
-          `  Nombre:      ${row.name || row.id}`,
-          `  Descripci\u00f3n: ${row.description || "N/A"}`,
-          `  Categor\u00eda:   ${row.category || "N/A"}`,
-          `  Habilitada:  ${row.active ? "S\u00ed" : "No"}`,
-          "",
-          `  Contenido:`,
-          `  │    ${preview}...`,
-          "",
-        ].join("\n"),
+      const output = `ID: ${row.id}\nNombre: ${row.name || row.id}\nDescripción: ${row.description || "N/A"}\nCategoría: ${row.category || "N/A"}\nHabilitada: ${row.active ? "Sí" : "No"}\n\n${row.body || "Sin contenido"}`
+      if (ui?.showInfoModal) {
+        await ui.showInfoModal("Detalles de la skill", output)
+        return { handled: true, output: "" }
       }
+      return { handled: true, output }
     }
+
     case "add": {
-      const path = rest[0]
+      let path = rest[0]
+      if (!path && ui?.showConfigModal) {
+        const values = await ui.showConfigModal("skill_import", "Importar skill", [
+          { key: "path", label: "Ruta del archivo Markdown", placeholder: "./SKILL.md", required: true, secret: false, field_type: "text" },
+        ])
+        if (!values) return { handled: true, output: "  Importación cancelada" }
+        path = values.path.trim()
+      }
       if (!path) return { handled: true, output: "uso: /skill add <path>\nejemplo: /skill add ~/my-skills/custom_auth.md" }
       try {
         const content = await Bun.file(path).text()
@@ -1584,63 +1553,81 @@ async function handleModeCommand(
 async function handleTaskCommand(
   args: string[],
   _db: DbCompat,
+  ui?: UiCallbacks,
 ): Promise<CommandResult> {
-  const [action, ...rest] = args
-
-  if (!action) {
-    return {
-      handled: true,
-      output: [
-        "",
-        "  \u00bfQu\u00e9 quieres hacer?",
-        "  \u25b8 list      \u2014 tareas recientes",
-        "  \u00b7 status    \u2014 estado detallado + fase actual",
-        "  \u00b7 cancel    \u2014 cancela tarea en curso",
-        "  \u00b7 rollback  \u2014 revierte cambios de una tarea",
-        "",
-      ].join("\n"),
-      menu: [
-        { label: "list",     cmd: "/task list",     desc: "tareas recientes" },
-        { label: "status",   cmd: "/task status",   desc: "estado detallado + fase actual" },
-        { label: "cancel",   cmd: "/task cancel",   desc: "cancela tarea en curso" },
-        { label: "rollback", cmd: "/task rollback", desc: "revierte cambios de una tarea" },
-      ],
+  const [action = "list", ...rest] = args
+  const display = async (output: string): Promise<CommandResult> => {
+    if (ui?.showInfoModal) {
+      await ui.showInfoModal("Tareas", output)
+      return { handled: true, output: "" }
+    }
+    return { handled: true, output }
+  }
+  if (["status", "cancel", "rollback"].includes(action)) {
+    if (!rest[0] && ui?.showConfigModal) {
+      const rows = (await scanDocs<CodeTaskDoc>("codeTasks")).sort((a, b) => b.created_at.localeCompare(a.created_at))
+      if (!rows.length) return display("No hay tareas registradas.")
+      const options = rows.map(row => `${row.id} :: ${row.status} :: ${row.description.slice(0, 60)}`)
+      const values = await ui.showConfigModal("task_select", "Seleccionar tarea", [
+        { key: "task", label: "Tarea", placeholder: "", required: true, secret: false, field_type: "select", options },
+      ])
+      if (!values) return { handled: true, output: "  Cancelado" }
+      const selected = options.indexOf(values.task)
+      if (selected < 0) return { handled: true, output: "  Selección inválida" }
+      rest[0] = rows[selected]!.id
+    }
+    if (rest[0]) {
+      const resolved = await resolveIdFragment<CodeTaskDoc>("codeTasks", rest[0])
+      if (resolved.kind === "none") return display(`Tarea no encontrada: ${rest[0]}`)
+      if (resolved.kind === "ambiguous") return display(`ID ambiguo:\n${formatIdCandidates(resolved.candidates)}`)
+      rest[0] = resolved.match.id
+      if (action === "rollback" && ["running", "planning"].includes(resolved.match.doc.status)) {
+        return display("La tarea sigue ejecutándose. No se puede cancelar ni revertir desde este menú mientras está activa.")
+      }
+      if (action !== "status" && ui?.showConfigModal) {
+        const values = await ui.showConfigModal("task_confirm", action === "rollback" ? "Revertir archivos de la tarea" : "Cancelar tarea", [
+          { key: "confirm", label: action === "rollback" ? "Se restaurarán los archivos guardados en los snapshots" : "Marcar la tarea como cancelada", placeholder: "", required: true, secret: false, field_type: "select", options: ["Volver", "Confirmar"] },
+        ])
+        if (values?.confirm !== "Confirmar") return { handled: true, output: "  Cancelado" }
+      }
     }
   }
 
   switch (action) {
     case "list": {
-      const limit = Math.min(parseInt(rest[rest.indexOf("--limit") + 1] || "10", 10), 50)
+      const limitIdx = rest.indexOf("--limit")
+      const limit = limitIdx === -1 ? 10 : Number(rest[limitIdx + 1])
+      if (!Number.isInteger(limit) || limit < 1 || limit > 50) return { handled: true, output: "--limit debe ser un entero entre 1 y 50" }
       const rows = (await scanDocs<CodeTaskDoc>("codeTasks"))
         .sort((a, b) => b.created_at.localeCompare(a.created_at))
         .slice(0, limit)
-      if (rows.length === 0) return { handled: true, output: "\n  No hay tareas.\n" }
+      if (rows.length === 0) return display("No hay tareas registradas.")
       const lines = rows.map(r => `  \u25b8 ${shortId(r.id).padEnd(10)} ${r.status.padEnd(12)} ${r.description.slice(0, 50)}`)
-      return { handled: true, output: "\n" + lines.join("\n") + "\n" }
+      return display("\n" + lines.join("\n") + "\n")
     }
     case "status": {
       const id = rest[0]
       if (!id) return { handled: true, output: "uso: /task status <id>" }
       const row = await getDoc<CodeTaskDoc>("codeTasks", id)
       if (!row) return { handled: true, output: `  Tarea no encontrada: ${id}` }
-      return {
-        handled: true,
-        output: [
+      const phases = (await scanDocs<CodeTaskPhaseDoc>("codeTaskPhases")).filter(phase => phase.task_id === id)
+      return display([
           "",
           `  Tarea: ${row.id}`,
+          `  Descripción: ${row.description}`,
           `  Estado: ${row.status}`,
+          ...phases.map(phase => `  Fase: ${phase.phase_name} · ${phase.coordinator} · ${phase.status}`),
           `  Modo: ${row.mode || "N/A"}`,
           `  Rama: ${row.branch_name || "N/A"}`,
           `  Creada: ${row.created_at}`,
           "",
-        ].join("\n"),
-      }
+        ].join("\n"))
     }
     case "cancel": {
       const id = rest[0]
       if (!id) return { handled: true, output: "uso: /task cancel <id>" }
-      const task = await getVersionedDoc<CodeTaskDoc>("codeTasks", id)
-      if (task) await (await col<CodeTaskDoc>("codeTasks")).put(id, { ...task.doc, status: "cancelled" }, { expectedVersion: task.version })
+      if (!ui?.cancelTask) return { handled: true, output: "Cancelación no disponible: el coordinador no está conectado." }
+      await ui.cancelTask(id)
       return { handled: true, output: `  \u2713 Tarea ${shortId(id)} cancelada` }
     }
     case "rollback": {
@@ -1666,25 +1653,9 @@ async function handleTaskCommand(
           }
         }
 
-        await (await col<CodeTaskDoc>("codeTasks")).put(id, { ...task.doc, status: "cancelled" }, { expectedVersion: task.version })
+        await (await col<CodeTaskDoc>("codeTasks")).put(id, { ...task.doc, status: restored === snapshots.length ? "rolled_back" : "failed" }, { expectedVersion: task.version })
 
-        let gitMsg = ""
-        if (task.doc.branch_name) {
-          try {
-            const proc = Bun.spawn({
-              cmd: ["git", "branch", "-D", task.doc.branch_name],
-              stdout: "pipe",
-              stderr: "pipe",
-              cwd: process.cwd(),
-            })
-            await proc.exited
-            gitMsg = `\n  Rama ${task.doc.branch_name} eliminada.`
-          } catch {
-            // ignore git errors
-          }
-        }
-
-        return { handled: true, output: `  \u2713 Rollback completo: ${restored}/${snapshots.length} archivos restaurados.${gitMsg}` }
+        return { handled: true, output: `  ${restored === snapshots.length ? "✓" : "✗"} Rollback: ${restored}/${snapshots.length} archivos restaurados.` }
       } catch (err) {
         return { handled: true, output: `  \u2717 Error en rollback: ${(err as Error).message}` }
       }
@@ -1697,79 +1668,64 @@ async function handleTaskCommand(
 async function handleNarrativeCommand(
   args: string[],
   _db: DbCompat,
+  ctx: ContextState,
+  ui?: UiCallbacks,
 ): Promise<CommandResult> {
-  const [action, ...rest] = args
-
-  if (!action) {
-    return {
-      handled: true,
-      output: [
-        "",
-        "  \u00bfQu\u00e9 quieres hacer?",
-        "  \u25b8 show      \u2014 muestra \u00faltimas N entradas",
-        "  \u00b7 search    \u2014 busca en el narrativo con HiveDB",
-        "  \u00b7 export    \u2014 exporta narrativo completo",
-        "",
-      ].join("\n"),
-      menu: [
-        { label: "show",   cmd: "/narrative show",   desc: "muestra \u00faltimas N entradas" },
-        { label: "search", cmd: "/narrative search", desc: "busca en el narrativo con HiveDB" },
-        { label: "export", cmd: "/narrative export", desc: "exporta narrativo completo" },
-      ],
-    }
+  const [action = "show", ...rest] = args
+  if (!["show", "search", "export"].includes(action)) {
+    return { handled: true, output: "opciones: show [--last N] [--all] | search <texto> [--all] | export [--format md|json] [--all]" }
   }
-
-  switch (action) {
-    case "show": {
-      const lastIdx = rest.indexOf("--last")
-      const limit = lastIdx !== -1 ? parseInt(rest[lastIdx + 1] || "5", 10) : 5
-      const rows = (await (await col<CodeNarrativeDoc>("codeNarrative")).scan())
-        .map((entry) => entry.doc)
-        .sort((a, b) => b.created_at.localeCompare(a.created_at))
-        .slice(0, limit)
-      if (rows.length === 0) return { handled: true, output: "\n  No hay entradas en el narrativo.\n" }
-      const lines = rows.map(r =>
-        `  \u25b8 [${r.coordinator}] ${r.created_at}\n  │  ${r.entry.slice(0, 120)}`
-      )
-      return { handled: true, output: "\n" + lines.join("\n\n") + "\n" }
+  const all = rest.includes("--all")
+  const scope = all ? "Todas las sesiones" : "Sesión actual"
+  const display = async (title: string, output: string): Promise<CommandResult> => {
+    if (ui?.showInfoModal) {
+      await ui.showInfoModal(title, output)
+      return { handled: true, output: "" }
     }
-    case "search": {
-      const query = rest.join(" ")
-      if (!query) return { handled: true, output: "uso: /narrative search <query>" }
-      try {
-        const needle = query.toLowerCase()
-        const rows = (await (await col<CodeNarrativeDoc>("codeNarrative")).scan())
-          .map((entry) => entry.doc)
-          .filter((row) =>
-            row.entry.toLowerCase().includes(needle) ||
-            row.coordinator.toLowerCase().includes(needle) ||
-            (row.phase ?? "").toLowerCase().includes(needle)
-          )
-          .sort((a, b) => b.created_at.localeCompare(a.created_at))
-          .slice(0, 5)
-        if (rows.length === 0) return { handled: true, output: `\n  Sin resultados para: ${query}\n` }
-        const lines = rows.map(r =>
-          `  \u25b8 [${r.coordinator}] ${r.created_at}\n  │  ${r.entry.slice(0, 120)}`
-        )
-        return { handled: true, output: "\n" + lines.join("\n\n") + "\n" }
-      } catch {
-        return { handled: true, output: `  \u2717 Error en b\u00fasqueda HiveDB.` }
-      }
-    }
-    case "export": {
-      const fmt = rest.includes("--format") ? rest[rest.indexOf("--format") + 1] || "md" : "md"
-      const rows = (await (await col<CodeNarrativeDoc>("codeNarrative")).scan())
-        .map((entry) => entry.doc)
-        .sort((a, b) => a.created_at.localeCompare(b.created_at))
-      const content = rows.map(r =>
-        `[${r.coordinator} — ${r.created_at}] [${r.task_id || "none"}] [${r.phase || ""}]\n\n${r.entry}\n\n---\n`
-      ).join("\n")
-      const outPath = `narrative-export-${Date.now()}.${fmt}`
+    return { handled: true, output }
+  }
+  const lastIdx = rest.indexOf("--last")
+  const limit = lastIdx === -1 ? 20 : Number(rest[lastIdx + 1])
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+    return { handled: true, output: "  --last debe ser un número entero entre 1 y 200" }
+  }
+  let query = rest.filter((arg, i) => arg !== "--all" && arg !== "--last" && (lastIdx === -1 || i !== lastIdx + 1)).join(" ")
+  if (action === "search" && !query && ui?.showConfigModal) {
+    const values = await ui.showConfigModal("narrative_search", "Buscar en el narrativo", [
+      { key: "query", label: "Texto, agente o fase", placeholder: "error", required: true, secret: false, field_type: "text" },
+    ])
+    if (!values) return { handled: true, output: "  Búsqueda cancelada" }
+    query = values.query.trim()
+  }
+  if (action === "search" && !query.trim()) return { handled: true, output: "uso: /narrative search <texto> [--all]" }
+  try {
+    const rows = (await (await col<CodeNarrativeDoc>("codeNarrative")).scan())
+      .map(entry => entry.doc)
+      .filter(row => all || (ctx.sessionId && row.session_id === ctx.sessionId))
+      .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
+    if (action === "export") {
+      const formatIdx = rest.indexOf("--format")
+      const fmt = formatIdx === -1 ? "md" : rest[formatIdx + 1]
+      if (fmt !== "md" && fmt !== "json") return { handled: true, output: "  Formatos disponibles: md, json" }
+      if (!rows.length) return display("Narrativo", `${scope}: no hay entradas para exportar.`)
+      const content = fmt === "json" ? JSON.stringify(rows, null, 2) : rows.map(row =>
+        `## ${row.created_at} · ${row.coordinator} · ${row.phase || "sin fase"}\n\nSesión: ${row.session_id || "sin sesión"} · Tarea: ${row.task_id || "sin tarea"}\n\n${row.entry}\n`
+      ).join("\n---\n\n")
+      const outPath = `${ctx.projectPath || process.cwd()}/narrative-export-${Date.now()}.${fmt}`
       await Bun.write(outPath, content)
-      return { handled: true, output: `  \u2713 Narrativo exportado a: ${outPath} (${rows.length} entradas)` }
+      return display("Narrativo exportado", `${scope} · ${rows.length} entradas\n${outPath}`)
     }
-    default:
-      return { handled: true, output: "opciones: show | search | export\n\nEscribe /help /narrative" }
+    const needle = query.toLowerCase()
+    const matches = action === "search" ? rows.filter(row =>
+      row.entry.toLowerCase().includes(needle) || row.coordinator.toLowerCase().includes(needle) || (row.phase ?? "").toLowerCase().includes(needle)
+    ) : rows
+    const selected = matches.slice(-limit)
+    const output = `${scope} · ${selected.length} de ${matches.length} entradas\n\n` + (selected.length ? selected.map(row =>
+      `[${row.created_at}] ${row.coordinator} · ${row.phase || "sin fase"}\nTarea: ${row.task_id || "sin tarea"} · Sesión: ${row.session_id || "sin sesión"}\n${row.entry}`
+    ).join("\n\n────────────────────\n\n") : action === "search" ? `Sin resultados para: ${query}` : "No hay entradas. Usa /narrative show --all para consultar otras sesiones.")
+    return display(action === "search" ? "Resultados del narrativo" : "Narrativo de depuración", output)
+  } catch (err) {
+    return display("Error del narrativo", `No se pudo consultar el narrativo: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
@@ -1942,7 +1898,15 @@ async function handleGithubCommand(
       }
     }
     case "set-repo": {
-      const repo = rest[0]
+      let repo = rest[0]
+      if (!repo && ui?.showConfigModal) {
+        const values = await ui.showConfigModal("github_repo", "Vincular repositorio GitHub", [
+          { key: "repo", label: "Repositorio (owner/repo)", placeholder: "owner/repo", required: true, secret: false, field_type: "text" },
+        ])
+        if (!values) return { handled: true, output: "  Configuración cancelada" }
+        repo = values.repo.trim()
+      }
+      if (repo && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return { handled: true, output: "  Repositorio inválido: usa owner/repo" }
       if (!repo) return { handled: true, output: "uso: /github set-repo <owner/repo>\nejemplo: /github set-repo johpaz/mi-app" }
       await setCodeConfig("default_repo", repo)
       return { handled: true, output: `  \u2713 Repo vinculado: ${repo}` }
@@ -2280,32 +2244,15 @@ async function handleTelegramCommand(
 
   if (!action || action === "status") {
     const row = await getDoc<Record<string, any>>("channels", "telegram")
-    if (!row || !row.active) {
-      return {
-        handled: true,
-        output: [
-          "",
-          "  Telegram no configurado.",
-          "",
-          "  Abre ⚙ Settings → pestaña Telegram → presiona A para conectar.",
-          "",
-        ].join("\n"),
-      }
+    const config = await readChannelConfig("telegram", "telegram")
+    const output = !row || !row.active
+      ? "Telegram no configurado. Usa Conectar en Configuración → Telegram."
+      : `Estado: ${row.status ?? "desconocido"}\nActivo: ${row.enabled ? "sí" : "no"}\nDM Policy: ${config.dmPolicy ?? "—"}\nGrupos: ${config.groups ? "sí" : "no"}\nLista blanca: ${(config.allowFrom ?? []).join(", ")}`
+    if (ui?.showInfoModal) {
+      await ui.showInfoModal("Estado de Telegram", output)
+      return { handled: true, output: "" }
     }
-    let config: Record<string, any> = {}
-    try { config = JSON.parse(row.config_encrypted as string) } catch {}
-    return {
-      handled: true,
-      output: [
-        "",
-        `  Estado:      ${row.status ?? "desconocido"}`,
-        `  Activo:      ${row.enabled ? "s\u00ed" : "no"}`,
-        `  DM Policy:   ${config.dmPolicy ?? "\u2014"}`,
-        `  Grupos:      ${config.groups ? "s\u00ed" : "no"}`,
-        config.allowFrom?.length ? `  Lista blanca: ${(config.allowFrom as string[]).join(", ")}` : "",
-        "",
-      ].filter(Boolean).join("\n"),
-    }
+    return { handled: true, output }
   }
 
   if (action === "disconnect") {
@@ -2329,27 +2276,29 @@ async function handleTelegramCommand(
       if (!values) return { handled: true, output: "  Configuraci\u00f3n cancelada" }
       try {
         await (Bun as any).secrets?.set?.({ service: "hive-code", name: "telegram.bot_token", value: values.bot_token })
-      } catch {}
-      const configJson = JSON.stringify({
+      } catch { throw new Error("Telegram credential keystore is unavailable") }
+      const channelConfig = {
         dmPolicy: values.dm_policy || "open",
         groups: values.groups === "s\u00ed",
         allowFrom: values.allow_from ? values.allow_from.split(",").map((s: string) => s.trim()).filter(Boolean) : [],
         enabled: true,
-      })
+      }
+      await storeChannelConfig("default", "telegram", "telegram", channelConfig, true)
       const channels = await col<Record<string, any>>("channels")
       const existing = await channels.get("telegram")
       await channels.put("telegram", {
         ...(existing?.doc ?? {}),
         id: "telegram",
         type: "telegram",
-        config_encrypted: configJson,
         active: true,
         enabled: true,
-        status: "connected",
+        status: "configured",
       }, { expectedVersion: existing?.version ?? 0 })
-      try {
-        await ui.startChannel?.("telegram", "telegram", JSON.parse(configJson))
-      } catch { /* channel start is best-effort */ }
+      if (ui.startChannel) {
+        await ui.startChannel("telegram", "telegram", channelConfig)
+        const started = await channels.get("telegram")
+        if (started) await channels.put("telegram", { ...started.doc, status: "connected" }, { expectedVersion: started.version })
+      }
       return {
         handled: true,
         output: `  \u2713 Telegram ${action === "connect" ? "conectado" : "actualizado"}`,
@@ -2399,13 +2348,13 @@ export async function parseInternalCommand(
     case "mcp":
       return handleMcpCommand(args, db, ctxState, ui)
     case "skill":
-      return handleSkillCommand(args, db)
+      return handleSkillCommand(args, db, ui)
     case "mode":
       return handleModeCommand(args, db, ctxState)
     case "task":
-      return handleTaskCommand(args, db)
+      return handleTaskCommand(args, db, ui)
     case "narrative":
-      return handleNarrativeCommand(args, db)
+      return handleNarrativeCommand(args, db, ctxState, ui)
     case "ace":
       return handleAceCommand(args, db)
     case "github":
@@ -2456,8 +2405,11 @@ export async function parseInternalCommand(
       }
       return { handled: true, output }
     }
-    case "help":
-      return { handled: true, output: renderHelp(args[0]) }
+    case "help": {
+      const output = renderHelp(args[0])
+      if (ui?.showInfoModal) { await ui.showInfoModal("Comandos disponibles", output); return { handled: true, output: "" } }
+      return { handled: true, output }
+    }
     case "version":
       return { handled: true, output: `hivecode v${VERSION}  ${GIT_HASH}` }
     case "logs":
@@ -2468,11 +2420,6 @@ export async function parseInternalCommand(
       return handleCompactCommand(db, ctxState)
     case "note":
       return handleNoteCommand(args, db, ctxState)
-    case "env": {
-      const safe = ["HOME", "USER", "SHELL", "TERM", "PATH", "BUN_VERSION", "NODE_ENV"]
-      const lines = safe.map(k => `  ${k}=${process.env[k] || ""}`)
-      return { handled: true, output: "\n" + lines.join("\n") + "\n" }
-    }
     default: {
       // Commands we removed, and what replaced them. They were real commands,
       // so "unknown command" would strand anyone typing them from muscle memory.

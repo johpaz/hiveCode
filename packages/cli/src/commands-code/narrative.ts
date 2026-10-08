@@ -1,3 +1,4 @@
+import { narrativeMatches } from "@johpaz/hivecode-core/services/narrative-mapping";
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote,
@@ -75,11 +76,7 @@ export async function narrativeSearch(args: string[]): Promise<void> {
 
   const needle = query.toLowerCase()
   const rows = (await listNarrative())
-    .filter((entry) =>
-      entry.entry.toLowerCase().includes(needle) ||
-      entry.coordinator.toLowerCase().includes(needle) ||
-      (entry.phase ?? "").toLowerCase().includes(needle)
-    )
+    .filter(entry => narrativeMatches(entry, query))
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
     .slice(0, 20)
 

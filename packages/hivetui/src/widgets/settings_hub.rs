@@ -1,6 +1,6 @@
 use crate::{
     state::{AppState, ModalState, ModelRows, ProviderKeyState, SettingsHubState, SettingsTab},
-    term::{Canvas, Rect, Style, AMBER, CYAN, DIM, GREEN, RED, SECONDARY, WHITE, BG_ELEVATED},
+    term::{Canvas, Rect, Style, AMBER, CYAN, DIM, GREEN, SECONDARY, WHITE, BG_ELEVATED},
     ui::{HitAction, HitMap, MouseRegion},
 };
 
@@ -63,23 +63,9 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &mut AppState, regist
         canvas.print(content_area.x + 2, content_area.y + 2, "Cargando…", Style::new().fg(DIM));
     } else {
         // Ajustar scroll_offset para mantener selected_row visible
-        let visible_rows = content_area.h.saturating_sub(1) as usize;
+        let visible_rows = content_area.h.saturating_sub(if hub.active_tab == SettingsTab::Models { 3 } else if hub.active_tab == SettingsTab::Providers { 2 } else { 1 }) as usize;
         if let ModalState::Settings(hub) = &mut state.modal {
-            let total = match hub.active_tab {
-                SettingsTab::Providers | SettingsTab::Models => hub.providers.len(),
-                SettingsTab::Agents    => hub.agents.len(),
-                SettingsTab::Mcp       => hub.mcp.len(),
-                SettingsTab::Skills    => hub.skills.len(),
-                _ => 0,
-            };
-            let max_offset = total.saturating_sub(visible_rows);
-            hub.scroll_offset = hub.scroll_offset.min(max_offset);
-            if hub.selected_row < hub.scroll_offset {
-                hub.scroll_offset = hub.selected_row;
-            }
-            if hub.selected_row >= hub.scroll_offset + visible_rows && visible_rows > 0 {
-                hub.scroll_offset = hub.selected_row.saturating_sub(visible_rows - 1);
-            }
+            hub.keep_selection_visible(visible_rows);
         }
         // El texto del footer se calcula antes del dispatch: los `render_*`
         // reciben `&mut AppState`, y leer el hub después ya no prestaría.
@@ -91,20 +77,25 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &mut AppState, regist
             }
         };
         let ModalState::Settings(hub) = &state.modal else { return };
-        match hub.active_tab {
+        let settings_tab = hub.active_tab;
+        match settings_tab {
             SettingsTab::Providers => render_providers(canvas, content_area, state, register_hits),
             SettingsTab::Models    => render_models(canvas, content_area, state, register_hits),
             SettingsTab::Agents    => render_agents(canvas, content_area, state, register_hits),
             SettingsTab::Mcp       => render_mcp(canvas, content_area, state, register_hits),
             SettingsTab::Skills    => render_skills(canvas, content_area, state, register_hits),
-            SettingsTab::Github    => render_github(canvas, content_area, state),
-            SettingsTab::Telegram  => render_telegram(canvas, content_area, state),
+            SettingsTab::Github    => render_github(canvas, content_area, state, register_hits),
+            SettingsTab::Telegram  => render_telegram(canvas, content_area, state, register_hits),
         }
 
         // Footer: atajos + qué hace Enter sobre la fila seleccionada.
         let hint_y = area.bottom().saturating_sub(2);
         canvas.print(area.x + 2, hint_y,
-            "Tab · ↑↓/clic · A añadir · D eliminar · Enter editar · Esc cerrar",
+            if settings_tab == SettingsTab::Models {
+                "↑↓ o clic: seleccionar · Enter o Confirmar: aplicar · Esc cerrar"
+            } else if settings_tab == SettingsTab::Providers {
+                "↑↓/clic · Enter configurar/activar · E editar API key · Esc cerrar"
+            } else { "Tab · ↑↓/clic · A añadir · D eliminar · Enter editar · Esc cerrar" },
             Style::new().fg(DIM));
         if let Some(hint) = footer_hint {
             if hint_y > area.y + 3 {
@@ -159,10 +150,7 @@ fn render_agents(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
 fn render_providers(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hits: bool) {
     let ModalState::Settings(hub) = &state.modal else { return };
 
-    canvas.print(area.x,      area.y, "ID",     Style::new().fg(DIM));
-    canvas.print(area.x + 16, area.y, "Modelo", Style::new().fg(DIM));
-    canvas.print(area.x + 36, area.y, "Key",    Style::new().fg(DIM));
-    canvas.print(area.x + 42, area.y, "Estado", Style::new().fg(DIM));
+    canvas.print(area.x, area.y, "Provider", Style::new().fg(DIM));
 
     if hub.providers.is_empty() {
         canvas.print(area.x + 2, area.y + 2,
@@ -172,7 +160,7 @@ fn render_providers(canvas: &mut Canvas, area: Rect, state: &mut AppState, regis
 
     let selected = hub.selected_row;
     let offset = hub.scroll_offset;
-    let visible = (area.h.saturating_sub(1)) as usize;
+    let visible = (area.h.saturating_sub(2)) as usize;
     for (i, p) in hub.providers.iter().enumerate().skip(offset).take(visible) {
         let y = area.y + 1 + (i - offset) as u16;
 
@@ -182,19 +170,9 @@ fn render_providers(canvas: &mut Canvas, area: Rect, state: &mut AppState, regis
             canvas.print(area.x, y, "▶ ", Style::new().fg(AMBER).bold());
         }
         let style = if is_sel { Style::new().fg(WHITE).bold() } else { Style::new().fg(SECONDARY) };
-        let id    = truncate(&p.id, 14);
-        let model = truncate(&p.model, 18);
-        canvas.print(area.x + 2,  y, &id,    style);
-        canvas.print(area.x + 16, y, &model, style);
-
-        // La columna Key refleja el keystore real (lo envía Bun), no un `true`
-        // fijo: `?` es un provider al que hay que escribirle clave, `~` uno que
-        // se autentica por navegador y no usa clave.
-        let key = p.key_state();
-        canvas.print(area.x + 36, y, key.glyph(), key_style(key));
-        canvas.print(area.x + 42, y,
-            if p.is_active { "● activo" } else { "○" },
-            if p.is_active { Style::new().fg(GREEN).bold() } else { Style::new().fg(DIM) });
+        let label = if p.is_active { format!("{}  [Activo]", p.name) } else { p.name.clone() };
+        canvas.print(area.x + 2, y, &truncate(&label, area.w.saturating_sub(4) as usize),
+            if p.is_active { Style::new().fg(GREEN).bold() } else { style });
 
         if register_hits {
             state.hit_map.push(MouseRegion::new(
@@ -206,14 +184,13 @@ fn render_providers(canvas: &mut Canvas, area: Rect, state: &mut AppState, regis
         }
     }
     draw_scrollbar(canvas, area, offset, hub.providers.len(), visible);
-}
-
-/// Color de la columna `Key` según cómo esté autenticado el provider.
-fn key_style(state: ProviderKeyState) -> Style {
-    match state {
-        ProviderKeyState::Ready       => Style::new().fg(GREEN),
-        ProviderKeyState::Missing     => Style::new().fg(RED),
-        ProviderKeyState::BrowserLogin => Style::new().fg(AMBER),
+    let label = "[ Configurar API key ]";
+    let y = area.bottom().saturating_sub(1);
+    canvas.print(area.x + 2, y, label, Style::new().fg(AMBER).bold());
+    if register_hits {
+        state.hit_map.push(MouseRegion::new("settings:edit-provider",
+            Rect { x: area.x + 2, y, w: label.len() as u16, h: 1 }, HUB_Z,
+            HitAction::Custom("settings:edit-provider".into())));
     }
 }
 
@@ -230,14 +207,31 @@ fn provider_footer_hint(hub: &SettingsHubState) -> String {
         ProviderKeyState::BrowserLogin =>
             format!("Enter → {} · login de navegador (sin clave)", p.id),
         ProviderKeyState::Ready if p.is_active =>
-            format!("Enter → {} · ya está activo con su clave", p.id),
+            format!("{} · API key guardada · E para modificarla", p.name),
         ProviderKeyState::Ready =>
-            format!("Enter → activar {} · ya tiene clave", p.id),
+            format!("Enter → activar {} · E para modificar API key", p.name),
     }
 }
 
 fn render_mcp(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hits: bool) {
     let ModalState::Settings(hub) = &state.modal else { return };
+
+    let has_selection = hub.mcp.get(hub.selected_row).is_some();
+    let actions = [("add", "[A Añadir]"), ("load", "[L Importar JSON]"), ("inspect", "[Enter Detalles]"), ("test", "[T Probar]"), ("toggle", "[Espacio Activar/desactivar]"), ("remove", "[D Eliminar]")];
+    let mut x = area.x;
+    let mut y = area.y + area.h.saturating_sub(3);
+    for (action, label) in actions {
+        let width = label.chars().count() as u16;
+        if x + width > area.x + area.w { x = area.x; y += 1; }
+        let available = action == "add" || action == "load" || has_selection;
+        canvas.print(x, y, label, Style::new().fg(if available { AMBER } else { DIM }));
+        if register_hits && available {
+            state.hit_map.push(MouseRegion::new(format!("settings:mcp:{action}"),
+                Rect { x, y, w: width, h: 1 }, HUB_Z,
+                HitAction::Custom(format!("settings:mcp:{action}"))));
+        }
+        x += width + 1;
+    }
 
     canvas.print(area.x,      area.y, "Nombre",   Style::new().fg(DIM));
     canvas.print(area.x + 18, area.y, "Endpoint", Style::new().fg(DIM));
@@ -251,7 +245,7 @@ fn render_mcp(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hi
 
     let selected = hub.selected_row;
     let offset = hub.scroll_offset;
-    let visible = (area.h.saturating_sub(1)) as usize;
+    let visible = (area.h.saturating_sub(4)) as usize;
     for (i, m) in hub.mcp.iter().enumerate().skip(offset).take(visible) {
         let y = area.y + 1 + (i - offset) as u16;
 
@@ -269,7 +263,7 @@ fn render_mcp(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hi
         canvas.print(area.x + 42, y, &status_label,
             if m.enabled { Style::new().fg(GREEN) } else { Style::new().fg(DIM) });
         if is_sel {
-            canvas.print(area.x + 52, y, "[D]elim [S]toggle [E]info", Style::new().fg(DIM));
+            canvas.print(area.x + 52, y, "Enter: detalles", Style::new().fg(DIM));
         }
 
         if register_hits {
@@ -287,6 +281,22 @@ fn render_mcp(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hi
 fn render_skills(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hits: bool) {
     let ModalState::Settings(hub) = &state.modal else { return };
 
+    let has_selection = hub.skills.get(hub.selected_row).is_some();
+    let actions = [("add", "[A Importar skill]"), ("info", "[Enter Detalles]"), ("toggle", "[Espacio Activar/desactivar]")];
+    let mut x = area.x;
+    let mut y = area.y + area.h.saturating_sub(3);
+    for (action, label) in actions {
+        let width = label.chars().count() as u16;
+        if x + width > area.x + area.w { x = area.x; y += 1; }
+        let available = action == "add" || has_selection;
+        canvas.print(x, y, label, Style::new().fg(if available { AMBER } else { DIM }));
+        if register_hits && available {
+            state.hit_map.push(MouseRegion::new(format!("settings:skill:{action}"),
+                Rect { x, y, w: width, h: 1 }, HUB_Z,
+                HitAction::Custom(format!("settings:skill:{action}"))));
+        }
+        x += width + 1;
+    }
     canvas.print(area.x,      area.y, "Nombre",    Style::new().fg(DIM));
     canvas.print(area.x + 24, area.y, "Categoría", Style::new().fg(DIM));
     canvas.print(area.x + 40, area.y, "Estado",    Style::new().fg(DIM));
@@ -298,7 +308,7 @@ fn render_skills(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
 
     let selected = hub.selected_row;
     let offset = hub.scroll_offset;
-    let visible = (area.h.saturating_sub(1)) as usize;
+    let visible = (area.h.saturating_sub(4)) as usize;
     for (i, s) in hub.skills.iter().enumerate().skip(offset).take(visible) {
         let y = area.y + 1 + (i - offset) as u16;
 
@@ -332,7 +342,7 @@ fn render_models(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
 
     let selected = hub.selected_row;
     let offset = hub.scroll_offset;
-    let visible = (area.h.saturating_sub(1)) as usize;
+    let visible = (area.h.saturating_sub(3)) as usize;
 
     match hub.model_rows() {
         // Sin provider activo: no hay modelos que ofrecer, se elige provider primero.
@@ -370,7 +380,7 @@ fn render_models(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
         ModelRows::Models { provider_id, models } => {
             canvas.print(area.x,      area.y,
                 &format!("Modelo · {provider_id}"), Style::new().fg(DIM));
-            canvas.print(area.x + 44, area.y, "Contexto", Style::new().fg(DIM));
+            canvas.print(area.right().saturating_sub(12), area.y, "Estado", Style::new().fg(DIM));
 
             let total = models.len();
             for (i, m) in models.iter().enumerate().skip(offset).take(visible) {
@@ -385,11 +395,25 @@ fn render_models(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
                     canvas.print(area.x + 2, y, "●", Style::new().fg(GREEN).bold());
                 }
                 let style = if is_sel { Style::new().fg(WHITE).bold() } else { Style::new().fg(SECONDARY) };
-                canvas.print(area.x + 4, y, &truncate(m, 62), style);
+                canvas.print(area.x + 4, y, &truncate(m, area.w.saturating_sub(18) as usize), style);
+                if is_active {
+                    canvas.print(area.right().saturating_sub(12), y, "Activo", Style::new().fg(GREEN).bold());
+                }
                 register_row_hit(&mut state.hit_map, register_hits, i, area, y);
             }
             draw_scrollbar(canvas, area, offset, total, visible);
-            print_hint(canvas, area, "Enter → usar este modelo  ·  P → cambiar de provider");
+            let button_y = area.bottom().saturating_sub(1);
+            let button = "[ Confirmar modelo ]";
+            canvas.print(area.x + 2, button_y, button, Style::new().fg(AMBER).bold());
+            if let Some(model) = models.get(selected) {
+                canvas.print(area.x + 2, button_y.saturating_sub(1),
+                    &truncate(&format!("Elegido: {model}"), area.w.saturating_sub(4) as usize), Style::new().fg(SECONDARY));
+            }
+            if register_hits && !models.is_empty() {
+                state.hit_map.push(MouseRegion::new("settings:confirm-model",
+                    Rect { x: area.x + 2, y: button_y, w: button.len() as u16, h: 1 }, HUB_Z,
+                    HitAction::Custom("settings:confirm-model".into())));
+            }
         }
     }
 }
@@ -414,7 +438,7 @@ fn register_row_hit(hit_map: &mut HitMap, register_hits: bool, i: usize, area: R
     ));
 }
 
-fn render_github(canvas: &mut Canvas, area: Rect, state: &mut AppState) {
+fn render_github(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hits: bool) {
     let ModalState::Settings(hub) = &state.modal else { return };
     let (label, style) = if hub.github_connected {
         ("● Conectado", Style::new().fg(GREEN).bold())
@@ -427,14 +451,22 @@ fn render_github(canvas: &mut Canvas, area: Rect, state: &mut AppState) {
         canvas.print(area.x + 2, area.y + 2, "Repo:", Style::new().fg(SECONDARY));
         canvas.print(area.x + 10, area.y + 2, repo, Style::new().fg(WHITE));
     }
-    if hub.github_connected {
-        canvas.print(area.x + 2, area.y + 4, "Enter → gestionar conexión", Style::new().fg(DIM));
-    } else {
-        canvas.print(area.x + 2, area.y + 4, "A → Conectar GitHub", Style::new().fg(AMBER));
+    let selected = hub.selected_row;
+    let connected = hub.github_connected;
+    let actions = [
+        if connected { "Modificar token de GitHub" } else { "Conectar GitHub" },
+        "Consultar estado", "Consultar usuario autenticado", "Vincular / cambiar repositorio", "Desconectar GitHub",
+    ];
+    for (i, label) in actions.iter().enumerate() {
+        let y = area.y + 4 + i as u16;
+        let style = if i == selected { Style::new().fg(AMBER).bold() } else { Style::new().fg(WHITE) };
+        canvas.print(area.x + 2, y, &format!("{} {}", if i == selected { "▶" } else { " " }, label), style);
+        register_row_hit(&mut state.hit_map, register_hits, i, area, y);
     }
+    canvas.print(area.x + 2, area.y + 10, "↑↓ / clic elegir · Enter ejecutar · A conectar", Style::new().fg(DIM));
 }
 
-fn render_telegram(canvas: &mut Canvas, area: Rect, state: &mut AppState) {
+fn render_telegram(canvas: &mut Canvas, area: Rect, state: &mut AppState, register_hits: bool) {
     let ModalState::Settings(hub) = &state.modal else { return };
     let (label, style) = if hub.telegram_active {
         ("● Bot activo", Style::new().fg(GREEN).bold())
@@ -443,11 +475,15 @@ fn render_telegram(canvas: &mut Canvas, area: Rect, state: &mut AppState) {
     };
     canvas.print(area.x + 2, area.y + 1, "Estado:", Style::new().fg(SECONDARY));
     canvas.print(area.x + 10, area.y + 1, label, style);
-    if hub.telegram_active {
-        canvas.print(area.x + 2, area.y + 3, "Enter → gestionar bot", Style::new().fg(DIM));
-    } else {
-        canvas.print(area.x + 2, area.y + 3, "A → Conectar Telegram", Style::new().fg(AMBER));
+    let selected = hub.selected_row;
+    let actions = ["Conectar Telegram", "Editar configuración del bot", "Consultar estado", "Desconectar Telegram"];
+    for (i, label) in actions.iter().enumerate() {
+        let y = area.y + 4 + i as u16;
+        let style = if i == selected { Style::new().fg(AMBER).bold() } else { Style::new().fg(WHITE) };
+        canvas.print(area.x + 2, y, &format!("{} {}", if i == selected { "▶" } else { " " }, label), style);
+        register_row_hit(&mut state.hit_map, register_hits, i, area, y);
     }
+    canvas.print(area.x + 2, area.y + 10, "↑↓ / clic elegir · Enter ejecutar · A conectar", Style::new().fg(DIM));
 }
 
 fn draw_scrollbar(canvas: &mut Canvas, area: Rect, offset: usize, total: usize, visible: usize) {
@@ -466,5 +502,17 @@ fn draw_scrollbar(canvas: &mut Canvas, area: Rect, offset: usize, total: usize, 
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max { format!("{}…", &s[..max.saturating_sub(1)]) } else { s.to_string() }
+    crate::ui::ellipsize_cells(s, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_labels_truncate_by_cells_without_splitting_utf8() {
+        assert_eq!(truncate("éééé", 4), "éééé");
+        assert_eq!(truncate("你好世界", 4), "你…");
+        assert_eq!(truncate("abc", 0), "");
+    }
 }

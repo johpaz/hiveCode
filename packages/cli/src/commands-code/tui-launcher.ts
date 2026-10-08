@@ -1,3 +1,6 @@
+import { ALL_COMMANDS } from "@johpaz/hivecode-code/coordinator/command-parser"
+import { listCatalogModels, listCatalogProviders } from "@johpaz/hivecode-core/services/provider-catalog-read"
+import { startProviderCatalogScheduler } from "@johpaz/hivecode-core/services/provider-catalog"
 /**
  * Launch the Rust/crossterm TUI binary and handle IPC with the Bun process.
  *
@@ -41,24 +44,6 @@ import type {
 import { restoreFiles } from "@johpaz/hivecode-code/checkpoint/rollback"
 import { hasProviderApiKey, isFreeProvider, storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
 import { getDefaultProvider, getProviderModel, setDefaultProvider, setProviderModel } from "./provider-store"
-
-const SUPPORTED_LLM_PROVIDERS = new Set([
-  "hiveagents",
-  "openai",
-  "anthropic",
-  "gemini",
-  "mistral",
-  "deepseek",
-  "kimi",
-  "openrouter",
-  "groq",
-  "qwen",
-  "nvidia",
-  "codex",
-  "opencode-go",
-  "minimax",
-  "hivecode-free",
-])
 
 function isLikelyMarkdown(content: string): boolean {
   if (content.includes("```")) return true
@@ -328,6 +313,14 @@ export async function launchTui(callbacks: TuiCallbacks, stdio?: TuiStdio): Prom
     // ── Launch TUI binary (Bun.listen is synchronous — socket ready now) ───
     process.stderr.write(`[tui] launching: ${binPath}\n`)
     process.stderr.write(`[tui] IPC: ${ipcServer.endpoint}\n`)
+    // The child owns the TTY. Anything Bun left reading stdin (a wizard prompt,
+    // a stray listener) would compete for the same bytes: slow, "stuck" keys.
+    if ((stdio?.stdin ?? 0) === 0) {
+      try {
+        process.stdin.pause()
+        if (process.stdin.isTTY) process.stdin.setRawMode(false)
+      } catch { /* not a TTY */ }
+    }
     const proc = Bun.spawn([binPath], {
       stdin:  stdio?.stdin ?? 0,
       stdout: stdio?.stdout ?? 1,
@@ -343,7 +336,15 @@ export async function launchTui(callbacks: TuiCallbacks, stdio?: TuiStdio): Prom
       kill: () => { proc.kill() },
     })
 
-    proc.exited.then((code) => {
+    const skillStartup = import("@johpaz/hivecode-core/services/skill-catalog").then(async catalog => {
+      const runtimeConfig = await (await import("@johpaz/hivecode-core/config")).loadConfig()
+      await catalog.startSkillCatalogReload(runtimeConfig)
+      return catalog
+    }).catch(error => { logger.error(`Skill reload initialization failed: ${error.message}`); return null })
+    const stopCatalogScheduler = startProviderCatalogScheduler()
+    proc.exited.then(async (code) => {
+      await stopCatalogScheduler()
+      await (await skillStartup)?.stopSkillCatalogReload()
       process.stderr.write(`[tui] hivetui exited with code: ${code}\n`)
       removeLogListener(logCb)
       callbacks.onExit?.()
@@ -383,6 +384,7 @@ async function sendSessionSnapshot(
              agent: cp.created_by ?? "system" })
     }
 
+    await sendNarrativeSnapshot(send, sessionId)
     await sendFileSnapshots(send, sessionId)
     await sendAdrSnapshot(send)
     await sendCodeTaskSnapshot(send, sessionId)
@@ -391,6 +393,10 @@ async function sendSessionSnapshot(
   } catch (e) {
     logger.warn(`[tui-ipc] ${label} snapshot failed:`, (e as Error).message)
   }
+}
+
+function isSettingsCommand(input: string): boolean {
+  return /^\/(telegram|modelo|github|mcp|skill)(?:\s|$)/.test(input)
 }
 
 async function handleTuiMessage(
@@ -413,6 +419,7 @@ async function handleTuiMessage(
         token_count:   callbacks.tokenCount,
         workers:       callbacks.workers,
       })
+      send({ type: "quick_menu", items: ALL_COMMANDS.map(command => ({ label: command.command, cmd: command.command, desc: command.description })) })
       // Dump session state so TUI can rebuild on startup
       await sendSessionSnapshot(send, callbacks.sessionId, "init")
       send({ type: "status", running: false, msg: "Listo · escribe tu tarea" })
@@ -487,7 +494,7 @@ async function handleTuiMessage(
             new_token_count: result.newTokenCount,
           })
         }
-        if (input.startsWith("/telegram")) {
+        if (isSettingsCommand(input)) {
           await sendSettingsSnapshot(send)
         }
       } catch (err) {
@@ -498,6 +505,7 @@ async function handleTuiMessage(
         })
         send({ type: "status", running: false, msg: "Error" })
         send({ type: "activity_update", coordinator: "", phase: "", status: "idle" })
+        if (isSettingsCommand(input)) await sendSettingsSnapshot(send)
       }
       break
     }
@@ -542,9 +550,10 @@ async function handleTuiMessage(
         // petición, así que se fija el primero habilitado del nuevo provider.
         const models = (await (await col<ModelDoc>("models")).findBy("provider_id", providerId))
           .map(entry => entry.doc)
-          .filter(m => m.model_type === "llm" && m.enabled)
+          .filter(m => m.model_type === "llm" && m.enabled && m.deprecated_at == null)
           .sort((a, b) => a.id.localeCompare(b.id))
-        const model = models[0]?.id
+        const configuredModel = await getProviderModel(providerId)
+        const model = models.find(m => m.id === configuredModel)?.id ?? models[0]?.id
 
         // Solo se toca el provider/modelo por defecto si algo cambia de verdad.
         // Reactivar el provider ya activo con su clave debe ser un no-op: si no,
@@ -567,7 +576,7 @@ async function handleTuiMessage(
         }
         await (await col<ProviderDoc>("providers")).put(
           providerId,
-          { ...doc, enabled: true },
+          { ...doc, enabled: true, active: true },
           { expectedVersion: row!.version },
         )
 
@@ -756,6 +765,25 @@ async function sendHistorySnapshot(send: (m: BunMessage) => void, sessionId: str
         task_id: turn.task_id ?? undefined,
       })
     }
+  }
+}
+
+/** Replay the session's stored narration into the Bee panel (last 40 entries, oldest first). */
+async function sendNarrativeSnapshot(send: (m: BunMessage) => void, sessionId: string): Promise<void> {
+  const rows = (await findDocsBy<CodeNarrativeDoc>("codeNarrative", "session_id", sessionId))
+    .filter((row) => row.entry?.trim())
+    .sort((a, b) => ms(b.created_at) - ms(a.created_at))
+    .slice(0, 40)
+    .reverse()
+  for (const row of rows) {
+    send({
+      type: "narrative_chunk",
+      coordinator: row.coordinator ?? "bee",
+      phase: row.phase ?? "narrative",
+      content: row.entry,
+      task_id: row.task_id ?? undefined,
+      replay: true,
+    })
   }
 }
 
@@ -1058,7 +1086,7 @@ function buildDashboardLevels(workers: any[]): Array<{ level: number; label: str
         : "pending"
     return {
       level,
-      label: ["PM", "ARC", "ENG", "QA+SEC", "OPS", "VER", "REV", "LIB"][level] ?? `L${level}`,
+      label: ["PM", "ARC", "ENG", "QA+SEC", "OPS", "REV", "LIB"][level] ?? `L${level}`,
       agents: list.map(w => w.name),
       status,
     }
@@ -1085,27 +1113,18 @@ function fallbackWorkerLevel(name: string): number {
 
 // ── Settings Snapshot ─────────────────────────────────────────────────────────
 
-async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> {
+export async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> {
   // Cada sección tiene su propio try-catch para que un error en MCP no borre los providers
   let providers: any[] = []
   try {
     const codeConfig = await col<CodeConfigDoc>("codeConfig")
     const defaultProvider = (await codeConfig.get("default_provider"))?.doc.value ?? ""
+    const providerRows = await listCatalogProviders()
     const modelsByProvider = new Map<string, ModelDoc[]>()
-    for (const model of await scanDocs<ModelDoc>("models")) {
-      if (model.model_type !== "llm" || !model.enabled) continue
-      const list = modelsByProvider.get(model.provider_id) ?? []
-      list.push(model)
-      modelsByProvider.set(model.provider_id, list)
+    for (const provider of providerRows) {
+      const catalogActive = provider.enabled && (provider.active || provider.id === defaultProvider)
+      modelsByProvider.set(provider.id, catalogActive ? await listCatalogModels(provider.id) : [])
     }
-    const providerRows = (await scanDocs<ProviderDoc>("providers"))
-      .filter((provider) =>
-        provider.enabled
-        && provider.category === "llm"
-        && SUPPORTED_LLM_PROVIDERS.has(provider.id)
-        && (modelsByProvider.get(provider.id)?.length ?? 0) > 0
-      )
-      .sort((a, b) => a.id.localeCompare(b.id))
 
     providers = await Promise.all(providerRows.map(async (provider) => {
       const configuredModel = (await codeConfig.get(`provider_model_${provider.id}`))?.doc.value ?? ""
@@ -1115,12 +1134,19 @@ async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> 
       // fijo la columna Key de la TUI marcaba \u2713 para todos los providers y
       // no daba ninguna pista de cuáles necesitaban clave.
       const browserLogin = isFreeProvider(provider.id) || provider.is_free_tier === true
+      let hasKey = browserLogin
+      let credentialError: string | undefined
+      try { if (!browserLogin) hasKey = await hasProviderApiKey(provider.id) }
+      catch { credentialError = "Almacén de credenciales no disponible" }
       return {
         id: provider.id,
         name: provider.name ?? provider.id,
-        model: configuredModel || fallbackModel,
+        model: configuredModel
+          ? ((modelsByProvider.get(provider.id) ?? []).some(m => m.id === configuredModel) ? configuredModel : "")
+          : fallbackModel,
         is_active: provider.id === defaultProvider,
-        has_key: browserLogin || await hasProviderApiKey(provider.id),
+        has_key: hasKey,
+        credential_error: credentialError,
         // hivecode-free y af\u00ednes hacen login por navegador: la TUI no debe
         // pedirles una API key, no hay ninguna que pegar.
         browser_login: browserLogin,
@@ -1175,6 +1201,7 @@ async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> 
       .map((entry) => entry.doc)
       .sort((a, b) => a.name.localeCompare(b.name))
       .map(s => ({
+        id: s.id,
         name: s.name ?? "",
         description: s.description ?? "",
         category: s.category ?? "",
@@ -1184,7 +1211,14 @@ async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> 
         // ofrecer una whose tools el agente no tiene es peor que no ofrecerla.
         tools: parseSkillTools(s.tools),
         // Quién la recomienda. Hasta ahora el campo se guardaba y nadie lo leía.
-        preferida_por: s.preferred_agents ?? [],
+        preferida_por: (() => {
+          try {
+            const roles: unknown = typeof s.preferred_agents === "string"
+              ? JSON.parse(s.preferred_agents)
+              : s.preferred_agents
+            return Array.isArray(roles) ? roles.filter((role): role is string => typeof role === "string") : []
+          } catch { return [] }
+        })(),
         // Clasificación calculada con la MISMA función que usa el runtime
         // (`isMinimalSkill`). Si la vista calculara su propia regla, podría
         // marcar como "siempre disponible" algo que el agente no puede cargar.
@@ -1200,7 +1234,7 @@ async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> 
   try {
     const codeConfig = await col<CodeConfigDoc>("codeConfig")
     github_connected = !!(await codeConfig.get("github_token"))?.doc.value
-    github_repo = (await codeConfig.get("github_repo"))?.doc.value ?? null
+    github_repo = (await codeConfig.get("default_repo"))?.doc.value ?? null
   } catch { /* config puede no existir */ }
   try {
     const telegram = (await (await col<ChannelDoc>("channels")).get("telegram"))?.doc

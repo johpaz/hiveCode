@@ -65,7 +65,7 @@ function catalogModelKey(provider: string, model: string): string {
 export async function getJevKey(): Promise<string | null> {
   const provider = await (await col<ProviderDoc>("providers")).get("openrouter")
   if (!provider?.doc.enabled || !provider.doc.active) return null
-  return (await getProviderApiKey("openrouter")) || process.env.OPENROUTER_API_KEY || null
+  return await getProviderApiKey("openrouter")
 }
 
 export async function getJevStatus(): Promise<JevStatus> {

@@ -686,13 +686,6 @@ export class TelegramChannel extends BaseChannel {
     this.typingIntervals.set(sessionId, interval);
   }
 
-  async stopTyping(sessionId: string): Promise<void> {
-    const interval = this.typingIntervals.get(sessionId);
-    if (interval) {
-      clearInterval(interval);
-      this.typingIntervals.delete(sessionId);
-    }
-  }
 
   async send(sessionId: string, message: OutboundMessage): Promise<void> {
     if (!this.bot) {

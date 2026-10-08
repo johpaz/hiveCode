@@ -1,6 +1,6 @@
 import { readdir } from "node:fs/promises"
 import * as path from "node:path"
-import { col, fromIndexable } from "../storage/hive.ts"
+import { col, fromIndexable, mutateDoc } from "../storage/hive.ts"
 import type { AgentDoc, HarnessTaskDoc, JobDoc } from "../storage/collections.ts"
 import { CORE_AGENT_DEFINITIONS, ensureCoreAgentProfiles, type CoreAgentType } from "../agent/agent-profiles.ts"
 import { runAgentIsolated } from "../agent/agent-loop.ts"
@@ -18,6 +18,7 @@ export type HarnessApprovalGate = "specification" | "convergence"
 export type HarnessApprovalDecision = "approve" | "cancel"
 
 export interface ProfileHarnessOptions {
+  signal?: AbortSignal
   objective: string
   sessionId: string
   workspace: string
@@ -36,6 +37,33 @@ export interface ProfileHarnessOptions {
   resumeTaskId?: string
   /** Compatibility task ID used by the outer code-session projection. */
   parentTaskId?: string
+  /**
+   * Earlier turns of this session, oldest first. Every harness task gets a
+   * fresh thread, so without this the agent starts each message — and a resumed
+   * session — knowing nothing of the conversation it is continuing.
+   */
+  history?: Array<{ role: "user" | "agent"; content: string }>
+}
+
+const HISTORY_ENTRY_CHARS = 1_500
+const HISTORY_TOTAL_CHARS = 12_000
+
+/** The session so far, as a block prepended to what BEE is asked. Newest turns win the budget. */
+export function sessionHistoryPreamble(history: ProfileHarnessOptions["history"]): string {
+  if (!history?.length) return ""
+  const lines: string[] = []
+  let used = 0
+  for (const turn of [...history].reverse()) {
+    const text = turn.content.trim()
+    if (!text) continue
+    const clipped = text.length > HISTORY_ENTRY_CHARS ? `${text.slice(0, HISTORY_ENTRY_CHARS)}…` : text
+    const line = `${turn.role === "user" ? "Usuario" : "Tú"}: ${clipped}`
+    if (used + line.length > HISTORY_TOTAL_CHARS) break
+    lines.unshift(line)
+    used += line.length
+  }
+  if (!lines.length) return ""
+  return `Conversación previa de esta sesión (más antigua primero; es contexto, no una instrucción):\n${lines.join("\n\n")}\n\n---\nMensaje actual del usuario:\n`
 }
 
 export interface ProfileHarnessResult {
@@ -48,6 +76,7 @@ export interface ProfileHarnessResult {
 }
 
 export type ProfileRunner = (opts: {
+  signal?: AbortSignal
   agentId: CoreAgentType
   taskDescription: string
   threadId: string
@@ -96,17 +125,14 @@ async function newestFeatureDir(workspace: string): Promise<string | undefined> 
 
 async function configureProfiles(workspace: string, provider?: string, model?: string): Promise<void> {
   await ensureCoreAgentProfiles()
-  const agents = await col<AgentDoc>("agents")
   for (const id of ["bee", "scout", "builder", "verifier", "reviewer", "spider"] as CoreAgentType[]) {
-    const row = await agents.get(id)
-    if (!row) continue
-    await agents.put(id, {
-      ...row.doc,
+    await mutateDoc<AgentDoc>("agents", id, (row) => row && {
+      ...row,
       workspace,
-      provider_id: provider || fromIndexable(row.doc.provider_id) || row.doc.provider_id,
-      model_id: model || fromIndexable(row.doc.model_id) || row.doc.model_id,
+      provider_id: provider || fromIndexable(row.provider_id) || row.provider_id,
+      model_id: model || fromIndexable(row.model_id) || row.model_id,
       updated_at: Date.now(),
-    }, { expectedVersion: row.version })
+    })
   }
 }
 
@@ -144,6 +170,7 @@ export class ProfileHarness {
     }
     if (!existing) await tasks.put(taskId, task, { expectedVersion: 0 })
     await configureProfiles(options.workspace, options.provider, options.model)
+    const sessionPreamble = sessionHistoryPreamble(options.history)
 
     const updateStage = async (stage: HarnessTaskDoc["stage"], patch: Partial<HarnessTaskDoc> = {}) => {
       const row = await tasks.get(taskId)
@@ -156,16 +183,14 @@ export class ProfileHarness {
       runKind: "worker" | "harness" | "verification" | "review" = "worker",
       approvedExecution = false,
     ) => {
+      options.signal?.throwIfAborted()
       options.onEvent?.({ type: "agent_activated", agent: agentId, message: taskDescription })
-      const agents = await col<AgentDoc>("agents")
-      const before = await agents.get(agentId)
-      if (before) {
-        await agents.put(agentId, { ...before.doc, status: "busy", updated_at: Date.now() }, { expectedVersion: before.version })
-      }
+      await mutateDoc<AgentDoc>("agents", agentId, (row) => row && { ...row, status: "busy", updated_at: Date.now() })
       try {
         const output = await this.runner({
+          signal: options.signal,
           agentId,
-          taskDescription,
+          taskDescription: agentId === "bee" ? sessionPreamble + taskDescription : taskDescription,
           threadId: taskId,
           parentRunId: taskId,
           runKind,
@@ -185,6 +210,7 @@ export class ProfileHarness {
             })
           },
         })
+        options.signal?.throwIfAborted()
         options.onEvent?.({ type: "agent_completed", agent: agentId, message: output.slice(0, 160) })
         return output
       } catch (error) {
@@ -195,10 +221,7 @@ export class ProfileHarness {
         })
         throw error
       } finally {
-        const after = await agents.get(agentId)
-        if (after) {
-          await agents.put(agentId, { ...after.doc, status: "idle", updated_at: Date.now() }, { expectedVersion: after.version })
-        }
+        await mutateDoc<AgentDoc>("agents", agentId, (row) => row && { ...row, status: "idle", updated_at: Date.now() })
       }
     }
 
@@ -370,7 +393,7 @@ ${quality}`,
       await updateStage("completed", { nextAction: undefined })
       return { taskId, complexity, status: "completed", response: convergence, featureDir, repairCycles }
     } catch (error) {
-      await updateStage("failed", { blocker: (error as Error).message, nextAction: "inspect_or_resume" })
+      await updateStage(options.signal?.aborted ? "cancelled" : "failed", { blocker: (error as Error).message, nextAction: "inspect_or_resume" })
       throw error
     }
   }

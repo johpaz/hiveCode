@@ -18,3 +18,9 @@ const dir = mkdtempSync(join(tmpdir(), "hivecode-test-"))
 
 // Resolved relative to cwd by getHiveDbPath(); an absolute path passes through.
 process.env.HIVE_DB_PATH = dir
+import { beforeEach } from "bun:test";
+// A test that checks path resolution may temporarily remove the override.
+// Restore it before every following test, even when that test has no own fixture.
+beforeEach(() => { process.env.HIVE_DB_PATH ??= dir; });
+// Keep the fallback installation inside the temporary tree as well.
+process.env.HIVE_HOME = join(dir, "home");

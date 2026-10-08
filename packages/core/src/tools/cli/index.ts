@@ -1,3 +1,4 @@
+import { spawnTaskProcess } from "../../runtime/task-execution";
 /**
  * shell_executor - Execute shell commands in agent workspace
  *
@@ -147,6 +148,15 @@ export const shellExecutorTool: Tool = {
       }
     }
 
+    // The unsandboxed path and the sandbox wrappers all assume a POSIX /bin/sh.
+    // Native Windows has none, so say so instead of failing with a spawn error.
+    if (os.platform() === "win32") {
+      return {
+        ok: false,
+        error: "shell_executor needs a POSIX shell and is not supported on native Windows. Run hivecode inside WSL2.",
+      };
+    }
+
     // ── Sandbox execution ──────────────────────────────────────────
     const sandboxCfg = resolveSandboxConfig(config, workspace || cwd);
     let useSandbox = false;
@@ -158,10 +168,10 @@ export const shellExecutorTool: Tool = {
       if (sandboxResult.ok) {
         useSandbox = true;
         log.info(`[shell-executor] Sandbox enabled (provider: ${sandboxResult.provider})`)
-      } else if (sandboxResult.error?.includes("falling back")) {
+      } else if (sandboxResult.reason === "unavailable") {
         log.warn(`[shell-executor] Sandbox unavailable, falling back to unsandboxed: ${sandboxResult.error}`)
         useSandbox = false;
-      } else if (sandboxResult.error?.includes("excluded")) {
+      } else if (sandboxResult.reason === "excluded") {
         log.info(`[shell-executor] Command excluded from sandbox, running unsandboxed`)
         useSandbox = false;
       } else {
@@ -184,7 +194,7 @@ export const shellExecutorTool: Tool = {
 
       if (useSandbox && sandboxResult) {
         // Execute with sandbox isolation
-        proc = Bun.spawn(sandboxResult.command, {
+        proc = spawnTaskProcess(sandboxResult.command, {
           env: sandboxEnv,
           signal: controller.signal,
           stdout: "pipe",
@@ -192,7 +202,7 @@ export const shellExecutorTool: Tool = {
         });
       } else {
         // Execute without sandbox (original behavior)
-        proc = Bun.spawn(["/bin/sh", "-c", command], {
+        proc = spawnTaskProcess(["/bin/sh", "-c", command], {
           cwd,
           env: sandboxEnv,
           signal: controller.signal,

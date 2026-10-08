@@ -125,8 +125,14 @@ pub enum BunMessage {
     /// La sesión activa cambió: se creó lazy al primer mensaje, o se cambió con
     /// `/session resume`. La TUI limpia la transcripción y los paneles por sesión;
     /// Bun reenvía después el snapshot de la nueva id.
+    ///
+    /// `fresh` marca la sesión recién nacida del primer mensaje: no hay nada que
+    /// soltar, y el historial local ya contiene lo que el usuario acaba de
+    /// escribir, que Bun no reenvía.
     SessionChanged {
         session_id: String,
+        #[serde(default)]
+        fresh: bool,
     },
 
     // ── Workers y coordinador ──────────────────────────────────────────────────
@@ -269,6 +275,10 @@ pub enum BunMessage {
         content: String,
         content_type: Option<String>,
         stream_id: Option<String>,
+        /// Narración ya ocurrida, reenviada al reanudar una sesión: se muestra,
+        /// pero no cuenta como actividad en vivo de ningún worker.
+        #[serde(default)]
+        replay: bool,
     },
 
     // ── Modales (enviados por Bun cuando un comando los requiere) ─────────────
@@ -406,7 +416,7 @@ pub enum BunMessage {
     FilesSnapshot   { files:   Vec<FileSnapshotEntry>   },
 
     // ── No-ops: Bun puede enviar estos; los ignoramos sin romper el parser ─────
-    QuickMenu { items: Vec<sonic_rs::Value> },
+    QuickMenu { items: Vec<IpcCommandMenuItem> },
     Suspend,
     Resume,
     ContextUpdate { agent: String, key: String, scope: String },
@@ -759,6 +769,13 @@ pub struct ApiContractIpc {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpcCommandMenuItem {
+    pub cmd: String,
+    #[serde(default)]
+    pub desc: String,
+}
+
 // ── Tipos para el hub de settings ────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
@@ -806,6 +823,8 @@ pub struct IpcSettingsMcp {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct IpcSettingsSkill {
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     pub description: String,
     pub category: String,

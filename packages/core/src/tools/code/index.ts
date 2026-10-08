@@ -1,3 +1,5 @@
+import { fetchTaskResource } from "../../runtime/task-execution";
+import { spawnTaskProcess } from "../../runtime/task-execution";
 import type { Tool } from "../types.ts"
 import { validateCommand } from "./command-validator.ts"
 import * as nodePath from "node:path"
@@ -21,7 +23,7 @@ const gitStatusTool: Tool = {
   async execute(params) {
     const path = (params.path as string) || "."
     try {
-      const proc = Bun.spawn(["git", "status", "--porcelain"], { cwd: path })
+      const proc = spawnTaskProcess(["git", "status", "--porcelain"], { cwd: path })
       const output = await new Response(proc.stdout).text()
       const exitCode = await proc.exited
       if (exitCode !== 0) {
@@ -79,7 +81,7 @@ const gitDiffTool: Tool = {
     if (params.target) args.push(params.target as string)
     if (params.file) args.push(params.file as string)
     try {
-      const proc = Bun.spawn(["git", ...args], { cwd: path })
+      const proc = spawnTaskProcess(["git", ...args], { cwd: path })
       const output = await new Response(proc.stdout).text()
       return { ok: true, result: { diff: output, length: output.length } }
     } catch (err) {
@@ -116,7 +118,7 @@ const gitLogTool: Tool = {
     const args = ["log", `--max-count=${count}`, "--format=%h %ai %an: %s"]
     if (params.branch) args.unshift(params.branch as string)
     try {
-      const proc = Bun.spawn(["git", ...args], { cwd: path })
+      const proc = spawnTaskProcess(["git", ...args], { cwd: path })
       const output = await new Response(proc.stdout).text()
       const exitCode = await proc.exited
       if (exitCode !== 0) {
@@ -161,18 +163,18 @@ const gitBranchTool: Tool = {
     const action = (params.action as string) || "list"
     try {
       if (action === "list") {
-        const proc = Bun.spawn(["git", "branch", "-a"], { cwd: path })
+        const proc = spawnTaskProcess(["git", "branch", "-a"], { cwd: path })
         const output = await new Response(proc.stdout).text()
         const branches = output.split("\n").filter(Boolean).map(b => b.trim())
         return { ok: true, result: { branches, current: branches.find(b => b.startsWith("*"))?.replace("* ", "") } }
       }
       if (action === "create" && params.name) {
-        const proc = Bun.spawn(["git", "branch", params.name as string], { cwd: path })
+        const proc = spawnTaskProcess(["git", "branch", params.name as string], { cwd: path })
         await proc.exited
         return { ok: true, result: `Branch '${params.name}' created` }
       }
       if (action === "delete" && params.name) {
-        const proc = Bun.spawn(["git", "branch", "-d", params.name as string], { cwd: path })
+        const proc = spawnTaskProcess(["git", "branch", "-d", params.name as string], { cwd: path })
         const exitCode = await proc.exited
         if (exitCode !== 0) {
           return { ok: false, error: await new Response(proc.stderr).text(), hint: "Try -D for force delete" }
@@ -180,7 +182,7 @@ const gitBranchTool: Tool = {
         return { ok: true, result: `Branch '${params.name}' deleted` }
       }
       if (action === "switch" && params.name) {
-        const proc = Bun.spawn(["git", "checkout", params.name as string], { cwd: path })
+        const proc = spawnTaskProcess(["git", "checkout", params.name as string], { cwd: path })
         const exitCode = await proc.exited
         if (exitCode !== 0) {
           return { ok: false, error: await new Response(proc.stderr).text() }
@@ -223,13 +225,13 @@ const gitCommitTool: Tool = {
     try {
       if (params.files) {
         const files = (params.files as string).split(" ")
-        const addProc = Bun.spawn(["git", "add", ...files], { cwd: path })
+        const addProc = spawnTaskProcess(["git", "add", ...files], { cwd: path })
         await addProc.exited
       } else {
-        const addProc = Bun.spawn(["git", "add", "-A"], { cwd: path })
+        const addProc = spawnTaskProcess(["git", "add", "-A"], { cwd: path })
         await addProc.exited
       }
-      const proc = Bun.spawn(["git", "commit", "-m", message], { cwd: path })
+      const proc = spawnTaskProcess(["git", "commit", "-m", message], { cwd: path })
       const stdout = await new Response(proc.stdout).text()
       const stderr = await new Response(proc.stderr).text()
       const exitCode = await proc.exited
@@ -281,7 +283,7 @@ const codeSearchTool: Tool = {
     const maxResults = (params.maxResults as number) || 30
     const context = (params.context as number) || 2
     try {
-      const rgProc = Bun.spawn([
+      const rgProc = spawnTaskProcess([
         "rg", "--line-number", "--with-filename",
         `--context=${context}`, `--max-count=${maxResults}`,
         ...(params.include ? ["--glob", params.include as string] : []),
@@ -298,7 +300,7 @@ const codeSearchTool: Tool = {
       return { ok: true, result: { matches: lines.slice(0, maxResults * (context * 2 + 1)), count: lines.length } }
     } catch {
       try {
-        const grepProc = Bun.spawn([
+        const grepProc = spawnTaskProcess([
           "grep", "-rn", "--include", params.include as string || "*.ts",
           pattern, path,
         ])
@@ -358,7 +360,7 @@ const codeBuildTool: Tool = {
       }
     }
     try {
-      const proc = Bun.spawn(["/bin/sh", "-c", cmd], {
+      const proc = spawnTaskProcess(["/bin/sh", "-c", cmd], {
         cwd: path,
         timeout: ((params.timeout as number) || 120) * 1000,
       })
@@ -439,7 +441,7 @@ const codeTestTool: Tool = {
       return { ok: false, error: `Command blocked by safety validator: ${(validation as any).reason}` }
     }
     try {
-      const proc = Bun.spawn(["/bin/sh", "-c", cmd], {
+      const proc = spawnTaskProcess(["/bin/sh", "-c", cmd], {
         cwd: path,
         timeout: ((params.timeout as number) || 180) * 1000,
       })
@@ -503,7 +505,7 @@ const codeLintTool: Tool = {
       return { ok: false, error: `Command blocked by safety validator: ${(lintValidation as any).reason}` }
     }
     try {
-      const proc = Bun.spawn(["/bin/sh", "-c", cmd], {
+      const proc = spawnTaskProcess(["/bin/sh", "-c", cmd], {
         cwd: path,
         timeout: ((params.timeout as number) || 120) * 1000,
       })
@@ -547,7 +549,7 @@ const codeDiffCreateTool: Tool = {
     const file2 = params.file2 as string
     if (!file1 || !file2) return { ok: false, error: "Both file1 and file2 are required" }
     try {
-      const proc = Bun.spawn(["diff", "-u", file1, file2])
+      const proc = spawnTaskProcess(["diff", "-u", file1, file2])
       const stdout = await new Response(proc.stdout).text()
       return {
         ok: true,
@@ -746,7 +748,7 @@ const checkTypesTool: Tool = {
     const path = (params.path as string) || "."
     try {
       const start = Bun.nanoseconds()
-      const proc = Bun.spawn(["bun", "tsc", "--noEmit"], {
+      const proc = spawnTaskProcess(["bun", "tsc", "--noEmit"], {
         cwd: path,
         timeout: ((params.timeout as number) || 120) * 1000,
       })
@@ -815,7 +817,7 @@ const runScriptTool: Tool = {
       const args = [filePath]
       if (params.args) args.push(...(params.args as string).split(" "))
       const start = Bun.nanoseconds()
-      const proc = Bun.spawn(["bun", ...args], {
+      const proc = spawnTaskProcess(["bun", ...args], {
         cwd: process.cwd(),
         timeout: 60_000,
         // Sandbox: minimal env — no host secrets, no API keys
@@ -884,7 +886,7 @@ const gitBlameTool: Tool = {
         args.push(`-L${params.lineStart}${end}`)
       }
       args.push(file)
-      const proc = Bun.spawn(["git", ...args], { cwd: repoPath })
+      const proc = spawnTaskProcess(["git", ...args], { cwd: repoPath })
       const output = await new Response(proc.stdout).text()
       const exitCode = await proc.exited
       if (exitCode !== 0) {
@@ -971,14 +973,14 @@ const gitCreatePrTool: Tool = {
       } catch {}
     }
     if (!token) {
-      const ghProc = Bun.spawn(["gh", "auth", "token"], { cwd: repoPath })
+      const ghProc = spawnTaskProcess(["gh", "auth", "token"], { cwd: repoPath })
       token = (await new Response(ghProc.stdout).text()).trim()
     }
 
     try {
       let repo = params.repo as string
       if (!repo) {
-        const remoteProc = Bun.spawn(["git", "remote", "get-url", "origin"], { cwd: repoPath })
+        const remoteProc = spawnTaskProcess(["git", "remote", "get-url", "origin"], { cwd: repoPath })
         const remote = (await new Response(remoteProc.stdout).text()).trim()
         const match = remote.match(/(?:github\.com[/:])([\w.-]+)\/([\w.-]+?)(?:\.git)?$/)
         if (match) repo = `${match[1]}/${match[2]}`
@@ -987,14 +989,14 @@ const gitCreatePrTool: Tool = {
 
       let head = params.head as string
       if (!head) {
-        const branchProc = Bun.spawn(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoPath })
+        const branchProc = spawnTaskProcess(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoPath })
         head = (await new Response(branchProc.stdout).text()).trim()
       }
       const base = (params.base as string) || "main"
 
       let body = params.body as string
       if (!body) {
-        const logProc = Bun.spawn(["git", "log", `${base}..${head}`, "--oneline", "--no-decorate"], { cwd: repoPath })
+        const logProc = spawnTaskProcess(["git", "log", `${base}..${head}`, "--oneline", "--no-decorate"], { cwd: repoPath })
         const log = (await new Response(logProc.stdout).text()).trim()
         if (log) {
           const commits = log.split("\n").map(l => `- ${l}`).join("\n")
@@ -1004,7 +1006,7 @@ const gitCreatePrTool: Tool = {
         }
       }
 
-      const response = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
+      const response = await fetchTaskResource(`https://api.github.com/repos/${repo}/pulls`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -1115,15 +1117,15 @@ const gitRollbackTool: Tool = {
 
       const resetArgs = ["reset", "--hard"]
       if (branchName) {
-        const mergeBase = Bun.spawn(["git", "merge-base", branchName, "main"], { cwd: repoPath })
+        const mergeBase = spawnTaskProcess(["git", "merge-base", branchName, "main"], { cwd: repoPath })
         const baseSha = (await new Response(mergeBase.stdout).text()).trim()
         if (baseSha) resetArgs.push(baseSha)
       }
-      const resetProc = Bun.spawn(["git", ...resetArgs], { cwd: repoPath })
+      const resetProc = spawnTaskProcess(["git", ...resetArgs], { cwd: repoPath })
       await resetProc.exited
 
       if (branchName) {
-        Bun.spawn(["git", "branch", "-D", branchName], { cwd: repoPath })
+        spawnTaskProcess(["git", "branch", "-D", branchName], { cwd: repoPath })
       }
 
       for (const snap of snapshots) await snapshotCol.delete(snap.id)
@@ -1265,7 +1267,7 @@ const codeTestParallelTool: Tool = {
         : baseCmd
 
       try {
-        const proc = Bun.spawn(["/bin/sh", "-c", cmd], {
+        const proc = spawnTaskProcess(["/bin/sh", "-c", cmd], {
           cwd: ".",
           timeout: timeoutMs,
           stdout: "pipe",
@@ -1282,7 +1284,7 @@ const codeTestParallelTool: Tool = {
             const xml = await Bun.file(junitPath).text()
             counts = parseJUnitCounts(xml)
           } catch { /* JUnit file unavailable — counts stay 0 */ }
-          finally { try { Bun.spawn(["rm", "-f", junitPath]) } catch { /* ignore */ } }
+          finally { try { spawnTaskProcess(["rm", "-f", junitPath]) } catch { /* ignore */ } }
         }
 
         return {
@@ -1295,7 +1297,7 @@ const codeTestParallelTool: Tool = {
           error: exitCode !== 0 ? (stderr || stdout).substring(0, 800) : undefined,
         }
       } catch (err) {
-        if (junitPath) try { Bun.spawn(["rm", "-f", junitPath]) } catch { /* ignore */ }
+        if (junitPath) try { spawnTaskProcess(["rm", "-f", junitPath]) } catch { /* ignore */ }
         const durationMs = Math.round((Bun.nanoseconds() - start) / 1_000_000)
         return {
           label,

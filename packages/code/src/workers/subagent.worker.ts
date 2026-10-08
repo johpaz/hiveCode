@@ -10,24 +10,10 @@
 
 import { callLLM } from "@johpaz/hivecode-core/agent/llm-client"
 import type { LLMMessage } from "@johpaz/hivecode-core/agent/llm-client"
-import { readWorkerSecrets } from "./secrets"
+import { resolveWorkerApiKey as resolveApiKey } from "./secrets"
 
 const COORDINATOR_PROVIDER = process.env.HIVE_COORDINATOR_PROVIDER || "anthropic"
 const COORDINATOR_MODEL = process.env.HIVE_COORDINATOR_MODEL || "claude-sonnet-4-6"
-
-/** Resolve API key using getEnvironmentData → env fallback.
- *  Each provider uses its own independent key — no sharing between providers. */
-function resolveApiKey(provider: string, taskSecrets?: Record<string, string>): string {
-  const envKey = `${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`
-  const envSecrets = readWorkerSecrets()
-  if (envSecrets?.[envKey]) return envSecrets[envKey]
-  if (envSecrets?.["LLM_API_KEY"]) return envSecrets["LLM_API_KEY"]
-  if (taskSecrets?.[envKey]) return taskSecrets[envKey]
-  if (taskSecrets?.["LLM_API_KEY"]) return taskSecrets["LLM_API_KEY"]
-  const envValue = process.env[envKey] || process.env.LLM_API_KEY || ""
-  if (envValue) return envValue
-  throw new Error(`No API key found for provider "${provider}"`)
-}
 
 interface SubAgentTask {
   systemPrompt: string

@@ -1,3 +1,5 @@
+import { publicMcpUrl } from "../../mcp/server-config";
+import { findMcpServer as findServer } from "../../mcp/server-config";
 import { encryptConfig, decryptConfig } from "../../storage/crypto.ts"
 import { col } from "../../storage/hive"
 import type { McpServerDoc } from "../../storage/collections"
@@ -24,9 +26,9 @@ export async function handleGetMcpServers(
     .map((entry) => entry.doc)
     .sort((a, b) => a.name.localeCompare(b.name))
 
-  const allServers = docs.map(s => {
+  const allServers = await Promise.all(docs.map(async s => {
     const normalizedName = s.name.toLowerCase().replace(/[^a-z0-9-]/g, "-")
-    const live = liveServers.get(s.name) || liveServers.get(normalizedName)
+    const live = liveServers.get(s.id) || liveServers.get(s.name) || liveServers.get(normalizedName)
     return {
       id: s.id,
       name: s.name,
@@ -35,15 +37,15 @@ export async function handleGetMcpServers(
       config: {
         transport: s.transport,
         command: s.command,
-        args: s.args ? JSON.parse(s.args) : [],
-        url: s.url,
-        headers: redactHeaders(s),
+        args: s.args ? (JSON.parse(s.args) as unknown[]).map(() => "••••••••") : [],
+        url: publicMcpUrl(s.url),
+        headers: await redactHeaders(s),
         enabled: s.enabled,
       },
-      tools_count: live?.tools.length || s.tools_count || 0,
+      tools_count: live?.tools.length ?? s.tools_count ?? 0,
       tools: live?.tools || [],
     }
-  })
+  }))
 
   return addCorsHeaders(Response.json(allServers), req)
 }
@@ -55,7 +57,7 @@ export async function handleCreateMcpServer(req: Request, addCorsHeaders: (r: Re
   }
 
   const serverId = body.name.toLowerCase().replace(/[^a-z0-9-]/g, "-")
-  const headers = body.config.headers ? encryptConfig(body.config.headers) : null
+  const headers = body.config.headers ? await encryptConfig(body.config.headers) : null
   const doc: McpServerDoc = {
     id: serverId,
     name: body.name,
@@ -106,9 +108,9 @@ export async function handleGetMcpServerDetail(
     name: server.name,
     transport: server.transport,
     command: server.command ?? null,
-    args: server.args ? JSON.parse(server.args) : [],
-    url: server.url ?? null,
-    headers: readHeaders(server),
+    args: server.args ? (JSON.parse(server.args) as unknown[]).map(() => "••••••••") : [],
+    url: publicMcpUrl(server.url),
+    headers: await redactHeaders(server),
     enabled: server.enabled,
     builtin: server.builtin,
     status: server.status,
@@ -141,7 +143,7 @@ export async function handleUpdateMcpServer(req: Request, addCorsHeaders: (r: Re
     patch.active = !!body.enabled
   }
   if (body.headers) {
-    const { encrypted, iv } = encryptConfig(body.headers)
+    const { encrypted, iv } = await encryptConfig(body.headers)
     patch.headers_encrypted = encrypted
     patch.headers_iv = iv
   }
@@ -223,12 +225,7 @@ export async function handleGetMCPServerTools(
   return addCorsHeaders(Response.json({ tools }), req)
 }
 
-async function findServer(idOrName: string) {
-  const servers = await col<McpServerDoc>("mcpServers")
-  const byId = await servers.get(idOrName)
-  if (byId) return byId
-  return (await servers.scan()).find((entry) => entry.doc.name === idOrName)
-}
+
 
 async function patchServer(idOrName: string, patch: Partial<McpServerDoc>): Promise<void> {
   const servers = await col<McpServerDoc>("mcpServers")
@@ -237,23 +234,18 @@ async function patchServer(idOrName: string, patch: Partial<McpServerDoc>): Prom
   await servers.put(entry.id, { ...entry.doc, ...patch }, { expectedVersion: entry.version })
 }
 
-function readHeaders(server: McpServerDoc): Record<string, string> | undefined {
+async function readHeaders(server: McpServerDoc): Promise<Record<string, string> | undefined> {
   if (!server.headers_encrypted || !server.headers_iv) return undefined
   try {
-    return decryptConfig(server.headers_encrypted, server.headers_iv) as Record<string, string>
+    return await decryptConfig(server.headers_encrypted, server.headers_iv) as Record<string, string>
   } catch (e) {
     mcpLog.error(`Failed to decrypt headers for ${server.name}: ${(e as Error).message}`)
     return undefined
   }
 }
 
-function redactHeaders(server: McpServerDoc): Record<string, string> | undefined {
-  const headers = readHeaders(server)
+async function redactHeaders(server: McpServerDoc): Promise<Record<string, string> | undefined> {
+  const headers = await readHeaders(server)
   if (!headers) return undefined
-  return Object.fromEntries(Object.entries(headers).map(([k, v]) => [
-    k,
-    k.toLowerCase().includes("auth") || k.toLowerCase().includes("token") || k.toLowerCase().includes("key")
-      ? `${String(v).slice(0, 4)}••••••••`
-      : v,
-  ]))
+  return Object.fromEntries(Object.keys(headers).map(key => [key, "••••••••"]))
 }

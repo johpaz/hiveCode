@@ -1,3 +1,4 @@
+import "../setup/memory-keystore";
 /**
  * El flujo "elegir provider + meter su API key" desde la TUI.
  *
@@ -20,7 +21,7 @@ import * as path from "node:path"
 import { col } from "@johpaz/hivecode-core/storage/hive"
 import { closeHiveDb } from "@johpaz/hivecode-core/storage/hivedb"
 import type { CodeConfigDoc, ModelDoc, ProviderDoc } from "@johpaz/hivecode-core/storage/collections"
-import { hasProviderApiKey, storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
+import { hasProviderApiKey, storeProviderApiKey, deleteProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
 
 // `provider-store` vive en packages/cli, que no está enlazado como paquete
 // resoluble desde tests/. Se replican sus dos helpers con la misma semántica
@@ -49,7 +50,7 @@ afterAll(async () => {
   else process.env.HIVE_DB_PATH = previousDbPath
   // No dejar claves falsas en el keystore real del usuario.
   for (const id of usedKeyIds) {
-    try { await Bun.secrets.delete({ service: "hive-code", name: `provider.${id}` }) } catch { /* no estaba */ }
+    try { await deleteProviderApiKey(id) } catch { /* no estaba */ }
   }
 })
 
@@ -92,7 +93,7 @@ async function seedProvider(id: string, opts: { models?: string[]; enabled?: boo
 const usedKeyIds: string[] = []
 
 async function clearKey(id: string) {
-  try { await Bun.secrets.delete({ service: "hive-code", name: `provider.${id}` }) } catch { /* no estaba */ }
+  try { await deleteProviderApiKey(id) } catch { /* no estaba */ }
 }
 
 // ── Parte 1: el snapshot de settings ─────────────────────────────────────────
@@ -238,7 +239,7 @@ describe("protocolo: provider_activate está declarado en ambos lados", () => {
       blockStart,
       controller.indexOf("let cmd = match hub.active_tab", blockStart),
     )
-    expect(providersArm).toContain("activate_provider(state, &target)")
+    expect(providersArm).toContain("activate_provider(state, &target, false)")
     expect(providersArm).not.toContain("/provider set")
   })
 })

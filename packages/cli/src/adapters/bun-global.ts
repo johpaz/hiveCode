@@ -1,3 +1,4 @@
+import { readVerifiedProcess, stopVerifiedProcess } from "@johpaz/hivecode-core/runtime/process-identity";
 /**
  * Bun Global Adapter
  * 
@@ -145,97 +146,16 @@ export class BunGlobalAdapter implements InstallationAdapter {
    * Stop Hive gateway
    */
   async stop(): Promise<void> {
-    try {
-      if (existsSync(this.pidFile)) {
-        const pid = parseInt(readFileSync(this.pidFile, "utf-8").trim(), 10);
-
-        if (!isNaN(pid)) {
-          try {
-            process.kill(pid, "SIGTERM");
-            console.log(`✅ Hive Gateway detenido (PID: ${pid})`);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === "ESRCH") {
-              console.log("⚠️  Hive Gateway no está corriendo");
-            } else {
-              throw error;
-            }
-          } finally {
-            try {
-              unlinkSync(this.pidFile);
-            } catch {
-              // Ignore errors removing PID file
-            }
-          }
-        }
-      } else {
-        // Try to kill by process name
-        try {
-          const r = Bun.spawnSync(["pkill", "-f", "bun.*hive.*start"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" })
-          if (r.exitCode !== 0) throw new Error("not running")
-          console.log("✅ Hive Gateway detenido");
-        } catch {
-          console.log("⚠️  Hive Gateway no está corriendo");
-        }
-      }
-    } catch (error) {
-      console.error("❌ Error deteniendo Hive Gateway:", (error as Error).message);
-      throw error;
-    }
+    const stopped = await stopVerifiedProcess(this.pidFile);
+    console.log(stopped ? "✅ Hive Gateway detenido" : "⚠️ Hive Gateway no está corriendo");
   }
 
-  /**
-   * Check if gateway is running
-   */
   async isRunning(): Promise<boolean> {
-    try {
-      if (existsSync(this.pidFile)) {
-        const pid = parseInt(readFileSync(this.pidFile, "utf-8").trim(), 10);
-
-        if (!isNaN(pid)) {
-          try {
-            process.kill(pid, 0);
-            return true;
-          } catch {
-            // Process not running, clean up stale PID file
-            try {
-              unlinkSync(this.pidFile);
-            } catch {
-              // Ignore
-            }
-          }
-        }
-      }
-
-      // Alternative: check if port is in use
-      const config = await this.getConfig();
-      const portAvailable = await isPortAvailable(config.gateway.port);
-      return !portAvailable;
-    } catch {
-      return false;
-    }
+    return readVerifiedProcess(this.pidFile) !== null;
   }
 
-  /**
-   * Get gateway process ID
-   */
   async getPid(): Promise<number | null> {
-    try {
-      if (existsSync(this.pidFile)) {
-        const pid = parseInt(readFileSync(this.pidFile, "utf-8").trim(), 10);
-        if (!isNaN(pid) && pid > 0) {
-          try {
-            process.kill(pid, 0);
-            return pid;
-          } catch {
-            // Process not running
-          }
-        }
-      }
-
-      return null;
-    } catch {
-      return null;
-    }
+    return readVerifiedProcess(this.pidFile)?.pid ?? null;
   }
 
   /**

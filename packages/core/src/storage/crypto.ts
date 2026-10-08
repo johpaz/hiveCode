@@ -1,23 +1,34 @@
+import { createConfigCipher } from "./config-cipher";
 /**
  * Crypto utilities — TDD §38.12
  *
- * API key storage delegates to Bun.secrets (OS keystore).
+ * API keys and the authenticated configuration encryption key use Bun.secrets.
+ * Only authenticated encrypted configuration envelopes are accepted.
  */
 
 const SERVICE = "hive-code";
 
-export function encryptConfig(plain: any, _iv?: string): { encrypted: string; iv: string } {
-  const str = typeof plain === "string" ? plain : JSON.stringify(plain);
-  return { encrypted: str, iv: "legacy" };
+const configCipher = createConfigCipher({
+  get: options => Bun.secrets.get(options),
+  set: options => Bun.secrets.set(options),
+});
+
+export const encryptConfig = configCipher.encrypt;
+export const decryptConfig = configCipher.decrypt;
+
+/** Serialize an encrypted envelope for channel documents. */
+export async function serializeConfig(config: unknown): Promise<string> {
+  return JSON.stringify(await encryptConfig(config));
 }
 
-export function decryptConfig(encrypted: string | null | undefined, _iv?: string | null): any {
-  if (!encrypted) return {};
-  try {
-    return JSON.parse(encrypted);
-  } catch {
-    return {};
+/** Read authenticated envelopes without masking crypto failures. */
+export async function deserializeConfig(serialized: string): Promise<Record<string, any>> {
+  const value = JSON.parse(serialized);
+  if (value && typeof value.encrypted === "string" && typeof value.iv === "string") {
+    return await decryptConfig(value.encrypted, value.iv);
   }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid stored configuration");
+  throw new Error("Unsupported stored configuration; run dev reset-records for legacy records");
 }
 
 /** @deprecated Provider API keys must never be serialized into document storage. */
@@ -51,7 +62,7 @@ export async function getProviderApiKey(providerId: string): Promise<string | nu
   try {
     return await Bun.secrets.get({ service: SERVICE, name: `provider.${providerId}` });
   } catch {
-    return null;
+    throw new Error(`Provider credential keystore is unavailable: ${providerId}`);
   }
 }
 

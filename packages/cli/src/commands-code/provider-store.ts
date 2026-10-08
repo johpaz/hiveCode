@@ -1,3 +1,5 @@
+import { getCodeConfig, setCodeConfig } from "@johpaz/hivecode-core/storage/code-config"
+import { listCatalogModels, listCatalogProviders } from "@johpaz/hivecode-core/services/provider-catalog-read"
 import { col, toIndexable } from "@johpaz/hivecode-core/storage/hive"
 import type {
   AgentDoc,
@@ -24,15 +26,8 @@ function byId<T extends { id: string }>(a: T, b: T): number {
   return a.id.localeCompare(b.id)
 }
 
-function byName<T extends { name: string }>(a: T, b: T): number {
-  return a.name.localeCompare(b.name)
-}
-
 export async function listProviders(): Promise<ProviderSummary[]> {
-  const providers = await col<ProviderDoc>("providers")
-  const rows = await providers.scan()
-  return rows
-    .map((entry) => entry.doc)
+  return (await listCatalogProviders())
     .sort(byId)
     .map((doc) => ({
       id: doc.id,
@@ -79,17 +74,6 @@ export async function deleteProvider(providerId: string): Promise<void> {
   await providers.delete(providerId)
 }
 
-export async function getCodeConfig(key: string): Promise<string> {
-  const codeConfig = await col<CodeConfigDoc>("codeConfig")
-  return (await codeConfig.get(key))?.doc.value ?? ""
-}
-
-export async function setCodeConfig(key: string, value: string | null): Promise<void> {
-  const codeConfig = await col<CodeConfigDoc>("codeConfig")
-  const existing = await codeConfig.get(key)
-  await codeConfig.put(key, { key, value, updated_at: Date.now() }, { expectedVersion: existing?.version ?? 0 })
-}
-
 export async function getDefaultProvider(): Promise<string> {
   return getCodeConfig("default_provider")
 }
@@ -120,15 +104,7 @@ export async function getAllProviderModels(): Promise<Map<string, string>> {
   )
 }
 
-export async function listModelChoices(providerId: string): Promise<{ value: string; label: string }[]> {
-  const models = await col<ModelDoc>("models")
-  const rows = await models.findBy("provider_id", providerId)
-  return rows
-    .map((entry) => entry.doc)
-    .filter((model) => model.model_type === "llm" && model.enabled)
-    .sort(byName)
-    .map((model) => ({ value: model.id, label: model.name }))
-}
+export { listModelChoices } from "@johpaz/hivecode-core/services/provider-catalog-read";
 
 export async function listFreeProviderModels(providerId: string): Promise<Array<{
   id: string
@@ -136,12 +112,7 @@ export async function listFreeProviderModels(providerId: string): Promise<Array<
   context: number
   capabilities: string
 }>> {
-  const models = await col<ModelDoc>("models")
-  const rows = await models.findBy("provider_id", providerId)
-  return rows
-    .map((entry) => entry.doc)
-    .filter((model) => model.model_type === "llm" && model.enabled)
-    .sort(byName)
+  return (await listCatalogModels(providerId))
     .map((model) => ({
       id: model.id,
       name: model.name,
@@ -224,3 +195,5 @@ export async function loadCodeCliState(): Promise<{
     tokenCount: Math.max(traceTokens, taskTokens),
   }
 }
+
+export { getCodeConfig, setCodeConfig }
