@@ -27,7 +27,7 @@ import { maybeCompact, clearOldToolResults } from "./compaction"
 import { capToolResult, fitLoopMessages, messageBudget, messageTokens } from "./context-budget"
 import type { MCPClientManager } from "@johpaz/hivecode-mcp"
 import { compileContext } from "./context-compiler"
-import { jevWantsParallel } from "./jev-planner"
+import { jevWantsParallel, structuralParallelism } from "./jev-planner"
 import { emitJevDecision } from "./jev-decisions"
 import { formatToolResult } from "../utils/toon"
 import { getAverageTokenCost } from "../storage/usage"
@@ -953,7 +953,13 @@ export async function* runAgent(
         log.warn(`[agent-loop] Jev parallel fallback: ${(err as Error).message}`)
         return null
       })
-      if (jevParallel) {
+      if (!jevParallel) {
+        // No oracle answered: the structural rule alone still parallelizes
+        // independent reads and distinct, non-colliding delegations.
+        runConcurrently = (await structuralParallelism(
+          approvedTools.map(tc => ({ function: { name: tc.function.name, arguments: tc.function.arguments } })),
+        ).catch(() => undefined))?.safe === true
+      } else {
         runConcurrently = jevParallel.parallel
         // When the batch cannot be parallelized, the agent is not idle — it is
         // waiting on the oracle. Telling the TUI *why* is the difference between

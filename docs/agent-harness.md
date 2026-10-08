@@ -22,8 +22,11 @@ Definidos en `packages/core/src/agent/agent-profiles.ts`.
 - `task_delegate(worker_id, task_description, acceptance?)` ejecuta a un worker y devuelve su handoff más la
   evidencia contra los **criterios de aceptación**. Un criterio con `checkTool` se decide sin LLM; el resto lo
   juzga BEE con la evidencia (`acceptance_met`: `true` / `false` / `null`).
-- **Paralelo**: varias llamadas `task_delegate` en el mismo paso corren a la vez cuando son workers distintos con
-  workspaces distintos (`jevWantsParallel`, `agent/jev-planner.ts`). Máximo 3 workers simultáneos.
+- **Paralelo**: varias llamadas `task_delegate` en el mismo paso corren a la vez cuando son workers distintos y
+  como máximo uno puede escribir el workspace (los demás son de solo lectura), o cada escritor tiene su propio
+  workspace. Esa regla estructural (`structuralParallelism`, `agent/jev-planner.ts`) decide **sin oráculo**;
+  con Jev/Kev activo, además se les pregunta si las operaciones son independientes. Los lotes de lecturas
+  independientes también van en paralelo. Máximo 3 workers simultáneos.
 - **Fan-in**: BEE es el fan-in. Si una entrega no cumple, `task_revise(task_id, feedback)` la devuelve al mismo
   worker, en el mismo hilo (`delegationThreadId`), con su entrega anterior y la retroalimentación.
 - Cada delegación es un `TaskDoc` (`task_status` la consulta). El worker hereda `approvedExecution` del padre.
