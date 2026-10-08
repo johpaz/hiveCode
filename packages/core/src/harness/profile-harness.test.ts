@@ -99,3 +99,79 @@ describe("approval gate", () => {
     expect(result.status).toBe("cancelled")
   })
 })
+
+describe("BEE-led execution", () => {
+  const COMPLEX_OBJECTIVE = "planifica la migración de arquitectura del módulo de auth"
+
+  function scripted(outputs: string[]) {
+    const calls: Array<{ agentId: string; task: string; approvedExecution?: boolean }> = []
+    const runner: ProfileRunner = async options => {
+      calls.push({ agentId: options.agentId, task: options.taskDescription, approvedExecution: options.approvedExecution })
+      return outputs[calls.length - 1] ?? "ok"
+    }
+    return { calls, runner }
+  }
+
+  test("plans through the planner, executes under BEE with approval, converges", async () => {
+    const { calls, runner } = scripted([
+      "Plan listo.\nFEATURE_DIR: specs/001-auth",
+      "Hecho en paralelo.\nVERDICT: PASS",
+      "Convergido.",
+    ])
+    const result = await new ProfileHarness(runner).run({
+      objective: COMPLEX_OBJECTIVE,
+      sessionId: "session-bee-led",
+      workspace: "/workspace/test",
+      policy: "auto",
+    })
+
+    expect(result).toMatchObject({ status: "completed", featureDir: "specs/001-auth", repairCycles: 0 })
+    // Only BEE is invoked by the harness: workers are BEE's to delegate to.
+    expect(calls.map(call => call.agentId)).toEqual(["bee", "bee", "bee"])
+    expect(calls[0]!.task).toContain('worker_id="planner"')
+    expect(calls[1]!.task).toContain("EN EL MISMO PASO")
+    expect(calls[1]!.approvedExecution).toBe(true)
+  })
+
+  test("sends a failed quality gate back through a repair cycle", async () => {
+    const { calls, runner } = scripted([
+      "FEATURE_DIR: specs/002-auth",
+      "Falló.\nVERDICT: FAIL",
+      "Reparado.\nVERDICT: PASS",
+      "Convergido.",
+    ])
+    const result = await new ProfileHarness(runner).run({
+      objective: COMPLEX_OBJECTIVE,
+      sessionId: "session-repair",
+      workspace: "/workspace/test",
+      policy: "auto",
+    })
+
+    expect(result).toMatchObject({ status: "completed", repairCycles: 1 })
+    expect(calls[2]!.task).toContain("Ciclo de reparación 1/")
+    expect(calls[2]!.task).toContain("VERDICT: FAIL")
+  })
+
+  test("fails when the quality gate never converges", async () => {
+    const { runner } = scripted(["FEATURE_DIR: specs/003-auth", ...Array(6).fill("VERDICT: FAIL")])
+    await expect(new ProfileHarness(runner).run({
+      objective: COMPLEX_OBJECTIVE,
+      sessionId: "session-no-converge",
+      workspace: "/workspace/test",
+      policy: "auto",
+    })).rejects.toThrow("did not converge")
+  })
+
+  test("a small change is delegated to the builder by BEE, without Spec Kit", async () => {
+    const { calls, runner } = scripted(["Cambio aplicado."])
+    const result = await new ProfileHarness(runner).run({
+      objective: "corrige el typo en el README",
+      sessionId: "session-simple",
+      workspace: "/workspace/test",
+    })
+    expect(result.complexity).toBe("simple_change")
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.agentId).toBe("bee")
+    expect(calls[0]!.task).toContain('worker "builder"')
+  })
+})

@@ -1,16 +1,13 @@
 import { readdir } from "node:fs/promises"
 import * as path from "node:path"
 import { col, fromIndexable, mutateDoc } from "../storage/hive.ts"
-import type { AgentDoc, HarnessTaskDoc, JobDoc } from "../storage/collections.ts"
+import type { AgentDoc, HarnessTaskDoc } from "../storage/collections.ts"
 import { CORE_AGENT_DEFINITIONS, ensureCoreAgentProfiles, type CoreAgentType } from "../agent/agent-profiles.ts"
 import { runAgentIsolated } from "../agent/agent-loop.ts"
 import type { StepEvent } from "../agent/agent-loop.ts"
 import {
-  AdaptiveScheduler,
   classifyTask,
-  DEFAULT_MAX_AGENT_CONCURRENCY,
   DEFAULT_MAX_REPAIR_CYCLES,
-  type ScheduledJobPayload,
   type TaskComplexity,
 } from "./adaptive-scheduler.ts"
 
@@ -33,7 +30,7 @@ export interface ProfileHarnessOptions {
     toolName?: string
     message: string
   }) => void
-  /** Existing durable harness task to continue without repeating completed DAG nodes. */
+  /** Existing durable harness task to continue without redoing the plan. */
   resumeTaskId?: string
   /** Compatibility task ID used by the outer code-session projection. */
   parentTaskId?: string
@@ -96,17 +93,11 @@ export type ProfileRunner = (opts: {
  */
 export const DEFAULT_MAX_HARNESS_STEPS = 40
 
+/** Workers BEE may run at once; mutating ones are serialized per file set by its own instructions. */
+export const MAX_PARALLEL_WORKERS = 3
+
 const PASS_RE = /\b(?:VERDICT|VEREDICTO|STATUS|ESTADO)\s*:\s*(?:PASS|PASSED|APPROVED|APROBADO|CUMPLE)\b/i
 const FAIL_RE = /\b(?:VERDICT|VEREDICTO|STATUS|ESTADO)\s*:\s*(?:FAIL|FAILED|REJECTED|RECHAZADO|NO CUMPLE)\b/i
-
-function laneProfile(job: JobDoc): CoreAgentType {
-  if (job.lane === "scout") return "scout"
-  // El gate fused usa el perfil `verifier`: es el que corre evidencia
-  // determinística. El `reviewer` canónico se elimina con la fusión.
-  if (job.lane === "quality" || job.lane === "verifier") return "verifier"
-  if (job.lane === "spider") return "spider"
-  return "builder"
-}
 
 function passed(output: string): boolean {
   return PASS_RE.test(output) && !FAIL_RE.test(output)
@@ -125,7 +116,7 @@ async function newestFeatureDir(workspace: string): Promise<string | undefined> 
 
 async function configureProfiles(workspace: string, provider?: string, model?: string): Promise<void> {
   await ensureCoreAgentProfiles()
-  for (const id of ["bee", "scout", "builder", "verifier", "reviewer", "spider"] as CoreAgentType[]) {
+  for (const id of ["bee", "scout", "planner", "builder", "verifier", "spider"] as CoreAgentType[]) {
     await mutateDoc<AgentDoc>("agents", id, (row) => row && {
       ...row,
       workspace,
@@ -137,13 +128,15 @@ async function configureProfiles(workspace: string, provider?: string, model?: s
 }
 
 /**
- * Canonical long-task orchestrator. It keeps model calls in the shared native
- * agent loop; this class owns routing, gates, DAG scheduling and repair policy.
+ * Canonical long-task orchestrator. Model calls stay in the shared native agent
+ * loop, and BEE does the orchestrating there: it delegates to workers with
+ * `task_delegate` (sibling calls run concurrently) and judges what comes back.
+ * This class owns only what must hold regardless of what the model decides:
+ * routing, the approval gates, the repair budget and durable resume.
  */
 export class ProfileHarness {
   constructor(
     private readonly runner: ProfileRunner = runAgentIsolated as ProfileRunner,
-    private readonly scheduler = new AdaptiveScheduler(DEFAULT_MAX_AGENT_CONCURRENCY),
   ) {}
 
   async run(options: ProfileHarnessOptions): Promise<ProfileHarnessResult> {
@@ -243,13 +236,15 @@ export class ProfileHarness {
           return { taskId, complexity, status: "ready", response, repairCycles: 0 }
         }
         await updateStage("executing")
-        const implementation = await invoke(
-          "builder",
-          `Implementa este cambio pequeño y localizado sin iniciar Spec Kit:\n\n${objective}\n\nDevuelve un handoff compacto con archivos y pruebas.`,
-        )
         const response = await invoke(
           "bee",
-          `Sintetiza para el usuario este handoff de Builder. No repitas logs ni afirmes pruebas no presentes.\n\nObjetivo:\n${objective}\n\nHandoff:\n${implementation}`,
+          `Cambio pequeño y localizado: no inicies Spec Kit. Delégalo al worker "builder" con task_delegate
+(con criterios de aceptación concretos) y juzga su handoff; si no cumple, usa task_revise.
+Responde al usuario con un resumen compacto: archivos tocados y pruebas ejecutadas, sin repetir logs
+ni afirmar pruebas que no estén en la evidencia.
+
+Objetivo:
+${objective}`,
           "harness",
         )
         await updateStage("completed")
@@ -264,22 +259,15 @@ export class ProfileHarness {
         await updateStage("planning")
         planning = await invoke(
           "bee",
-          `Tarea compleja; aplica obligatoriamente la skill spec-kit.
+          `Tarea compleja. No planifiques tú: delega el plan al worker "planner" con task_delegate.
 
-Coordinás: no explorás el código a mano. Tu loadout son las herramientas speckit_* y
-search_knowledge, que busca sobre herramientas, skills, MCP, playbook y el código del
-proyecto. Si necesitás investigación profunda, dejala como tarea de lane [scout] en
-tasks.md en vez de intentar hacerla vos.
-
-1. Llama speckit_init.
-2. Usa search_knowledge para el contexto que te falte del proyecto.
-3. Completa spec.md, plan.md y analysis.md con speckit_artifact_write.
-4. Valida spec y plan con speckit_validate.
-5. Escribe tasks.md con tareas TNNN, lane [scout|builder|spider], ownership y dependencias explícitas.
-6. Llama speckit_tasks_sync usando run_id="${taskId}".
-
-No guardes notas de progreso: los artefactos Spec Kit son tu registro.
-Detente antes de implementar. En la respuesta incluye exactamente "FEATURE_DIR: specs/...".
+1. Llama task_delegate con worker_id="planner" y como task_description el objetivo completo (y el contexto
+   que ya conozcas). Criterios de aceptación: spec.md, plan.md y tasks.md existen y pasan speckit_validate;
+   cada tarea tiene lane, archivos propios, dependencias y criterios verificables.
+2. Si necesitas contexto previo del código, delega antes una investigación al worker "scout" (en paralelo
+   con el planner si son independientes).
+3. Revisa el handoff; si el plan no cumple, devuélvelo con task_revise.
+4. No implementes. En tu respuesta incluye exactamente "FEATURE_DIR: specs/..." y un resumen del plan.
 
 Objetivo:
 ${objective}`,
@@ -313,63 +301,37 @@ ${objective}`,
       }
 
       await updateStage("executing", { nextAction: undefined })
-      const scheduled = await this.scheduler.run(taskId, async (job, payload: ScheduledJobPayload) => {
-        const profile = laneProfile(job)
-        const output = await invoke(
-          profile,
-          `Ejecuta solo esta tarea del DAG.
-Feature: ${featureDir}
-Task: ${payload.id}
-Depends on: ${payload.dependsOn.join(", ") || "none"}
-Description: ${payload.description}
-Respeta la spec, el plan, ownership, permisos y el workspace. Devuelve evidencia y handoff.`,
-          "worker",
-          true,
-        )
-        if (FAIL_RE.test(output)) throw new Error(output.slice(0, 500))
-      })
-      if (scheduled.failed.length || scheduled.blocked.length) {
-        throw new Error(
-          `DAG incomplete. Failed: ${scheduled.failed.map(item => item.id).join(", ") || "none"}; ` +
-          `blocked: ${scheduled.blocked.join(", ") || "none"}`,
-        )
-      }
-
       let repairCycles = 0
       let quality = ""
-      while (true) {
-        await updateStage("reviewing")
-        // Antes eran dos invocaciones: el `verifier` reproducía los criterios y
-        // el `reviewer` juzgaba el código con esa evidencia en el prompt. Ahora
-        // es un solo gate que hace las dos mitades en orden y emite un veredicto
-        // — la mitad de las llamadas del ciclo de review, y sin el desajuste de
-        // tener que decidir si "verificó bien pero revisó mal" cuenta como fallo.
-        quality = await invoke(
-          "verifier",
-          `Quality gate for ${featureDir}. Do it in this order:
-1) Reproduce every acceptance criterion of ${featureDir} against the running
-   system — real commands, real output. "not reproducible" is NOT "passes".
-2) Then review the diff, spec, plan and tasks, and cross-check module contracts.
+      let prompt = `Ejecuta el plan de ${featureDir}.
 
-Do not modify code. End with "VERDICT: PASS" or "VERDICT: FAIL".`,
-          "verification",
-        )
+1. Lee tasks.md con speckit_artifact_read.
+2. Delega las tareas con task_delegate al worker de su lane (scout, builder, spider). Las tareas listas
+   que no comparten archivos ni dependencias se delegan EN EL MISMO PASO (varias llamadas task_delegate
+   juntas) para que corran en paralelo; las que dependen de otra esperan su resultado. Máximo ${MAX_PARALLEL_WORKERS}
+   workers a la vez y un solo builder por conjunto de archivos.
+3. Cada delegación lleva criterios de aceptación tomados de la tarea. Juzga la evidencia de cada una; si
+   no cumple, task_revise con feedback concreto antes de seguir.
+4. Cuando todas estén hechas, delega al worker "verifier" (Quality Gate): reproducir cada criterio de
+   aceptación de ${featureDir} contra el sistema real y revisar el diff. Debe terminar con "VERDICT: PASS" o "VERDICT: FAIL".
+5. Termina tu respuesta con el veredicto del Quality Gate tal cual ("VERDICT: PASS" o "VERDICT: FAIL"), la
+   evidencia y los archivos tocados.`
+      while (true) {
+        quality = await invoke("bee", prompt, "harness", true)
+        await updateStage("reviewing")
         if (passed(quality)) break
         if (repairCycles >= DEFAULT_MAX_REPAIR_CYCLES) {
           throw new Error(`Quality gate did not converge after ${repairCycles} repair cycles`)
         }
         repairCycles++
         await updateStage("executing", { nextAction: `repair_cycle_${repairCycles}` })
-        await invoke(
-          "builder",
-          `Repair cycle ${repairCycles}/${DEFAULT_MAX_REPAIR_CYCLES} for ${featureDir}.
-Fix only actionable failures below, preserve passing behavior, then run focused tests.
+        prompt = `Ciclo de reparación ${repairCycles}/${DEFAULT_MAX_REPAIR_CYCLES} para ${featureDir}.
+Corrige solo los fallos accionables del Quality Gate (delega a "builder" con task_delegate o devuelve la
+tarea con task_revise), conserva lo que ya pasa y vuelve a delegar el Quality Gate al "verifier".
+Termina con "VERDICT: PASS" o "VERDICT: FAIL".
 
-QUALITY GATE:
-${quality}`,
-          "worker",
-          true,
-        )
+QUALITY GATE ANTERIOR:
+${quality}`
       }
 
       const convergence = await invoke(

@@ -15,7 +15,7 @@ triggers:
   - "large refactor"
   - "refactor amplio"
   - "spec kit"
-preferred_agents: [bee, verifier, reviewer]
+preferred_agents: [bee, planner, verifier]
 steps:
   - step: 1
     action: initialize
@@ -34,13 +34,13 @@ steps:
     instruction: "For approval policy, stop before workspace mutation until the user accepts the specification and architecture"
   - step: 6
     action: task_dag
-    instruction: "Write independently executable checkbox tasks with stable TNNN IDs, agent lane, ownership, and explicit dependencies; call speckit_tasks_sync"
+    instruction: "The planner worker writes independently executable checkbox tasks with stable TNNN IDs, lane, file ownership, and explicit dependencies"
   - step: 7
     action: execute
-    instruction: "Activate only the profiles required by ready DAG nodes; never exceed three concurrent invocations"
+    instruction: "BEE delegates ready tasks with task_delegate; independent tasks go in the same step so they run in parallel; never exceed three concurrent workers"
   - step: 8
     action: verify_and_review
-    instruction: "Verifier reproduces acceptance criteria, then Reviewer independently checks the diff and artifacts; permit at most two repair cycles"
+    instruction: "The Quality Gate (verifier) reproduces acceptance criteria and then reviews the diff and artifacts; permit at most two repair cycles via task_revise or a builder repair"
   - step: 9
     action: converge
     instruction: "Call speckit_converge with verification evidence, review verdict, and all remaining gaps"
@@ -53,9 +53,9 @@ rules:
   - "Artifacts on disk are canonical; chat summaries are not checkpoints"
   - "Product and architecture are BEE responsibilities guided by this skill, not permanent agents"
   - "Domain expertise is loaded as a skill, not represented by a persistent agent identity"
-  - "Never create more than five stable identities: BEE, Scout, Builder, Verifier, Reviewer"
+  - "Stable identities: BEE, Scout, Planner, Builder, Verifier (Quality Gate), Spider"
   - "Never run more than three agent invocations concurrently"
-  - "Verifier and Reviewer are read-only over source code"
+  - "Planner and Verifier are read-only over source code"
   - "After two failed repair cycles, return control to the user with evidence and options"
 output_format:
   structure: markdown
@@ -70,7 +70,7 @@ output_format:
 
 Use Spec Kit as the durable protocol for complex work. The lifecycle is:
 
-`constitution → specify → plan → analyze → approval 1 → tasks/DAG → implement → verify → review → converge → approval 2 → integrate`
+`constitution → specify → plan → analyze → approval 1 → tasks → delegate in parallel → quality gate → converge → approval 2 → integrate`
 
 ## Task syntax
 
@@ -79,15 +79,14 @@ Each executable task in `tasks.md` uses:
 ```markdown
 - [ ] T001 [scout] Map affected contracts
 - [ ] T002 [builder] Implement the contract (depends: T001)
-- [ ] T003 [verifier] Reproduce acceptance criteria (depends: T002)
-- [ ] T004 [reviewer] Independent final review (depends: T003)
+- [ ] T003 [quality] Reproduce acceptance criteria and review the diff (depends: T002)
 ```
 
-Use `[P]` only in the prose description if useful; actual parallelism is derived from dependencies and is capped by the harness.
+Use `[P]` only in the prose description if useful; actual parallelism is derived from dependencies: BEE delegates every ready, file-disjoint task in the same step, capped at three workers.
 
 ## Handoffs
 
-Every invoked profile returns a compact, self-contained handoff containing:
+Every delegated worker returns a compact, self-contained handoff containing:
 
 - status and outcome;
 - evidence and paths;

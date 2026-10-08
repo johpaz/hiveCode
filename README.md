@@ -11,7 +11,7 @@
 
 **Documentación técnica:**
 - [`docs/harness.md`](./docs/harness.md) — arquitectura completa del harness, las 4 capas del sistema, Learning Harness y comparación con Google ADK / Antigravity CLI.
-- [`docs/agent-harness.md`](./docs/agent-harness.md) — arquitectura vigente: perfiles, activación perezosa, Spec Kit, DAG, budgets y gates.
+- [`docs/agent-harness.md`](./docs/agent-harness.md) — arquitectura vigente: perfiles, delegación paralela, planner (Spec Kit), oráculo Jev/Kev, budgets y gates.
 - [`docs/workers.md`](./docs/workers.md) — referencia histórica del pipeline de compatibilidad.
 - [`docs/code-context-retrieval.md`](./docs/code-context-retrieval.md) — cómo los workers obtienen contexto del proyecto: resumen precacheado + búsqueda HiveDB index.
 

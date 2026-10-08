@@ -102,6 +102,7 @@ export const SEED_DATA: SeedData = {
     { id: "agent_find", name: "agent_find", category: "agents", description: "Buscar agentes worker existentes en ejecución o inactivos. Sinónimos: buscar agente, encontrar worker, localizar agente" },
     { id: "agent_archive", name: "agent_archive", category: "agents", description: "Archivar o terminar un agente worker. Sinónimos: archivar agente, terminar worker, desactivar agente" },
     { id: "task_delegate", name: "task_delegate", category: "agents", description: "Delegar una tarea general a un agente worker específico. Sinónimos: delegar tarea, asignar worker, ejecutar por agente" },
+    { id: "task_revise", name: "task_revise", category: "agents", description: "Devolver una tarea delegada al mismo worker con retroalimentación concreta en lugar de darla por hecha. Sinónimos: devolver tarea, pedir correcciones, revisar entrega" },
     { id: "task_delegate_code", name: "task_delegate_code", category: "agents", description: "Delegar tarea de código a un subagente CLI (Qwen, Claude, etc.) vía Code Bridge. Sinónimos: delegar código, subagente CLI, programación, Qwen" },
     { id: "task_status", name: "task_status", category: "agents", description: "Obtener estado de ejecución de tareas delegadas. Sinónimos: estado tarea delegada, verificar progreso, consultar tarea" },
     { id: "bus_publish", name: "bus_publish", category: "agents", description: "Publicar mensaje en el Agent Bus para comunicación worker-to-worker. Sinónimos: publicar mensaje, comunicar workers, enviar bus" },

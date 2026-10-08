@@ -59,7 +59,7 @@ async function executeTool(
   allTools: Array<{ name: string; execute?: (params: Record<string, unknown>, config?: any) => Promise<unknown> }>,
   toolName: string,
   args: unknown,
-  config: { user_id?: string; thread_id?: string; channel?: string; workspace?: string | null; signal?: AbortSignal }
+  config: { user_id?: string; thread_id?: string; channel?: string; workspace?: string | null; signal?: AbortSignal; agent_id?: string; run_id?: string; approved_execution?: boolean }
 ): Promise<unknown> {
   const tool = allTools.find(t => t.name === toolName)
   if (!tool?.execute) {
@@ -577,6 +577,7 @@ export async function* runAgent(
     // The restored messages are already the pruned set from the run that
     // checkpointed them; pruning them again would compound the loss.
     skipJev: isResume,
+    contextWindow: providerCfg.contextWindow,
     // La ficha del especialista muestra la carga de ESTE turno, no el perfil
     // declarado: JEV poda y el descubrimiento amplía, así que la lista cambia
     // aunque el agente no haya descubierto nada nuevo.
@@ -592,7 +593,9 @@ export async function* runAgent(
     toolNames: ctx.tools.map(t => t.function.name),
   }))
 
-  const systemPrompt = opts.systemPromptOverride || ctx.systemPrompt
+  const systemPrompt = opts.systemPromptOverride
+    ? opts.systemPromptOverride + ctx.conversationSummarySection
+    : ctx.systemPrompt
 
   // Build initial messages array for the model
   let messages: LLMMessage[] = [
@@ -1035,6 +1038,10 @@ export async function* runAgent(
         thread_id: opts.threadId,
         channel: opts.channel,
         workspace: agent.workspace ?? null,
+        // Delegation reads these: a worker inherits the parent's run and approval.
+        agent_id: opts.agentId,
+        run_id: runId,
+        approved_execution: opts.approvedExecution === true,
       })
       
       const toolMs = Math.round(performance.now() - tTool)
@@ -1485,6 +1492,7 @@ export async function runAgentIsolated(opts: {
   approvedExecution?: boolean
   onStep?: (step: StepEvent) => Promise<void>
   maxSteps?: number
+  signal?: AbortSignal
   onToken?: (token: string) => void
   onReasoningToken?: (token: string) => void
 }): Promise<string> {
@@ -1502,6 +1510,7 @@ export async function runAgentIsolated(opts: {
     approvedExecution: opts.approvedExecution,
     onStep: opts.onStep,
     maxSteps: opts.maxSteps,
+    signal: opts.signal,
     onToken: opts.onToken,
     onReasoningToken: opts.onReasoningToken,
   })) {

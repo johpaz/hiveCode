@@ -1102,7 +1102,7 @@ function buildDashboardLevels(workers: any[]): Array<{ level: number; label: str
  */
 function fallbackWorkerLevel(name: string): number {
   if (name === "product_manager") return 0
-  if (name === "architecture" || name === "architect") return 1
+  if (name === "architecture" || name === "architect" || name === "planner") return 1
   if (["backend", "frontend", "data_scientist"].includes(name)) return 2
   if (name === "security" || name === "test") return 3
   if (name === "devops") return 4

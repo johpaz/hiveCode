@@ -160,6 +160,7 @@ export {
   agentFindTool,
   agentArchiveTool,
   taskDelegateTool,
+  taskReviseTool,
   taskDelegateCodeTool,
   taskStatusTool,
   busPublishTool,

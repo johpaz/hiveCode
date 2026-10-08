@@ -23,23 +23,45 @@ function extractRealContextSize(err: any): number | undefined {
   return err?.error?.n_ctx ?? err?.n_ctx
 }
 
-/** Keeps the system prompt and the last third of messages, then shrinks max_tokens. */
+/**
+ * Retry body for a context overflow.
+ *
+ * Big tool results go first: an overflow is almost always one `fs_list`/`fs_read`
+ * result, and dropping a third of the conversation for it throws away the
+ * objective with the noise. Only when clipping is not enough does it fall back
+ * to keeping the system prompt and the last third of messages. Then it shrinks
+ * max_tokens.
+ */
 function compactBodyForContextOverflow(body: any, err: any): void {
-  const kept: any[] = []
-  let systemMsg: any = null
-  for (const m of body.messages) {
-    if (m.role === "system") {
-      systemMsg = m
-      continue
+  const realCtx = extractRealContextSize(err)
+  const textOf = (m: any) => typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "")
+
+  body.messages = body.messages.map((m: any) =>
+    m.role === "tool" && typeof m.content === "string" && m.content.length > 2500
+      ? { ...m, content: `${m.content.slice(0, 1700)}\n[… resultado recortado tras desbordar el contexto …]\n${m.content.slice(-600)}` }
+      : m,
+  )
+
+  const estimatedTokens = body.messages.reduce((sum: number, m: any) => sum + Math.ceil(textOf(m).length / 3.5), 0)
+    + Math.ceil(JSON.stringify(body.tools ?? []).length / 3.5)
+  if (estimatedTokens > (realCtx ?? 32_768) * 0.6) {
+    const kept: any[] = []
+    let systemMsg: any = null
+    for (const m of body.messages) {
+      if (m.role === "system") {
+        systemMsg = m
+        continue
+      }
+      kept.push(m)
     }
-    kept.push(m)
+
+    const keepRatio = Math.max(1, Math.floor(kept.length / 3))
+    const trimmed = kept.slice(-keepRatio)
+    // A tool result cut off from the assistant call that produced it is a 400.
+    while (trimmed.length > 1 && trimmed[0].role === "tool") trimmed.shift()
+    body.messages = systemMsg ? [systemMsg, ...trimmed] : trimmed
   }
 
-  const keepRatio = Math.max(1, Math.floor(kept.length / 3))
-  const trimmed = kept.slice(-keepRatio)
-  body.messages = systemMsg ? [systemMsg, ...trimmed] : trimmed
-
-  const realCtx = extractRealContextSize(err)
   if (realCtx) {
     body.max_tokens = Math.min(body.max_tokens ?? realCtx, Math.floor(realCtx * 0.25))
   } else if (body.max_tokens) {

@@ -127,6 +127,7 @@ export interface EventMap {
   /** Availability of the decision plane: off / ready / cooling down. */
   "jev:status": {
     state: "off" | "ready" | "fallback";
+    oracle?: "jev" | "kev" | null;
     lastError: string | null;
     lastSuccessAt: number | null;
     totals: { decisions: number; savedTokens: number; costUsd: number };

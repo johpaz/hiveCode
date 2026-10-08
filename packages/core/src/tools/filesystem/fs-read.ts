@@ -12,6 +12,9 @@ import { resolveInWorkspace, getWorkspace } from "./workspace-guard.ts";
 
 const log = logger.child("fs-read");
 
+/** Most characters one read returns, whatever the line count. */
+const MAX_READ_CHARS = 20_000;
+
 export const fsReadTool: Tool = {
   name: "fs_read",
   description: "Read file content from agent workspace. Spanish: leer archivo, ver contenido, abrir archivo",
@@ -70,7 +73,21 @@ export const fsReadTool: Tool = {
         ? Math.max(0, totalLines + resolvedOffset)
         : Math.max(0, resolvedOffset - 1);
       const end = Math.min(totalLines, start + limit);
-      const selected = lines.slice(start, end);
+      let selected = lines.slice(start, end);
+
+      // Line limits do not bound size (a minified file is one line). Cap the
+      // characters too, and say where to continue.
+      let charCount = 0;
+      let cut = selected.length;
+      for (let i = 0; i < selected.length; i++) {
+        charCount += selected[i].length + 8;
+        if (charCount > MAX_READ_CHARS && i > 0) { cut = i; break; }
+      }
+      const truncated = cut < selected.length;
+      if (truncated) selected = selected.slice(0, cut);
+      else if (selected.length === 1 && selected[0].length > MAX_READ_CHARS) {
+        selected = [`${selected[0].slice(0, MAX_READ_CHARS)} […línea recortada a ${MAX_READ_CHARS} caracteres]`];
+      }
 
       return {
         ok: true,
@@ -78,6 +95,11 @@ export const fsReadTool: Tool = {
         content: selected.map((line, i) => `${start + i + 1}: ${line}`).join("\n"),
         totalLines,
         linesRead: selected.length,
+        ...(truncated && {
+          truncated: true,
+          nextOffset: start + selected.length + 1,
+          note: `Lectura cortada a ~${MAX_READ_CHARS} caracteres. Continúa con fs_read offset=${start + selected.length + 1}.`,
+        }),
       };
     } catch (error) {
       log.error(`Error reading file: ${(error as Error).message}`);
