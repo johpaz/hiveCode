@@ -515,6 +515,27 @@ export const agentArchiveTool: Tool = {
 
 // ─── task_delegate ───────────────────────────────────────────────────────────
 
+/**
+ * Resolves what the coordinator calls a delegated task: the `task_id` that
+ * task_delegate returned, or the `ref` it attached (a Spec Kit id such as T003).
+ * Models mix the two up, so both are accepted; the newest match wins.
+ */
+async function findDelegatedTask(idOrRef: string): Promise<TaskDoc | null> {
+  const tasks = await col<TaskDoc>("tasks");
+  const direct = await tasks.get(idOrRef);
+  if (direct) return direct.doc;
+  const wanted = idOrRef.trim().toLowerCase();
+  const matches: TaskDoc[] = [];
+  for (const status of ["completed", "blocked", "failed", "in_progress", "pending"]) {
+    for (const entry of await tasks.findBy("status", status)) {
+      try {
+        if (String(JSON.parse(entry.doc.metadata ?? "{}").ref ?? "").toLowerCase() === wanted) matches.push(entry.doc);
+      } catch { /* legacy row without JSON metadata */ }
+    }
+  }
+  return matches.sort((a, b) => b.created_at - a.created_at)[0] ?? null;
+}
+
 export const taskDelegateTool: Tool = {
   name: "task_delegate",
   description: "Delegate a bounded task to a worker agent and get its handoff plus evidence against acceptance criteria. Emit several task_delegate calls in ONE step to run distinct workers simultaneously (they run in parallel when their workspaces do not collide); you are the fan-in: judge the evidence, or send a task back with task_revise. Spanish: delegar tarea, asignar worker, ejecutar por agente, delegate_task",
@@ -536,6 +557,7 @@ export const taskDelegateTool: Tool = {
           required: ["id", "description"],
         },
       },
+      ref: { type: "string", description: "Optional label of this task in your plan (e.g. the Spec Kit id T003). task_revise accepts it in place of the task_id." },
       task_id: { type: "string", description: "Optional existing task ID to update automatically" },
       project_id: { type: "string", description: "Optional project ID for progress tracking" },
     },
@@ -545,6 +567,7 @@ export const taskDelegateTool: Tool = {
     const workerId = params.worker_id as string;
     const taskDescription = params.task_description as string;
     const projectId = params.project_id as string | undefined;
+    const ref = typeof params.ref === "string" && params.ref.trim() ? params.ref.trim() : undefined;
     const { buildWorkerBrief, checkAcceptance, delegationThreadId, parseAcceptance, summarizeAcceptance } =
       await import("../../agent/delegation.ts");
 
@@ -576,13 +599,13 @@ export const taskDelegateTool: Tool = {
         depends_on: null,
         result: null,
         error: null,
-        metadata: JSON.stringify({ worker_id: workerId, acceptance }),
+        metadata: JSON.stringify({ worker_id: workerId, acceptance, ref }),
         created_at: now(),
         updated_at: now(),
         completed_at: null,
       } satisfies TaskDoc, { expectedVersion: 0 });
     } else {
-      await updateTask(taskId, { status: "in_progress", agent_id: workerId, metadata: JSON.stringify({ worker_id: workerId, acceptance }) });
+      await updateTask(taskId, { status: "in_progress", agent_id: workerId, metadata: JSON.stringify({ worker_id: workerId, acceptance, ref }) });
     }
     const resolvedProjectId = projectId ?? existing?.doc.project_id ?? "";
 
@@ -616,6 +639,7 @@ export const taskDelegateTool: Tool = {
       return {
         ok: true,
         task_id: taskId,
+        ref,
         worker_id: workerId,
         worker_name: worker.name,
         result,
@@ -639,7 +663,7 @@ export const taskReviseTool: Tool = {
   parameters: {
     type: "object",
     properties: {
-      task_id: { type: "string", description: "The task_id from task_delegate's result." },
+      task_id: { type: "string", description: "The task_id from task_delegate's result (or the ref you gave it, e.g. T003)." },
       feedback: { type: "string", description: "Concrete, actionable feedback: what is wrong and what the worker still needs to do." },
       acceptance: {
         type: "array",
@@ -659,18 +683,19 @@ export const taskReviseTool: Tool = {
     if (!taskId) return { ok: false, error: "Provide task_id." };
     if (!feedback?.trim()) return { ok: false, error: "Provide feedback describing what is missing." };
 
-    const task = (await (await col<TaskDoc>("tasks")).get(String(taskId)))?.doc;
-    if (!task) return { ok: false, error: `Task not found: ${taskId}` };
+    const task = await findDelegatedTask(String(taskId));
+    if (!task) return { ok: false, error: `Task not found: ${taskId}. Use the task_id that task_delegate returned (e.g. "000000000000003") or the ref you gave it.` };
+    const resolvedId = task.id;
     let meta: { worker_id?: string; acceptance?: unknown } = {};
     try { meta = JSON.parse(task.metadata ?? "{}"); } catch { /* legacy row without metadata */ }
     const workerId = meta.worker_id ?? task.agent_id;
     const worker = workerId ? (await (await col<AgentDoc>("agents")).get(workerId))?.doc : null;
-    if (!worker?.enabled) return { ok: false, error: `Worker unavailable for task ${taskId}: ${workerId}` };
+    if (!worker?.enabled) return { ok: false, error: `Worker unavailable for task ${resolvedId}: ${workerId}` };
 
     const { buildWorkerBrief, checkAcceptance, delegationThreadId, parseAcceptance, summarizeAcceptance } =
       await import("../../agent/delegation.ts");
     const acceptance = parseAcceptance(params.acceptance ?? meta.acceptance, task.description ?? task.name);
-    await updateTask(String(taskId), { status: "in_progress", progress: 50 });
+    await updateTask(resolvedId, { status: "in_progress", progress: 50 });
 
     try {
       const { runAgentIsolated } = await import("../../agent/agent-loop.ts");
@@ -685,7 +710,7 @@ export const taskReviseTool: Tool = {
           ].join("\n\n"),
           acceptance,
         ),
-        threadId: delegationThreadId(String(taskId), worker.id),
+        threadId: delegationThreadId(resolvedId, worker.id),
         parentRunId: config?.configurable?.run_id,
         runKind: "worker",
         approvedExecution: config?.configurable?.approved_execution === true,
@@ -693,16 +718,16 @@ export const taskReviseTool: Tool = {
       });
       const checks = await checkAcceptance(acceptance, result);
       const met = summarizeAcceptance(checks);
-      await updateTask(String(taskId), {
+      await updateTask(resolvedId, {
         status: met === false ? "blocked" : "completed",
         progress: met === false ? 80 : 100,
         result,
         completed_at: now(),
       });
-      return { ok: true, task_id: String(taskId), worker_id: worker.id, result, acceptance: checks, acceptance_met: met };
+      return { ok: true, task_id: resolvedId, worker_id: worker.id, result, acceptance: checks, acceptance_met: met };
     } catch (err) {
-      await updateTask(String(taskId), { status: "failed", error: (err as Error).message });
-      return { ok: false, task_id: String(taskId), error: (err as Error).message };
+      await updateTask(resolvedId, { status: "failed", error: (err as Error).message });
+      return { ok: false, task_id: resolvedId, error: (err as Error).message };
     }
   },
 };

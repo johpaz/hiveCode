@@ -26,7 +26,7 @@ import type { LLMMessage, LLMToolDef, ContentPart } from "./llm-client"
 import type { MCPClientManager } from "@johpaz/hivecode-mcp"
 import { syncToolCatalogToIndex, mcpToolFullName } from "./tool-selector"
 import { syncSkillsToIndex, getMinimalSkills, selectSkills, type SkillDescriptor } from "./skill-selector"
-import { MINIMAL_TOOLS } from "./minimal-loadout"
+import { COORDINATOR_PINNED_TOOLS, MINIMAL_TOOLS } from "./minimal-loadout"
 import { getHiveDb } from "../storage/hivedb"
 import { causalLogEnabled } from "../storage/causal-events"
 import { syncPlaybookToIndex } from "./playbook-selector"
@@ -326,9 +326,11 @@ export async function compileContext(opts: {
 
   // Loadout policy, by role:
   //
-  //  - BEE (coordinator): minimal set + Spec Kit. It orchestrates rather than works,
-  //    and search_knowledge already covers discovery over tools, skills, MCP, playbook
-  //    and project code. SDD is a mandatory planning contract, not optional discovery.
+  //  - BEE (coordinator): minimal set + delegation + Spec Kit. It orchestrates rather
+  //    than works, and search_knowledge already covers discovery over tools, skills, MCP,
+  //    playbook and project code. Delegation (task_delegate/task_revise/task_status) is
+  //    its way of acting, so it is never left to discovery; SDD is a mandatory planning
+  //    contract, not optional discovery.
   //  - Other core profiles (scout/builder/verifier/reviewer): their own curated,
   //    permission-bounded envelope from agent-profiles.ts, in full. They are specialists;
   //    withholding their tools left them unable to act and reduced to writing notes.
@@ -341,7 +343,7 @@ export async function compileContext(opts: {
   const initialToolNames = new Set(MINIMAL_TOOLS)
   if (isCoordinator) {
     for (const name of configuredToolNames) {
-      if (name.startsWith("speckit_")) initialToolNames.add(name)
+      if (name.startsWith("speckit_") || COORDINATOR_PINNED_TOOLS.has(name)) initialToolNames.add(name)
     }
   } else if (isSpecialistProfile) {
     for (const name of configuredToolNames) initialToolNames.add(name)
@@ -365,7 +367,7 @@ export async function compileContext(opts: {
   // G9 causal memory block, appended once the system prompt exists (STEP-9e).
   let systemPromptExtraCausal = ""
 
-  const loadoutKind = isCoordinator ? "coordinator (minimal + speckit)"
+  const loadoutKind = isCoordinator ? "coordinator (minimal + delegation + speckit)"
     : isSpecialistProfile ? `specialist envelope (${agent.agent_type})`
       : "minimal"
   log.info(`[context-compiler] [STEP-4] Native tool loadout [${loadoutKind}]: ${filteredNativeTools.length} tools`)

@@ -92,6 +92,8 @@ const REPEAT_WINDOW = 8
 const SINGLE_TOOL_DOMINANCE_NUDGE = 3
 /** Calls of one tool with no other tool in between before we treat it as spinning. */
 const SINGLE_TOOL_DOMINANCE_LIMIT = 5
+/** Orchestration tools: calling them in a row is the job, not a loop. */
+const DOMINANCE_EXEMPT_TOOLS = new Set(["task_delegate", "task_revise", "task_status"])
 /** Sampling temperature for the tool-calling loop. Matches the worker loop's 0.3. */
 const TOOL_CALLING_TEMPERATURE = 0.3
 /** Steps left at which the model is told to wrap up. */
@@ -180,11 +182,19 @@ function canonicalJSON(value: unknown): string {
  * signatures for the whole run, keeps a sliding window so alternating patterns stay
  * visible, and tracks how long one tool has monopolized the run.
  */
-class RepeatTracker {
+export class RepeatTracker {
   private readonly counts = new Map<string, number>()
   private window: string[] = []
   private lastToolName = ""
   private sameToolStreak = 0
+  /** Bumped once per model step, so a parallel batch counts as one step in the streak. */
+  private step = 0
+  private streakStep = -1
+
+  /** Call once per model step, before recording that step's tool results. */
+  nextStep(): void {
+    this.step++
+  }
 
   /** Records a call and reports whether it warrants a nudge or a hard stop. */
   record(toolName: string, signature: string): "ok" | "nudge" | "stop" {
@@ -194,14 +204,24 @@ class RepeatTracker {
     this.window.push(signature)
     if (this.window.length > REPEAT_WINDOW) this.window.shift()
 
+    // The streak is of consecutive *steps* using this tool. Five different reads
+    // issued together (the oracle approved running them in parallel) are one step,
+    // not five repetitions.
     if (toolName === this.lastToolName) {
-      this.sameToolStreak++
+      if (this.step !== this.streakStep) {
+        this.sameToolStreak++
+        this.streakStep = this.step
+      }
     } else {
       this.lastToolName = toolName
       this.sameToolStreak = 1
+      this.streakStep = this.step
     }
 
     if (count >= REPEAT_TOOL_CALL_LIMIT) return "stop"
+    // Delegating again and again is what a coordinator is for: only identical
+    // calls (the count rules above and below) say it is stuck.
+    if (DOMINANCE_EXEMPT_TOOLS.has(toolName)) return count >= REPEAT_TOOL_CALL_NUDGE ? "nudge" : "ok"
     if (this.sameToolStreak >= SINGLE_TOOL_DOMINANCE_LIMIT) return "stop"
     if (count >= REPEAT_TOOL_CALL_NUDGE) return "nudge"
     // The stall that actually burns budgets: one tool hammered with a slightly
@@ -1131,6 +1151,7 @@ export async function* runAgent(
     results.push(...parallelResults)
 
     // Phase 3: Post-execution (Traces, yielding, state updates)
+    repeats.nextStep()
     for (const r of results) {
       log.info(`[agent-loop] Tool ${r.name} completed in ${r.ms}ms`)
       

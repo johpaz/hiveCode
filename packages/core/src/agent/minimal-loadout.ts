@@ -26,6 +26,13 @@ export const MINIMAL_TOOLS = new Set([
   "save_note",
 ])
 
+/**
+ * What the coordinator always holds on top of the minimal set: the ways it acts.
+ * Without these it can only talk — a real run showed BEE looping on
+ * `report_progress` because `task_delegate` was in its profile but never loaded.
+ */
+export const COORDINATOR_PINNED_TOOLS = new Set(["task_delegate", "task_revise", "task_status"])
+
 /** Splits a SkillDoc's comma-separated `tools` column into tool names. */
 export function parseSkillTools(toolsCsv: string | null | undefined): string[] {
   return (toolsCsv ?? "")

@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
 import {
+  normalizeFeatureDir,
   specKitArtifactReadTool,
   specKitArtifactWriteTool,
   specKitInitTool,
@@ -65,5 +66,35 @@ One independently testable scenario.
       artifact: "spec",
     }, config) as any
     expect(result.ok).toBe(false)
+  })
+})
+
+
+describe("feature_dir normalization", () => {
+  const ws = "/work/space"
+
+  test("accepts the relative, the absolute and the bare-name forms of the same directory", () => {
+    expect(normalizeFeatureDir("specs/001-auth", ws)).toBe("specs/001-auth")
+    expect(normalizeFeatureDir("/work/space/specs/001-auth/", ws)).toBe("specs/001-auth")
+    expect(normalizeFeatureDir("./specs/001-auth", ws)).toBe("specs/001-auth")
+    expect(normalizeFeatureDir("001-auth", ws)).toBe("specs/001-auth")
+  })
+
+  test("never turns an escape into a path inside specs/", () => {
+    for (const bad of ["..", "../secrets", "/etc/passwd", ".", "src/app", "/other/specs/x"]) {
+      expect(normalizeFeatureDir(bad, ws).startsWith("specs/")).toBe(false)
+    }
+  })
+
+  test("the tool reads an artifact through the absolute path and explains a wrong one", async () => {
+    const init = await specKitInitTool.execute({ objective: "Paths", feature_id: "paths" }, config) as any
+    const viaAbsolute = await specKitArtifactReadTool.execute(
+      { feature_dir: path.join(workspace, init.feature_dir), artifact: "spec" }, config,
+    ) as any
+    expect(viaAbsolute.ok).toBe(true)
+
+    const wrong = await specKitArtifactReadTool.execute({ feature_dir: "src/app", artifact: "spec" }, config) as any
+    expect(wrong.ok).toBe(false)
+    expect(wrong.error).toContain('got "src/app"')
   })
 })
