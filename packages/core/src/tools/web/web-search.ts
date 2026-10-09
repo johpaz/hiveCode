@@ -1,3 +1,4 @@
+import { fetchTaskResource } from "../../runtime/task-execution";
 /**
  * web_search - Search the web for current information
  *
@@ -37,7 +38,7 @@ async function searchDuckDuckGo(query: string, numResults: number): Promise<Sear
 
   log.info(`Requesting DuckDuckGo HTML: ${searchUrl}`);
 
-  const response = await fetch(searchUrl, {
+  const response = await fetchTaskResource(searchUrl, {
     signal: AbortSignal.timeout(TIMEOUT_MS),
     headers: {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",

@@ -10,6 +10,7 @@ import type { ConversationDoc, ScratchpadDoc, SummaryDoc } from "../storage/coll
 import { logger } from "../utils/logger"
 import type { ContentPart, LLMMessage } from "./llm-client"
 import { estimateTokens } from "../utils/toon"
+import { rememberConversationSummary } from "./conversation-memory"
 
 const log = logger.child("conv-store")
 
@@ -228,6 +229,11 @@ export async function saveSummary(
     created_at: existing?.doc.created_at ?? now,
     updated_at: now,
   }, { expectedVersion: existing?.version ?? 0 })
+  try {
+    await rememberConversationSummary(threadId, summary, lastMessageId)
+  } catch {
+    log.warn("[conv-store] Summary saved; conversation memory indexing pending")
+  }
 }
 
 // ─── Scratchpad ───────────────────────────────────────────────────────────────

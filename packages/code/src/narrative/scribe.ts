@@ -1,3 +1,5 @@
+import { narrativeMatches } from "@johpaz/hivecode-core/services/narrative-mapping";
+import { mapDecision as mapADR } from "@johpaz/hivecode-core/services/narrative-mapping";
 import { col, ensureIndexes, updateDoc } from "@johpaz/hivecode-core/storage/hive"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import type {
@@ -77,19 +79,7 @@ function mapEntry(r: CodeNarrativeDoc): NarrativeEntry {
   }
 }
 
-function mapADR(r: CodeDecisionDoc): ADR {
-  return {
-    id: r.id,
-    taskId: r.task_id,
-    title: r.title,
-    context: r.context,
-    options: r.options,
-    decision: r.decision,
-    consequences: r.consequences,
-    status: r.status,
-    createdAt: r.created_at,
-  }
-}
+
 
 function mapSnapshot(r: CodeFileSnapshotDoc): FileSnapshot {
   return {
@@ -166,6 +156,8 @@ export class Scribe {
       for (let attempt = 0; attempt < 5; attempt++) {
         const existing = await (await col<T>(collection)).get(id)
         if (!existing) return
+        if (collection === "codeTasks" && (existing.doc as any).status === "cancelled"
+          && "status" in patch && (patch as any).status !== "cancelled") return
         try {
           await (await col<T>(collection)).put(id, { ...existing.doc, ...patch }, { expectedVersion: existing.version })
           return
@@ -266,9 +258,19 @@ export class Scribe {
     })
   }
 
-  async getRecentTurns(sessionId: string, limit = 10): Promise<Turn[]> {
+  /**
+   * The last `limit` turns, oldest first. By default only turns that finished.
+   * `includeIncomplete` also returns the ones that never got an answer (a task
+   * that crashed or was cancelled) — the user still asked, and the agent must
+   * know it. `excludeTurnId` drops the turn being worked on right now.
+   */
+  async getRecentTurns(
+    sessionId: string,
+    limit = 10,
+    opts: { includeIncomplete?: boolean; excludeTurnId?: string } = {},
+  ): Promise<Turn[]> {
     return (await Scribe.loadBy<CodeTurnDoc>("codeTurns", "session_id", sessionId))
-      .filter((turn) => turn.completed_at)
+      .filter((turn) => turn.id !== opts.excludeTurnId && (opts.includeIncomplete || turn.completed_at))
       .sort((a, b) => b.created_at.localeCompare(a.created_at))
       .slice(0, limit)
       .reverse()
@@ -403,11 +405,7 @@ export class Scribe {
   async searchNarrative(query: string): Promise<NarrativeEntry[]> {
     const needle = query.toLowerCase()
     return (await Scribe.loadAll<CodeNarrativeDoc>("codeNarrative"))
-      .filter((entry) =>
-        entry.entry.toLowerCase().includes(needle) ||
-        entry.coordinator.toLowerCase().includes(needle) ||
-        (entry.phase ?? "").toLowerCase().includes(needle)
-      )
+      .filter(entry => narrativeMatches(entry, query))
       .slice(0, 20)
       .map(mapEntry)
   }

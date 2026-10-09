@@ -116,7 +116,8 @@ export interface WorkerToManagerMessage {
 
 /** Messages sent FROM manager TO workers */
 export interface ManagerToWorkerMessage {
-  type: "TASK" | "TOOL_RESULT"
+  type: "TASK" | "TOOL_RESULT" | "CANCEL_TASK"
+  taskId?: string
   task?: CoordinatorTask
   toolCallId?: string
   result?: unknown

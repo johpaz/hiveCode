@@ -1,3 +1,6 @@
+import { catalogSkillLoader, syncSkillCatalog, startSkillCatalogReload } from "../services/skill-catalog";
+import { serverRuntimeConfig } from "../mcp/server-config";
+import { writeProcessIdentity } from "../runtime/process-identity";
 import type { Config } from "../config/loader";
 import { logger } from "../utils/logger";
 import { col } from "../storage/hive";
@@ -47,7 +50,7 @@ export async function writePidFile(pidFile: string): Promise<void> {
   try {
     const dir = path.dirname(pidFile);
     mkdirSync(dir, { recursive: true });
-    await Bun.write(pidFile, process.pid.toString());
+    writeProcessIdentity(pidFile);
     log.info(`PID file written: ${pidFile}`);
   } catch (error) {
     log.warn(`Could not write PID file: ${(error as Error).message}`);
@@ -221,41 +224,10 @@ export async function initializeGateway(
     // 4a. Sincronizar skills externos (Claude Code global + dirs custom via HIVE_SKILL_DIRS)
     //     Se ejecuta en cada arranque para pickup de skills recién instalados sin reseed.
     try {
-      const { SkillLoader, getClaudeSkillsDirs } = await import("@johpaz/hivecode-skills")
-      const loader = new SkillLoader({
-        workspacePath: process.cwd(),
-        skills: {
-          extraDirs: [
-            ...getClaudeSkillsDirs(),
-            ...(process.env.HIVE_SKILL_DIRS?.split(path.delimiter).filter(Boolean) ?? []),
-          ],
-        },
-      })
+      const loader = catalogSkillLoader(config)
       const allSkills = loader.loadAllSkills()
-      const skills = await col<SkillDoc>("skills")
-      const now = Date.now()
-      for (const s of allSkills) {
-        const existing = await skills.get(s.name)
-        await skills.put(s.name, {
-          id: s.name,
-          name: s.name,
-          description: s.description || "",
-          version: String(s.version || "0.0.1"),
-          author: s.author || "Anonymous",
-          icon: s.icon || "skill",
-          category: s.category || "general",
-          permissions: JSON.stringify(s.permissions || []),
-          dependencies: JSON.stringify(s.dependencies || []),
-          tools: (s.tools || []).join(","),
-          triggers: (s.triggers || []).join(","),
-          preferred_agents: JSON.stringify(s.preferred_agents || []),
-          body: s.content || "",
-          version_num: 1,
-          active: true,
-          created_at: existing?.doc.created_at ?? now,
-          updated_at: now,
-        }, { expectedVersion: existing?.version ?? 0 })
-      }
+      await syncSkillCatalog(allSkills)
+      await startSkillCatalogReload(config)
       log.info(`[initialize] ✅ ${allSkills.length} skills sincronizados (bundled + externos)`)
     } catch (err) {
       log.warn(`[initialize] External skill sync failed: ${(err as Error).message}`)
@@ -291,19 +263,7 @@ export async function initializeGateway(
     for (const entry of dbServers) {
       const server = entry.doc;
       try {
-        const mcpServerConfig: any = {
-          transport: server.transport,
-          command: server.command,
-          args: server.args ? JSON.parse(server.args) : [],
-          url: server.url,
-          enabled: true,
-        };
-
-        // Decrypt headers if present
-        if (server.headers_encrypted && server.headers_iv) {
-          const { decryptConfig } = await import("../storage/crypto");
-          mcpServerConfig.headers = decryptConfig(server.headers_encrypted, server.headers_iv);
-        }
+        const mcpServerConfig = await serverRuntimeConfig(server);
 
         mcpServersFromDB[server.id || server.name] = mcpServerConfig;
       } catch (error) {

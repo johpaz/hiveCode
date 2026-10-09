@@ -2,14 +2,14 @@
  * generate-bundle.ts
  * Scans all SKILL.md files from src/bundled/ and generates
  * src/bundled-data.generated.ts with all skill data inlined as TypeScript.
- * This file is then bundled into dist/hive.js so skills load without FS access.
+ * This file is then bundled into dist/hivecode.js so skills load without FS access.
  *
  * Usage: bun packages/skills/scripts/generate-bundle.ts
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { YAML } from "bun";
+import { parseFrontmatter } from "../src/frontmatter";
 
 const BUNDLED_DIR = path.join(import.meta.dir, "../src/bundled");
 const OUTPUT_FILE = path.join(import.meta.dir, "../src/bundled-data.generated.ts");
@@ -22,18 +22,10 @@ interface SkillEntry {
   tools: string[];
   triggers: string[];
   body: string;
+  metadata: Record<string, unknown>;
+  raw: string;
 }
 
-function parseFrontmatter(content: string): { frontmatter: Record<string, unknown>; body: string } {
-  const match = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
-  if (!match) return { frontmatter: {}, body: content };
-  try {
-    const frontmatter = YAML.parse(match[1]!) as Record<string, unknown>;
-    return { frontmatter, body: match[2]! };
-  } catch {
-    return { frontmatter: {}, body: content };
-  }
-}
 
 function scanDir(dir: string): SkillEntry[] {
   const skills: SkillEntry[] = [];
@@ -55,6 +47,8 @@ function scanDir(dir: string): SkillEntry[] {
         tools: (frontmatter.tools as string[]) ?? [],
         triggers: (frontmatter.triggers as string[]) ?? [],
         body,
+        metadata: frontmatter,
+        raw: content,
       });
     } else {
       // Category directory — recurse one level
@@ -79,6 +73,8 @@ const lines: string[] = [
   "  tools: string[];",
   "  triggers: string[];",
   "  body: string;",
+  "  metadata: Record<string, any>;",
+  "  raw: string;",
   "}",
   "",
   `export const BUNDLED_SKILLS_DATA: BundledSkillEntry[] = [`,
@@ -90,6 +86,8 @@ for (const skill of skills) {
   const escapedDescription = skill.description.replace(/\\/g, "\\\\").replace(/`/g, "\\`");
 
   lines.push(`  {`);
+  lines.push(`    metadata: ${JSON.stringify(skill.metadata)},`);
+  lines.push(`    raw: ${JSON.stringify(skill.raw)},`);
   lines.push(`    name: ${JSON.stringify(skill.name)},`);
   lines.push(`    description: \`${escapedDescription}\`,`);
   lines.push(`    category: ${JSON.stringify(skill.category)},`);

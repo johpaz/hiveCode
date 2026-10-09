@@ -88,11 +88,11 @@ export type BunMessage =
    * switched with `/session resume`. The TUI clears the transcript and per-session
    * panels, then Bun re-sends the snapshot for the new id.
    */
-  | { type: "session_changed"; session_id: string }
+  | { type: "session_changed"; session_id: string; fresh?: boolean }
   | ({ type: "worker_update"; worker: string; phase: string; status: string; display_name?: string; activity?: string; task_id?: string; token_count?: number } & WorkerDashboardFields)
   | { type: "quick_menu";      items: { label: string; cmd: string; desc: string }[] }
   | ({ type: "activity_update"; coordinator: string; phase: string; status: string; display_name?: string; activity?: string; task_id?: string; token_count?: number } & WorkerDashboardFields)
-  | { type: "narrative_chunk"; coordinator: string; phase: string; content: string; content_type?: string; stream_id?: string; task_id?: string }
+  | { type: "narrative_chunk"; coordinator: string; phase: string; content: string; content_type?: string; stream_id?: string; task_id?: string; replay?: boolean }
   | { type: "blackboard_event"; timestamp: string; agent: string; event_type: string; content: string }
   | { type: "metrics_update"; token_count?: number; cost?: string; elapsed_secs?: number }
   | {

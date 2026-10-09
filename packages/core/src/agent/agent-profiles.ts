@@ -1,11 +1,11 @@
-import { col, toIndexable } from "../storage/hive"
+import { col, mutateDoc, toIndexable } from "../storage/hive"
 import type { AgentDoc } from "../storage/collections"
 import { obscuraToolNames } from "../tools/web/obscura"
 
 /** Perfiles canónicos. `reviewer` se fusionó con `verifier`: los dos eran el
  *  mismo gate en dos momentos, y el de calidad hereda su `id` para que las
  *  corridas en curso y los datos ya persistidos sigan resolviendo. */
-export const CORE_AGENT_TYPES = ["bee", "scout", "builder", "verifier", "spider"] as const
+export const CORE_AGENT_TYPES = ["bee", "scout", "planner", "builder", "verifier", "spider"] as const
 export type CoreAgentType = typeof CORE_AGENT_TYPES[number]
 
 export type AgentPermissionProfile =
@@ -39,23 +39,30 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
   bee: {
     id: "bee",
     name: "BEE",
-    description: "Lead y orquestador del objetivo, los artefactos y el DAG de ejecución.",
+    description: "Lead del objetivo: decide, delega a workers en paralelo y consolida la evidencia.",
     role: "coordinator",
     permissionProfile: "orchestrate",
     maxTurns: 30,
     tools: [
       ...READ_TOOLS,
-      "speckit_init", "speckit_artifact_read", "speckit_artifact_write",
-      "speckit_validate", "speckit_tasks_sync", "speckit_converge",
+      // Delegación: varias llamadas task_delegate en un mismo paso corren a la vez.
+      "task_delegate", "task_revise", "task_status",
+      // El plan lo escribe el planner; BEE solo lo lee, lo valida y cierra la convergencia.
+      "speckit_artifact_read", "speckit_validate", "speckit_converge",
       "report_progress", "save_note",
     ],
     skills: ["spec-kit", "task_orchestrator", "busqueda_hivedb"],
     systemPrompt: [
       "Eres BEE, Lead de hiveCode. Eres el único interlocutor del usuario y dueño del objetivo.",
       "Resuelve directamente preguntas y cambios pequeños. Para features, refactors amplios o arquitectura,",
-      "activa obligatoriamente la skill spec-kit antes de implementar. Delega investigación a Scout,",
-      "mutaciones a Builder, validación de aceptación a Verifier, el gate final a Reviewer",
-      "y búsqueda/scraping/automatización web a Spider.",
+      "delega primero el plan al worker `planner` (spec, plan y tareas con dueño) antes de implementar.",
+      "Delega con task_delegate: investigación a `scout`, mutaciones a `builder`, validación de aceptación",
+      "al Quality Gate (`verifier`) y búsqueda/scraping/automatización web a `spider`.",
+      "Para trabajo simultáneo emite varias llamadas task_delegate en el MISMO paso, con workers distintos",
+      "y sin archivos en común; el runtime las ejecuta en paralelo. Cada delegación lleva criterios de",
+      "aceptación; tú eres el fan-in: juzga la evidencia que vuelve y, si no cumple, usa task_revise en vez de darla por buena.",
+      "Cuando todas las tareas del plan estén hechas, pasa al Quality Gate sin delegar más trabajo; si el plan",
+      "trae tareas diminutas del mismo lane y los mismos archivos, agrúpalas en una sola delegación.",
       "No confundas una identidad de agente con una especialidad: carga skills según la tarea.",
     ].join(" "),
     enabled: true,
@@ -73,6 +80,34 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
       "Eres Scout de hiveCode. Investiga sin modificar archivos, git ni estado externo.",
       "Devuelve un handoff autocontenido con evidencia, rutas, riesgos, dudas y recomendación.",
       "Evita transcribir logs extensos: conserva solo lo necesario para que otro agente actúe.",
+    ].join(" "),
+    enabled: true,
+  },
+  planner: {
+    id: "planner",
+    name: "Planner",
+    description: "Convierte un objetivo complejo en spec, plan y tareas con dueño usando Spec Kit; no implementa.",
+    role: "worker",
+    permissionProfile: "read_only",
+    maxTurns: 24,
+    tools: [
+      ...READ_TOOLS,
+      "speckit_init", "speckit_artifact_read", "speckit_artifact_write", "speckit_validate",
+      "save_note",
+    ],
+    skills: ["spec-kit", "code_analysis", "busqueda_hivedb"],
+    systemPrompt: [
+      "Eres Planner de hiveCode. Conviertes un objetivo en artefactos Spec Kit y no tocas código fuente.",
+      "Flujo: speckit_init; recoge contexto con search_knowledge y lectura; completa spec.md, plan.md y",
+      "analysis.md con speckit_artifact_write; valida spec y plan con speckit_validate; escribe tasks.md con",
+      "tareas TNNN, lane [scout|builder|spider|quality], archivos de cada una (ownership) y dependencias explícitas.",
+      "Mantén el plan proporcional al objetivo: un objetivo pequeño lleva 2 a 4 tareas, no una por archivo.",
+      "Cada tarea incluye su propio test y su configuración mínima (no hagas tareas separadas para package.json,",
+      "carpetas o tests), y una tarea agrupa todo lo que comparte archivos. El Quality Gate lo ejecuta BEE al",
+      "final: no lo escribas como tarea.",
+      "Marca como paralelizables las tareas sin dependencias ni archivos compartidos.",
+      "Cada tarea lleva criterios de aceptación verificables. Termina con el handoff e incluye exactamente",
+      "\"FEATURE_DIR: specs/...\". Si la investigación a fondo pesa, déjala como tarea [scout] en vez de hacerla tú.",
     ].join(" "),
     enabled: true,
   },
@@ -183,51 +218,47 @@ export async function ensureCoreAgentProfiles(userId = "default"): Promise<void>
 
   for (const type of CORE_AGENT_TYPES) {
     const definition = CORE_AGENT_DEFINITIONS[type]
-    const existing = await agents.get(type)
-    const inheritedProvider = existing?.doc.provider_id
-      ?? (type === "bee" ? existingCoordinator?.provider_id : undefined)
-      ?? toIndexable(null)
-    const inheritedModel = existing?.doc.model_id
-      ?? (type === "bee" ? existingCoordinator?.model_id : undefined)
-      ?? toIndexable(null)
+    await mutateDoc<AgentDoc>("agents", type, (current) => {
+      const existing = current ? { doc: current } : null
+      const inheritedProvider = existing?.doc.provider_id
+        ?? (type === "bee" ? existingCoordinator?.provider_id : undefined)
+        ?? toIndexable(null)
+      const inheritedModel = existing?.doc.model_id
+        ?? (type === "bee" ? existingCoordinator?.model_id : undefined)
+        ?? toIndexable(null)
 
-    const doc: AgentDoc = {
-      id: type,
-      user_id: existing?.doc.user_id ?? userId,
-      name: definition.name,
-      description: definition.description,
-      system_prompt: definition.systemPrompt,
-      tone: existing?.doc.tone ?? "direct",
-      role: definition.role,
-      agent_type: type,
-      status: existing?.doc.status ?? "idle",
-      enabled: type === "bee" ? true : existing?.doc.enabled ?? definition.enabled,
-      provider_id: inheritedProvider,
-      model_id: inheritedModel,
-      fallback_provider_id: existing?.doc.fallback_provider_id ?? toIndexable(null),
-      fallback_model_id: existing?.doc.fallback_model_id ?? toIndexable(null),
-      effort: existing?.doc.effort ?? "medium",
-      max_input_tokens: existing?.doc.max_input_tokens ?? 0,
-      max_output_tokens: existing?.doc.max_output_tokens ?? 0,
-      max_cost_usd: existing?.doc.max_cost_usd ?? 0,
-      tools_json: JSON.stringify(definition.tools),
-      skills_json: JSON.stringify(definition.skills),
-      permission_profile: definition.permissionProfile,
-      user_instructions: existing?.doc.user_instructions ?? "",
-      config_version: (existing?.doc.config_version ?? 0) + (existing ? 0 : 1),
-      parent_id: type === "bee" ? toIndexable(null) : "bee",
-      max_iterations: existing?.doc.max_iterations ?? definition.maxTurns,
-      workspace: existing?.doc.workspace ?? null,
-      lastTraceAt: existing?.doc.lastTraceAt,
-      created_at: existing?.doc.created_at ?? now,
-      updated_at: now,
-    }
-
-    if (existing) {
-      await agents.put(type, doc, { expectedVersion: existing.version })
-    } else {
-      await agents.put(type, doc, { expectedVersion: 0 })
-    }
+      return {
+        id: type,
+        user_id: existing?.doc.user_id ?? userId,
+        name: definition.name,
+        description: definition.description,
+        system_prompt: definition.systemPrompt,
+        tone: existing?.doc.tone ?? "direct",
+        role: definition.role,
+        agent_type: type,
+        status: existing?.doc.status ?? "idle",
+        enabled: type === "bee" ? true : existing?.doc.enabled ?? definition.enabled,
+        provider_id: inheritedProvider,
+        model_id: inheritedModel,
+        fallback_provider_id: existing?.doc.fallback_provider_id ?? toIndexable(null),
+        fallback_model_id: existing?.doc.fallback_model_id ?? toIndexable(null),
+        effort: existing?.doc.effort ?? "medium",
+        max_input_tokens: existing?.doc.max_input_tokens ?? 0,
+        max_output_tokens: existing?.doc.max_output_tokens ?? 0,
+        max_cost_usd: existing?.doc.max_cost_usd ?? 0,
+        tools_json: JSON.stringify(definition.tools),
+        skills_json: JSON.stringify(definition.skills),
+        permission_profile: definition.permissionProfile,
+        user_instructions: existing?.doc.user_instructions ?? "",
+        config_version: (existing?.doc.config_version ?? 0) + (existing ? 0 : 1),
+        parent_id: type === "bee" ? toIndexable(null) : "bee",
+        max_iterations: existing?.doc.max_iterations ?? definition.maxTurns,
+        workspace: existing?.doc.workspace ?? null,
+        lastTraceAt: existing?.doc.lastTraceAt,
+        created_at: existing?.doc.created_at ?? now,
+        updated_at: now,
+      } satisfies AgentDoc
+    })
   }
 }
 

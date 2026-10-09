@@ -1,3 +1,4 @@
+import { runWithTaskSignal } from "@johpaz/hivecode-core/runtime/task-execution"
 /**
  * Tool Bridge — connects coordinator workers to the main thread tool registry.
  *
@@ -158,7 +159,7 @@ export async function executeToolByName(
     return { ok: false, error: `Tool '${toolName}' not found or not executable` }
   }
   try {
-    return await tool.execute(args, config)
+    return await runWithTaskSignal(config?.signal, () => tool.execute(args, config))
   } catch (err) {
     return {
       ok: false,

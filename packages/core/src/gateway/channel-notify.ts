@@ -77,6 +77,18 @@ export async function sendToUserChannel(
     return { ok: false, error: "Channel send not initialized" }
   }
 
+  // «tui» no es un canal del gateway: es la propia pantalla. Buscarlo en el
+  // gateway fallaba siempre y dejaba un WARN en cada aviso.
+  if (channel === "tui" && _tuiSendFn) {
+    try {
+      _tuiSendFn(message)
+      return { ok: true, delivered_to: "tui" as const }
+    } catch (err) {
+      log.warn(`[channel-notify] TUI send failed: ${(err as Error).message}`)
+      return { ok: false, error: (err as Error).message }
+    }
+  }
+
   const sessionId = await resolveSessionId(userId, channel)
   log.info(`[channel-notify] Sending to ${channel}/${sessionId}: ${message.substring(0, 80)}`)
 

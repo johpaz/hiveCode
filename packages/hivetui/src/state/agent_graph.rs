@@ -40,7 +40,7 @@ pub fn tier_for(name: &str) -> AgentTier {
     let lower = name.to_lowercase();
     match lower.as_str() {
         "bee" => AgentTier::Orchestrator,
-        "architecture" | "product_manager" => AgentTier::Planning,
+        "architecture" | "product_manager" | "planner" => AgentTier::Planning,
         "backend" | "frontend" | "data_scientist" => AgentTier::Engineering,
         "security" | "test" | "devops" => AgentTier::Quality,
         // El gate fused. `verifier` y `reviewer` siguen aceptándose porque un
@@ -61,7 +61,7 @@ pub fn display_name(role: &str) -> String {
     match role {
         "bee" => "Abeja Reina".to_string(),
         "product_manager" => "Ocelote".to_string(),
-        "architecture" => "Cóndor".to_string(),
+        "architecture" | "planner" => "Cóndor".to_string(),
         "backend" => "Topo".to_string(),
         "frontend" => "Quetzal".to_string(),
         "data_scientist" => "Tecolote".to_string(),

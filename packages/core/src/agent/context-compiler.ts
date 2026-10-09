@@ -26,27 +26,32 @@ import type { LLMMessage, LLMToolDef, ContentPart } from "./llm-client"
 import type { MCPClientManager } from "@johpaz/hivecode-mcp"
 import { syncToolCatalogToIndex, mcpToolFullName } from "./tool-selector"
 import { syncSkillsToIndex, getMinimalSkills, selectSkills, type SkillDescriptor } from "./skill-selector"
-import { MINIMAL_TOOLS } from "./minimal-loadout"
+import { COORDINATOR_PINNED_TOOLS, MINIMAL_TOOLS } from "./minimal-loadout"
 import { getHiveDb } from "../storage/hivedb"
 import { causalLogEnabled } from "../storage/causal-events"
 import { syncPlaybookToIndex } from "./playbook-selector"
 import { describeSwarmCapabilities, planJevContext } from "./jev-planner"
 import { emitJevDecision } from "./jev-decisions"
 import { getRecentMessages, getSummary, getScratchpad, toAPIMessages } from "./conversation-store"
+import { relevantConversationMemory } from "./conversation-memory"
 import { formatContext, estimateTokens } from "../utils/toon"
 import { buildSystemPromptWithProjects } from "./prompt-builder"
 import { createAllTools } from "../tools/index"
 import { getMCPManager as getSingletonMCPManager } from "../mcp/singleton"
 import { syncMCPToolsToDB, syncMCPToolsToIndex } from "../mcp/tool-sync"
 import { getUserDate, getUserTime } from "../utils/date"
-import { col } from "../storage/hive"
-import type { AgentDoc, CodePlaybookDoc, McpServerDoc, ProjectDoc, SkillDoc, TaskDoc } from "../storage/collections"
+import { col, fromIndexable } from "../storage/hive"
+import { COMPACT_RATIO, budgetTokens, fitMessagesToBudget, resolveWindow } from "./context-budget"
+import type { AgentDoc, CodePlaybookDoc, McpServerDoc, ModelDoc, ProjectDoc, SkillDoc, TaskDoc } from "../storage/collections"
 
 const log = logger.child("context-compiler")
 
 // Configuration constants
 const KEEP_LAST_N_MESSAGES = 40      // Always keep last N messages (Strategy: SELECT) — increased because tool calls/results are now persisted
 const TOKEN_COMPACT_THRESHOLD = 6000 // Compact when exceeds this (Strategy: COMPRESS)
+const SUMMARY_MAX_CHARS = 4000       // Cap the compacted summary so it can't itself blow the system-prompt budget
+/** Share of the window the system prompt may take; the history and the answer need the rest. */
+const SYSTEM_PROMPT_RATIO = 0.5
 
 function parseStringList(value: string | null | undefined): string[] {
   if (!value) return []
@@ -70,6 +75,12 @@ export interface ContextTool {
 
 export interface CompiledContext {
   systemPrompt: string
+  /**
+   * The `# RESUMEN DE LA CONVERSACIÓN` block already folded into `systemPrompt`.
+   * Exposed so a caller-supplied `systemPromptOverride` can compose it in instead
+   * of discarding it. "" when compaction has not fired.
+   */
+  conversationSummarySection: string
   messages: LLMMessage[]
   tools: LLMToolDef[]
   allTools: ContextTool[]
@@ -157,6 +168,11 @@ export async function compileContext(opts: {
    * amplía, así que lo que el agente tiene delante cambia cada turno. La ficha
    * del especialista usa esto para no mentir.
    */
+  /**
+   * The window the provider will really read (resolveProviderConfig). Falls back
+   * to the model row, then to a conservative default.
+   */
+  contextWindow?: number
   onLoadout?: (loadout: {
     tools: string[]
     skills: string[]
@@ -194,6 +210,16 @@ export async function compileContext(opts: {
   if (!agent) {
     throw new Error(`Agent not found: ${agentId}`)
   }
+
+  // Window the provider will read: the budget every later step is measured against.
+  let modelContextWindow = opts.contextWindow
+  if (!modelContextWindow) {
+    try {
+      const modelId = fromIndexable(agent.model_id)
+      if (modelId) modelContextWindow = (await (await col<ModelDoc>("models")).get(modelId))?.doc.context_window ?? undefined
+    } catch { /* use default */ }
+  }
+  modelContextWindow = resolveWindow(modelContextWindow)
 
   const isWorker = agent.role === 'worker' || !!isolated
   log.info(`[context-compiler] [STEP-1] ✅ Compiling for ${isWorker ? 'worker' : 'coordinator'} agent=${agent.name}`)
@@ -300,9 +326,11 @@ export async function compileContext(opts: {
 
   // Loadout policy, by role:
   //
-  //  - BEE (coordinator): minimal set + Spec Kit. It orchestrates rather than works,
-  //    and search_knowledge already covers discovery over tools, skills, MCP, playbook
-  //    and project code. SDD is a mandatory planning contract, not optional discovery.
+  //  - BEE (coordinator): minimal set + delegation + Spec Kit. It orchestrates rather
+  //    than works, and search_knowledge already covers discovery over tools, skills, MCP,
+  //    playbook and project code. Delegation (task_delegate/task_revise/task_status) is
+  //    its way of acting, so it is never left to discovery; SDD is a mandatory planning
+  //    contract, not optional discovery.
   //  - Other core profiles (scout/builder/verifier/reviewer): their own curated,
   //    permission-bounded envelope from agent-profiles.ts, in full. They are specialists;
   //    withholding their tools left them unable to act and reduced to writing notes.
@@ -315,7 +343,7 @@ export async function compileContext(opts: {
   const initialToolNames = new Set(MINIMAL_TOOLS)
   if (isCoordinator) {
     for (const name of configuredToolNames) {
-      if (name.startsWith("speckit_")) initialToolNames.add(name)
+      if (name.startsWith("speckit_") || COORDINATOR_PINNED_TOOLS.has(name)) initialToolNames.add(name)
     }
   } else if (isSpecialistProfile) {
     for (const name of configuredToolNames) initialToolNames.add(name)
@@ -339,7 +367,7 @@ export async function compileContext(opts: {
   // G9 causal memory block, appended once the system prompt exists (STEP-9e).
   let systemPromptExtraCausal = ""
 
-  const loadoutKind = isCoordinator ? "coordinator (minimal + speckit)"
+  const loadoutKind = isCoordinator ? "coordinator (minimal + delegation + speckit)"
     : isSpecialistProfile ? `specialist envelope (${agent.agent_type})`
       : "minimal"
   log.info(`[context-compiler] [STEP-4] Native tool loadout [${loadoutKind}]: ${filteredNativeTools.length} tools`)
@@ -431,19 +459,18 @@ export async function compileContext(opts: {
 
   const totalTokens = recentMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0)
 
-  let messages: LLMMessage[]
-
-  if (summary && totalTokens > TOKEN_COMPACT_THRESHOLD) {
-    // Use summary + recent messages (Strategy: COMPRESS)
-    messages = [
-      { role: "system", content: `[Conversation Summary]: ${summary.summary}` },
-      ...toAPIMessages(recentMessages),
-    ]
-    log.info(`[context-compiler] [STEP-9c] Using summary (${summary.messages_covered} messages compressed)`)
-  } else {
-    // Conversation is short enough, use all recent messages
-    messages = toAPIMessages(recentMessages)
+  // The summary rides in the system prompt, never as a second `system` message:
+  // providers hoist every system message into one instruction, and a
+  // context-overflow retry that keeps only the last one would replace the real
+  // prompt with the summary.
+  const summaryApplies = !!(summary && totalTokens > TOKEN_COMPACT_THRESHOLD)
+  const conversationSummarySection = summaryApplies
+    ? `\n\n# RESUMEN DE LA CONVERSACIÓN (turnos anteriores, compactados)\n${summary!.summary.slice(0, SUMMARY_MAX_CHARS)}\n`
+    : ""
+  if (summaryApplies) {
+    log.info(`[context-compiler] [STEP-9c] Using summary (${summary!.messages_covered} messages compressed) — folded into system prompt`)
   }
+  let messages: LLMMessage[] = toAPIMessages(recentMessages)
 
   // [STEP-9d] STRATEGY 1.5 — Jev decides what the model actually pays for.
   //
@@ -511,13 +538,13 @@ export async function compileContext(opts: {
   // only matters as the denominator of that ratio. max_input_tokens is the
   // agent's own effective cap, which is the closest thing here to what the
   // model will actually accept.
-  const modelContextWindow = Number(agent.max_input_tokens) > 0
+  const causalWindow = Number(agent.max_input_tokens) > 0
     ? Number(agent.max_input_tokens)
     : 32_000
   if (summary && totalTokens > TOKEN_COMPACT_THRESHOLD && causalStreamId && causalLogEnabled()) {
     try {
       const causalDb = await getHiveDb()
-      const causalMaxTokens = Math.max(500, Math.min(4000, Math.floor(modelContextWindow * 0.05)))
+      const causalMaxTokens = Math.max(500, Math.min(4000, Math.floor(causalWindow * 0.05)))
       const causalCtx = (await causalDb.buildAgentContext({
         taskId: causalStreamId,
         currentPhase: "current",
@@ -566,6 +593,8 @@ export async function compileContext(opts: {
     const scratchpadContent = formatContext(scratchpadData)
     systemPrompt += `\n\n# SCRATCHPAD (Persistent Notes)\n${scratchpadContent}\n`
   }
+
+  systemPrompt += conversationSummarySection
 
   // Inject active/recent project state from DB (coordinator only)
   if (!isWorker) {
@@ -713,12 +742,54 @@ export async function compileContext(opts: {
     systemPrompt += systemPromptExtraCausal
   }
 
+  if (!isWorker) {
+    try {
+      const query = typeof userMessage === "string" ? userMessage : userMessage
+        .filter(part => part.type === "text").map(part => (part as { text: string }).text).join("\n");
+      systemPrompt += await relevantConversationMemory({
+        threadId, query,
+        excludeSummary: summaryApplies ? summary!.summary : undefined,
+      });
+    } catch {
+      log.warn("[context-compiler] Conversation memory unavailable for this turn")
+    }
+  }
+
+  // ── Budget: nothing below may push the request past the model's window ──────
+  // The system prompt gets at most half; what is left, minus the tool schemas,
+  // is the history's. (Ported from hive's compiler.)
+  const maxSystemPromptChars = Math.max(8000, Math.floor(modelContextWindow * SYSTEM_PROMPT_RATIO * 3.5))
+  if (systemPrompt.length > maxSystemPromptChars) {
+    const originalLen = systemPrompt.length
+    systemPrompt = systemPrompt.substring(0, maxSystemPromptChars) +
+      `\n\n[... System prompt truncated (${originalLen} chars → ${maxSystemPromptChars} chars) ...]`
+    log.warn(`[context-compiler] System prompt truncated: ${originalLen} → ${maxSystemPromptChars} chars (window ${modelContextWindow})`)
+  }
+  const systemTokens = budgetTokens(systemPrompt)
+  const toolTokens = budgetTokens(JSON.stringify(finalTools))
+  // The history keeps at least a quarter of the window even when instructions and
+  // tools alone overflow it: otherwise a small model would lose the whole chat.
+  messages = fitMessagesToBudget(
+    messages,
+    Math.max(
+      Math.floor(modelContextWindow * 0.25),
+      Math.floor(modelContextWindow * COMPACT_RATIO) - systemTokens - toolTokens,
+    ),
+  )
+  const messageTokenTotal = messages.reduce((sum, m) => sum + budgetTokens(typeof m.content === "string" ? m.content : JSON.stringify(m.content)), 0)
+  const estimatedTotal = systemTokens + toolTokens + messageTokenTotal
+  const skillBodyChars = allSkills.reduce((sum, skill) => sum + (skill.body?.length ?? 0), 0)
+
   log.info(
     `[context-compiler] ✅ DONE: ${allTools.length} permitted tools, ` +
     `${finalTools.length} selected tools${jevToolsForLLM ? " (jev-pruned)" : ""}, ` +
     `${messages.length} messages, ` +
     `${allSkills.length} skills (${minimalSkills.length} minimal, ${discoveredSkills.length} discovered), ` +
     `isolated=${isWorker}`
+  )
+  log.info(
+    `[context-compiler] Budget: sys=${systemTokens} (skills≈${Math.round(skillBodyChars / 3.5)}) msgs=${messageTokenTotal} tools=${toolTokens} ` +
+    `total≈${estimatedTotal}/${modelContextWindow} (${Math.round((estimatedTotal / modelContextWindow) * 100)}%)`
   )
 
   if (jevDecision) {
@@ -736,6 +807,7 @@ export async function compileContext(opts: {
 
   return {
     systemPrompt,
+    conversationSummarySection,
     messages,
     tools: finalTools,
     allTools,

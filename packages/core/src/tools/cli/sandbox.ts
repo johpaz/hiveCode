@@ -1,3 +1,4 @@
+import { spawnTaskProcess } from "../../runtime/task-execution";
 /**
  * Sandbox Engine — OS-level process isolation for shell commands.
  *
@@ -41,11 +42,15 @@ export interface SandboxConfig {
   failIfUnavailable: boolean
 }
 
+export type SandboxSkipReason = "disabled" | "excluded" | "unavailable"
+
 export interface SandboxResult {
   ok: boolean
   provider: SandboxProvider
   command: string[]
   error?: string
+  /** Why no sandbox was applied. Set when ok is false and the caller may fall back. */
+  reason?: SandboxSkipReason
 }
 
 /**
@@ -56,6 +61,10 @@ export function detectSandboxProvider(): SandboxProvider {
   const platform = os.platform()
 
   if (platform === "linux") {
+    if (isWsl1()) {
+      log.warn("[sandbox] WSL1 detected; bubblewrap is unusable")
+      return null
+    }
     if (isBwrapAvailable()) {
       return "bwrap"
     }
@@ -73,6 +82,36 @@ export function detectSandboxProvider(): SandboxProvider {
 
   log.warn(`[sandbox] Unsupported platform: ${platform}`)
   return null
+}
+
+/**
+ * WSL1 translates syscalls instead of running a Linux kernel, so bubblewrap
+ * cannot create namespaces there. WSL2 runs a real kernel and works.
+ */
+export function isWsl1(): boolean {
+  if (os.platform() !== "linux") return false
+  try {
+    const v = fs.readFileSync("/proc/version", "utf8")
+    return /microsoft/i.test(v) && !/wsl2/i.test(v)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Human-readable reason why no provider exists on this host, with the fix when known.
+ */
+export function describeSandboxUnavailable(): string {
+  const platform = os.platform()
+  if (platform === "win32") {
+    return "Sandbox is not supported on native Windows. Run hivecode inside WSL2 to get kernel-level isolation."
+  }
+  if (isWsl1()) {
+    return "Sandbox does not work on WSL1 (no namespace support). Upgrade the distro to WSL2: wsl --set-version <distro> 2"
+  }
+  if (platform === "linux") return "bubblewrap (bwrap) not found. Install it with your package manager."
+  if (platform === "darwin") return "sandbox-exec not found on macOS."
+  return `Unsupported platform: ${platform}`
 }
 
 /**
@@ -97,7 +136,7 @@ export function shouldExcludeCommand(cmd: string, excludedCommands: string[]): b
 }
 
 /**
- * Build a sandboxed command array for Bun.spawn().
+ * Build a sandboxed command array for spawnTaskProcess().
  *
  * Returns the full command array that wraps the original command
  * with sandbox isolation (bwrap or sandbox-exec).
@@ -107,24 +146,25 @@ export function buildSandboxCommand(
   config: SandboxConfig
 ): SandboxResult {
   if (!config.enabled) {
-    return { ok: false, provider: null, command: [], error: "Sandbox not enabled" }
+    return { ok: false, provider: null, command: [], error: "Sandbox not enabled", reason: "disabled" }
   }
 
   if (shouldExcludeCommand(cmd, config.excludedCommands)) {
-    return { ok: false, provider: null, command: [], error: "Command excluded from sandbox" }
+    return { ok: false, provider: null, command: [], error: "Command excluded from sandbox", reason: "excluded" }
   }
 
   const provider = detectSandboxProvider()
   if (!provider) {
+    const why = describeSandboxUnavailable()
     if (config.failIfUnavailable) {
       return {
         ok: false,
         provider: null,
         command: [],
-        error: "No sandbox provider available and failIfUnavailable is true",
+        error: `${why} (failIfUnavailable is true)`,
       }
     }
-    return { ok: false, provider: null, command: [], error: "No sandbox provider available, falling back to unsandboxed execution" }
+    return { ok: false, provider: null, command: [], error: why, reason: "unavailable" }
   }
 
   log.info(`[sandbox] Using provider: ${provider} for command: ${cmd.slice(0, 80)}...`)

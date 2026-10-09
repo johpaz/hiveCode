@@ -229,13 +229,14 @@ export class HiveAgentsProvider extends OpenAICompatBase {
         if (init?.body) {
           try {
             const parsed = JSON.parse(init.body as string)
-            const summary = { model: parsed.model, messages: parsed.messages?.length, tools: parsed.tools?.length, max_tokens: parsed.max_tokens, temperature: parsed.temperature, tool_choice: parsed.tool_choice, extra_body: parsed.extra_body }
+            const summary = { model: parsed.model, messages: parsed.messages?.length, tools: parsed.tools?.length, prompt_chars: (init.body as string).length, max_tokens: parsed.max_tokens, temperature: parsed.temperature, tool_choice: parsed.tool_choice, extra_body: parsed.extra_body }
             log.info(`[hiveagents] → Body summary: ${JSON.stringify(summary)}`)
           } catch { /* ignore */ }
         }
 
+        const startedAt = performance.now()
         const res = await fetch(url, { ...init, headers })
-        log.info(`[hiveagents] ← Response: ${res.status} ${res.statusText}`)
+        log.info(`[hiveagents] ← Response: ${res.status} ${res.statusText} (${Math.round(performance.now() - startedAt)}ms hasta la respuesta)`)
         return res
       },
     })

@@ -1,3 +1,4 @@
+import { fetchTaskResource } from "../../runtime/task-execution";
 /**
  * api_request - Make HTTP requests to REST APIs (curl-like)
  *
@@ -113,7 +114,7 @@ export const apiRequestTool: Tool = {
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       fetchOptions.signal = controller.signal;
 
-      const response = await fetch(url, fetchOptions);
+      const response = await fetchTaskResource(url, fetchOptions);
       clearTimeout(timeoutId);
 
       if (method === "HEAD") {

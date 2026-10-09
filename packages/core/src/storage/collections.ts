@@ -33,6 +33,12 @@ export interface ProviderDoc {
 }
 
 export interface ModelDoc {
+  catalog_managed?: boolean;
+  catalog_wire_id?: string;
+  catalog_last_seen_at?: number;
+  catalog_missing_since_slot?: number;
+  catalog_enabled_before_deprecation?: boolean;
+  deprecated_at?: number | null;
   id: string;
   provider_id: string;
   name: string;
@@ -52,7 +58,7 @@ export interface AgentDoc {
   tone: string | null;
   role: "coordinator" | "worker";
   /** Stable v1 harness identity. Legacy/custom agents may omit this field. */
-  agent_type?: "bee" | "scout" | "builder" | "verifier" | "reviewer" | "spider";
+  agent_type?: "bee" | "scout" | "planner" | "builder" | "verifier" | "reviewer" | "spider";
   status: string;
   enabled: boolean;
   provider_id: string;
@@ -140,6 +146,9 @@ export interface ToolDoc {
 }
 
 export interface SkillDoc {
+  metadata?: string;
+  source_path?: string;
+  catalog_managed?: boolean;
   id: string;
   name: string;
   description: string | null;
@@ -893,7 +902,7 @@ export interface AgentRunDoc {
   agent_id: string;
   kind: "chat" | "worker" | "harness" | "verification" | "review";
   parent_run_id?: string | null;
-  profile_type?: "bee" | "scout" | "builder" | "verifier" | "reviewer" | "spider";
+  profile_type?: "bee" | "scout" | "planner" | "builder" | "verifier" | "reviewer" | "spider";
   objective: string;
   status: AgentRunStatus;
   turn: number;

@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { MCPConfig, MCPServerConfig } from "./config";
-import { logger, type LogHandler } from "./logger";
+import { Logger, type LogHandler } from "./logger";
 import * as path from "node:path";
 import {
   createTransport,
@@ -41,20 +41,37 @@ interface MCPServerState {
   resources: MCPResource[];
   prompts: MCPPrompt[];
   reconnectAttempts: number;
-  lastError?: string;  // CORRECCIÓN 3 — guardar el mensaje de error
+  lastError?: string;  // Last connection error for diagnostics
+}
+
+function publicUrl(value?: string): string | undefined {
+  if (!value) return undefined;
+  try { return new URL(value).origin; } catch { return undefined; }
+}
+function stableConfig(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableConfig).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${stableConfig(item)}`).join(",")}}`;
+  return JSON.stringify(value) ?? "undefined";
 }
 
 export class MCPClientManager {
   private servers: Map<string, MCPServerState> = new Map();
   private config: MCPConfig;
-  private log = logger.child("mcp");
+  private log = new Logger("mcp");
+  private attempts = new Set<Promise<void>>();
+  private connecting = new Map<string, Promise<void>>();
+  private retries = new Map<string, ReturnType<typeof setTimeout>>();
+  private revisions = new Map<string, number>();
+  private reconciliation: Promise<void> = Promise.resolve();
 
-  constructor(config: MCPConfig) {
+  getConfig(): MCPConfig { return structuredClone(this.config); }
+
+  constructor(config: MCPConfig, private factories?: { client: () => Client; transport: (config: MCPServerConfig) => Transport }) {
     this.config = config;
   }
 
   setLogHandler(handler: LogHandler): void {
-    logger.setHandler(handler);
+    this.log.setHandler(handler);
   }
 
   async initialize(): Promise<void> {
@@ -78,13 +95,18 @@ export class MCPClientManager {
 
     this.log.info(`MCP Client initialized with ${this.servers.size} servers`);
 
-    // CORRECCIÓN 1 — conectar todos los servers al inicializar
-    // initialize() solo registraba los servers pero nunca llamaba connectAll()
-    // por eso el log mostraba "initialized with 2 servers" pero nunca conectaba
+    // Initialization includes the first connection attempt for each enabled server.
     await this.connectAll();
   }
 
-  async updateConfig(config: MCPConfig): Promise<void> {
+  updateConfig(config: MCPConfig): Promise<void> {
+    const next = structuredClone(config);
+    const pending = this.reconciliation.then(() => this.reconcileConfig(next));
+    this.reconciliation = pending.catch(() => {});
+    return pending;
+  }
+
+  private async reconcileConfig(config: MCPConfig): Promise<void> {
     this.config = config;
     const newServers = this.config.servers ?? {};
 
@@ -102,15 +124,14 @@ export class MCPClientManager {
         const existing = this.servers.get(name);
         if (existing) {
           const configChanged =
-            JSON.stringify(existing.config) !== JSON.stringify(serverConfig);
+            stableConfig(existing.config) !== stableConfig(serverConfig);
           if (configChanged) {
-            const wasConnected = existing.status === "connected";
             await this.disconnectServer(name);
             existing.config = serverConfig as MCPServerConfig;
-            if (wasConnected) {
+            {
               await this.connectServer(name).catch((err) => {
                 this.log.error(
-                  `Failed to reconnect ${name} after config update: ${err.message}`
+                  `Failed to reconnect ${name} after config update`
                 );
               });
             }
@@ -128,9 +149,9 @@ export class MCPClientManager {
             prompts: [],
             reconnectAttempts: 0,
           });
-          // CORRECCIÓN 2 — conectar el server nuevo inmediatamente
+          // Connect newly added enabled servers immediately.
           await this.connectServer(name).catch((err) => {
-            this.log.error(`Failed to connect new server ${name}: ${err.message}`);
+            this.log.error(`Failed to connect new server ${name}`);
           });
         }
       }
@@ -145,6 +166,7 @@ export class MCPClientManager {
   }
 
   private createTransportForServer(state: MCPServerState): Transport {
+    if (this.factories) return this.factories.transport(state.config);
     const transportType = state.config.transport as TransportType;
 
     switch (transportType) {
@@ -197,31 +219,64 @@ export class MCPClientManager {
     }
   }
 
-  async connectServer(name: string): Promise<void> {
+  connectServer(name: string): Promise<void> {
+    const current = this.connecting.get(name);
+    if (current) return current;
+    const attempt = this.connectOnce(name);
+    this.connecting.set(name, attempt);
+    this.attempts.add(attempt);
+    void attempt.finally(() => {
+      this.attempts.delete(attempt);
+      if (this.connecting.get(name) === attempt) this.connecting.delete(name);
+    }).catch(() => {});
+    return attempt;
+  }
+
+  private async connectOnce(name: string): Promise<void> {
     const state = this.servers.get(name);
     if (!state) throw new Error(`MCP server not found: ${name}`);
     if (state.status === "connected") return;
 
+    const revision = this.revisions.get(name) ?? 0;
+    let client: Client | undefined;
+    let transport: Transport | undefined;
+    const isCurrent = () => this.servers.get(name) === state && (this.revisions.get(name) ?? 0) === revision;
     state.status = "connecting";
     state.lastError = undefined;  // limpiar error anterior
     this.log.info(`Connecting to MCP server: ${name}`);
 
     try {
-      const transport = this.createTransportForServer(state);
+      transport = this.createTransportForServer(state);
 
-      const client = new Client(
+      client = this.factories?.client() ?? new Client(
         { name: "hive", version: "0.1.0" },
         { capabilities: {} }
       );
 
+      client.onclose = () => {
+        if (!isCurrent() || state.status !== "connected") return;
+        state.client = null;
+        state.transport = null;
+        state.status = "error";
+        state.tools = []; state.resources = []; state.prompts = [];
+        state.lastError = "MCP transport closed";
+        this.scheduleReconnect(name, state, revision);
+      };
+      state.client = client;
+      state.transport = transport;
       await client.connect(transport);
 
+      if (!isCurrent()) { await client.close(); return; }
       state.client = client;
       state.transport = transport;
       state.status = "connected";
       state.reconnectAttempts = 0;
+      const retry = this.retries.get(name);
+      if (retry) clearTimeout(retry);
+      this.retries.delete(name);
 
-      await this.discoverCapabilities(name);
+      await this.discoverCapabilities(name, state);
+      if (!isCurrent()) return;
 
       this.log.info(`Connected to MCP server: ${name}`, {
         tools: state.tools.length,
@@ -229,16 +284,34 @@ export class MCPClientManager {
         prompts: state.prompts.length,
       });
     } catch (error) {
+      await client?.close().catch(() => {});
+      await transport?.close().catch(() => {});
+      if (!isCurrent()) return;
+      state.client = null;
+      state.transport = null;
       state.status = "error";
-      // CORRECCIÓN 3 — guardar el mensaje de error para mostrarlo en el dashboard
-      state.lastError = (error as Error).message;
+      // Keep the connection error available to dashboard diagnostics.
+      state.lastError = "MCP connection failed; verify transport and credentials";
       this.log.error(`Failed to connect to MCP server ${name}: ${state.lastError}`);
+      this.scheduleReconnect(name, state, revision);
       throw error;
     }
   }
 
-  private async discoverCapabilities(name: string): Promise<void> {
-    const state = this.servers.get(name);
+  private scheduleReconnect(name: string, state: MCPServerState, revision: number): void {
+    if (this.retries.has(name)) return;
+    const delays = [2000, 5000, 15000, 30000, 60000];
+    const timer = setTimeout(() => {
+      this.retries.delete(name);
+      if (this.servers.get(name) === state && (this.revisions.get(name) ?? 0) === revision) {
+        void this.connectServer(name).catch(() => {});
+      }
+    }, delays[Math.min(state.reconnectAttempts++, delays.length - 1)]);
+    timer.unref?.();
+    this.retries.set(name, timer);
+  }
+
+  private async discoverCapabilities(name: string, state = this.servers.get(name)): Promise<void> {
     if (!state?.client) return;
 
     try {
@@ -279,6 +352,12 @@ export class MCPClientManager {
   async disconnectServer(name: string): Promise<void> {
     const state = this.servers.get(name);
     if (!state) return;
+    this.revisions.set(name, (this.revisions.get(name) ?? 0) + 1);
+    const timer = this.retries.get(name);
+    if (timer) clearTimeout(timer);
+    this.retries.delete(name);
+    // Detach the previous attempt: its revision cannot publish state after replacement.
+    this.connecting.delete(name);
 
     if (state.client) {
       try {
@@ -291,6 +370,7 @@ export class MCPClientManager {
     state.client = null;
     state.transport = null;
     state.status = "disconnected";
+    state.tools = []; state.resources = []; state.prompts = [];
     state.lastError = undefined;
 
     this.log.info(`Disconnected from MCP server: ${name}`);
@@ -306,7 +386,7 @@ export class MCPClientManager {
       throw new Error(`MCP server not connected: ${serverName}`);
     }
 
-    this.log.debug(`Calling MCP tool: ${serverName}/${toolName}`, { args });
+    this.log.debug(`Calling MCP tool: ${serverName}/${toolName}`);
 
     const result = await state.client.callTool({
       name: toolName,
@@ -363,7 +443,7 @@ export class MCPClientManager {
       tools: s.tools,
       resources: s.resources,
       prompts: s.prompts,
-      url: s.config.transport === "stdio" ? `${s.config.command} ${s.config.args?.join(" ")}` : s.config.url,
+      url: s.config.transport === "stdio" ? s.config.command : publicUrl(s.config.url),
       error: s.lastError,
     }));
   }
@@ -384,21 +464,14 @@ export class MCPClientManager {
     const s = this.servers.get(name);
     if (!s) return undefined;
 
-    // CORRECCIÓN 4 — redactar headers con tokens antes de exponer al dashboard
+    // Mask recognized credential headers before exposing server configuration.
     const safeConfig: MCPServerConfig = {
-      ...s.config,
-      headers: s.config.headers
-        ? Object.fromEntries(
-          Object.entries(s.config.headers).map(([k, v]) => [
-            k,
-            k.toLowerCase().includes("auth") ||
-              k.toLowerCase().includes("token") ||
-              k.toLowerCase().includes("key")
-              ? `${(v as string).slice(0, 4)}••••••••`
-              : v,
-          ])
-        )
-        : undefined,
+      transport: s.config.transport,
+      enabled: s.config.enabled,
+      command: s.config.command,
+      url: publicUrl(s.config.url),
+      headers: s.config.headers ? Object.fromEntries(Object.keys(s.config.headers).map(key => [key, "••••••••"])) : undefined,
+      env: s.config.env ? Object.fromEntries(Object.keys(s.config.env).map(key => [key, "••••••••"])) : undefined,
     };
 
     return {
@@ -419,7 +492,7 @@ export class MCPClientManager {
       promises.push(
         this.connectServer(name).catch((error) => {
           // No relanzar — el Gateway sigue funcionando sin ese server
-          this.log.error(`Failed to connect ${name}: ${error.message}`);
+          this.log.error(`Failed to connect ${name}`);
         })
       );
     }
@@ -433,6 +506,7 @@ export class MCPClientManager {
   }
 
   async disconnectAll(): Promise<void> {
+    const attempts = [...this.attempts];
     const promises: Promise<void>[] = [];
 
     for (const name of this.servers.keys()) {
@@ -440,6 +514,7 @@ export class MCPClientManager {
     }
 
     await Promise.allSettled(promises);
+    await Promise.allSettled(attempts);
   }
 }
 

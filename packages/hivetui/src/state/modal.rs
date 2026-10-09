@@ -228,6 +228,7 @@ pub struct SettingsAgent {
 
 #[derive(Debug, Clone, Default)]
 pub struct SettingsSkill {
+    pub id: String,
     pub name: String,
     pub description: String,
     pub category: String,
@@ -255,13 +256,42 @@ pub struct SettingsHubState {
 /// Con provider activo solo se listan sus modelos: mezclar los ~115 modelos de
 /// todos los providers en un mismo select hacía inmanejable cambiar de modelo.
 /// Sin provider activo no hay modelos que ofrecer, así que el tab muestra los
-/// providers y hay que elegir uno primero.
+/// un estado vacío y remite al tab Providers para activar uno.
 pub enum ModelRows<'a> {
-    NeedProvider { providers: &'a [SettingsProvider] },
+    NeedProvider { providers: Vec<&'a SettingsProvider> },
     Models { provider_id: &'a str, models: &'a [String] },
 }
 
 impl SettingsHubState {
+    pub fn row_count(&self) -> usize {
+        match self.active_tab {
+            SettingsTab::Providers => self.providers.len(),
+            SettingsTab::Models => self.model_row_count(),
+            SettingsTab::Agents => self.agents.len(),
+            SettingsTab::Mcp => self.mcp.len(),
+            SettingsTab::Skills => self.skills.len(),
+            SettingsTab::Github => 5,
+            SettingsTab::Telegram => 4,
+        }
+    }
+
+    pub fn select_row(&mut self, row: usize) {
+        self.selected_row = row.min(self.row_count().saturating_sub(1));
+    }
+
+    pub fn move_row(&mut self, delta: isize) {
+        self.select_row(self.selected_row.saturating_add_signed(delta));
+    }
+
+    pub fn keep_selection_visible(&mut self, visible: usize) {
+        self.select_row(self.selected_row);
+        self.scroll_offset = self.scroll_offset.min(self.row_count().saturating_sub(visible));
+        if self.selected_row < self.scroll_offset { self.scroll_offset = self.selected_row; }
+        if visible > 0 && self.selected_row >= self.scroll_offset + visible {
+            self.scroll_offset = self.selected_row.saturating_sub(visible - 1);
+        }
+    }
+
     /// Provider marcado como default, si lo hay.
     pub fn active_provider(&self) -> Option<&SettingsProvider> {
         self.providers.iter().find(|p| p.is_active)
@@ -284,8 +314,8 @@ impl SettingsHubState {
                 provider_id: &p.id,
                 models: &p.models,
             },
-            // Provider activo sin modelos (o sin provider): elegir provider primero.
-            _ => ModelRows::NeedProvider { providers: &self.providers },
+            // Nunca ofrecer providers inactivos desde el tab Modelos.
+            _ => ModelRows::NeedProvider { providers: self.providers.iter().filter(|p| p.is_active).collect() },
         }
     }
 
@@ -355,8 +385,8 @@ mod tests {
         ];
 
         assert!(matches!(hub.model_rows(), ModelRows::NeedProvider { .. }));
-        // Las filas son providers, no modelos.
-        assert_eq!(hub.model_row_count(), 2);
+        // Los providers inactivos solo se ofrecen en el tab Providers.
+        assert_eq!(hub.model_row_count(), 0);
     }
 
     #[test]

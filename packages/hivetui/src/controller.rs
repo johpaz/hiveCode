@@ -72,20 +72,8 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 hub.selected_row = 0;
                 hub.scroll_offset = 0;
             }
-            KeyCode::Up => {
-                hub.selected_row = hub.selected_row.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                let max = match hub.active_tab {
-                    SettingsTab::Providers => hub.providers.len(),
-                    SettingsTab::Models    => hub.model_row_count(),
-                    SettingsTab::Agents    => hub.agents.len(),
-                    SettingsTab::Mcp       => hub.mcp.len(),
-                    SettingsTab::Skills    => hub.skills.len(),
-                    _                      => 0,
-                }.saturating_sub(1);
-                hub.selected_row = (hub.selected_row + 1).min(max);
-            }
+            KeyCode::Up => hub.move_row(-1),
+            KeyCode::Down => hub.move_row(1),
             KeyCode::Char('p') | KeyCode::Char('P') if hub.active_tab == SettingsTab::Models => {
                 // Cambiar de provider sin salir del tab: los modelos dependen del
                 // provider activo, así que hay que volver a la lista de providers.
@@ -106,9 +94,10 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     SettingsTab::Github    => "/github connect",
                     SettingsTab::Telegram  => "/telegram connect",
                 };
+                let refresh = !matches!(hub.active_tab, SettingsTab::Github | SettingsTab::Mcp | SettingsTab::Skills | SettingsTab::Telegram);
                 keep_hub_loading(state);
                 state.pending_ipc.push(TuiMessage::Submit { input: cmd.to_string() });
-                state.pending_ipc.push(TuiMessage::RequestSettings);
+                if refresh { state.pending_ipc.push(TuiMessage::RequestSettings); }
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 // Delete del item seleccionado — envía el comando de remove al tab activo
@@ -123,10 +112,11 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     }
                     _ => None,
                 };
+                let model_command = matches!(hub.active_tab, SettingsTab::Models | SettingsTab::Github | SettingsTab::Mcp | SettingsTab::Skills | SettingsTab::Telegram);
                 if let Some(c) = cmd {
                     keep_hub_loading(state);
                     state.pending_ipc.push(TuiMessage::Submit { input: c });
-                    state.pending_ipc.push(TuiMessage::RequestSettings);
+                    if !model_command { state.pending_ipc.push(TuiMessage::RequestSettings); }
                 }
             }
             KeyCode::Char(' ') => {
@@ -134,8 +124,8 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 let cmd = match hub.active_tab {
                     SettingsTab::Skills => {
                         hub.skills.get(hub.selected_row).map(|s| {
-                            if s.active { format!("/skill disable {}", s.name) }
-                            else        { format!("/skill enable {}",  s.name) }
+                            if s.active { format!("/skill disable {}", s.id) }
+                            else        { format!("/skill enable {}",  s.id) }
                         })
                     }
                     SettingsTab::Mcp => {
@@ -146,11 +136,31 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     }
                     _ => None,
                 };
+                let model_command = matches!(hub.active_tab, SettingsTab::Models | SettingsTab::Github | SettingsTab::Mcp | SettingsTab::Skills | SettingsTab::Telegram);
                 if let Some(c) = cmd {
                     keep_hub_loading(state);
                     state.pending_ipc.push(TuiMessage::Submit { input: c });
-                    state.pending_ipc.push(TuiMessage::RequestSettings);
+                    if !model_command { state.pending_ipc.push(TuiMessage::RequestSettings); }
                 }
+            }
+            KeyCode::Char('l') | KeyCode::Char('L') if hub.active_tab == SettingsTab::Mcp => {
+                keep_hub_loading(state);
+                state.pending_ipc.push(TuiMessage::Submit { input: "/mcp load".to_string() });
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') | KeyCode::Char('e') | KeyCode::Char('E') if hub.active_tab == SettingsTab::Mcp => {
+                let action = if matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T')) { "test" } else { "inspect" };
+                let command = hub.mcp.get(hub.selected_row).map(|m| format!("/mcp {action} {}", m.id));
+                if let Some(input) = command {
+                    keep_hub_loading(state);
+                    state.pending_ipc.push(TuiMessage::Submit { input });
+                }
+            }
+            KeyCode::Char('e') | KeyCode::Char('E') if hub.active_tab == SettingsTab::Providers => {
+                let target = hub.provider_at(hub.selected_row).map(|p| ProviderTarget {
+                    id: p.id.clone(), name: p.name.clone(), needs_key: p.needs_key(), browser_login: p.browser_login,
+                });
+                if let Some(target) = target { activate_provider(state, &target, true); }
+                return false;
             }
             KeyCode::Enter => {
                 // En Providers, Enter NO vuelve a mandar `/provider set`: Bun ignoraba
@@ -164,7 +174,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                         browser_login: p.browser_login,
                     });
                     if let Some(target) = selected {
-                        activate_provider(state, &target);
+                        activate_provider(state, &target, false);
                     }
                     return false;
                 }
@@ -188,14 +198,16 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                         hub.mcp.get(hub.selected_row)
                             .map(|m| format!("/mcp inspect {}", m.id))
                     }
-                    SettingsTab::Github    => Some("/github status".to_string()),
-                    SettingsTab::Telegram  => Some("/telegram status".to_string()),
+                    SettingsTab::Skills => hub.skills.get(hub.selected_row).map(|s| format!("/skill info {}", s.id)),
+                    SettingsTab::Github    => Some(["/github connect", "/github status", "/github whoami", "/github set-repo", "/github disconnect"][hub.selected_row.min(4)].to_string()),
+                    SettingsTab::Telegram  => Some(["/telegram connect", "/telegram edit", "/telegram status", "/telegram disconnect"][hub.selected_row.min(3)].to_string()),
                     _ => None,
                 };
+                let model_command = matches!(hub.active_tab, SettingsTab::Models | SettingsTab::Github | SettingsTab::Mcp | SettingsTab::Skills | SettingsTab::Telegram);
                 if let Some(c) = cmd {
                     keep_hub_loading(state);
                     state.pending_ipc.push(TuiMessage::Submit { input: c });
-                    state.pending_ipc.push(TuiMessage::RequestSettings);
+                    if !model_command { state.pending_ipc.push(TuiMessage::RequestSettings); }
                 }
             }
             _ => {}
@@ -290,18 +302,6 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         }
     }
 
-    if state.active_tab == TabId::Swarm
-        && handle_dashboard_key(state, key.code, key.modifiers, typing)
-    {
-        return false;
-    }
-
-    if state.active_tab != TabId::Swarm
-        && handle_immersive_layout_key(state, key.code, key.modifiers, typing)
-    {
-        return false;
-    }
-
     // ── Popup de comandos / activo ─────────────────────────────────────────────
     if state.input.value().starts_with('/') && !state.history_nav_mode {
         match key.code {
@@ -315,15 +315,16 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 return false;
             }
             KeyCode::Down => {
-                let max = command_popup::filtered(state.input.value()).len().saturating_sub(1);
+                let max = command_popup::filtered(state).len().saturating_sub(1);
                 state.command_popup_selected = (state.command_popup_selected + 1).min(max);
                 return false;
             }
             KeyCode::Tab => {
                 // Autocompletar con el comando seleccionado
-                let filtered = command_popup::filtered(state.input.value());
-                if let Some(cmd) = filtered.get(state.command_popup_selected) {
-                    state.input.set(cmd.cmd);
+                let filtered = command_popup::filtered(state);
+                if let Some(cmd) = filtered.get(state.command_popup_selected).map(|cmd| cmd.cmd.to_owned()) {
+                    state.input.set(&cmd);
+                    state.command_popup_selected = 0;
                 }
                 return false;
             }
@@ -332,9 +333,9 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 // Esto permite que el usuario navegue con ↑↓ y pulse Enter directamente
                 // sin necesidad de Tab previo.
                 {
-                    let filtered_items = command_popup::filtered(state.input.value());
-                    if let Some(selected_cmd) = filtered_items.get(state.command_popup_selected) {
-                        state.input.set(selected_cmd.cmd);
+                    let filtered_items = command_popup::filtered(state);
+                    if let Some(selected_cmd) = filtered_items.get(state.command_popup_selected).map(|cmd| cmd.cmd.to_owned()) {
+                        state.input.set(&selected_cmd);
                     }
                 }
                 let raw = state.input.value().trim().to_string();
@@ -347,7 +348,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     "/help" => {
                         state.modal = ModalState::Info(InfoModalState {
                             title: "Comandos disponibles".to_string(),
-                            content: help_text(),
+                            content: help_text(state),
                             scroll: 0,
                         });
                         return false;
@@ -393,7 +394,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     "/quit" | "/exit" => {
                         return true; // app.rs envía TuiMessage::Exit
                     }
-                    "/mode" => {
+                    "/mode" if arg.is_empty() || matches!(arg, "plan" | "approval" | "aprobación" | "auto") => {
                         let new_mode = if arg.is_empty() {
                             state.session.mode.next()
                         } else {
@@ -455,6 +456,18 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
             }
             _ => {}
         }
+    }
+
+    if state.active_tab == TabId::Swarm
+        && handle_dashboard_key(state, key.code, key.modifiers, typing)
+    {
+        return false;
+    }
+
+    if state.active_tab != TabId::Swarm
+        && handle_immersive_layout_key(state, key.code, key.modifiers, typing)
+    {
+        return false;
     }
 
     // Mientras welcome visible: 1-5 dismiss + cambiar tab; Esc solo dismiss
@@ -729,7 +742,7 @@ fn keep_hub_loading(state: &mut AppState) {
 ///   secreto. La clave viaja en `ProviderActivate`, así que Bun ya no necesita
 ///   reabrir su propio desplegable de providers.
 /// - Con clave guardada, o con login de navegador → se activa directo.
-fn activate_provider(state: &mut AppState, target: &ProviderTarget) {
+fn activate_provider(state: &mut AppState, target: &ProviderTarget, edit_key: bool) {
     let hub = match &state.modal {
         ModalState::Settings(hub) => Some(hub.clone()),
         _ => None,
@@ -737,16 +750,17 @@ fn activate_provider(state: &mut AppState, target: &ProviderTarget) {
 
     // El login de navegador (PKCE) no usa API key: preguntar por ella sería
     // un formulario imposible de completar. Bun suspende la TUI y abre el browser.
-    if !target.browser_login && target.needs_key {
+    if !target.browser_login && (target.needs_key || edit_key) {
         state.modal_focused = 0;
         state.modal = ModalState::Config(ConfigModalState {
             command: "provider_activate".to_string(),
             title: format!("API key · {}", target.name),
             fields: vec![ModalField {
                 key: "api_key".to_string(),
-                label: format!("Clave de {}", target.name),
+                label: if target.needs_key { format!("Clave de {}", target.name) }
+                    else { "Nueva API key (vacío conserva actual)".to_string() },
                 kind: ModalFieldKind::Secret,
-                required: true,
+                required: target.needs_key,
                 ..Default::default()
             }],
             values: vec![String::new()],
@@ -1095,6 +1109,13 @@ fn confirm_or_send_dashboard_rollback(state: &mut AppState) {
 }
 
 pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
+    if let ModalState::Settings(hub) = &mut state.modal {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => { hub.move_row(-1); return; }
+            MouseEventKind::ScrollDown => { hub.move_row(1); return; }
+            _ => {}
+        }
+    }
     match mouse.kind {
         MouseEventKind::ScrollUp if state.active_tab == TabId::Mesa && !state.history_nav_mode => {
             state.history.scroll = state.history.scroll.saturating_sub(3);
@@ -1173,25 +1194,15 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
             // cuya altura es configurable (1-5), así que su fila se deriva del
             // layout y no de una constante.
             if state.active_tab != TabId::Swarm {
-                if let Some((w, h)) = terminal::size().ok() {
-                    let tabbar_area = crate::term::Rect::new(
-                        0,
-                        state.panels.header_height.clamp(1, 5),
-                        w,
-                        1,
-                    );
-                    if tabbar_area.y < h {
-                        if let Some(tab) = tabbar::tab_at_col(tabbar_area, mouse.column, state) {
-                            state.active_tab = tab;
-                            if tab != TabId::Mesa {
-                                state.history_nav_mode = false;
-                                state.history_hscroll = 0;
-                            }
-                            state.show_welcome = false;
-                            state.selection = None;
-                            return;
-                        }
+                if let Some(tab) = tabbar_click(state, terminal::size().ok(), mouse.column, mouse.row) {
+                    state.active_tab = tab;
+                    if tab != TabId::Mesa {
+                        state.history_nav_mode = false;
+                        state.history_hscroll = 0;
                     }
+                    state.show_welcome = false;
+                    state.selection = None;
+                    return;
                 }
             }
             let history_area = content_rect_from_size(state, terminal::size().ok());
@@ -1276,6 +1287,8 @@ fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
         }
         HitAction::Command(command) => {
             state.input.set(&command);
+            state.command_popup_selected = 0;
+            state.history_nav_mode = false;
             true
         }
         HitAction::SelectRow(i) => {
@@ -1287,6 +1300,29 @@ fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
         }
         HitAction::Custom(ref id) if id.starts_with("settings:") => {
             if id == "settings:noop" { return true; }
+            if let Some(action) = id.strip_prefix("settings:skill:") {
+                let code = match action { "add" => KeyCode::Char('a'), "info" => KeyCode::Enter, "toggle" => KeyCode::Char(' '), _ => return false };
+                handle_key_event(state, KeyEvent::new(code, KeyModifiers::NONE));
+                return true;
+            }
+            if let Some(action) = id.strip_prefix("settings:mcp:") {
+                let code = match action {
+                    "add" => KeyCode::Char('a'), "load" => KeyCode::Char('l'),
+                    "inspect" => KeyCode::Enter, "test" => KeyCode::Char('t'),
+                    "toggle" => KeyCode::Char(' '), "remove" => KeyCode::Char('d'),
+                    _ => return false,
+                };
+                handle_key_event(state, KeyEvent::new(code, KeyModifiers::NONE));
+                return true;
+            }
+            if id == "settings:edit-provider" {
+                handle_key_event(state, KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+                return true;
+            }
+            if id == "settings:confirm-model" {
+                handle_key_event(state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                return true;
+            }
             if let Some(tab_name) = id.strip_prefix("settings:tab:") {
                 if let ModalState::Settings(hub) = &mut state.modal {
                     hub.active_tab = match tab_name {
@@ -1306,7 +1342,7 @@ fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
             if let Some(row_str) = id.strip_prefix("settings:row:") {
                 if let Ok(row) = row_str.parse::<usize>() {
                     if let ModalState::Settings(hub) = &mut state.modal {
-                        hub.selected_row = row;
+                        hub.select_row(row);
                     }
                 }
                 return true;
@@ -1463,6 +1499,20 @@ fn screen_rect_from_size(size: Option<(u16, u16)>) -> Option<crate::term::Rect> 
     Some(crate::term::Rect::new(0, 0, w, h))
 }
 
+/// La pestaña bajo un clic, solo si el clic cae en la fila del tabbar.
+///
+/// `tab_at_col` mira únicamente la columna: sin comprobar la fila, un clic en
+/// cualquier punto de una vista cuya columna coincidiera con una pestaña
+/// cambiaba de pantalla.
+fn tabbar_click(state: &AppState, size: Option<(u16, u16)>, column: u16, row: u16) -> Option<TabId> {
+    let area = screen_rect_from_size(size)?;
+    let tabbar = layout_areas(area, &state.panels).tabbar;
+    if tabbar.h == 0 || row < tabbar.y || row >= tabbar.bottom() {
+        return None;
+    }
+    tabbar::tab_at_col(tabbar, column, state)
+}
+
 fn content_rect_from_size(state: &AppState, size: Option<(u16, u16)>) -> Option<crate::term::Rect> {
     let area = screen_rect_from_size(size)?;
     Some(layout_areas(area, &state.panels).content)
@@ -1539,7 +1589,96 @@ fn copy_selected_entry_to_clipboard(state: &AppState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_click_only_changes_tab_on_the_tabbar_row() {
+        let state = AppState::default();
+        let size = Some((140, 40));
+        let tabbar = layout_areas(screen_rect_from_size(size).unwrap(), &state.panels).tabbar;
+
+        // Una columna que cae sobre una pestaña, en la fila del tabbar: cambia.
+        let col = (0..140).find(|c| tabbar::tab_at_col(tabbar, *c, &state).is_some()).unwrap();
+        assert!(tabbar_click(&state, size, col, tabbar.y).is_some());
+
+        // La misma columna en cualquier otra fila (contenido, input, header): no.
+        for row in (0..40).filter(|r| *r != tabbar.y) {
+            assert_eq!(tabbar_click(&state, size, col, row), None, "fila {row}");
+        }
+    }
+
     use super::*;
+
+    #[test]
+    fn skills_settings_use_database_ids_for_details_and_toggle() {
+        for (action, expected) in [("info", "/skill info database_id"), ("toggle", "/skill disable database_id"), ("add", "/skill add")] {
+            let mut state = AppState::default();
+            state.modal = ModalState::Settings(SettingsHubState {
+                active_tab: SettingsTab::Skills,
+                skills: vec![crate::state::SettingsSkill { id: "database_id".into(), name: "Display Name".into(), active: true, ..Default::default() }],
+                ..Default::default()
+            });
+            handle_hit_action(&mut state, HitAction::Custom(format!("settings:skill:{action}")));
+            assert!(state.pending_ipc.iter().any(|m| matches!(m, TuiMessage::Submit { input } if input == expected)));
+            assert!(!state.pending_ipc.iter().any(|m| matches!(m, TuiMessage::RequestSettings)));
+        }
+    }
+
+    #[test]
+    fn telegram_settings_expose_all_four_actions() {
+        for (row, expected) in ["/telegram connect", "/telegram edit", "/telegram status", "/telegram disconnect"].iter().enumerate() {
+            let mut state = AppState::default();
+            state.modal = ModalState::Settings(SettingsHubState { active_tab: SettingsTab::Telegram, selected_row: row, ..Default::default() });
+            press(&mut state, KeyCode::Enter);
+            assert!(state.pending_ipc.iter().any(|m| matches!(m, TuiMessage::Submit { input } if input == expected)));
+            assert!(!state.pending_ipc.iter().any(|m| matches!(m, TuiMessage::RequestSettings)));
+        }
+    }
+
+    #[test]
+    fn mode_subcommands_are_forwarded_without_changing_the_local_mode() {
+        for command in ["/mode get", "/mode set plan", "/mode history"] {
+            let mut state = AppState::default();
+            let original = state.session.mode;
+            type_text(&mut state, command);
+            press(&mut state, KeyCode::Enter);
+            assert_eq!(state.session.mode, original);
+            assert!(!state.pending_ipc.iter().any(|m| matches!(m, TuiMessage::ModeChange { .. })));
+            assert!(state.history.entries.iter().any(|entry| entry.content == command));
+        }
+    }
+
+    #[test]
+    fn mcp_settings_buttons_submit_all_supported_actions() {
+        let actions = [("add", "/mcp add"), ("load", "/mcp load"),
+            ("inspect", "/mcp inspect demo"), ("test", "/mcp test demo"),
+            ("toggle", "/mcp disable demo"), ("remove", "/mcp remove demo")];
+        for (action, command) in actions {
+            let mut state = AppState::default();
+            state.modal = ModalState::Settings(SettingsHubState {
+                active_tab: SettingsTab::Mcp,
+                mcp: vec![crate::state::SettingsMcp { id: "demo".to_string(), enabled: true, ..Default::default() }],
+                ..Default::default()
+            });
+            assert!(handle_hit_action(&mut state, HitAction::Custom(format!("settings:mcp:{action}"))));
+            assert!(state.pending_ipc.iter().any(|m| matches!(m, TuiMessage::Submit { input } if input == command)));
+            assert!(!state.pending_ipc.iter().any(|m| matches!(m, TuiMessage::RequestSettings)));
+        }
+    }
+
+    #[test]
+    fn github_settings_actions_submit_without_a_stale_refresh() {
+        let actions = ["/github connect", "/github status", "/github whoami", "/github set-repo", "/github disconnect"];
+        for (row, command) in actions.iter().enumerate() {
+            let mut state = AppState::default();
+            state.modal = ModalState::Settings(SettingsHubState {
+                active_tab: SettingsTab::Github,
+                selected_row: row,
+                ..Default::default()
+            });
+            handle_key_event(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert!(state.pending_ipc.iter().any(|m| matches!(m, TuiMessage::Submit { input } if input == command)));
+            assert!(!state.pending_ipc.iter().any(|m| matches!(m, TuiMessage::RequestSettings)));
+        }
+    }
 
     fn mk_state_with_entries(n: usize) -> AppState {
         let mut state = AppState::default();
@@ -1678,6 +1817,77 @@ mod tests {
 
     fn pending(state: &AppState) -> Vec<&TuiMessage> {
         state.pending_ipc.iter().collect()
+    }
+
+    #[test]
+    fn slash_session_navigation_renders_and_submits_in_every_layout() {
+        for number in 1..=6 {
+            let tab = TabId::from_num(number).unwrap();
+            let mut state = AppState::default();
+            state.active_tab = tab;
+            state.input.set("/se");
+            let mut canvas = crate::term::Canvas::new(130, 40);
+            crate::renderer::render(&mut canvas, &mut state);
+            let text = canvas.to_text_rows().join("\n");
+            assert!(text.contains("comandos"), "menu missing in {tab:?}");
+            assert!(text.contains("/session resume"));
+            press(&mut state, KeyCode::Down);
+            press(&mut state, KeyCode::Down);
+            press(&mut state, KeyCode::Down);
+            crate::renderer::render(&mut canvas, &mut state);
+            assert!(canvas.to_text_rows().join("\n").contains("▸ /session new"));
+            press(&mut state, KeyCode::Enter);
+            assert_eq!(state.history.entries.last().unwrap().content, "/session new");
+        }
+    }
+
+    #[test]
+    fn complete_backend_menu_scrolls_to_last_command() {
+        let mut state = AppState::default();
+        state.input.set("/");
+        state.command_menu = (0..60).map(|i| crate::ipc::IpcCommandMenuItem {
+            cmd: format!("/custom-{i}"), desc: "backend action".into(),
+        }).collect();
+        state.command_popup_selected = command_popup::filtered(&state).len() - 1;
+        let mut canvas = crate::term::Canvas::new(100, 30);
+        crate::renderer::render(&mut canvas, &mut state);
+        assert!(canvas.to_text_rows().join("\n").contains("▸ /custom-59"));
+        press(&mut state, KeyCode::Tab);
+        assert_eq!(state.input.value(), "/custom-59");
+        assert_eq!(state.command_popup_selected, 0);
+    }
+
+    #[test]
+    fn mouse_selects_model_and_confirm_button_submits_the_exact_choice() {
+        let mut p = provider_row("gemini", true, false);
+        p.is_active = true;
+        p.models = vec!["gemini-one".into(), "gemini-two".into()];
+        p.model = "gemini-one".into();
+        let mut state = hub_state(vec![p]);
+        if let ModalState::Settings(hub) = &mut state.modal { hub.active_tab = SettingsTab::Models; }
+        let mut canvas = crate::term::Canvas::new(130, 40);
+        crate::renderer::render(&mut canvas, &mut state);
+        let row = state.hit_map.regions().iter().find(|r| r.id == "settings:row:1").unwrap().rect;
+        handle_mouse_event(&mut state, MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.x, row: row.y, modifiers: KeyModifiers::NONE });
+        assert!(matches!(&state.modal, ModalState::Settings(hub) if hub.selected_row == 1));
+        crate::renderer::render(&mut canvas, &mut state);
+        let button = state.hit_map.regions().iter().find(|r| r.id == "settings:confirm-model").unwrap().rect;
+        handle_mouse_event(&mut state, MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: button.x, row: button.y, modifiers: KeyModifiers::NONE });
+        assert!(pending(&state).iter().any(|msg| matches!(msg, TuiMessage::Submit { input } if input == "/modelo set gemini gemini-two")));
+        assert!(matches!(&state.modal, ModalState::Settings(hub) if hub.loading));
+    }
+
+    #[test]
+    fn edit_key_of_configured_provider_opens_optional_secret_field() {
+        let mut state = hub_state(vec![provider_row("openai", true, false)]);
+        press(&mut state, KeyCode::Char('e'));
+        let ModalState::Config(modal) = &state.modal else { panic!("API key editor expected") };
+        assert_eq!(modal.fields[0].kind, ModalFieldKind::Secret);
+        assert!(!modal.fields[0].required);
+        assert_eq!(modal.action, Some(ModalAction::ProviderActivate { provider_id: "openai".into() }));
+        assert!(pending(&state).is_empty());
     }
 
     #[test]
@@ -2491,72 +2701,9 @@ fn cycle_select(state: &mut AppState, field_idx: usize, delta: isize) {
     }
 }
 
-fn help_text() -> String {
-    "\
-Comandos de hivetui
-═══════════════════
-
-Locales (TUI)
-─────────────
-/help        Mostrar esta pantalla
-/quit /exit  Salir de hivetui
-/logs        Mostrar/ocultar panel de logs
-/timeline    Mostrar/ocultar panel de workers
-/copy        Activar modo navegación/copia del historial
-
-Modo de ejecución
-─────────────────
-/mode                    Ciclar modo (plan → aprobación → auto)
-/mode plan|aprobación|auto  Fijar modo directamente
-/mode get                Mostrar modo actual
-/mode history            Historial de cambios de modo
-
-Provider y Modelo
-─────────────────
-/provider list|add|set|test|status
-/modelo list|set|add|delete|info
-
-Integraciones
-─────────────
-/github connect|status|whoami|disconnect|set-repo
-/telegram connect|edit|disconnect|status
-
-Herramientas del sistema
-────────────────────────
-/mcp list|add|enable|disable|test
-/skill list|enable|disable|info|add
-
-Tareas y Ejecución
-──────────────────
-/task list|status|cancel|rollback
-/run <tarea>   Ejecutar tarea en modo actual
-/plan <tarea>  Planificar sin ejecutar
-/stop          Detener tarea en curso
-
-Búsqueda y Aprendizaje
-──────────────────────
-/narrative show|search|export
-/ace status|playbook list|playbook reset|reflector run
-
-Notas y Sistema
-───────────────
-/note add|list|delete
-/logs list|follow
-/doctor   Diagnóstico del sistema
-/version  Versión de hivecode
-/env      Variables de entorno seguras
-
-Sesiones
-──────────────
-/session list     Sesiones de este proyecto, con su título
-/session resume   Reanudar una sesión (TUI) o por id
-/session new      Cerrar la actual; el siguiente mensaje abre otra
-/session status   Estado de la sesión activa
-/compact  Compactar contexto
-
-El badge [▶ RESUME] del panel del enjambre reanuda una tarea que quedó
-a medias: Enter para armarlo, Enter otra vez para continuarla.
-
+fn help_text(state: &AppState) -> String {
+    let commands = state.command_menu.iter().map(|item| format!("{:<24} {}", item.cmd, item.desc)).collect::<Vec<_>>().join("\n");
+    format!("{}\n\nCtrl+S: configuración. Shift+Tab: modo.\n\n{}", commands, "\
 Vistas (tabs)
 ═════════════
 1 / /layout enjambre   El enjambre en vivo: tool calls y esperas
@@ -2587,5 +2734,5 @@ Ctrl+Y       Copiar entrada seleccionada (OSC 52)
 Ctrl+C       Salir
 Esc          Cancelar / volver al input
 ↑↓           Navegar historial o popup de comandos
-".to_string()
+")
 }

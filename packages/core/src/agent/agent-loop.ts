@@ -1,3 +1,4 @@
+import { runWithTaskSignal } from "../runtime/task-execution"
 /**
  * Agent Loop — native implementation, no LangGraph.
  *
@@ -23,9 +24,10 @@ import { callLLM, resolveProviderConfig, type LLMMessage } from "./llm-client"
 import { addMessage } from "./conversation-store"
 import { saveTrace, recordLLMUsage } from "./tracer"
 import { maybeCompact, clearOldToolResults } from "./compaction"
+import { capToolResult, fitLoopMessages, messageBudget, messageTokens } from "./context-budget"
 import type { MCPClientManager } from "@johpaz/hivecode-mcp"
 import { compileContext } from "./context-compiler"
-import { jevWantsParallel } from "./jev-planner"
+import { jevWantsParallel, structuralParallelism } from "./jev-planner"
 import { emitJevDecision } from "./jev-decisions"
 import { formatToolResult } from "../utils/toon"
 import { getAverageTokenCost } from "../storage/usage"
@@ -57,7 +59,7 @@ async function executeTool(
   allTools: Array<{ name: string; execute?: (params: Record<string, unknown>, config?: any) => Promise<unknown> }>,
   toolName: string,
   args: unknown,
-  config: { user_id?: string; thread_id?: string; channel?: string; workspace?: string | null }
+  config: { user_id?: string; thread_id?: string; channel?: string; workspace?: string | null; signal?: AbortSignal; agent_id?: string; run_id?: string; approved_execution?: boolean }
 ): Promise<unknown> {
   const tool = allTools.find(t => t.name === toolName)
   if (!tool?.execute) {
@@ -65,7 +67,7 @@ async function executeTool(
   }
   try {
     const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args
-    return await tool.execute(parsedArgs as Record<string, unknown>, { configurable: config })
+    return await runWithTaskSignal(config.signal, () => tool.execute(parsedArgs as Record<string, unknown>, { configurable: config, signal: config.signal }))
   } catch (err) {
     return {
       error: true,
@@ -90,6 +92,8 @@ const REPEAT_WINDOW = 8
 const SINGLE_TOOL_DOMINANCE_NUDGE = 3
 /** Calls of one tool with no other tool in between before we treat it as spinning. */
 const SINGLE_TOOL_DOMINANCE_LIMIT = 5
+/** Orchestration tools: calling them in a row is the job, not a loop. */
+const DOMINANCE_EXEMPT_TOOLS = new Set(["task_delegate", "task_revise", "task_status"])
 /** Sampling temperature for the tool-calling loop. Matches the worker loop's 0.3. */
 const TOOL_CALLING_TEMPERATURE = 0.3
 /** Steps left at which the model is told to wrap up. */
@@ -178,11 +182,19 @@ function canonicalJSON(value: unknown): string {
  * signatures for the whole run, keeps a sliding window so alternating patterns stay
  * visible, and tracks how long one tool has monopolized the run.
  */
-class RepeatTracker {
+export class RepeatTracker {
   private readonly counts = new Map<string, number>()
   private window: string[] = []
   private lastToolName = ""
   private sameToolStreak = 0
+  /** Bumped once per model step, so a parallel batch counts as one step in the streak. */
+  private step = 0
+  private streakStep = -1
+
+  /** Call once per model step, before recording that step's tool results. */
+  nextStep(): void {
+    this.step++
+  }
 
   /** Records a call and reports whether it warrants a nudge or a hard stop. */
   record(toolName: string, signature: string): "ok" | "nudge" | "stop" {
@@ -192,14 +204,24 @@ class RepeatTracker {
     this.window.push(signature)
     if (this.window.length > REPEAT_WINDOW) this.window.shift()
 
+    // The streak is of consecutive *steps* using this tool. Five different reads
+    // issued together (the oracle approved running them in parallel) are one step,
+    // not five repetitions.
     if (toolName === this.lastToolName) {
-      this.sameToolStreak++
+      if (this.step !== this.streakStep) {
+        this.sameToolStreak++
+        this.streakStep = this.step
+      }
     } else {
       this.lastToolName = toolName
       this.sameToolStreak = 1
+      this.streakStep = this.step
     }
 
     if (count >= REPEAT_TOOL_CALL_LIMIT) return "stop"
+    // Delegating again and again is what a coordinator is for: only identical
+    // calls (the count rules above and below) say it is stuck.
+    if (DOMINANCE_EXEMPT_TOOLS.has(toolName)) return count >= REPEAT_TOOL_CALL_NUDGE ? "nudge" : "ok"
     if (this.sameToolStreak >= SINGLE_TOOL_DOMINANCE_LIMIT) return "stop"
     if (count >= REPEAT_TOOL_CALL_NUDGE) return "nudge"
     // The stall that actually burns budgets: one tool hammered with a slightly
@@ -575,6 +597,7 @@ export async function* runAgent(
     // The restored messages are already the pruned set from the run that
     // checkpointed them; pruning them again would compound the loss.
     skipJev: isResume,
+    contextWindow: providerCfg.contextWindow,
     // La ficha del especialista muestra la carga de ESTE turno, no el perfil
     // declarado: JEV poda y el descubrimiento amplía, así que la lista cambia
     // aunque el agente no haya descubierto nada nuevo.
@@ -590,7 +613,9 @@ export async function* runAgent(
     toolNames: ctx.tools.map(t => t.function.name),
   }))
 
-  const systemPrompt = opts.systemPromptOverride || ctx.systemPrompt
+  const systemPrompt = opts.systemPromptOverride
+    ? opts.systemPromptOverride + ctx.conversationSummarySection
+    : ctx.systemPrompt
 
   // Build initial messages array for the model
   let messages: LLMMessage[] = [
@@ -601,6 +626,22 @@ export async function* runAgent(
   // For isolated workers the user message is the task context, not from history
   if (opts.isolated) {
     messages.push({ role: "user", content: opts.userMessage })
+  }
+
+  // What actually goes to the model each call: old tool results cleared harder
+  // as the window fills, then whole oldest turns dropped if that is not enough.
+  // `messages` itself stays complete for persistence and checkpoints.
+  const prepareMessages = (all: LLMMessage[], tools: unknown): LLMMessage[] => {
+    const budget = messageBudget(providerCfg.contextWindow, tools)
+    let prepared = clearOldToolResults(all) as LLMMessage[]
+    if (prepared.reduce((sum, m) => sum + messageTokens(m), 0) > budget * 0.7) {
+      prepared = clearOldToolResults(all, 2) as LLMMessage[]
+    }
+    const fit = fitLoopMessages(prepared, budget)
+    if (fit.dropped > 0 || fit.messages !== prepared) {
+      log.info(`[agent-loop] Context budget: ${all.length} → ${fit.messages.length} msgs (dropped ${fit.dropped}), ~${fit.tokens}/${budget} tokens`)
+    }
+    return fit.messages
   }
 
   let iterations = 0
@@ -764,7 +805,7 @@ export async function* runAgent(
     const response = await callProfileLLM({
       ...providerCfg,
       ...profileCallOptions,
-      messages: clearOldToolResults(messages) as LLMMessage[],
+      messages: prepareMessages(messages, ctx.tools),
       tools: ctx.tools.length > 0 ? ctx.tools : undefined,
       signal: opts.signal,
       onToken: opts.onToken,
@@ -932,7 +973,13 @@ export async function* runAgent(
         log.warn(`[agent-loop] Jev parallel fallback: ${(err as Error).message}`)
         return null
       })
-      if (jevParallel) {
+      if (!jevParallel) {
+        // No oracle answered: the structural rule alone still parallelizes
+        // independent reads and distinct, non-colliding delegations.
+        runConcurrently = (await structuralParallelism(
+          approvedTools.map(tc => ({ function: { name: tc.function.name, arguments: tc.function.arguments } })),
+        ).catch(() => undefined))?.safe === true
+      } else {
         runConcurrently = jevParallel.parallel
         // When the batch cannot be parallelized, the agent is not idle — it is
         // waiting on the oracle. Telling the TUI *why* is the difference between
@@ -1010,15 +1057,23 @@ export async function* runAgent(
         taskId: opts.threadId,
       })
 
+      opts.signal?.throwIfAborted()
       const toolResultJS = await executeTool(ctx.allTools, toolName, tc.function.arguments, {
+        signal: opts.signal,
         user_id: opts.userId,
         thread_id: opts.threadId,
         channel: opts.channel,
         workspace: agent.workspace ?? null,
+        // Delegation reads these: a worker inherits the parent's run and approval.
+        agent_id: opts.agentId,
+        run_id: runId,
+        approved_execution: opts.approvedExecution === true,
       })
       
       const toolMs = Math.round(performance.now() - tTool)
-      const toolResultLLM = formatToolResult(toolResultJS, cleanModel)
+      // One result never gets to take the window: an fs_list of a whole repo used
+      // to go in whole and the next call died with a 400.
+      const toolResultLLM = capToolResult(formatToolResult(toolResultJS, cleanModel), providerCfg.contextWindow)
       const toolError = !!(
         toolResultJS
         && typeof toolResultJS === "object"
@@ -1096,6 +1151,7 @@ export async function* runAgent(
     results.push(...parallelResults)
 
     // Phase 3: Post-execution (Traces, yielding, state updates)
+    repeats.nextStep()
     for (const r of results) {
       log.info(`[agent-loop] Tool ${r.name} completed in ${r.ms}ms`)
       
@@ -1331,7 +1387,7 @@ export async function* runAgent(
       const synthesis = await callProfileLLM({
         ...providerCfg,
         ...profileCallOptions,
-        messages: clearOldToolResults(messages) as LLMMessage[],
+        messages: prepareMessages(messages, undefined),
         tools: undefined, // no tools — force text response
         signal: opts.signal,
         onToken: opts.onToken,
@@ -1463,6 +1519,7 @@ export async function runAgentIsolated(opts: {
   approvedExecution?: boolean
   onStep?: (step: StepEvent) => Promise<void>
   maxSteps?: number
+  signal?: AbortSignal
   onToken?: (token: string) => void
   onReasoningToken?: (token: string) => void
 }): Promise<string> {
@@ -1480,6 +1537,7 @@ export async function runAgentIsolated(opts: {
     approvedExecution: opts.approvedExecution,
     onStep: opts.onStep,
     maxSteps: opts.maxSteps,
+    signal: opts.signal,
     onToken: opts.onToken,
     onReasoningToken: opts.onReasoningToken,
   })) {

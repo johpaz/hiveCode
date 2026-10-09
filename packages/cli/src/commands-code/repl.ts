@@ -1,3 +1,4 @@
+import { readVerifiedProcess } from "@johpaz/hivecode-core/runtime/process-identity";
 import * as path from "node:path"
 import fs, { existsSync, mkdirSync, readFileSync } from "node:fs"
 import { getHiveDir } from "@johpaz/hivecode-core/config/loader"
@@ -65,16 +66,7 @@ function isLikelyMarkdown(content: string): boolean {
 // ─── Gateway lifecycle ────────────────────────────────────────────────────────
 
 function isGatewayRunning(): boolean {
-  try {
-    const pidFile = path.join(getHiveDir(), "gateway.pid")
-    if (!existsSync(pidFile)) return false
-    const pid = parseInt(readFileSync(pidFile, "utf-8").trim(), 10)
-    if (isNaN(pid)) return false
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
+  return readVerifiedProcess(path.join(getHiveDir(), "gateway.pid")) !== null
 }
 
 async function waitForGateway(port = 16120, timeout = 10000): Promise<boolean> {
@@ -179,6 +171,7 @@ async function ensureProvider(
     name: result.provider,
     baseUrl: result.baseUrl || null,
     enabled: true,
+    active: true,
   })
 
   await setDefaultProvider(result.provider)
@@ -777,6 +770,11 @@ export async function repl(): Promise<void> {
       tuiControl,
 
       async onSubmit(input) {
+        if (["/halt", "/stop"].includes(input.trim())) {
+          const taskId = manager.getActiveTaskId()
+          if (taskId) await manager.cancelTask(taskId)
+          return { output: taskId ? "Tarea detenida; archivos parciales conservados." : "No hay tarea activa." }
+        }
         if (input.trim().toLowerCase() === "/auto") {
           return { output: "Navegación automática de layouts reactivada." }
         }
@@ -843,6 +841,7 @@ export async function repl(): Promise<void> {
                 const cm = getChannelManager()
                 if (cm) await cm.addChannel(type, accountId, config)
               },
+              cancelTask: taskId => manager.cancelTask(taskId),
               executeTask: async (task: string, mode: string) => {
                 return executeTask(task, mode as ReplMode, {
                   suspend: tuiControl.suspend ?? undefined,
@@ -864,16 +863,31 @@ export async function repl(): Promise<void> {
           // escribe el doc de sesión y ya emitió `session_changed` (la TUI
           // limpia los paneles de la sesión anterior). Aquí solo hay que
           // reenviar el snapshot de la sesión a la que entramos.
+          //
+          // MESA expande solo el último turno. Si la confirmación ("Sesión
+          // reanudada…") llegara después del snapshot, se llevaría el turno
+          // expandido y la conversación repuesta quedaría en líneas de una fila.
+          // Va primero, como línea de sistema, y el snapshot termina en el último
+          // turno real.
+          let output = result.output
           if (result.switchSession) {
+            const announce = result.switchSession.sessionId !== null && output ? output : null
+            const refresh = tuiControl.refreshSession
             await applySessionSwitch(result.switchSession, {
               manager,
-              refreshSession: tuiControl.refreshSession,
+              refreshSession: announce && refresh
+                ? async (id) => {
+                    _tuiIpcSend?.({ type: "history_append", role: "system", content: announce })
+                    await refresh(id)
+                  }
+                : refresh,
               defaultProjectPath: init.projectPath,
             })
+            if (announce && refresh) output = ""
           }
 
           return {
-            output:      result.output,
+            output,
             newMode:     result.newMode,
             newProvider: result.newProvider,
             newModel:    result.newModel,

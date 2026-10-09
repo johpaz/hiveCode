@@ -18,7 +18,7 @@ import { MINIMAL_TOOLS } from "./minimal-loadout"
 import { searchCapabilities } from "./capability-search"
 import { mcpToolFullName } from "./tool-selector"
 import { agentAlias, agentFunction, agentTierLevel } from "./agent-identity"
-import { askJev, getJevKey, type JevAnswer, type JevQuestion } from "./jev-decisions"
+import { askJev, hasOracle, type JevAnswer, type JevQuestion } from "./jev-decisions"
 import { col } from "../storage/hive"
 import type { AgentDoc, McpServerDoc, McpToolDoc } from "../storage/collections"
 
@@ -149,7 +149,7 @@ export async function planJevContext(input: {
   /** From describeSwarmCapabilities; absent means "unknown", not "none". */
   swarm?: { mcpServers: JevMcpServer[]; specialists: JevSpecialist[] }
 }): Promise<JevContextPlan | null> {
-  if (!await getJevKey().catch(() => null)) return null
+  if (!await hasOracle().catch(() => false)) return null
   const { objective, messages, tools, allTools, skills, isWorker } = input
   const mandatoryMessages = new Set<number>()
 
@@ -307,45 +307,60 @@ export async function planJevContext(input: {
 /** Tools whose results do not depend on each other; safe to run concurrently. */
 const READ_ONLY_TOOLS = /^(fs_read|fs_list|fs_glob|fs_exists|web_search|web_fetch|memory_read|memory_search|artifact_read|artifact_inspect|task_status|agent_find)$/
 
+type ToolCallLike = { function: { name: string; arguments: unknown } }
+
+/** Workers that may write the workspace: two of them at once would collide. */
+function mayWrite(agent: AgentDoc | undefined): boolean {
+  return agent?.permission_profile === "write_workspace" || agent?.permission_profile === undefined
+}
+
+/**
+ * The part of the parallelism decision that needs no oracle. A batch of
+ * delegations is safe when the workers are distinct and at most one of them can
+ * write the workspace — or, if several can, when each has its own workspace.
+ * Returns undefined when the batch is neither all reads nor all delegations
+ * (mixed or mutating batches stay sequential).
+ */
+export async function structuralParallelism(calls: ToolCallLike[]): Promise<{ kind: "reads" | "delegations"; safe: boolean } | undefined> {
+  if (calls.length < 2) return undefined
+  const names = calls.map(c => c.function.name)
+  if (names.every(n => READ_ONLY_TOOLS.test(n))) return { kind: "reads", safe: true }
+  if (!names.every(n => n === "task_delegate")) return undefined
+
+  const ids = calls.map(call => {
+    try {
+      const args = typeof call.function.arguments === "string"
+        ? JSON.parse(call.function.arguments)
+        : call.function.arguments
+      return String(args?.worker_id ?? "")
+    } catch { return "" }
+  })
+  if (ids.some(id => !id) || new Set(ids).size !== ids.length) return { kind: "delegations", safe: false }
+  const agentsCol = await col<AgentDoc>("agents")
+  const agents = (await Promise.all(ids.map(id => agentsCol.get(id)))).map(row => row?.doc)
+  if (agents.some(agent => !agent)) return { kind: "delegations", safe: false }
+  const writers = agents.filter(mayWrite)
+  if (writers.length <= 1) return { kind: "delegations", safe: true }
+  const workspaces = writers.map(agent => agent!.workspace)
+  return { kind: "delegations", safe: workspaces.every(Boolean) && new Set(workspaces).size === workspaces.length }
+}
+
 /**
  * Only independent reads, or separate delegated tasks, may execute concurrently.
- * null leaves the batch to the runtime default; `decision` is present only when
- * Jev was actually asked.
+ * The structural rule decides without an oracle; a Jev/Kev answer is asked only
+ * for batches the rule already allows. null means no oracle answered — the
+ * caller applies `structuralParallelism` itself.
  */
 export async function jevWantsParallel(
-  calls: Array<{ function: { name: string; arguments: unknown } }>,
+  calls: ToolCallLike[],
 ): Promise<{ parallel: boolean; decision?: JevDecisionMetrics } | null> {
   if (calls.length < 2) return null
-  if (!await getJevKey().catch(() => null)) return null
-  const names = calls.map(c => c.function.name)
-  const readOnly = names.every(n => READ_ONLY_TOOLS.test(n))
-  const delegated = names.every(n => n === "task_delegate")
-
+  if (!await hasOracle().catch(() => false)) return null
+  const structure = await structuralParallelism(calls)
   // Anything that writes, or mixes reads with writes, stays sequential without
   // asking: the answer is structurally known, so spending a round-trip on it
   // would be paying latency to learn nothing.
-  if (!readOnly && !delegated) return { parallel: false }
-
-  if (delegated) {
-    // Two delegations may run together only if they are genuinely distinct:
-    // different workers, and different workspaces so they do not collide on
-    // files while editing.
-    const ids = calls.map(call => {
-      try {
-        const args = typeof call.function.arguments === "string"
-          ? JSON.parse(call.function.arguments)
-          : call.function.arguments
-        return String(args?.worker_id ?? "")
-      } catch { return "" }
-    })
-    if (ids.some(id => !id) || new Set(ids).size !== ids.length) return { parallel: false }
-    const agentsCol = await col<AgentDoc>("agents")
-    const agents = await Promise.all(ids.map(id => agentsCol.get(id)))
-    const workspaces = agents.map(row => row?.doc.workspace)
-    if (workspaces.some(path => !path) || new Set(workspaces).size !== workspaces.length) {
-      return { parallel: false }
-    }
-  }
+  if (!structure?.safe) return { parallel: false }
 
   const result = await askJev({
     calls: calls.map(c => ({ tool: c.function.name, arguments: excerpt(c.function.arguments, 700) })),

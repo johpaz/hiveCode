@@ -1,3 +1,5 @@
+import { listCatalogProviders } from "../../services/provider-catalog-read"
+import { syncProviderCatalog } from "../../services/provider-catalog"
 import { maskApiKey, storeProviderApiKey, getProviderApiKey, hasProviderApiKey } from "../../storage/crypto"
 import { col } from "../../storage/hive"
 import type { ModelDoc, ProviderDoc } from "../../storage/collections"
@@ -10,12 +12,9 @@ import {
 import { logger } from "../../utils/logger"
 
 const log = logger.child("gateway")
-const SUPPORTED_LLM_PROVIDERS = new Set(["hiveagents", "openai", "anthropic", "gemini", "mistral", "deepseek", "kimi", "openrouter", "groq", "qwen", "nvidia", "codex", "opencode-go", "minimax", "hivecode-free"])
 
 export async function handleGetProviders(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
-  const rawProviders = (await (await col<ProviderDoc>("providers")).scan())
-    .map((entry) => entry.doc)
-    .filter((provider) => SUPPORTED_LLM_PROVIDERS.has(provider.id))
+  const rawProviders = await listCatalogProviders()
   const modelsRows = (await (await col<ModelDoc>("models")).scan()).map((entry) => entry.doc)
 
   const modelsByProvider: Record<string, ModelDoc[]> = {}
@@ -160,59 +159,12 @@ export async function handleSyncProviderModels(
   if (!providerRow) {
     return addCorsHeaders(new Response("Provider not found", { status: 404 }), req)
   }
-  if (!providerRow.base_url) {
-    return addCorsHeaders(Response.json({ error: "Provider base_url is required to sync models" }, { status: 400 }), req)
-  }
-
-  if (providerId === "hiveagents") {
-    const models = (await (await col<ModelDoc>("models")).findBy("provider_id", providerId))
-      .map((entry) => entry.doc)
-      .filter((model) => model.id === HIVEAGENTS_MODEL_ID)
-    return addCorsHeaders(Response.json({ success: true, synced: models.length, models }), req)
-  }
-
-  const baseUrl = providerRow.base_url.replace(/\/(v1|api)\/?$/, "")
-
   try {
-    const res = await fetch(`${baseUrl}/v1/models`, { signal: AbortSignal.timeout(10000) })
-    if (!res.ok) {
-      return addCorsHeaders(Response.json({ error: `${providerId} responded ${res.status}` }, { status: 502 }), req)
-    }
-    const data = await res.json() as { data: Array<{ id: string }> }
-    const modelNames = providerId === "hiveagents"
-      ? (data.data || []).map(m => m.id).filter(id => id === HIVEAGENTS_MODEL_ID)
-      : (data.data || []).map(m => m.id)
-
-    if (modelNames.length === 0) {
-      return addCorsHeaders(Response.json({ error: "No models found from provider" }, { status: 400 }), req)
-    }
-
-    const modelsCol = await col<ModelDoc>("models")
-    for (const name of modelNames) {
-      const existing = await modelsCol.get(name)
-      await modelsCol.put(name, {
-        id: name,
-        provider_id: providerId,
-        name,
-        model_type: "llm",
-        context_window: existing?.doc.context_window ?? 32768,
-        capabilities: existing?.doc.capabilities ?? null,
-        enabled: true,
-        active: true,
-      }, { expectedVersion: existing?.version ?? 0 })
-    }
-
-    for (const entry of await modelsCol.findBy("provider_id", providerId)) {
-      if (!modelNames.includes(entry.doc.id)) {
-        await modelsCol.put(entry.id, { ...entry.doc, active: false, enabled: false }, { expectedVersion: entry.version })
-      }
-    }
-
-    const models = (await modelsCol.findBy("provider_id", providerId)).map((entry) => entry.doc)
-    return addCorsHeaders(Response.json({ success: true, synced: modelNames.length, models }), req)
-  } catch (err: unknown) {
-    const errorMsg = (err as Error).message
-    return addCorsHeaders(Response.json({ error: `Could not connect to provider: ${errorMsg}` }, { status: 502 }), req)
+    const result = await syncProviderCatalog(providerRow)
+    const models = (await (await col<ModelDoc>("models")).findBy("provider_id", providerId)).map(entry => entry.doc)
+    return addCorsHeaders(Response.json({ success: true, ...result, models }), req)
+  } catch (error) {
+    return addCorsHeaders(Response.json({ error: (error as Error).message }, { status: 502 }), req)
   }
 }
 
@@ -251,6 +203,7 @@ async function updateProvider(id: string, patch: Partial<ProviderDoc>): Promise<
 async function cascadeProviderModels(providerId: string, active: boolean): Promise<void> {
   const models = await col<ModelDoc>("models")
   for (const entry of await models.findBy("provider_id", providerId)) {
+    if (active && entry.doc.deprecated_at != null) continue
     await models.put(entry.id, { ...entry.doc, active, enabled: active }, { expectedVersion: entry.version })
   }
 }

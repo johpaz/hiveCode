@@ -14,6 +14,13 @@ import * as path from "node:path";
 
 const log = logger.child("fs-list");
 
+/** Never worth listing: dependencies, VCS data and build output. */
+const IGNORED_DIRS = new Set([
+  "node_modules", ".git", "target", "dist", "build", ".next", ".turbo", "coverage",
+  "__pycache__", ".venv", "venv", ".cache",
+]);
+const DEFAULT_MAX_ENTRIES = 200;
+
 export const fsListTool: Tool = {
   name: "fs_list",
   description: "List files and directories in workspace. Spanish: listar archivos, ver carpeta, explorar directorio",
@@ -32,6 +39,14 @@ export const fsListTool: Tool = {
         type: "number",
         description: "Maximum depth for recursive listing (default: 3)",
       },
+      detail: {
+        type: "boolean",
+        description: "Include size and modified date for every entry (default: false — names and types only)",
+      },
+      maxEntries: {
+        type: "number",
+        description: "Most entries to return, counted across the whole tree (default: 200)",
+      },
     },
     required: [],
   },
@@ -47,6 +62,10 @@ export const fsListTool: Tool = {
     }
     const recursive = (params.recursive as boolean) ?? false;
     const maxDepth = (params.maxDepth as number) ?? 3;
+    const detail = (params.detail as boolean) ?? false;
+    const maxEntries = Math.max(1, (params.maxEntries as number) ?? DEFAULT_MAX_ENTRIES);
+    let emitted = 0;
+    let skipped = 0;
 
     log.debug(`Listing directory: ${dirPath}`);
 
@@ -78,8 +97,20 @@ export const fsListTool: Tool = {
       function listDir(dir: string, depth: number): FileEntry[] {
         if (depth > maxDepth) return [];
 
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        return entries.map((entry) => {
+        const out: FileEntry[] = [];
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          // Dependency and build directories are never what the agent is looking
+          // for, and a recursive listing of one is what filled the context window.
+          if (entry.isDirectory() && IGNORED_DIRS.has(entry.name)) {
+            skipped++;
+            continue;
+          }
+          if (emitted >= maxEntries) {
+            skipped++;
+            continue;
+          }
+          emitted++;
+
           const fullPath = path.join(dir, entry.name);
           const result: FileEntry = {
             name: entry.name,
@@ -87,16 +118,7 @@ export const fsListTool: Tool = {
             path: fullPath,
           };
 
-          if (entry.isDirectory() && recursive && depth < maxDepth) {
-            try {
-              const subStats = fs.statSync(fullPath);
-              result.size = subStats.size;
-              result.modified = subStats.mtime.toISOString();
-              result.children = listDir(fullPath, depth + 1);
-            } catch {
-              // Ignore permission errors
-            }
-          } else {
+          if (detail) {
             try {
               const subStats = fs.statSync(fullPath);
               result.size = subStats.size;
@@ -106,8 +128,17 @@ export const fsListTool: Tool = {
             }
           }
 
-          return result;
-        });
+          if (entry.isDirectory() && recursive && depth < maxDepth) {
+            try {
+              result.children = listDir(fullPath, depth + 1);
+            } catch {
+              // Ignore permission errors
+            }
+          }
+
+          out.push(result);
+        }
+        return out;
       }
 
       const entries = listDir(dirPath, 0);
@@ -116,7 +147,12 @@ export const fsListTool: Tool = {
         ok: true,
         path: dirPath,
         entries,
-        count: entries.length,
+        count: emitted,
+        ...(skipped > 0 && {
+          truncated: true,
+          omitted: skipped,
+          note: `Se omitieron ${skipped} entradas (carpetas de dependencias/build o tope de ${maxEntries}). Lista una subcarpeta concreta o usa search_knowledge(type="code").`,
+        }),
       };
     } catch (error) {
       log.error(`Error listing directory: ${(error as Error).message}`);

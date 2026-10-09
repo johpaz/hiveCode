@@ -89,6 +89,14 @@ impl Canvas {
             let w = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
             let cx = x.saturating_add(col);
             if self.glyph_fits(cx, y, w) {
+                // Un fondo sin definir deja pasar el del panel: si no, el texto
+                // se pinta como un bloque resaltado sobre el fondo.
+                let mut style = style;
+                if style.bg == crossterm::style::Color::Reset {
+                    if let Some(under) = self.cell_at(cx, y) {
+                        style.bg = under.style.bg;
+                    }
+                }
                 self.put(cx, y, Cell::new(ch, style));
                 // Mark right-half of wide chars as placeholder so flush never overwrites them
                 if w == 2 {

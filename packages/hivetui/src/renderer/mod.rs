@@ -114,8 +114,7 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
     }
 
     // Popup de comandos: flota justo encima del input
-    if state.active_tab == TabId::Mesa
-        && state.input.value().starts_with('/')
+    if state.input.value().starts_with('/')
         && !matches!(state.modal, ModalState::Config(_) | ModalState::Info(_) | ModalState::PlanApproval(_) | ModalState::ReviewConfirm(_) | ModalState::Settings(_)) {
         let history_area = content_area_for_popup(area, state);
         command_popup::render(canvas, history_area, state);

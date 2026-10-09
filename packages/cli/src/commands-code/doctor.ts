@@ -1,3 +1,5 @@
+import { runtimeDiagnostics, type DiagnosticCheck } from "@johpaz/hivecode-core/services/diagnostics";
+import { SUPPORTED_LLM_PROVIDERS, providerCredentialName } from "@johpaz/hivecode-core/services/provider-capabilities"
 import {
   hiveIntro, hiveOutro, hivePhaseComplete,
   hiveNote, hiveSpinner,
@@ -7,14 +9,9 @@ import { getHiveDbPath, findLegacyHiveDb } from "@johpaz/hivecode-core/storage/h
 import { preflightMigration, migrateLegacyDb } from "@johpaz/hivecode-core/storage/db-migrate"
 import type { AgentDoc, LearningProposalDoc, ProviderDoc, SkillDoc } from "@johpaz/hivecode-core/storage/collections"
 
-const SUPPORTED_LLM_PROVIDERS = new Set(["hiveagents", "openai", "anthropic", "gemini", "mistral", "deepseek", "kimi", "openrouter", "groq", "qwen", "nvidia", "codex", "opencode-go", "minimax", "hivecode-free"])
 
-interface DoctorCheck {
-  name: string
-  status: "pass" | "warn" | "fail"
-  message: string
-  detail?: string
-}
+
+type DoctorCheck = DiagnosticCheck
 
 /**
  * Move a cwd-relative database to the HiveDir location. Prints the preflight
@@ -73,39 +70,7 @@ export async function doctor(flags: string[] = []): Promise<void> {
 
   hiveIntro("hivecode · Diagnóstico")
 
-  const checks: DoctorCheck[] = []
-
-  // Check 1: Bun version
-  const bunVersion = Bun.version
-  const bunOk = bunVersion >= "1.3.10"
-  checks.push({
-    name: "Bun runtime",
-    status: bunOk ? "pass" : "warn",
-    message: bunOk ? `v${bunVersion}` : `v${bunVersion} (recomendado >= 1.3.10)`,
-  })
-
-  // Check 2: HiveDB availability
-  const dbCheckSpinner = hiveSpinner("default")
-  dbCheckSpinner.start("Verificando HiveDB...")
-  try {
-    await col("meta")
-    const path = getHiveDbPath()
-    dbCheckSpinner.stop(`HiveDB activo · ${path}`)
-    checks.push({
-      name: "HiveDB",
-      status: "pass",
-      message: "Disponible",
-      detail: path,
-    })
-  } catch (err) {
-    dbCheckSpinner.stop("HiveDB no accesible", "error")
-    checks.push({
-      name: "HiveDB",
-      status: "fail",
-      message: "No se pudo conectar a la base de datos",
-      detail: (err as Error).message,
-    })
-  }
+  const checks: DoctorCheck[] = await runtimeDiagnostics()
 
   // A legacy database in the cwd means the user has state the current process
   // cannot see. Surfacing it is the whole point: silently starting empty would
@@ -121,30 +86,6 @@ export async function doctor(flags: string[] = []): Promise<void> {
         ? `${pre.from} → ${pre.to} · ${(pre.bytes / 1_000_000).toFixed(1)} MB en ${pre.files.length} archivos. `
           + `Migrá con: hivecode doctor --migrate-db`
         : legacy,
-    })
-  }
-
-  // Check 3: Providers
-  const providerSpinner = hiveSpinner("default")
-  providerSpinner.start("Verificando providers...")
-  try {
-    const providers = (await (await col<ProviderDoc>("providers")).scan())
-      .map((entry) => entry.doc)
-      .filter((provider) => provider.enabled && SUPPORTED_LLM_PROVIDERS.has(provider.id))
-    const providerNames = providers.map(p => p.name || p.id).join(", ")
-
-    providerSpinner.stop(`${providers.length} provider(s) activo(s)`)
-    checks.push({
-      name: "Providers LLM",
-      status: providers.length > 0 ? "pass" : "warn",
-      message: providers.length > 0 ? providerNames : "Ningún provider configurado",
-    })
-  } catch (err) {
-    providerSpinner.stop("Error verificando providers", "error")
-    checks.push({
-      name: "Providers LLM",
-      status: "fail",
-      message: "No se pudieron verificar providers",
     })
   }
 

@@ -16,6 +16,7 @@ let answerPayload: Record<string, any> | null = null
 let askCalls: Array<{ state: unknown; questions: Record<string, any> }> = []
 
 mock.module("@johpaz/hivecode-core/agent/jev-decisions", () => ({
+  hasOracle: async () => jevEnabled,
   getJevKey: async () => (jevEnabled ? "sk-test" : null),
   JEV_MODEL: "typesafe/jev-1.13",
   askJev: async (state: unknown, questions: Record<string, any>) => {

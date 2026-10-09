@@ -40,10 +40,25 @@ function workspaceFrom(config?: any): string {
   return workspace
 }
 
+/**
+ * Models hand back the feature directory in the shape they saw it: the relative
+ * `specs/<name>`, the absolute path, or just `<name>`. The first two are the same
+ * place and the third is unambiguous, so all are accepted — and all must still
+ * resolve inside the workspace's `specs/`.
+ */
+export function normalizeFeatureDir(featureDir: string, workspace: string): string {
+  let normalized = featureDir.trim().replace(/\\/g, "/")
+  const root = workspace.replace(/\\/g, "/").replace(/\/+$/, "")
+  if (normalized.startsWith(`${root}/`)) normalized = normalized.slice(root.length + 1)
+  normalized = normalized.replace(/^\.?\/+/, "").replace(/\/+$/, "")
+  if (/^[\w.-]+$/.test(normalized) && !normalized.startsWith(".") ) normalized = `specs/${normalized}`
+  return normalized
+}
+
 function resolveFeatureDir(featureDir: string, workspace: string): string {
-  const normalized = featureDir.replace(/\\/g, "/").replace(/^\/+/, "")
+  const normalized = normalizeFeatureDir(featureDir, workspace)
   if (!normalized.startsWith("specs/")) {
-    throw new Error("feature_dir must be inside specs/")
+    throw new Error(`feature_dir must be inside specs/ (for example "specs/001-name"); got "${featureDir}"`)
   }
   return resolveInWorkspace(normalized, workspace)
 }

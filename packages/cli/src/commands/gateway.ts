@@ -1,3 +1,4 @@
+import { writeProcessIdentity, readVerifiedProcess, stopVerifiedProcess, signalVerifiedProcess } from "@johpaz/hivecode-core/runtime/process-identity";
 /**
  * Gateway Command - Refactored with Installation Adapters
  * 
@@ -198,18 +199,7 @@ function ensureLogDir(): void {
  * Check if gateway is running using the adapter
  */
 async function isRunning(): Promise<boolean> {
-  try {
-    // Try adapter first
-    const adapter = await getAdapter();
-    const adapterRunning = await adapter.isRunning();
-    if (adapterRunning) {
-      return true;
-    }
-  } catch {
-    // Adapter check failed, fall through to PID check
-  }
-
-
+  return readVerifiedProcess(await getPidFile()) !== null;
 }
 
 /**
@@ -281,7 +271,7 @@ export async function start(flags: string[]): Promise<void> {
       env: { ...process.env, HIVE_GATEWAY_CHILD: "1" },
     });
     child.unref();
-    await Bun.write(await getPidFile(), child.pid?.toString() || "");
+    writeProcessIdentity(await getPidFile(), child.pid);
     console.log(`✅ Hive Gateway iniciado en modo daemon (PID: ${child.pid})`);
     console.log(`   Logs: ${logFile}`);
     return;
@@ -457,22 +447,8 @@ export async function stop(): Promise<void> {
     // Adapter stop failed, fall through to manual stop
   }
 
-  // Fallback to manual PID-based stop
-  if (!(await isRunning())) {
-    console.log("⚠️  Hive Gateway no está corriendo");
-    return;
-  }
+  await stopVerifiedProcess(await getPidFile());
 
-  const pidFile = await getPidFile();
-  const pid = parseInt((await Bun.file(pidFile).text()).trim(), 10);
-
-  try {
-    process.kill(pid, "SIGTERM");
-    await Bun.file(pidFile).delete();
-    console.log("✅ Hive Gateway detenido");
-  } catch (e) {
-    console.error("❌ Error deteniendo el Gateway:", e);
-  }
 }
 
 /**
@@ -523,10 +499,10 @@ export async function reload(): Promise<void> {
   }
 
   const pidFile = await getPidFile();
-  const pid = parseInt((await Bun.file(pidFile).text()).trim(), 10);
+  const pid = readVerifiedProcess(pidFile)?.pid;
 
   try {
-    process.kill(pid, "SIGHUP");
+    signalVerifiedProcess(pidFile, "SIGHUP");
     console.log("✅ Configuración recargada");
   } catch (e) {
     console.error("❌ Error recargando configuración:", e);

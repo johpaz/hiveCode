@@ -1,3 +1,4 @@
+import { resolvePath } from "./sandbox-path";
 /**
  * Seatbelt Backend — macOS sandbox using sandbox-exec.
  *
@@ -228,12 +229,3 @@ function writeProfileToTempFile(profile: string): string {
 /**
  * Resolve a path relative to workspace or expand ~.
  */
-function resolvePath(p: string, workspace: string): string {
-  if (p.startsWith("~")) {
-    return path.join(os.homedir(), p.slice(1))
-  }
-  if (!path.isAbsolute(p)) {
-    return path.resolve(workspace, p)
-  }
-  return path.normalize(p)
-}

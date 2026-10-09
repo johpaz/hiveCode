@@ -48,6 +48,7 @@ export async function onboard(version = VERSION): Promise<void> {
     name: result.provider,
     baseUrl: result.baseUrl || null,
     enabled: true,
+    active: true,
   })
 
   await setDefaultProvider(result.provider)

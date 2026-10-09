@@ -1,3 +1,4 @@
+import { runWithTaskSignal } from "@johpaz/hivecode-core/runtime/task-execution"
 /**
  * Tool Worker — dedicated worker for executing tools in parallel.
  *
@@ -10,6 +11,7 @@ import { loadConfig } from "@johpaz/hivecode-core/config"
 import type { Tool } from "@johpaz/hivecode-core/tools"
 
 let tools: Tool[] | null = null
+const running = new Map<string, AbortController>()
 
 async function getTools() {
   if (!tools) {
@@ -27,7 +29,10 @@ declare var self: {
 self.onmessage = async (event) => {
   const { type, toolName, toolArgs, toolCallId, config } = event.data
 
+  if (type === "CANCEL_TOOL") { running.get(toolCallId)?.abort(new Error("Task cancelled")); return }
   if (type !== "TOOL_TASK") return
+  const controller = new AbortController()
+  running.set(toolCallId, controller)
 
   try {
     const allTools = await getTools()
@@ -42,7 +47,7 @@ self.onmessage = async (event) => {
       return
     }
 
-    const result = await tool.execute(toolArgs, config)
+    const result = await runWithTaskSignal(controller.signal, () => tool.execute(toolArgs, { ...config, signal: controller.signal }))
 
     self.postMessage({
       type: "TOOL_RESULT",
@@ -55,5 +60,5 @@ self.onmessage = async (event) => {
       toolCallId,
       error: (err as Error).message,
     })
-  }
+  } finally { running.delete(toolCallId) }
 }

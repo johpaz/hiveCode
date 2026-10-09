@@ -106,7 +106,7 @@ async function openSettingsHub(
   try {
     return await waitForFrame(
       session.iter,
-      f => providers.every(p => frameText(f).includes(p.id)),
+      f => providers.every(p => frameText(f).includes(p.name)),
       5000,
       "el hub con sus filas",
     )
@@ -132,18 +132,18 @@ function watchRequestSettings(
 }
 
 describe("E2E: elegir provider + API key desde el hub", () => {
-  test("la columna Key distingue quién tiene clave y quién no", async () => {
+  test("Providers muestra nombres y configuración de API sin listar modelos", async () => {
     const session = await startSession("approval", SETTINGS)
     try {
       const hub = await openSettingsHub(session, [conClave, sinClave, conBrowser])
       const text = frameText(hub)
 
-      // Los tres estados de credenciales tienen glifo propio. Con el
-      // `has_key: true` fijo de antes, todas las filas salían con ✓.
-      expect(text).toContain("✓")
-      expect(text).toContain("?")
-      expect(text).toContain("~")
-      expect(text).toContain("● activo")
+      expect(text).toContain("Anthropic  [Activo]")
+      expect(text).toContain("OpenAI")
+      expect(text).toContain("Configurar API key")
+      expect(text).toContain("E editar API key")
+      expect(text).not.toContain(conClave.model)
+      expect(text).not.toContain(sinClave.model)
     } finally {
       session.dispose()
     }
@@ -241,7 +241,7 @@ describe("E2E: elegir provider + API key desde el hub", () => {
       expect(after.some(m => m.type === "provider_activate")).toBe(false)
       expect(after.some(m => m.type === "modal_cancel")).toBe(false)
       // Se vuelve al hub, no al chat.
-      expect(frameText(back)).toContain("openai")
+      expect(frameText(back)).toContain("OpenAI")
     } finally {
       session.dispose()
     }

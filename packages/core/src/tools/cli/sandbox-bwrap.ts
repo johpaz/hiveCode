@@ -1,3 +1,5 @@
+import { resolvePath } from "./sandbox-path";
+import { spawnTaskProcess } from "../../runtime/task-execution";
 /**
  * Bubblewrap Backend — Linux sandbox using bwrap namespaces.
  *
@@ -50,7 +52,7 @@ export function isBwrapAvailable(): boolean {
 /**
  * Build a bubblewrap command array for the given shell command.
  *
- * The resulting array can be passed directly to Bun.spawn().
+ * The resulting array can be passed directly to spawnTaskProcess().
  */
 export function buildBwrapCommand(
   cmd: string,
@@ -145,15 +147,7 @@ export function buildBwrapCommand(
 /**
  * Resolve a path relative to workspace or expand ~.
  */
-function resolvePath(p: string, workspace: string): string {
-  if (p.startsWith("~")) {
-    return path.join(os.homedir(), p.slice(1))
-  }
-  if (!path.isAbsolute(p)) {
-    return path.resolve(workspace, p)
-  }
-  return path.normalize(p)
-}
+
 
 /**
  * Check if a filesystem path exists.

@@ -1,5 +1,5 @@
 import { col } from "@johpaz/hivecode-core/storage/hive"
-import type { AgentMemoryDoc, CodeConfigDoc, CodePlaybookDoc, CodeSessionDoc, CodeTaskPhaseDoc, HarnessTaskDoc, ModelDoc, WorkerActivityDoc } from "@johpaz/hivecode-core/storage/collections"
+import type { AgentMemoryDoc, CodeTaskDoc, CodeConfigDoc, CodePlaybookDoc, CodeSessionDoc, CodeTaskPhaseDoc, HarnessTaskDoc, ModelDoc, WorkerActivityDoc } from "@johpaz/hivecode-core/storage/collections"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { computeBackoffDelay } from "@johpaz/hivecode-core/utils/retry"
 import { createAllTools } from "@johpaz/hivecode-core/tools"
@@ -111,6 +111,77 @@ export class CoordinatorManager extends CoordinatorBase {
   private workerCrashCounts = new Map<PhaseName, number>()
   private scribe = new Scribe()
   private activeTaskId: string | null = null
+  private cancelledTasks = new Set<string>()
+  private cancellations = new Map<string, Promise<void>>()
+  private workerTasks = new Map<PhaseName, string>()
+  private toolTasks = new Map<string, { taskId: string; worker: Bun.Worker }>()
+  private taskAborts = new Map<string, AbortController>()
+  private taskExecutions = new Map<string, Promise<unknown>>()
+  private trackExecution<T>(taskId: string, action: Promise<T>): Promise<T> {
+    this.taskExecutions.set(taskId, action)
+    return action.finally(() => this.taskExecutions.delete(taskId))
+  }
+
+  cancelTask(taskId: string): Promise<void> {
+    const existing = this.cancellations.get(taskId)
+    if (existing) return existing
+    const action = this.cancelOwnedTask(taskId).catch(error => { this.cancellations.delete(taskId); throw error })
+    this.cancellations.set(taskId, action)
+    return action
+  }
+
+  private async cancelOwnedTask(taskId: string): Promise<void> {
+    const task = await (await col<CodeTaskDoc>("codeTasks")).get(taskId)
+    if (!task) throw new Error(`Tarea no encontrada: ${taskId}`)
+    if (["completed", "failed", "cancelled", "rolled_back"].includes(task.doc.status)) return
+    this.cancelledTasks.add(taskId)
+    this.taskAborts.get(taskId)?.abort(new Error("Task cancelled"))
+    if (this.activeTaskId === taskId) setCancelled(true)
+    for (const [name, owner] of this.workerTasks) if (owner === taskId) {
+      this.workers.get(name)?.postMessage(JSON.stringify({ type: "CANCEL_TASK", taskId }))
+    }
+    for (const [toolCallId, owner] of this.toolTasks) if (owner.taskId === taskId) {
+      owner.worker.postMessage({ type: "CANCEL_TOOL", toolCallId })
+    }
+    const deadline = Date.now() + 5000
+    while ([...this.workerTasks.values()].includes(taskId) || [...this.toolTasks.values()].some(owner => owner.taskId === taskId)) {
+      if (Date.now() >= deadline) break
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    for (const [name, owner] of this.workerTasks) if (owner === taskId) {
+      const worker = this.workers.get(name)
+      if (worker) { worker.onerror = null; worker.onmessage = null; worker.terminate() }
+      this.workers.delete(name)
+      this.workerTasks.delete(name)
+      setWorkerBusy(COORDINATOR_NAMES.indexOf(name), false)
+    }
+    for (const [toolCallId, owner] of this.toolTasks) if (owner.taskId === taskId) {
+      owner.worker.terminate()
+      this.toolWorkerPool = this.toolWorkerPool.filter(worker => worker !== owner.worker)
+      this.idleToolWorkers = this.idleToolWorkers.filter(worker => worker !== owner.worker)
+      this.toolResolvers.get(toolCallId)?.({ ok: false, error: "Task cancelled" })
+      this.toolResolvers.delete(toolCallId)
+      this.toolTasks.delete(toolCallId)
+    }
+    for (const [key, resolver] of this.pendingResolvers) if (key.startsWith(`${taskId}:`)) {
+      clearTimeout(this.pendingTimeouts.get(key))
+      this.pendingTimeouts.delete(key)
+      this.pendingResolvers.delete(key)
+      resolver.reject(new Error("Task cancelled"))
+    }
+    const execution = this.taskExecutions.get(taskId)
+    if (execution) {
+      await Promise.race([execution.catch(() => {}), new Promise(resolve => setTimeout(resolve, Math.max(0, deadline - Date.now())))])
+      if (this.taskExecutions.has(taskId)) throw new Error("La tarea sigue deteniéndose; no se liberaron sus recursos")
+    }
+    this.workspaceLeases.releaseByOwner(taskId)
+    await this.scribe.flush()
+    const latest = await (await col<CodeTaskDoc>("codeTasks")).get(taskId)
+    if (latest) await (await col<CodeTaskDoc>("codeTasks")).put(taskId, { ...latest.doc, status: "cancelled", completed_at: new Date().toISOString() }, { expectedVersion: latest.version })
+    this.taskSupervisor.updateStage(taskId, "cancelled")
+    if (this.activeTaskId === taskId) this.emitTaskUpdate("cancelled")
+  }
+
   private activeSessionId: string | null = null
   private broadcastChannel: BroadcastChannel | null = null
   private pendingResolvers = new Map<string, { resolve: (value: CoordinatorResult) => void; reject: (err: Error) => void }>()
@@ -139,7 +210,7 @@ export class CoordinatorManager extends CoordinatorBase {
     if (totalKeys === 0) {
       console.info(
         `[secrets] ℹ️  No API keys configured yet — agents will start but tasks need a provider.\n` +
-        `   Run: hivecode provider add   (or set <PROVIDER>_API_KEY env var)`
+        `   Configure providers in Ctrl+S → Providers`
       )
     }
 
@@ -213,6 +284,7 @@ export class CoordinatorManager extends CoordinatorBase {
             resolver(data.result || { ok: false, error: data.error })
             this.toolResolvers.delete(data.toolCallId)
           }
+          this.toolTasks.delete(data.toolCallId)
           this.idleToolWorkers.push(worker)
           const workerId = this.toolWorkerPool.indexOf(worker)
           if (this.onWorkerUpdate) this.onWorkerUpdate({ type: "tool_worker", id: workerId, status: "idle" })
@@ -237,6 +309,7 @@ export class CoordinatorManager extends CoordinatorBase {
     }
 
     const toolCallId = Bun.randomUUIDv7()
+    if (this.activeTaskId) this.toolTasks.set(toolCallId, { taskId: this.activeTaskId, worker })
     const workerId = this.toolWorkerPool.indexOf(worker)
     if (this.onWorkerUpdate) this.onWorkerUpdate({ type: "tool_worker", id: workerId, status: "busy", tool: toolName })
 
@@ -298,8 +371,9 @@ export class CoordinatorManager extends CoordinatorBase {
     this.activateSession(sessionId, projectPath)
     // The TUI started with an empty session_id; tell it the real one. There is no
     // snapshot to re-send — this session was born empty and its first turn is
-    // already streaming.
-    this.onIpcEvent?.("session_changed", { session_id: sessionId })
+    // already streaming. `fresh` tells the TUI to keep its transcript: the
+    // user's own message lives only there, and clearing it made it vanish.
+    this.onIpcEvent?.("session_changed", { session_id: sessionId, fresh: true })
     return sessionId
   }
 
@@ -557,13 +631,24 @@ export class CoordinatorManager extends CoordinatorBase {
     const turnId = this.scribe.createTurn(this.activeSessionId, description)
 
     // Gather recent conversation history to give BEE context
-    const recentTurns = await this.scribe.getRecentTurns(this.activeSessionId, 10)
+    const recentTurns = await this.scribe.getRecentTurns(this.activeSessionId, 10, {
+      includeIncomplete: true,
+      excludeTurnId: turnId,
+    })
     const conversationHistory = recentTurns.map(t => ([
       { role: "user" as const,  content: t.userMessage,   createdAt: t.createdAt },
-      { role: "agent" as const, content: t.agentResponse, createdAt: t.createdAt },
+      {
+        role: "agent" as const,
+        // A turn that never finished has no answer; say so instead of leaving a
+        // silent gap, so the agent does not take the request for unanswered chat.
+        content: t.agentResponse.trim() || "(Esta tarea no llegó a terminar: no hay respuesta guardada.)",
+        createdAt: t.createdAt,
+      },
     ])).flat()
 
+    setCancelled(false)
     this.activeTaskId = this.scribe.createTask(this.activeSessionId, description, mode)
+    this.taskAborts.set(this.activeTaskId, new AbortController())
     this.taskSupervisor.createTask({
       taskId: this.activeTaskId,
       sessionId: this.activeSessionId,
@@ -590,7 +675,8 @@ export class CoordinatorManager extends CoordinatorBase {
     // retained below only to resume legacy plans when explicitly requested.
     if (process.env.HIVECODE_LEGACY_HARNESS !== "1") {
       const harness = new ProfileHarness()
-      const result = await harness.run({
+      const result = await this.trackExecution(this.activeTaskId, harness.run({
+        signal: this.taskAborts.get(this.activeTaskId)?.signal,
         objective: description,
         sessionId: this.activeSessionId,
         workspace: initialWorkspace.worktreePath,
@@ -598,6 +684,7 @@ export class CoordinatorManager extends CoordinatorBase {
         provider: configuredProvider || undefined,
         model: configuredModel || undefined,
         parentTaskId: this.activeTaskId,
+        history: conversationHistory.map(({ role, content }) => ({ role, content })),
         approve: onApprovalCheckpoint
           ? async (gate, evidence) => {
               const decision = await onApprovalCheckpoint({
@@ -611,6 +698,7 @@ export class CoordinatorManager extends CoordinatorBase {
             }
           : undefined,
         onEvent: event => {
+          if (this.activeTaskId && this.cancelledTasks.has(this.activeTaskId)) return
           if (event.agent) {
             if (event.type === "agent_progress") {
               this.emitNarrativeChunk({
@@ -629,7 +717,7 @@ export class CoordinatorManager extends CoordinatorBase {
             })
           }
         },
-      })
+      }))
 
       this.scribe.appendNarrative({
         taskId: this.activeTaskId,
@@ -641,6 +729,7 @@ export class CoordinatorManager extends CoordinatorBase {
         isOverride: false,
       })
 
+      if (this.activeTaskId && this.cancelledTasks.has(this.activeTaskId)) return
       if (result.status === "completed") {
         if (result.complexity !== "conversation") {
           await this.integrateTaskWorkspace(this.activeTaskId, "auto")
@@ -1977,6 +2066,7 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
   }
 
   private async dispatchPhase(phase: PhaseName, task: CoordinatorTask): Promise<CoordinatorResult> {
+    if (this.cancelledTasks.has(task.taskId)) throw new Error("Task cancelled")
     const tools = getToolsForCoordinator(phase, this.allTools)
     const compiledContext = await this.compileWorkerContext(phase, task.description, task.narrative)
 
@@ -1993,6 +2083,8 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
 
       const idx = COORDINATOR_NAMES.indexOf(phase)
       setWorkerBusy(idx, true)
+      if (this.cancelledTasks.has(task.taskId)) { reject(new Error("Task cancelled")); return }
+      this.workerTasks.set(phase, task.taskId)
       const resolverKey = `${task.taskId}:${task.phaseId}`
       this.pendingResolvers.set(resolverKey, { resolve, reject })
 
@@ -2169,11 +2261,16 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
 
   private handleWorkerMessage(name: PhaseName, rawMsg: WorkerToManagerMessage | string): void {
     const msg = typeof rawMsg === "string" ? JSON.parse(rawMsg) as WorkerToManagerMessage : rawMsg
+    if (this.cancelledTasks.has(msg.taskId)) {
+      if (msg.type === "RESULT" && this.workerTasks.get(name) === msg.taskId) this.workerTasks.delete(name)
+      return
+    }
     // A worker that talks back is healthy — reset its consecutive-crash counter
     // so a fresh crash later starts backoff from scratch rather than tripping
     // the circuit breaker on old, already-recovered crashes.
     if (this.workerCrashCounts.get(name)) this.workerCrashCounts.set(name, 0)
     if (msg.type === "RESULT" && msg.result) {
+      this.workerTasks.delete(name)
       // NOTE: We intentionally do NOT emit onNarrativeChunk here for the final
       // agent response, because the caller (executeTask via runTask) already
       // captures stdout and sends a HistoryAppend to the TUI. Emitting here
@@ -2238,6 +2335,8 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
     const worker = this.workers.get(name)
     if (!worker || !msg.toolName || !msg.toolCallId) return
     const taskId = msg.taskId || this.activeTaskId || "unknown"
+
+    if (this.cancelledTasks.has(taskId)) return
 
     // Check automatic interruptions (SPEC §6.3)
     const interruption = checkAutomaticInterruption(msg)
@@ -2435,13 +2534,14 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
           this.allTools,
           msg.toolName!,
           msg.toolArgs || {},
-          { configurable: { workspace: workspaceRoot } }
+          { configurable: { workspace: workspaceRoot }, signal: this.taskAborts.get(taskId)?.signal }
         )
       }
     } finally {
       if (activeLease) this.workspaceLeases.release(activeLease.leaseId)
     }
     
+    if (this.cancelledTasks.has(taskId)) return
     const toolDurationNs = BigInt(Math.round((performance.now() - toolStart) * 1_000_000))
     const success = !(result && typeof result === "object" && "ok" in (result as any) && (result as any).ok === false)
     const outputSummary = typeof result === "string" ? result.slice(0, 2000) : JSON.stringify(result).slice(0, 2000)
@@ -2567,7 +2667,7 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
         }
         break
       case "TASK_CANCELLED":
-        setCancelled(true)
+        if (msg.payload.taskId || this.activeTaskId) void this.cancelTask(msg.payload.taskId || this.activeTaskId!).catch(error => log.error(error.message))
         break
       case "PAUSE":
         break

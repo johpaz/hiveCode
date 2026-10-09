@@ -1,3 +1,4 @@
+import { mapDecision as mapDecision } from "../../services/narrative-mapping";
 import type { Tool } from "../types.ts";
 import { col } from "../../storage/hive.ts";
 import { logger } from "../../utils/logger.ts";
@@ -32,19 +33,7 @@ function mapEntry(r: CodeNarrativeDoc) {
   };
 }
 
-function mapDecision(r: CodeDecisionDoc) {
-  return {
-    id: r.id,
-    taskId: r.task_id,
-    title: r.title,
-    context: r.context,
-    options: r.options,
-    decision: r.decision,
-    consequences: r.consequences,
-    status: r.status,
-    createdAt: r.created_at,
-  };
-}
+
 
 export const readNarrativeTool: Tool = {
   name: "read_narrative",

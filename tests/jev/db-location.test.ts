@@ -18,12 +18,12 @@ import {
 } from "@johpaz/hivecode-core/storage/hivedb"
 import { preflightMigration } from "@johpaz/hivecode-core/storage/db-migrate"
 
+const originalEnv = { HIVE_HOME: process.env.HIVE_HOME, HIVE_DEV: process.env.HIVE_DEV, HIVE_DB_PATH: process.env.HIVE_DB_PATH };
 const HOME = os.homedir()
 const empty = {} as Record<string, string | undefined>
 
 afterEach(() => {
-  delete process.env.HIVE_HOME
-  delete process.env.HIVE_DEV
+  for (const [key, value] of Object.entries(originalEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
 })
 
 describe("getHiveDbPath precedence", () => {

@@ -515,15 +515,50 @@ export const agentArchiveTool: Tool = {
 
 // ─── task_delegate ───────────────────────────────────────────────────────────
 
+/**
+ * Resolves what the coordinator calls a delegated task: the `task_id` that
+ * task_delegate returned, or the `ref` it attached (a Spec Kit id such as T003).
+ * Models mix the two up, so both are accepted; the newest match wins.
+ */
+async function findDelegatedTask(idOrRef: string): Promise<TaskDoc | null> {
+  const tasks = await col<TaskDoc>("tasks");
+  const direct = await tasks.get(idOrRef);
+  if (direct) return direct.doc;
+  const wanted = idOrRef.trim().toLowerCase();
+  const matches: TaskDoc[] = [];
+  for (const status of ["completed", "blocked", "failed", "in_progress", "pending"]) {
+    for (const entry of await tasks.findBy("status", status)) {
+      try {
+        if (String(JSON.parse(entry.doc.metadata ?? "{}").ref ?? "").toLowerCase() === wanted) matches.push(entry.doc);
+      } catch { /* legacy row without JSON metadata */ }
+    }
+  }
+  return matches.sort((a, b) => b.created_at - a.created_at)[0] ?? null;
+}
+
 export const taskDelegateTool: Tool = {
   name: "task_delegate",
-  description: "Delegate a task to a worker agent and execute it immediately (blocking). Spanish: delegar tarea, asignar worker, ejecutar por agente, delegate_task",
+  description: "Delegate a bounded task to a worker agent and get its handoff plus evidence against acceptance criteria. Emit several task_delegate calls in ONE step to run distinct workers simultaneously (they run in parallel when their workspaces do not collide); you are the fan-in: judge the evidence, or send a task back with task_revise. Spanish: delegar tarea, asignar worker, ejecutar por agente, delegate_task",
   parameters: {
     type: "object",
     properties: {
-      worker_id: { type: "string", description: "ID of the worker agent" },
+      worker_id: { type: "string", description: "ID of the worker agent (scout, builder, verifier, spider, planner, ...)" },
       task_description: { type: "string", description: "Clear, detailed instructions for the worker" },
-      task_id: { type: "number", description: "Optional task DB ID to update status automatically" },
+      acceptance: {
+        type: "array",
+        description: "Verifiable acceptance criteria. Defaults to 'the task is done as described'. A criterion with checkTool is decided deterministically (no LLM); the rest are judged by you from the evidence.",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            description: { type: "string" },
+            checkTool: { type: "string" },
+          },
+          required: ["id", "description"],
+        },
+      },
+      ref: { type: "string", description: "Optional label of this task in your plan (e.g. the Spec Kit id T003). task_revise accepts it in place of the task_id." },
+      task_id: { type: "string", description: "Optional existing task ID to update automatically" },
       project_id: { type: "string", description: "Optional project ID for progress tracking" },
     },
     required: ["worker_id", "task_description"],
@@ -531,85 +566,168 @@ export const taskDelegateTool: Tool = {
   execute: async (params: Record<string, unknown>, config?: any) => {
     const workerId = params.worker_id as string;
     const taskDescription = params.task_description as string;
-    const taskId = params.task_id as number | undefined;
     const projectId = params.project_id as string | undefined;
+    const ref = typeof params.ref === "string" && params.ref.trim() ? params.ref.trim() : undefined;
+    const { buildWorkerBrief, checkAcceptance, delegationThreadId, parseAcceptance, summarizeAcceptance } =
+      await import("../../agent/delegation.ts");
 
     // Verify worker exists and is enabled
     const worker = (await (await col<AgentDoc>("agents")).get(workerId))?.doc;
+    if (!worker) return { ok: false, error: `Worker not found: ${workerId}` };
+    if (!worker.enabled) return { ok: false, error: `Worker is disabled: ${worker.name}` };
 
-    if (!worker) {
-      return { ok: false, error: `Worker not found: ${workerId}` };
+    const tasksCol = await col<TaskDoc>("tasks");
+    const acceptance = parseAcceptance(params.acceptance, taskDescription);
+    const taskName = taskDescription.slice(0, 60);
+
+    // Every delegation is a TaskDoc, so task_status / task_revise can find it.
+    let taskId = params.task_id !== undefined ? String(params.task_id) : "";
+    const existing = taskId ? await tasksCol.get(taskId) : null;
+    if (!existing) {
+      const { nextId } = await import("../../storage/hive.ts");
+      taskId = await nextId("tasks");
+      await tasksCol.put(taskId, {
+        id: taskId,
+        project_id: projectId ?? "",
+        agent_id: workerId,
+        parent_task_id: "",
+        name: taskName,
+        description: taskDescription,
+        status: "in_progress",
+        progress: 0,
+        priority: 0,
+        depends_on: null,
+        result: null,
+        error: null,
+        metadata: JSON.stringify({ worker_id: workerId, acceptance, ref }),
+        created_at: now(),
+        updated_at: now(),
+        completed_at: null,
+      } satisfies TaskDoc, { expectedVersion: 0 });
+    } else {
+      await updateTask(taskId, { status: "in_progress", agent_id: workerId, metadata: JSON.stringify({ worker_id: workerId, acceptance, ref }) });
     }
-    if (!worker.enabled) {
-      return { ok: false, error: `Worker is disabled: ${worker.name}` };
-    }
+    const resolvedProjectId = projectId ?? existing?.doc.project_id ?? "";
 
-    // Fetch task info for bus notifications
-    const taskRow = taskId ? (await (await col<TaskDoc>("tasks")).get(String(taskId)))?.doc : null;
-    const taskName = taskRow?.name ?? taskDescription.slice(0, 60);
-    const resolvedProjectId = projectId ?? taskRow?.project_id ?? "";
-
-    // Mark task in_progress if task_id provided
-    if (taskId) {
-      await updateTask(String(taskId), { status: "in_progress", agent_id: workerId });
-    }
-
-    // Notify Agent Bus: task started
-    agentBus.notifyTaskStarted(workerId, worker.name, taskId ?? 0, taskName, resolvedProjectId);
-
-    log.info(`[task_delegate] Delegating to ${worker.name} (${workerId})`);
+    agentBus.notifyTaskStarted(workerId, worker.name, Number(taskId) || 0, taskName, resolvedProjectId);
+    log.info(`[task_delegate] Delegating task ${taskId} to ${worker.name} (${workerId})`);
 
     try {
       // Dynamic import to avoid circular dependency (agent-loop → tools → agent-loop)
       const { runAgentIsolated } = await import("../../agent/agent-loop.ts");
-
-      const threadId = `task-${taskId ?? Date.now()}-${workerId}`;
       const result = await runAgentIsolated({
         agentId: workerId,
-        taskDescription,
-        threadId,
+        taskDescription: buildWorkerBrief(taskDescription, acceptance),
+        threadId: delegationThreadId(taskId, workerId),
+        parentRunId: config?.configurable?.run_id,
+        runKind: "worker",
+        approvedExecution: config?.configurable?.approved_execution === true,
+        signal: config?.signal,
       });
 
-      // Update task to completed if task_id provided
-      if (taskId) {
-        await updateTask(String(taskId), { status: "completed", progress: 100, result });
-
-        // Recalculate project progress if project_id provided
-        if (resolvedProjectId) {
-          await updateProjectProgress(resolvedProjectId);
-        }
-      }
-
-      // Notify Agent Bus: task completed
-      agentBus.notifyTaskCompleted(workerId, worker.name, taskId ?? 0, taskName, resolvedProjectId, result);
-
-      const finalProgress = resolvedProjectId
-        ? ((await (await col<ProjectDoc>("projects")).get(resolvedProjectId))?.doc.progress ?? null)
-        : null;
+      const checks = await checkAcceptance(acceptance, result);
+      const met = summarizeAcceptance(checks);
+      await updateTask(taskId, {
+        status: met === false ? "blocked" : "completed",
+        progress: met === false ? 80 : 100,
+        result,
+        completed_at: now(),
+      });
+      if (resolvedProjectId) await updateProjectProgress(resolvedProjectId);
+      agentBus.notifyTaskCompleted(workerId, worker.name, Number(taskId) || 0, taskName, resolvedProjectId, result);
 
       return {
         ok: true,
+        task_id: taskId,
+        ref,
         worker_id: workerId,
         worker_name: worker.name,
-        task_id: taskId,
         result,
-        project_progress: finalProgress,
+        acceptance: checks,
+        // true: all confirmed deterministically · false: a check failed (task_revise it) · null: you judge from the evidence
+        acceptance_met: met,
       };
     } catch (err) {
-      // Mark task failed if task_id provided
-      if (taskId) {
-        await updateTask(String(taskId), { status: "failed", result: (err as Error).message, error: (err as Error).message });
-      }
+      await updateTask(taskId, { status: "failed", result: (err as Error).message, error: (err as Error).message });
+      agentBus.notifyTaskFailed(workerId, worker.name, Number(taskId) || 0, taskName, resolvedProjectId, (err as Error).message);
+      return { ok: false, task_id: taskId, worker_id: workerId, error: (err as Error).message };
+    }
+  },
+};
 
-      // Notify Agent Bus: task failed
-      agentBus.notifyTaskFailed(workerId, worker.name, taskId ?? 0, taskName, resolvedProjectId, (err as Error).message);
+// ─── task_revise ─────────────────────────────────────────────────────────────
 
-      return {
-        ok: false,
-        worker_id: workerId,
-        task_id: taskId,
-        error: (err as Error).message,
-      };
+export const taskReviseTool: Tool = {
+  name: "task_revise",
+  description: "Send a delegated task back to its worker with concrete feedback instead of reporting it as done. The worker resumes on the same thread with its previous handoff. Spanish: devolver tarea, pedir correcciones, revisar entrega",
+  parameters: {
+    type: "object",
+    properties: {
+      task_id: { type: "string", description: "The task_id from task_delegate's result (or the ref you gave it, e.g. T003)." },
+      feedback: { type: "string", description: "Concrete, actionable feedback: what is wrong and what the worker still needs to do." },
+      acceptance: {
+        type: "array",
+        description: "Updated acceptance criteria, if they need to change. Defaults to the original task's criteria.",
+        items: {
+          type: "object",
+          properties: { id: { type: "string" }, description: { type: "string" }, checkTool: { type: "string" } },
+          required: ["id", "description"],
+        },
+      },
+    },
+    required: ["task_id", "feedback"],
+  },
+  execute: async (params: Record<string, unknown>, config?: any) => {
+    const taskId = params.task_id as string | undefined;
+    const feedback = params.feedback as string | undefined;
+    if (!taskId) return { ok: false, error: "Provide task_id." };
+    if (!feedback?.trim()) return { ok: false, error: "Provide feedback describing what is missing." };
+
+    const task = await findDelegatedTask(String(taskId));
+    if (!task) return { ok: false, error: `Task not found: ${taskId}. Use the task_id that task_delegate returned (e.g. "000000000000003") or the ref you gave it.` };
+    const resolvedId = task.id;
+    let meta: { worker_id?: string; acceptance?: unknown } = {};
+    try { meta = JSON.parse(task.metadata ?? "{}"); } catch { /* legacy row without metadata */ }
+    const workerId = meta.worker_id ?? task.agent_id;
+    const worker = workerId ? (await (await col<AgentDoc>("agents")).get(workerId))?.doc : null;
+    if (!worker?.enabled) return { ok: false, error: `Worker unavailable for task ${resolvedId}: ${workerId}` };
+
+    const { buildWorkerBrief, checkAcceptance, delegationThreadId, parseAcceptance, summarizeAcceptance } =
+      await import("../../agent/delegation.ts");
+    const acceptance = parseAcceptance(params.acceptance ?? meta.acceptance, task.description ?? task.name);
+    await updateTask(resolvedId, { status: "in_progress", progress: 50 });
+
+    try {
+      const { runAgentIsolated } = await import("../../agent/agent-loop.ts");
+      const result = await runAgentIsolated({
+        agentId: worker.id,
+        taskDescription: buildWorkerBrief(
+          [
+            "Revisión de una tarea que ya entregaste.",
+            `Tarea original:\n${task.description ?? task.name}`,
+            `Tu entrega anterior:\n${(task.result ?? "").slice(0, 4000)}`,
+            `Retroalimentación del coordinador:\n${feedback}`,
+          ].join("\n\n"),
+          acceptance,
+        ),
+        threadId: delegationThreadId(resolvedId, worker.id),
+        parentRunId: config?.configurable?.run_id,
+        runKind: "worker",
+        approvedExecution: config?.configurable?.approved_execution === true,
+        signal: config?.signal,
+      });
+      const checks = await checkAcceptance(acceptance, result);
+      const met = summarizeAcceptance(checks);
+      await updateTask(resolvedId, {
+        status: met === false ? "blocked" : "completed",
+        progress: met === false ? 80 : 100,
+        result,
+        completed_at: now(),
+      });
+      return { ok: true, task_id: resolvedId, worker_id: worker.id, result, acceptance: checks, acceptance_met: met };
+    } catch (err) {
+      await updateTask(resolvedId, { status: "failed", error: (err as Error).message });
+      return { ok: false, task_id: resolvedId, error: (err as Error).message };
     }
   },
 };
@@ -1010,6 +1128,7 @@ export function createTools(): Tool[] {
     agentFindTool,
     agentArchiveTool,
     taskDelegateTool,
+    taskReviseTool,
     taskDelegateCodeTool,
     taskStatusTool,
     busPublishTool,

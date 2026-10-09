@@ -7,7 +7,7 @@
       "dependencies": {
         "@anthropic-ai/sdk": "^0.98.0",
         "@google/genai": "^1.43.0",
-        "@johpaz/hive-db": "^0.5.1",
+        "@johpaz/hive-db": "^0.7.0",
         "@modelcontextprotocol/sdk": "^1.26.0",
         "grammy": "latest",
         "openai": "^6.18.0",
@@ -52,7 +52,7 @@
       "dependencies": {
         "@anthropic-ai/sdk": "^0.98.0",
         "@google/genai": "^1.43.0",
-        "@johpaz/hive-db": "^0.5.1",
+        "@johpaz/hive-db": "^0.7.0",
         "@johpaz/hivecode-mcp": "workspace:*",
         "@johpaz/hivecode-skills": "workspace:*",
         "@modelcontextprotocol/sdk": "latest",
@@ -98,19 +98,19 @@
 
     "@hono/node-server": ["@hono/node-server@2.1.3", "", { "peerDependencies": { "hono": "^4" } }, "sha512-TA//nWMqPhbfdfneACk6t5a9eqbS9lABEPyKn0/xZTah3H3U2XaVg85rJFl0/Fyit0I552YDHgXGVSf3GwqbUw=="],
 
-    "@johpaz/hive-db": ["@johpaz/hive-db@0.5.1", "", { "optionalDependencies": { "@johpaz/hive-db-darwin-arm64": "0.5.1", "@johpaz/hive-db-darwin-x64": "0.5.1", "@johpaz/hive-db-linux-arm64-gnu": "0.5.1", "@johpaz/hive-db-linux-x64-gnu": "0.5.1", "@johpaz/hive-db-linux-x64-musl": "0.5.1", "@johpaz/hive-db-win32-x64-msvc": "0.5.1" } }, "sha512-fv/cTfgHsVFiHk/G9mS6pCJdm6Z/L+0eRp5/T9g521ZESfGnwhBuX+gy+DNoPggWDfZQIpRYzIylG2eCZKRNhA=="],
+    "@johpaz/hive-db": ["@johpaz/hive-db@0.7.0", "", { "optionalDependencies": { "@johpaz/hive-db-darwin-arm64": "0.7.0", "@johpaz/hive-db-darwin-x64": "0.7.0", "@johpaz/hive-db-linux-arm64-gnu": "0.7.0", "@johpaz/hive-db-linux-x64-gnu": "0.7.0", "@johpaz/hive-db-linux-x64-musl": "0.7.0", "@johpaz/hive-db-win32-x64-msvc": "0.7.0" } }, "sha512-+wLQpKwiNeyLtol+wGsw7OL4kNm5jS25P4T0vnR5e4zaoDMHBH4trh8ejSrE9GQz7Zdj+90/6XW2Jn5J6OnAxg=="],
 
-    "@johpaz/hive-db-darwin-arm64": ["@johpaz/hive-db-darwin-arm64@0.5.1", "", { "os": "darwin", "cpu": "arm64" }, "sha512-4fkhTOJCmvNIlJT8RkVS6EO9ojUyfGJgpXK949HOPNKTybK/Is1IQFlB86egN8YKBT0BrcF7dTwO3h0LFYA6QQ=="],
+    "@johpaz/hive-db-darwin-arm64": ["@johpaz/hive-db-darwin-arm64@0.7.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-vdaZENA/04V/uvzc5KvDvPC4IEGhJP2zDQPatD+j+7lmLbqo4sBTNzzK4ClWxp+b61tjkuZyesk+uw6fDNahhg=="],
 
-    "@johpaz/hive-db-darwin-x64": ["@johpaz/hive-db-darwin-x64@0.5.1", "", { "os": "darwin", "cpu": "x64" }, "sha512-RpJEM3AlxeYR2A6lBQpIYGmovTizxd14IAIr8D7JGKYnsLWgjShXiAJSpw8Iizhfcf6n+3ZvCE66rI8tCQHyjg=="],
+    "@johpaz/hive-db-darwin-x64": ["@johpaz/hive-db-darwin-x64@0.7.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-tWz4TPUt/vSAlgr9fwgno9iMq13C9UrDfD9YG697bdIyoHz1se3sqW37hUZpXdcb8BP+iQxC31PYkXdufVHO3A=="],
 
-    "@johpaz/hive-db-linux-arm64-gnu": ["@johpaz/hive-db-linux-arm64-gnu@0.5.1", "", { "os": "linux", "cpu": "arm64" }, "sha512-jcroCACfo2w0oUMQs47LdbN+HFQT8jdznWFdD9shHeMHv5ahmF4zIZWwKn28rq2J9d4QdrSLiWKhUiWlZYWWng=="],
+    "@johpaz/hive-db-linux-arm64-gnu": ["@johpaz/hive-db-linux-arm64-gnu@0.7.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-xRPlFY6fXY8bW9EsR54nnwo7CeB0D7OyX0KSFLuknkwpJJibfq1gN7CPriFTC8jXslFe3ddo1nVGww09uTC1Iw=="],
 
-    "@johpaz/hive-db-linux-x64-gnu": ["@johpaz/hive-db-linux-x64-gnu@0.5.1", "", { "os": "linux", "cpu": "x64" }, "sha512-zH3aZ5NCRSrDp3dms2Ma+UB4VvlvDg7kDhRF868Yt54pVzGRD8Z88EgEhk6Lb3OwufsQJCRSBNX905crtEc/jA=="],
+    "@johpaz/hive-db-linux-x64-gnu": ["@johpaz/hive-db-linux-x64-gnu@0.7.0", "", { "os": "linux", "cpu": "x64" }, "sha512-v4TPFJLqSzTo5d3UK9X/CtUDtJFg9KYJ6syxQTsrgl+/pwf26lpSLMWuyP24XzCppk3qbZd1ZGsvfMfMjg9nDA=="],
 
-    "@johpaz/hive-db-linux-x64-musl": ["@johpaz/hive-db-linux-x64-musl@0.5.1", "", { "os": "linux", "cpu": "x64" }, "sha512-gN7UsjR/FHsbBdBsjj+YEMkcIk0Bu+N8+bKTGflIt0XnZQ+n2os7yJirXIg/f+sI/3vfvCnWgNcYVwmn0Q8fKg=="],
+    "@johpaz/hive-db-linux-x64-musl": ["@johpaz/hive-db-linux-x64-musl@0.7.0", "", { "os": "linux", "cpu": "x64" }, "sha512-Of1FqUaLsNd0hMnSphVNnQW3ARyNjciRCcSBv7jHsgZAaOrkcwvMcqBFn8aX6KkqKcgBquOfyWpN6b0SNdaRYw=="],
 
-    "@johpaz/hive-db-win32-x64-msvc": ["@johpaz/hive-db-win32-x64-msvc@0.5.1", "", { "os": "win32", "cpu": "x64" }, "sha512-7CfKretZDrHgRkYd4cMbisZdkK34Ovv+aUwVuNcz7TcY2G1pfbJfmJ34Y12tmzq/UvLwV65VkXbt4WmpcUIzGw=="],
+    "@johpaz/hive-db-win32-x64-msvc": ["@johpaz/hive-db-win32-x64-msvc@0.7.0", "", { "os": "win32", "cpu": "x64" }, "sha512-Fxir0viFkVo04gds6jAlLPbjoMT2ESagcisW55s3wHXgqELyiGWVak10TBHZ69yB0u7AoLU/zf0V7bsMcaYgNw=="],
 
     "@johpaz/hivecode-cli": ["@johpaz/hivecode-cli@workspace:packages/cli"],
 
@@ -122,7 +122,7 @@
 
     "@johpaz/hivecode-skills": ["@johpaz/hivecode-skills@workspace:packages/skills"],
 
-    "@modelcontextprotocol/sdk": ["@modelcontextprotocol/sdk@1.32.0", "", { "dependencies": { "@hono/node-server": "^1.19.9 || ^2.0.5", "ajv": "^8.17.1", "ajv-formats": "^3.0.1", "content-type": "^1.0.5", "cors": "^2.8.5", "cross-spawn": "^7.0.5", "eventsource": "^3.0.2", "eventsource-parser": "^3.0.0", "express": "^5.2.1", "express-rate-limit": "^8.2.1", "hono": "^4.11.4", "jose": "^6.1.3", "json-schema-typed": "^8.0.2", "pkce-challenge": "^5.0.0", "raw-body": "^3.0.0", "zod": "^3.25 || ^4.0", "zod-to-json-schema": "^3.25.1" }, "peerDependencies": { "@cfworker/json-schema": "^4.1.1" }, "optionalPeers": ["@cfworker/json-schema"] }, "sha512-8BviX/hK4Gd2eL1KdTwm0gfl4d3wdoErW0Jd00h6nomUAtk6IJk5vwQJc6kfWtJTzN5OEV/lgIiJKI8fiDGAlA=="],
+    "@modelcontextprotocol/sdk": ["@modelcontextprotocol/sdk@1.32.1", "", { "dependencies": { "@hono/node-server": "^1.19.9 || ^2.0.5", "ajv": "^8.17.1", "ajv-formats": "^3.0.1", "content-type": "^1.0.5", "cors": "^2.8.5", "cross-spawn": "^7.0.5", "eventsource": "^3.0.2", "eventsource-parser": "^3.0.0", "express": "^5.2.1", "express-rate-limit": "^8.2.1", "hono": "^4.11.4", "jose": "^6.1.3", "json-schema-typed": "^8.0.2", "pkce-challenge": "^5.0.0", "raw-body": "^3.0.0", "zod": "^3.25 || ^4.0", "zod-to-json-schema": "^3.25.1" }, "peerDependencies": { "@cfworker/json-schema": "^4.1.1" }, "optionalPeers": ["@cfworker/json-schema"] }, "sha512-2DdE+SJDtzLEEWzY1ZjY7Q+VcPhcV1KisD3zI4u0XZyktsjHum1mwbMI+JaulUBi2OZk+KJAi2uPXzxichPkdw=="],
 
     "@protobufjs/aspromise": ["@protobufjs/aspromise@1.1.2", "", {}, "sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ=="],
 
