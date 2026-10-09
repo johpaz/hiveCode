@@ -152,6 +152,9 @@ export abstract class OpenAICompatBase implements LLMProvider {
     }
     const maxTokens = resolveMaxTokens(options.maxTokens, options.contextWindow)
     if (maxTokens) body.max_tokens = maxTokens
+    // Caller-supplied knobs (e.g. disabling a reasoning model's thinking) are
+    // merged last so they win over anything derived above.
+    if (options.extraBody) Object.assign(body, options.extraBody)
     const profile = getProviderProfile(this.providerName)
     const sendTools = modelSupportsTools(this.providerName, options.model) && !!(options.tools?.length)
 

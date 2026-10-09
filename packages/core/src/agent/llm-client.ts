@@ -86,6 +86,17 @@ export interface LLMCallOptions {
   tools?: LLMToolDef[]
   temperature?: number
   maxTokens?: number
+  /**
+   * Extra JSON merged into the OpenAI-compatible request body.
+   *
+   * The escape hatch for knobs that have no portable equivalent. The clearest
+   * case: a reasoning model spends its whole budget thinking, so a task that
+   * wants a short answer must say so —
+   * `{ chat_template_kwargs: { enable_thinking: false } }` turns Qwen3's 1228
+   * tokens into 8. Sent verbatim and only where the caller asks, so a provider
+   * that does not know the field simply ignores it.
+   */
+  extraBody?: Record<string, unknown>
   numGpu?: number
   onToken?: (token: string) => void
   signal?: AbortSignal
