@@ -464,7 +464,6 @@ hivecode exit                          # Detener el sistema
 /run                                  Ejecutar tarea en modo actual
 /logs     list|follow                 Ver logs del sistema
 /note                                 Guardar nota en scratchpad
-/env                                  Variables de entorno no sensibles
 /version                              Versión de hivecode
 /doctor                               Diagnóstico del sistema
 /help [comando]                       Ayuda detallada
