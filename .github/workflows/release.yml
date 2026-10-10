@@ -180,11 +180,46 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Set version from tag
+      # `release.sh` ya dejó todos los package.json en la versión del tag. Si no
+      # coinciden, el tag se empujó a mano o sin pasar por el script: no se publica.
+      - name: El tag coincide con la versión del paquete
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          cd packages/cli
-          npm version $VERSION --no-git-tag-version
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION=$(node -p "require('./packages/cli/package.json').version")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::el tag v$TAG_VERSION no coincide con packages/cli/package.json ($PKG_VERSION)"
+            exit 1
+          fi
+
+      # `files: ["dist/"]`: sin construir, npm publicaría un paquete vacío.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/hivetui
+
+      - name: Build dist (CLI, workers y TUI)
+        run: cd packages/cli && bun run build
+
+      # El CLI va empaquetado en dist/hivecode.js. Las dependencias `workspace:*`
+      # no existen en npm y harían fallar la instalación; solo se quitan en este
+      # workspace de CI, no se commitea.
+      - name: Quitar dependencias de workspace del paquete publicado
+        run: |
+          node -e '
+            const fs = require("fs");
+            const f = "packages/cli/package.json";
+            const p = JSON.parse(fs.readFileSync(f, "utf8"));
+            for (const k of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+              for (const [n, v] of Object.entries(p[k] ?? {})) {
+                if (String(v).startsWith("workspace:")) delete p[k][n];
+              }
+            }
+            fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n");
+          '
+          cp README.md packages/cli/README.md
+
+      - name: Contenido del paquete
+        run: cd packages/cli && npm pack --dry-run
 
       - name: Publish to npm
         run: cd packages/cli && npm publish --access public
