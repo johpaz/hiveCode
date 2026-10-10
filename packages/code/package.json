@@ -1,6 +1,6 @@
 {
   "name": "@johpaz/hivecode-code",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "private": true,
   "description": "hivecode workers — 6 Bun Worker coordinators for software engineering",
