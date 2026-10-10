@@ -6,7 +6,6 @@ use crossterm::{
     event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
-    terminal,
 };
 
 use crate::{
@@ -1166,7 +1165,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                 }
             }
             if state.active_tab == TabId::Swarm {
-                if let Some(area) = screen_rect_from_size(terminal::size().ok()) {
+                if let Some(area) = screen_rect_from_size(current_terminal_size()) {
                     let area = crate::renderer::layout_for_state(area, state).content;
                     if let Some(checkpoint_idx) = dashboard_layout::checkpoint_at(state, area, mouse.column, mouse.row) {
                         state.checkpoints.selected = Some(checkpoint_idx);
@@ -1185,7 +1184,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
             // cuya altura es configurable (1-5), así que su fila se deriva del
             // layout y no de una constante.
             if state.active_tab != TabId::Swarm {
-                if let Some(tab) = tabbar_click(state, terminal::size().ok(), mouse.column, mouse.row) {
+                if let Some(tab) = tabbar_click(state, current_terminal_size(), mouse.column, mouse.row) {
                     state.active_tab = tab;
                     if tab != TabId::Mesa {
                         state.history_nav_mode = false;
@@ -1196,7 +1195,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                     return;
                 }
             }
-            let history_area = content_rect_from_size(state, terminal::size().ok());
+            let history_area = content_rect_from_size(state, current_terminal_size());
             if state.active_tab == TabId::Mesa {
                 if let Some(area) = history_area {
                     if let Some(entry_idx) = history::entry_at_y(state, area, mouse.row) {
@@ -1211,7 +1210,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                 }
             }
             // Iniciar selección de texto si el click está en el área de contenido
-            if let Some(area) = content_rect_from_size(state, terminal::size().ok()) {
+            if let Some(area) = content_rect_from_size(state, current_terminal_size()) {
                 if rect_contains(area, mouse.column, mouse.row) {
                     state.selection = Some(Selection {
                         anchor: (mouse.column, mouse.row),
@@ -1242,7 +1241,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
             }
         }
         MouseEventKind::Down(MouseButton::Right) => {
-            let history_area = content_rect_from_size(state, terminal::size().ok());
+            let history_area = content_rect_from_size(state, current_terminal_size());
             if state.active_tab == TabId::Mesa {
                 if let Some(area) = history_area {
                     if let Some(entry_idx) = history::entry_at_y(state, area, mouse.row) {
@@ -1359,7 +1358,7 @@ fn update_active_split_drag(state: &mut AppState, col: u16, row: u16) -> bool {
     let Some(id) = state.panels.active_drag.clone() else {
         return false;
     };
-    let Some(screen_area) = screen_rect_from_size(terminal::size().ok()) else {
+    let Some(screen_area) = screen_rect_from_size(current_terminal_size()) else {
         return false;
     };
     let areas = layout_areas(screen_area, &state.panels);
@@ -1446,7 +1445,7 @@ enum PlanScrollTarget {
 }
 
 fn plan_scroll_target(state: &AppState, col: u16, row: u16) -> PlanScrollTarget {
-    let Some(content_area) = content_rect_from_size(state, terminal::size().ok()) else {
+    let Some(content_area) = content_rect_from_size(state, current_terminal_size()) else {
         return PlanScrollTarget::Stream;
     };
     let main_split = SplitPane::new(
@@ -1485,6 +1484,20 @@ fn plan_scroll_target(state: &AppState, col: u16, row: u16) -> PlanScrollTarget 
 
 fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom()
+}
+
+/// Tamaño del terminal. En tests nunca se consulta: `cargo test` corrido desde
+/// un terminal real devolvería su tamaño y los tests de scroll/drag, escritos
+/// para el 80x24 de reserva, dependerían de la ventana de quien los ejecuta.
+fn current_terminal_size() -> Option<(u16, u16)> {
+    #[cfg(test)]
+    {
+        None
+    }
+    #[cfg(not(test))]
+    {
+        crossterm::terminal::size().ok()
+    }
 }
 
 fn screen_rect_from_size(size: Option<(u16, u16)>) -> Option<crate::term::Rect> {
