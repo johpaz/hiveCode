@@ -2,85 +2,119 @@
 
 **Multi-AI Coding Swarm — Consola-first. Enfocado en código. Multi-proveedor.**
 
-`hivecode` es un harness de ingeniería de software con seis perfiles estables: **BEE**, **Planner**, **Scout**, **Builder**, **Quality Gate** (`verifier`) y **Spider**. Activa ejecuciones y especialistas temporales bajo demanda, limita por defecto a cuatro las llamadas activas a modelos o herramientas por sesión y usa Spec Kit nativo para features, arquitectura, migraciones y refactors amplios.
+`hivecode` es un harness de ingeniería de software que corre en tu terminal. Un coordinador, **BEE**, recibe tu tarea y delega en seis perfiles estables —**BEE**, **Planner**, **Scout**, **Builder**, **Quality Gate** (`verifier`) y **Spider**—, activa ejecuciones y especialistas temporales bajo demanda, limita por defecto a cuatro las llamadas activas a modelos o herramientas por sesión y usa Spec Kit nativo para features, arquitectura, migraciones y refactors amplios.
 
-> **Runtime:** Bun >= 1.4.2
+> **Runtime:** Bun >= 1.4.2 (los binarios de GitHub Releases lo traen embebido)
 > **Base de datos:** HiveDB WAL — única fuente de verdad
 > **TUI:** Rust + crossterm, renderer custom (`packages/hivetui/`)
 > **Licencia:** hivecode-NC-1.0 (no comercial)
 
 **Documentación técnica:**
 
-- [`docs/harness.md`](./docs/harness.md) — arquitectura completa del harness, las 4 capas del sistema, Learning Harness y comparación con Google ADK / Antigravity CLI.
-- [`docs/agent-harness.md`](./docs/agent-harness.md) — referencia vigente de agentes: herramientas, skills, especialidades, contexto HiveDB, oficina del enjambre y oráculos JEV/KEV.
-- [`docs/workers.md`](./docs/workers.md) — referencia histórica del pipeline de compatibilidad.
-- [`docs/code-context-retrieval.md`](./docs/code-context-retrieval.md) — cómo los workers obtienen contexto del proyecto: resumen precacheado + búsqueda HiveDB index.
+- [`docs/agent-harness.md`](./docs/agent-harness.md) — referencia vigente: perfiles, herramientas, skills, especialidades, delegación, contexto HiveDB, oficina del enjambre y oráculos JEV/KEV.
+- [`docs/plans/2026-10-10-hivedb-context.md`](./docs/plans/2026-10-10-hivedb-context.md) — cómo los agentes obtienen contexto del proyecto: caché, aislamiento, presupuestos y entrega durable.
+- [`docs/workers.md`](./docs/workers.md) — referencia histórica del pipeline de compatibilidad (los once coordinadores por niveles).
 
 ---
 
-## Inicio rápido
+## Instalación
+
+Hay tres formas. Elige según tu sistema.
+
+### Con npm (Linux x64)
 
 ```bash
-# Clonar e instalar
+# 1. Bun >= 1.4.2 (el CLI se ejecuta sobre Bun aunque lo instales con npm)
+curl -fsSL https://bun.sh/install | bash
+
+# 2. hivecode
+npm i -g @johpaz/hivecode
+
+# 3. Comprueba y arranca
+hivecode --version
+hivecode doctor
+hivecode
+```
+
+El paquete npm incluye la TUI y la base de datos nativa compiladas para **Linux x64** (glibc y musl). En macOS, Windows y Linux arm64 usa los binarios de la siguiente sección.
+
+Para actualizar: `npm i -g @johpaz/hivecode@latest`, o `hivecode upgrade` para comprobar si hay una versión nueva.
+
+### Binario independiente (todas las plataformas)
+
+Cada [release de GitHub](https://github.com/johpaz/hiveCode/releases) publica un ejecutable por plataforma con el runtime y la TUI embebidos: **no hace falta instalar Bun**.
+
+| Sistema | Archivo |
+|---------|---------|
+| Linux x64 | `hive-code-linux-x64` (musl: `hive-code-linux-x64-musl`) |
+| Linux arm64 | `hive-code-linux-arm64` |
+| macOS Apple Silicon | `hive-code-macos-arm64` |
+| macOS Intel | `hive-code-macos-x64` |
+| Windows x64 | `hive-code-windows-x64.exe` |
+| Windows arm64 | `hive-code-windows-arm64.exe` |
+
+```bash
+# Linux / macOS
+chmod +x hive-code-linux-x64
+sudo mv hive-code-linux-x64 /usr/local/bin/hivecode
+hivecode --version
+
+# Verificar la descarga (SHA256SUMS va en cada release)
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+Si macOS bloquea el binario por haberlo descargado con el navegador, quita la marca de cuarentena: `xattr -d com.apple.quarantine hivecode`.
+
+> **Windows:** el binario de Windows es el menos probado de los siete. Además, la herramienta `shell_executor` no está soportada fuera de WSL2 (no hay `/bin/sh`): para el flujo completo usa hivecode dentro de una distro WSL2 con el binario de Linux. Ver [Sandbox del shell](#sandbox-del-shell-por-sistema-operativo).
+
+### Desde el código fuente
+
+```bash
 git clone https://github.com/johpaz/hiveCode.git hivecode
 cd hivecode
 bun install
-
-# Arrancar (gateway + TUI en el mismo proceso)
-bun run dev
-# o bien: hivecode
-
-# Primera vez: configurar un provider
-# F2 → tab Providers → elige la fila → Enter → pega la API key
-# (sin salir de la TUI)
+bun run dev        # compila la TUI en debug y arranca gateway + TUI en el mismo proceso
 ```
+
+Requiere Bun, Rust y Git. `bun run dev` compila la TUI con `cargo build`; para un binario optimizado, véase [Build y distribución](#build-y-distribución).
+
+---
+
+## Primer arranque
+
+`hivecode` abre la TUI y el gateway local en el mismo proceso. Antes de la primera tarea hay que configurar un provider, sin salir de la TUI o desde la línea de comandos:
+
+```text
+En la TUI:   F2 → tab Providers → elige la fila → Enter → pega la API key
+Por CLI:     hivecode provider add anthropic
+             hivecode provider set-model anthropic <modelo>
+             hivecode provider test
+Sin clave:   hivecode login        # habilita los modelos de hivecode-free
+```
+
+Las claves se guardan en el llavero del sistema (`Bun.secrets`), nunca en texto plano. Si falla algo, `hivecode doctor` hace un diagnóstico completo.
 
 ---
 
 ## Interfaz: TUI
 
-La interfaz es un **terminal Rust compilado** (`packages/hivetui/`) con renderer custom propio sobre `crossterm` — sin dependencias de Ratatui ni Tui-rs. Se comunica con el proceso Bun vía Unix socket IPC con colas de prioridad (`critical / normal / low`).
+La interfaz es un **terminal Rust compilado** (`packages/hivetui/`) con renderer custom propio sobre `crossterm` — sin dependencias de Ratatui ni Tui-rs. Se comunica con el proceso Bun vía IPC con colas de prioridad (`critical / normal / low`).
 
-### Navegación por tabs (teclas 1–5)
+### Vistas (teclas 1–5)
 
-| # | Tab | Contenido |
-|---|-----|-----------|
-| 1 | **FOCUS** | ThoughtStream (razonamiento BEE en tiempo real, solo modo PLAN) + FilMap de riesgo o ADRs |
-| 2 | **PLAN** | ADRs activos + strip de aprobación interactiva (APPROVAL mode) |
-| 3 | **CODE** | Diff activo o filemap ÷ panel lateral de workers (se adapta: 60/40 ↔ 40/60 con 3+ workers activos) |
-| 4 | **REVIEW** | Hallazgos del CodeReviewer + filemap de riesgo + veredicto (APROBADO / RECHAZADO) |
-| 5 | **DASHBOARD** | Grid de tarjetas de workers con estado, progreso, iteraciones y tokens |
+| # | Vista | Contenido |
+|---|-------|-----------|
+| 1 | **ENJAMBRE** | La oficina: un puesto por perfil, su herramienta en vuelo, esperas y agentes bloqueados por un MCP apagado. `Alt+↑/↓` selecciona, `Enter` abre CÓDIGO. |
+| 2 | **PLAN** | Spec, plan y fases + strip de aprobación interactiva (modo `approval`). |
+| 3 | **MESA** | La conversación con BEE y, a la derecha, su razonamiento en vivo. Mientras trabaja muestra un loader con los agentes y herramientas activas. |
+| 4 | **CÓDIGO** | Diff activo o mapa de archivos y panel lateral de workers. |
+| 5 | **REVISIÓN** | Hallazgos del Quality Gate, mapa de riesgo y veredicto. |
 
-La tab activa se enruta automáticamente según el estado de Bun (PLAN → Focus, CODE → Code, REVIEW → Review). El usuario puede fijarla pulsando 1–5.
+La vista activa se enruta automáticamente según el estado de la tarea y puede fijarse pulsando 1–5. Otras superficies: la **ficha del agente** (`i` o `/ficha <agente>`: capacidades, carga efectiva y decisiones del oráculo), el **registro** (`/logs`) y la **configuración** (`F2`).
 
-### Layout general
+### Cabecera, estado y mascota
 
-```
-╭─ ⬡ FOCUS[1]  ⬡ PLAN[2]  ⬡ CODE[3]  ⬡ REVIEW[4]  ⬡ DASHBOARD[5] ──── HH:MM:SS  $0.04 ─╮
-│                                                                                            │
-│  [contenido del tab activo — ver tabla arriba]                                             │
-│                                                                                            │
-│  ── checkpoint_bar ─────────────────────────────────────────────── [nivel 1 ✓ · nivel 2…] │
-│  ── conflict_bar ──────────────────────────────────────── [⚠ conflict: api_shape_mismatch] │
-├────────────────────────────────────────────────────────────────────────────────────────────┤
-│  > escribe tu tarea aquí_                                    (•ᴗ•) hive  [AUTO]  [tokens]  │
-╰────────────────────────────────────────────────────────────────────────────────────────────╯
-```
-
-### Paneles y widgets
-
-| Widget | Descripción |
-|--------|-------------|
-| `header` | Tabbar ⬡ + reloj + costo acumulado de sesión |
-| `statusbar` | Modo activo (plan/approval/auto), tokens totales, mensaje de estado de Bun |
-| `thought_stream` | Stream de razonamiento en tiempo real del BEE (solo PLAN mode) |
-| `workers_panel` | Lista vertical de workers con barra de progreso, iteraciones y nivel |
-| `dashboard_layout` | Grid de tarjetas de worker: estado, %, tokens por worker |
-| `history` | Historial scroll + navegación horizontal por entrada larga |
-| `checkpoint_bar` | Barra de checkpoints de recuperación por nivel; indica cuáles completaron |
-| `conflict_bar` | Alerta cuando `agent_conflicts` tiene entradas sin resolver |
-| `mascot` | BEE animada en el input: `(•ᴗ•)` auto · `\(^•^)/` plan · `(?•?)` approval |
-| `input` | Línea de entrada con autocompletado de slash commands |
+La cabecera muestra el modo (`PLAN` / `APPROVAL` / `AUTO`), los workers activos, el contexto de BEE (`ctx`), el provider y modelo, y el costo de la sesión. La **mascota** junto al nombre cambia de gesto con el modo —`\(^•^)/` plan, `(?•?)` approval, `(•ᴗ•)` auto— y mueve los ojos mientras el enjambre trabaja. Un toast sobre el input indica qué está haciendo el agente.
 
 ### Overlays y modales
 
@@ -131,257 +165,41 @@ cd packages/hivetui && cargo build --release
 
 ---
 
+---
+
 ## Modos de operación
 
 | Modo | Qué hace | Comando rápido |
 |------|----------|---------------|
-| `plan` | BEE enruta, ProductManager define el PRD y Architecture diseña el ADR/lista de fases. **Ningún archivo se modifica.** | `/mode set plan` |
-| `approval` | Checkpoint interactivo entre cada nivel. Muestra archivos a crear/modificar y pide confirmación. | `/mode set approval` |
+| `plan` | BEE enruta y el Planner define spec, plan y tareas. **Ningún archivo se modifica.** | `/mode set plan` |
+| `approval` | Hay un gate de aprobación antes de implementar y otro al converger. | `/mode set approval` |
 | `auto` | Ejecución completa sin intervención. | `/mode set auto` |
 
----
-
-## Arquitectura del enjambre
-
-### BEE — El Senior Dev orquestador
-
-**BEE** es el único punto de entrada para todas las solicitudes. Clasifica cada mensaje en una de estas acciones:
-
-| Acción BEE | Cuándo | Ejemplo |
-|------------|--------|---------|
-| `respond` | Saludo, pregunta, explicación — sin trabajo técnico | "hola", "¿qué hace este proyecto?" |
-| `fix` | Bug simple en ≤ 3 archivos, sin diseño arquitectónico | "el login falla con email en mayúsculas" |
-| `dispatch` | Feature puntual donde el coordinador es obvio | "agrega un test para el módulo auth" |
-| `architecture` | Implementación multi-módulo, nuevas entidades, ADR necesario | "implementa notificaciones en tiempo real" |
-
-### Flujo completo — Orquestación por niveles
-
-```
-Usuario escribe cualquier mensaje
-        │
-        ▼
-  ┌─────────────────────────────────────────────────────────────┐
-  │  BEE — Senior Dev  (siempre primero)                       │
-  │  Lee el proyecto, clasifica, consulta agent_memory         │
-  └─────────────────────────────────────────────────────────────┘
-        │
-  ┌─────┴─────────────────────────────────────────────────┐
-  │                                                       │
-  ▼                                                       ▼
-"respond" / "fix"                               "dispatch" / "architecture"
-  │                                                       │
-  ▼                                              Nivel 0: ProductManager
-BEE responde o aplica                            PRD + historias de usuario
-el fix directamente.                             + criterios de aceptación
-SIN activar ningún worker.                       (solo cuando BEE decide architecture)
-                                                         │
-                                                Nivel 1: Architecture
-                                                ADR + contratos TypeScript
-                                                Plan de fases dinámico
-                                                         │
-                                         Niveles siguientes (paralelo por dependencias):
-                                         Los coordinadores reales se determinan
-                                         dinámicamente según el plan.
-                                         Security se inyecta transversalmente
-                                         en niveles con engineers.
-                                                         │
-                                         CodeReviewer
-                                           (modelo máximo, veredicto final)
-                                                         │
-                                  ┌──────────────────────┴──────────────────┐
-                                  │ APROBADO                                │ RECHAZADO
-                                  ▼                                         ▼
-                           Librarian (post-sesión)                Workers relanzados
-                           Destila sesión → agent_memory          con constraints del reviewer
-```
-
-> **Modo inicial:** `auto`. BEE ejecuta el pipeline completo sin pausas. En modo `plan` solo muestra el ARNÉS sin ejecutar nada. En modo `approval` hace checkpoint entre cada nivel esperando confirmación del operador.
-
-Si un worker agota sus iteraciones sin completar, **ForensicAgent** se activa automáticamente antes de cualquier relanzamiento — analiza la causa raíz y recomienda `relanzar_con_constraint`, `reasignar` o `escalar_al_humano`.
-
-### Los 11 coordinadores del enjambre
-
-Roster consolidado (antes 13): DBA se fusionó en BackendEngineer, MobileEngineer se fusionó en FrontendEngineer, e Integration se fusionó en CodeReviewer — los tres eran "escritores paralelos" sobre un dominio que ya tenía dueño, generando costuras de conflicto sin dividir trabajo real del LLM. Se sumó **Verifier**, que reproduce los criterios de aceptación del PRD contra el sistema real — el hueco de verificación que ni QA ni Reviewer cubrían por sí solos.
-
-Cada worker es un **Bun Worker independiente** (proceso JS separado con su propio heap). Se comunican exclusivamente por paso de mensajes — nunca entre sí directamente. El blackboard en HiveDB es el único medio de coordinación.
+`Shift+Tab` recorre los modos. Delegar en modo `plan` está permitido para investigación y planificación, pero no concede permiso de escritura: `fs_write`, `fs_edit`, `shell_executor`, tests/build y commits siguen bloqueados.
 
 ---
 
-#### BEE — Coordinador Principal
-Único punto de entrada. Recibe la tarea del usuario, lee el contexto del proyecto con herramientas, consulta `agent_memory` de sesiones anteriores, y toma la decisión de ruteo. Escribe su razonamiento en el blackboard (`agent_context` type=`decision`). Observa el estado de todos los workers vía la vista `bee_awareness` y resuelve conflictos:
-- Severidad `low`/`medium` → resuelve autónomamente y continúa
-- Severidad `critical` o violación de ADR → emite **HALT** y escala al humano
+## Cómo funciona
 
-**Herramientas:** lectura completa del proyecto + escritura (puede aplicar fixes directamente)
+**BEE** es el único interlocutor del usuario. Clasifica cada solicitud y decide cuánta maquinaria activar: una pregunta se responde directo, un cambio pequeño se delega al Builder y una tarea compleja pasa por spec, plan, implementación, verificación y convergencia.
 
----
+| Perfil | Rol |
+|--------|-----|
+| **BEE** | Orquesta, delega con `task_delegate`, juzga la evidencia y consolida. |
+| **Planner** | Convierte un objetivo complejo en spec, plan y tareas con dueño (Spec Kit). No implementa. |
+| **Scout** | Investiga el repositorio sin modificar nada. |
+| **Builder** | Implementa una tarea acotada. |
+| **Quality Gate** | Reproduce los criterios de aceptación y revisa el diff. Termina con `VERDICT: PASS` o `FAIL`. |
+| **Spider** | Búsqueda, scraping y automatización de navegador. |
 
-#### 1. ProductManager
-Se activa cuando BEE clasifica como `architecture`, antes de cualquier diseño. Traduce requisitos ambiguos o de producto en un PRD estructurado: objetivo, historias de usuario, criterios de aceptación verificables, y constraints técnicos conocidos. Lo escribe en el blackboard como `type=decision` — Architecture lo usa como punto de partida, QAEngineer usa los criterios de aceptación para los tests.
+- **Paralelo:** varias delegaciones corren a la vez si son workers distintos y como máximo uno escribe el workspace. El tope por defecto son cuatro llamadas activas por sesión (`HIVE_MAX_AGENT_CONCURRENCY`, de 1 a 32).
+- **Reparación:** si el Quality Gate devuelve `FAIL`, hay hasta dos ciclos de reparación con `task_revise`.
+- **Especialistas temporales:** un responsable puede crear un especialista para una subtarea independiente. Hereda los permisos del padre y desaparece al terminar; la evidencia queda en HiveDB.
+- **Oráculos JEV/KEV:** modelos pequeños opcionales deciden qué contexto entra al prompt. No conceden permisos; sin ellos todo funciona por el camino clásico.
 
-**No inventa detalles de implementación. Herramientas:** solo lectura + `write_decision`
-
----
-
-#### 2. Architecture — Diseñador de Sistemas
-Se activa después de ProductManager cuando BEE clasifica como `architecture`. Lee el PRD del blackboard, los ADRs activos y los registros de `agent_memory` tipo `pattern` y `contract`. Produce:
-- Un **ADR** con contexto, opciones evaluadas y decisión justificada
-- Un **plan de fases con niveles de dependencia** — determina qué engineers del nivel 1 se despachan según el tipo de proyecto (web, mobile, ML, fullstack)
-- **Contratos TypeScript** entre módulos
-
-**Herramientas:** solo lectura + `write_decision`
+El detalle de herramientas, skills y especialidades por perfil está en [`docs/agent-harness.md`](./docs/agent-harness.md). El pipeline anterior de once coordinadores por niveles está archivado en [`docs/workers.md`](./docs/workers.md).
 
 ---
-
-#### 3. BackendEngineer — Ingeniero de Servidor
-Implementa APIs, lógica de negocio, acceso a datos y el **modelo de datos** (absorbe el rol de DBA: el schema es parte del contrato de backend, no un dominio aparte). Lee el plan de Architecture y los contratos del blackboard. Al terminar escribe los endpoints y el modelo de datos implementados con sus contratos exactos para que Frontend y DataScientist los consuman. El sub-agente `db-agent` sigue disponible para el diseño de datos.
-
-**Herramientas:** read + write completo + git + build/test/lint + `write_decision` + shell
-
----
-
-#### 4. FrontendEngineer — Ingeniero de Interfaz de Cliente
-Implementa UI de cliente — **web y mobile** (absorbe el rol de MobileEngineer: mismo trabajo de UI contra un único contrato de API). En modo web, verifica cada componente con `browser_screenshot` antes de darlo por completo; en modo mobile (React Native, Expo, iOS/SwiftUI, Android/Jetpack Compose) el ciclo de verificación es build+test. Si un endpoint que necesita aún no está definido en el blackboard, escribe una pregunta dirigida a Backend y continúa con las partes independientes. Al terminar documenta qué componentes creó y qué endpoints consume para que CodeReviewer valide la consistencia.
-
-**Herramientas:** read + write completo + git + build/test/lint
-
----
-
-#### 5. DataScientist — Científico de Datos / IA
-Implementa modelos ML, pipelines de datos y agentes de IA. Es fundamentalmente distinto a BackendEngineer — maneja PyTorch, scikit-learn, transformers y MLOps. Coordina con BackendEngineer vía blackboard para definir el contrato del endpoint de predicciones antes de que el backend lo implemente. Reporta métricas concretas (F1, AUC, accuracy) en el blackboard, no narrativas vagas.
-
-**Herramientas:** read + write + run_script + shell
-
----
-
-#### 6. SecurityAuditor — Auditor de Seguridad
-Opera en **dos modos simultáneos**:
-- **Transversal** durante el nivel de engineers: corre en paralelo con Backend/Frontend/DataScientist, detecta hallazgos CRITICAL y escribe constraints en el blackboard antes de que los workers afectados continúen
-- **Dedicado** en el nivel de QA: análisis completo del código producido
-
-Categorías que siempre audita: inyecciones SQL/command, secrets hardcodeados, autenticación débil, dependencias vulnerables, XSS, exposición de datos. **No modifica código.**
-
-**Herramientas:** solo lectura + `check_dependencies`
-
----
-
-#### 7. QAEngineer — Ingeniero de Calidad
-Escribe y ejecuta tests después de que todos los engineers del nivel anterior completaron. Lee los criterios de aceptación del PRD de ProductManager (si existe) para escribir casos verificables. El Context Compiler le inyecta `forensic_lessons` de sesiones anteriores para evitar repetir casos que ya causaron problemas. Si un test falla, escribe el fallo en el blackboard dirigido al worker responsable.
-
-**Herramientas:** read + write + test runner
-
----
-
-#### 8. DevOpsEngineer — Infraestructura y CI/CD
-Configura pipelines de CI/CD, Dockerfiles, Terraform y configuraciones de monitoreo. Se activa después de QA y Security porque necesita conocer el estado final del código. Lee el blackboard para entender qué cambios hicieron los otros workers y actualiza la infraestructura para soportarlos.
-
-**Herramientas:** read + write + git completo (incluyendo `git_create_pr`, `git_rollback`) + shell
-
----
-
-#### 9. Verifier — Verificación de Comportamiento *(nuevo)*
-Reproduce, de forma independiente, los criterios de aceptación del PRD de ProductManager contra el sistema real — no confía en que QA escribió los tests correctos ni en que el código "parece" correcto. Corre después de DevOps y antes de CodeReviewer: levanta build/servidor, ejecuta cada criterio, y prioriza siempre evidencia determinística (`code_test`, `code_build`, comandos exactos) sobre juicio propio. Si un criterio no es reproducible en el entorno, lo dice explícitamente en vez de asumir que cumple. **No modifica código.**
-
-**Herramientas:** solo lectura + `code_test`, `code_build`, `shell_executor`, `run_script`, `write_decision`
-
----
-
-#### 10. CodeReviewer — Gate de Calidad Final
-Siempre usa el **modelo de mayor capacidad disponible**, independientemente del modelo configurado para los otros workers. Lee todo el blackboard, los diffs contra checkpoints, hallazgos de Security, resultados de QA, y la evidencia de Verifier. Además, **cruza contratos entre módulos** (absorbe el rol de Integration): endpoints↔consumo, modelo de datos↔queries, tipos↔imports. El Context Compiler le inyecta toda la `agentMemory` del proyecto — llega con el historial completo de lo que funcionó y lo que no.
-
-Emite el veredicto invocando la tool **`submit_review_verdict`** (estructurada, no texto libre): un checklist de criterios de aceptación cruzados con evidencia real, categorías de estado (ok/warning/blocking), y razones específicas si rechaza.
-- `aprobado` — el trabajo cumple todos los criterios
-- `aprobado_con_observaciones` — aprobado, con puntos de mejora para próximas sesiones
-- `rechazado: {razones específicas}` — no puede pasar a producción sin correcciones
-
-Un test debilitado o eliminado para forzar la aprobación es motivo de rechazo automático. Si rechaza, BEE relanza los workers afectados con los constraints del rechazo. **No modifica código.**
-
-**Herramientas:** solo lectura + `write_decision` + `check_types` + `code_test`
-
----
-
-#### 11. ForensicAgent — Reflexión Forzada *(on-demand)*
-Se activa en dos casos: (1) un worker alcanza su límite de iteraciones sin completar, o (2) una tarea agota sus reintentos automáticos con backoff exponencial sin resolverse — en ese caso, el análisis forense se adjunta a la escalación a revisión humana en vez de escalar solo con el error crudo. El `CoordinatorManager` nunca relanza un worker que falló por límite sin esperar el análisis del ForensicAgent.
-
-Analiza el historial completo del worker fallido en el blackboard y produce:
-1. **Qué intentó** — cada enfoque en orden cronológico
-2. **Por qué falló** — causa raíz: `error_de_implementacion`, `conflicto_con_constraint`, `limitacion_del_entorno` o `problema_de_especificacion`
-3. **Recomendación** — exactamente una de tres:
-   - `relanzar_con_constraint: {constraint}` → el manager escribe el constraint y relanza
-   - `reasignar_a: {worker}` → la tarea no corresponde a este worker
-   - `escalar_al_humano: {opciones}` → requiere decisión humana
-
-**No modifica código. Herramientas:** solo lectura del blackboard y workspace
-
----
-
-#### 12. Librarian — Memoria Compuesta *(on-demand, post-sesión)*
-Se activa solo cuando CodeReviewer emitió `APROBADO` o `APROBADO_CON_OBSERVACIONES`. Lee el blackboard completo y **destila** — no transcribe — el conocimiento accionable en la colección `agent_memory` de `./hivecode`. Escribe patrones, antipatrones, contratos, convenciones y lecciones forenses. Incrementa `confirmed_count` de registros que la sesión validó y depreca los que ya no aplican (`refuted_count > confirmed_count + 2`). El conocimiento no se borra — se depreca con trazabilidad.
-
-**No modifica código de producción. Herramientas:** solo lectura + `write_memory`
-
----
-
-### Paralelismo real por niveles
-
-El `CoordinatorManager` agrupa las fases definidas por Architecture en niveles de dependencia. Todos los workers de un nivel se inician **en el mismo tick** con `Promise.all()`. El siguiente nivel solo comienza cuando todos los del nivel anterior reportaron `done`.
-
-```
-BEE (siempre primero)
-  │
-  ├─ respond / fix ───────► respuesta directa o fix aplicado por BEE
-  │
-  └─ architecture ────────► ProductManager ──► Architecture
-                                                  │
-                                                  ▼
-                                        Plan de fases dinámico
-                                                  │
-                              Nivel 0 ──► Engineers según el plan
-                                        (backend absorbe DBA, frontend absorbe
-                                         mobile, data_scientist)
-                                        + SecurityAuditor transversal
-                                                  │
-                              Nivel 1 ──► QA / DevOps según dependencias
-                                                  │
-                              Nivel N ──► Verifier (reproduce criterios del PRD)
-                                                  │
-                              Nivel N+1 ► CodeReviewer (modelo máximo,
-                                                          absorbe Integration)
-                                                  │
-                              Post-sesión ► Librarian (solo si APROBADO)
-```
-
-La tabla `worker_activity` registra `started_at` y `completed_at` con `level`. Todos los coordinadores de un mismo nivel se lanzan en paralelo con `Promise.all()`.
-
----
-
-## Memoria compuesta entre sesiones
-
-El **Librarian** destila el conocimiento de cada sesión aprobada en la colección `agentMemory` de HiveDB. El **Context Compiler** la consulta por índice antes de despachar cada worker, con filtrado por dominio: cada worker recibe solo el tipo de conocimiento relevante para su rol.
-
-| Worker | Tipos de memoria que recibe |
-|--------|----------------------------|
-| Architecture | `pattern`, `contract` |
-| SecurityAuditor | `antipattern` |
-| QAEngineer | `forensic_lesson` |
-| Verifier | `contract`, `forensic_lesson` |
-| CodeReviewer | todos los tipos |
-| demás workers | filtrado por relevancia semántica (HiveDB index) |
-
-Tipos de conocimiento persistido:
-
-| Tipo | Qué registra |
-|------|-------------|
-| `pattern` | Enfoque que funcionó y fue aprobado por el CodeReviewer |
-| `antipattern` | Enfoque que causó fallos o fue rechazado |
-| `contract` | Interfaz establecida entre módulos |
-| `convention` | Convención del proyecto descubierta durante la sesión |
-| `forensic_lesson` | Lección de fallos analizados por el ForensicAgent |
-
-Los registros tienen `confirmed_count` / `refuted_count`. El sistema depreca automáticamente conocimiento que ya no aplica (`refuted_count > confirmed_count + 2`). El conocimiento no se borra — se depreca con trazabilidad completa.
-
----
-
 ## Learning Harness — Autocorrección
 
 El sistema detecta sus propios fallos durante la ejecución y genera propuestas de mejora que el operador puede revisar y aplicar. No hay autocorrección automática — **las propuestas en estado `pending` no tienen ningún efecto** hasta que el operador las apruebe.
@@ -421,13 +239,15 @@ hivecode agent edit <name>
 
 ```bash
 hivecode                               # Iniciar REPL/TUI interactivo
+hivecode --version                     # Versión instalada
 hivecode doctor                        # Diagnóstico completo
 hivecode doctor --fix                  # (reservado) correcciones automáticas — aún no implementado
 
 hivecode agent list [--role=<rol>]     # Listar agentes
 hivecode agent inspect <name>          # Ver detalles de un agente
-hivecode agent edit <name>             # Editar system prompt de un agente
-hivecode agent reset <name>            # Restaurar system prompt de un agente
+hivecode agent edit <name>             # Editar instrucciones personales de un agente
+hivecode agent configure <name>        # Configurar modelo y límites
+hivecode agent reset <name>            # Restaurar instrucciones de un agente
 
 hivecode provider list                 # Listar providers configurados
 hivecode provider add [name]           # Añadir provider de IA
@@ -446,7 +266,6 @@ hivecode exit                          # Detener el sistema
 ```
 
 ---
-
 ## Comandos internos del TUI (slash commands)
 
 ```
@@ -578,43 +397,36 @@ PRAGMA mmap_size    = 268435456;  -- 256 MB
 ## Build y distribución
 
 ```bash
-bun run build          # Bundle + workers + TUI
-bun run build:binary   # Binario standalone (Linux)
+bun run build             # Skills + TUI release + bundle del CLI y workers (dist/)
+bun run build:binary      # Binario standalone para Linux x64
 bun run build:binary:all  # Binarios Linux, macOS y Windows
-bun run lint           # Type check
-bun test               # Tests unitarios
+bun run lint              # Type check
+bun run test              # Tests (aísla la DB y el llavero)
 bun run test:integration  # Tests de integración
 ```
 
-Artefactos del build:
+### Publicar una versión
 
+El repositorio versiona **en lockstep**: un release es un único número en todos los `package.json`, en `Cargo.toml` y en `Cargo.lock`.
+
+```bash
+scripts/release.sh patch --dry-run   # verifica (tipos, tests Bun y Rust) sin cambiar nada
+scripts/release.sh patch --push      # sube la versión, crea el tag vX.Y.Z y lo empuja
 ```
-dist/
-├── hivecode.js               # Entry point
-├── bee.worker.js             # Coordinador principal
-├── architecture.worker.js
-├── product-manager.worker.js
-├── backend.worker.js         # absorbe el rol de DBA
-├── frontend.worker.js        # absorbe el rol de Mobile
-├── data-scientist.worker.js
-├── security.worker.js
-├── test.worker.js
-├── devops.worker.js
-├── verifier.worker.js        # nuevo: reproduce criterios de aceptación del PRD
-├── reviewer.worker.js        # absorbe el rol de Integration
-├── librarian.worker.js       # On-demand: post-sesión aprobada
-├── forensic.worker.js        # On-demand: análisis de fallos
-├── tool.worker.js            # Pool de herramientas pesadas
-└── subagent.worker.js        # Sub-agentes especializados
-```
+
+El tag dispara `release.yml`: verifica, compila los binarios de cada plataforma, crea la release de GitHub con `SHA256SUMS` y publica `@johpaz/hivecode` en npm. `scripts/set-version.ts` es la única fuente de verdad del número.
 
 ---
 
 ## Requisitos
 
-- [Bun](https://bun.sh) >= 1.4.2
-- [Rust](https://rustup.rs) + [crossterm](https://crates.io/crates/crossterm) (para compilar el TUI en `packages/hivetui/`)
-- Git
+| Para… | Necesitas |
+|-------|-----------|
+| Usar el binario de Releases | Nada más. |
+| Instalar con npm | [Bun](https://bun.sh) >= 1.4.2 y Node/npm. Linux x64. |
+| Compilar desde el código fuente | Bun >= 1.4.2, [Rust](https://rustup.rs) y Git. |
+
+Un llavero del sistema (libsecret/D-Bus en Linux, Keychain en macOS, Credential Manager en Windows) para guardar las API keys. Sin él, `hivecode doctor` lo reporta como error.
 
 ### Sandbox del shell por sistema operativo
 
