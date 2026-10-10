@@ -1,7 +1,7 @@
 {
   "name": "@johpaz/hivecode-cli",
   "version": "0.1.0",
-  "description": "hivecode CLI \u2014 Multi-AI coding tool. Console-first.",
+  "description": "hivecode CLI — Multi-AI coding tool. Console-first.",
   "bin": {
     "hivecode": "./dist/hivecode.js"
   },
