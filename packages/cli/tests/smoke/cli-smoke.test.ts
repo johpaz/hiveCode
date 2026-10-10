@@ -15,6 +15,23 @@ import { tmpdir } from "node:os"
 
 const CLI = path.resolve(import.meta.dir, "../../src/index.ts")
 
+/**
+ * ¿Hay llavero del sistema? `doctor` corre en un subproceso con el `Bun.secrets`
+ * real, y sin libsecret/D-Bus (un runner de CI, un contenedor) reporta
+ * "Secrets ✗" y sale con 1: es lo correcto, no un fallo. Estos tests solo tienen
+ * sentido donde el llavero existe.
+ */
+async function systemKeystoreAvailable(): Promise<boolean> {
+  const probe = Bun.spawn({
+    cmd: [process.execPath, "-e", "await Bun.secrets.get({ service: 'hivecode-smoke-probe', name: 'probe' })"],
+    stdout: "ignore",
+    stderr: "ignore",
+    stdin: "ignore",
+  })
+  return (await probe.exited) === 0
+}
+const HAS_KEYSTORE = await systemKeystoreAvailable()
+
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
 async function runCli(
@@ -72,7 +89,7 @@ describe("smoke: --version", () => {
 // ─── doctor ───────────────────────────────────────────────────────────────────
 
 describe("smoke: doctor", () => {
-  test("realiza diagnóstico completo y termina con exit 0", async () => {
+  test.skipIf(!HAS_KEYSTORE)("realiza diagnóstico completo y termina con exit 0", async () => {
     // ARMAR: DB real en ~/.hivecode
     // ACTUAR
     const { exitCode, stdout } = await runCli(["doctor"])
@@ -98,7 +115,7 @@ describe("smoke: doctor", () => {
     expect(stdout).toMatch(/skill|Skill/)
   })
 
-  test("resumen muestra checks pasados", async () => {
+  test.skipIf(!HAS_KEYSTORE)("resumen muestra checks pasados", async () => {
     const { stdout } = await runCli(["doctor"])
     // NOTAR — siempre hay al menos 1 check pasado
     expect(stdout).toMatch(/\d+ checks? pas/)

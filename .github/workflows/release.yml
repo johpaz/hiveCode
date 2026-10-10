@@ -34,6 +34,9 @@ jobs:
           workspaces: packages/hivetui
 
       - run: bun install --frozen-lockfile
+      # Los E2E de la TUI ejecutan packages/hivetui/target/debug/hivetui.
+      - name: Build TUI (debug)
+        run: cargo build --locked --manifest-path packages/hivetui/Cargo.toml
       - name: Typecheck
         run: bun run lint
       - name: Tests Bun
