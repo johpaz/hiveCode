@@ -78,6 +78,11 @@ test("invalidates packets on uncommitted edits, same-mtime edits and deletion", 
   const fresh = await buildContextPacket(scope, {paths: ["src/lib.rs"]})
   expect(fresh.context).toContain("NEW_SOURCE")
   expect(fresh.version).not.toBe(packet.version)
+  // reconcile compara mtime y no hashea el repo: la edición con mtime intacto ya
+  // la cubrió el hash del paquete; aquí, un cambio con mtime nuevo.
+  writeFileSync(source, "pub fn render_office() { println!(\"MTIME_SOURCE\"); }")
+  const later = new Date(Date.now() + 5_000)
+  utimesSync(source, later, later)
   expect((await reconcileCodeIndex("a", scope.workspace)).reindexed).toBeGreaterThan(0)
   unlinkSync(source)
   await updateFileIndex("a", source, scope.workspace)

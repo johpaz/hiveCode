@@ -2,6 +2,7 @@ use crate::{
     state::{AppState, ReplMode, WorkerStatus},
     term::{Canvas, Color, Rect, Style, AMBER_BRIGHT, AMBER_DIM, BG_PANEL, DIM, GREEN, SECONDARY, WHITE},
     ui::{cell_width, fmt_tokens, truncate_cells},
+    widgets::components::pulse_color,
 };
 
 const BORDER_SUBTLE: Color = Color::Rgb { r: 35, g: 30, b: 20 };
@@ -30,13 +31,14 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
         // ⬡ hiveCode + mascot face (expression changes with mode)
         canvas.print(x, y, "⬡ hiveCode", Style::new().fg(AMBER_BRIGHT).bold());
         x += 10;
-        let face = match state.session.mode {
-            ReplMode::Plan     => "\\(^•^)/",
-            ReplMode::Approval => "(?•?)",
-            ReplMode::Auto     => "(•ᴗ•)",
+        let face = mascot_face(&state.session.mode, state.running, state.anim_tick);
+        let face_color = if state.running {
+            pulse_color(GREEN, AMBER_BRIGHT, state.anim_tick)
+        } else {
+            GREEN
         };
-        canvas.print(x + 1, y, face, Style::new().fg(GREEN).bold());
-        x += 1 + cell_width(face) as u16;
+        canvas.print(x + 1, y, &face, Style::new().fg(face_color).bold());
+        x += 1 + cell_width(&face) as u16;
 
         let sep = "  ·  ";
         macro_rules! sep {
@@ -115,6 +117,28 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     }
 }
 
+/// Cara de la mascota. En reposo muestra la expresión del modo; mientras el
+/// agente trabaja los ojos se mueven y parpadean con `anim_tick` (8 frames de
+/// 120ms). Todos los frames de un modo miden lo mismo para que el resto del
+/// header no se mueva.
+fn mascot_face(mode: &ReplMode, running: bool, tick: u8) -> String {
+    let (left, eye, mouth, right) = match mode {
+        ReplMode::Plan     => ("\\(", '^', '•', ")/"),
+        ReplMode::Approval => ("(", '?', '•', ")"),
+        ReplMode::Auto     => ("(", '•', 'ᴗ', ")"),
+    };
+    let eyes = if running {
+        // mira alrededor, parpadea, mira de nuevo
+        const FRAMES: [Option<char>; 8] = [
+            None, Some('°'), None, Some('-'), None, Some('°'), Some('o'), Some('-'),
+        ];
+        FRAMES[(tick % 8) as usize].unwrap_or(eye)
+    } else {
+        eye
+    };
+    format!("{left}{eyes}{mouth}{eyes}{right}")
+}
+
 fn mode_badge(mode: &ReplMode) -> (&'static str, Color, Color) {
     match mode {
         ReplMode::Plan     => (" PLAN ",       Color::Rgb { r: 17, g: 24, b: 39  }, Color::Rgb { r: 74, g: 158, b: 255 }),
@@ -174,6 +198,16 @@ mod tests {
         assert!(row.contains("bee-model"), "{row}");
         assert!(row.contains("ctx:32.0k / 128.0k (25%)"), "{row}");
         assert!(!row.contains("900.0k"));
+    }
+
+    #[test]
+    fn mascot_eyes_move_only_while_running_and_keep_width() {
+        let idle = mascot_face(&ReplMode::Auto, false, 3);
+        assert_eq!(idle, "(•ᴗ•)");
+        let frames: Vec<String> = (0..8).map(|t| mascot_face(&ReplMode::Auto, true, t)).collect();
+        assert!(frames.iter().any(|f| f != &idle));
+        assert!(frames.iter().all(|f| cell_width(f) == cell_width(&idle)));
+        assert_eq!(mascot_face(&ReplMode::Plan, false, 0), "\\(^•^)/");
     }
 
     #[test]

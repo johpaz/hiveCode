@@ -129,16 +129,16 @@ describe("E2E flow: full auto-mode task lifecycle", () => {
       })
       s.ipc.send({ type: "status", running: false, msg: "Listo" })
 
+      // `Status{running:false}` es el único cierre del turno: el frame que lo
+      // refleja ya trae la respuesta final, no hay un frame posterior.
       const done = await waitForFrame(
-        s.iter, f => !f.running && f.tab === "mesa", 5000, "completed task on focus",
+        s.iter,
+        f => !f.running && f.tab === "mesa" && frameContains(f, "SENTINEL_FINAL"),
+        5000, "completed task with final answer on focus",
       )
       expect(done.running).toBe(false)
       expect(done.tab).toBe("mesa")
-
-      const finalFrame = await waitForFrame(
-        s.iter, f => frameContains(f, "SENTINEL_FINAL"), 5000, "final answer",
-      )
-      expect(frameContains(finalFrame, "SENTINEL_FINAL")).toBe(true)
+      expect(frameContains(done, "SENTINEL_FINAL")).toBe(true)
     } finally {
       s.dispose()
     }
@@ -231,11 +231,13 @@ describe("E2E flow: dashboard_snapshot", () => {
         halt: { active: false },
       }, { priority: "low" })
 
-      // The header renders on every tab, so this is routing-independent.
+      // El header se pinta en todas las pestañas, así que no depende del routing.
+      // Muestra el costo de la sesión; el medidor de contexto es el de BEE
+      // (`ctx:`), no el total de tokens del snapshot.
       const frame = await waitForFrame(
-        s.iter, f => /45[.,]?678|45\.7k|45k/i.test(frameText(f)), 5000, "token count in header",
+        s.iter, f => (f.rows[0] ?? "").includes("$0.12"), 5000, "cost in header",
       )
-      expect(frameText(frame)).toMatch(/45[.,]?678|45\.7k|45k/i)
+      expect(frame.rows[0]).toContain("$0.12")
     } finally {
       s.dispose()
     }
@@ -621,7 +623,9 @@ describe("E2E flow: ficha del especialista", () => {
       // Esperar a que el roster esté en pantalla antes de teclear: el socket y
       // el stdin son canales distintos y `i` puede procesarse antes de que
       // llegue el roster.
-      await waitForFrame(s.iter, f => frameContains(f, "2⬡"), 5000, "roster aplicado")
+      // El ROSTER deja a Quetzal con `obscura` apagado: el badge del Enjambre
+      // cuenta agentes bloqueados (`1✗`) y sólo muestra `2⬡` cuando no hay ninguno.
+      await waitForFrame(s.iter, f => frameContains(f, "1✗"), 5000, "roster aplicado")
       // `init` deja la vista en MESA; el usuario va a ENJAMBRE con la tecla 1.
       s.type("1")
       // El predicado exige vista Y contenido: esperar solo por el texto sería
@@ -642,7 +646,7 @@ describe("E2E flow: ficha del especialista", () => {
     const s = await startSession("auto")
     try {
       s.ipc.send(ROSTER as never)
-      await waitForFrame(s.iter, f => frameContains(f, "2⬡"), 5000, "roster aplicado")
+      await waitForFrame(s.iter, f => frameContains(f, "1✗"), 5000, "roster aplicado")
       s.ipc.send(LOADOUT as never)
       await waitForFrame(s.iter, () => true, 3000, "carga aplicada")
       // `i` abre la ficha del primer especialista del roster.

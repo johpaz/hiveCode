@@ -10,8 +10,40 @@ permissions:
   id-token: write
 
 jobs:
+  verify:
+    name: Verificar antes de publicar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Un tag sólo se publica si está en main: evita liberar una rama a medias.
+      - name: El tag pertenece a main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::el tag ${GITHUB_REF_NAME} no está en main"; exit 1; }
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.3"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/hivetui
+
+      - run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run lint
+      - name: Tests Bun
+        run: bun run test --parallel
+      - name: Tests Rust (TUI)
+        run: cargo test --locked --manifest-path packages/hivetui/Cargo.toml
+
   build:
     name: Build ${{ matrix.target }}
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -19,24 +51,31 @@ jobs:
         include:
           - os: ubuntu-latest
             target: bun-linux-x64
+            rust: x86_64-unknown-linux-gnu
             artifact: hive-code-linux-x64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: bun-linux-arm64
+            rust: aarch64-unknown-linux-gnu
             artifact: hive-code-linux-arm64
           - os: ubuntu-latest
             target: bun-linux-x64-musl
+            rust: x86_64-unknown-linux-musl
             artifact: hive-code-linux-x64-musl
           - os: macos-latest
             target: bun-darwin-x64
+            rust: x86_64-apple-darwin
             artifact: hive-code-macos-x64
           - os: macos-latest
             target: bun-darwin-arm64
+            rust: aarch64-apple-darwin
             artifact: hive-code-macos-arm64
           - os: windows-latest
             target: bun-windows-x64
+            rust: x86_64-pc-windows-msvc
             artifact: hive-code-windows-x64.exe
           - os: windows-latest
             target: bun-windows-x64-arm64
+            rust: aarch64-pc-windows-msvc
             artifact: hive-code-windows-arm64.exe
 
     steps:
@@ -45,20 +84,34 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.3"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/hivetui
+          key: ${{ matrix.rust }}
+
+      - name: Install musl tools
+        if: contains(matrix.rust, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
-      - name: Build TUI binary (Linux/macOS only)
-        if: runner.os != 'Windows'
+      # La TUI va embebida en el binario vía packages/hivetui/hivetui.bin. Si
+      # falla, el build falla: un release sin TUI no arranca.
+      - name: Build TUI
+        shell: bash
         run: |
-          if command -v cargo &>/dev/null; then
-            cd packages/hivetui && cargo build --release
-          else
-            echo "Cargo not available, skipping TUI binary"
-          fi
-        continue-on-error: true
+          cargo build --release --locked --target ${{ matrix.rust }} \
+            --manifest-path packages/hivetui/Cargo.toml
+          BIN=packages/hivetui/target/${{ matrix.rust }}/release/hivetui
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          cp "$BIN" packages/hivetui/hivetui.bin
+          ls -la packages/hivetui/hivetui.bin
 
       - name: Build CLI binary
         run: |
@@ -87,6 +140,9 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Checksums
+        run: cd artifacts && sha256sum * > SHA256SUMS
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -99,7 +155,7 @@ jobs:
 
   publish-npm:
     name: Publish to npm
-    needs: release
+    needs: [verify, release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -107,7 +163,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.3"
 
       - name: Setup Node.js for npm publish
         uses: actions/setup-node@v4
@@ -116,7 +172,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Set version from tag
         run: |

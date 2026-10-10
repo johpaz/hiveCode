@@ -613,11 +613,12 @@ impl AppState {
                 self.history.entries.push(HistoryEntry { role: r, content, agent, timestamp });
                 self.history.scroll = 0;
                 self.history.selected = Some(self.history.entries.len().saturating_sub(1));
-                if r == Role::Assistant {
-                    // La respuesta llegó → detener live-activity y mostrarla ya.
-                    // No esperar a Status{running:false}; tui-launcher los envía en orden
-                    // pero queremos el cambio de estado en el mismo frame.
-                    self.running = false;
+                // Un `assistant` NO cierra el turno: el coordinador agrega una
+                // entrada por cada narración a mitad de tarea ("Executing: …").
+                // El fin de turno lo dicen `AssistantDone` y `Status{running:false}`;
+                // apagar `running` aquí congelaba cara, toast y spinner mientras
+                // los agentes seguían trabajando.
+                if r == Role::Assistant && !self.running {
                     if self.session.mode == ReplMode::Plan && self.plan.current.is_some() {
                         self.recommend_layout(TabId::Plan, LayoutStage::Planning, "plan listo -> Plan");
                     } else {
@@ -1861,6 +1862,22 @@ mod tests {
         // Switching sessions is not a mode change — the user's choice stands.
         assert_eq!(state.session.mode, ReplMode::Auto);
         assert_eq!(state.session.session_id, "s-1");
+    }
+
+    #[test]
+    fn mid_turn_assistant_narration_keeps_the_turn_running() {
+        let mut state = AppState::default();
+        state.apply_message(crate::ipc::BunMessage::Status { running: true, msg: "x".into() });
+        state.apply_message(crate::ipc::BunMessage::HistoryAppend {
+            role: "assistant".into(),
+            content: "Executing: task_delegate".into(),
+            agent: Some("bee".into()),
+            timestamp: None,
+            content_type: None,
+        });
+        assert!(state.running, "una narración no termina el turno");
+        state.apply_message(crate::ipc::BunMessage::Status { running: false, msg: "ok".into() });
+        assert!(!state.running);
     }
 
     #[test]

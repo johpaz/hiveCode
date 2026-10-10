@@ -24,8 +24,8 @@ jobs:
         with:
           # Pin exacto: Bun 1.4.1 traía dos regresiones (renombrado de `var` en
           # `bun build`, que rompía imports con SyntaxError, y una fuga de
-          # AsyncLocalStorage) que sólo 1.4.2 corrige.
-          bun-version: "1.4.2"
+          # AsyncLocalStorage) que sólo 1.4.2 y posteriores corrigen; se fija 1.4.3, la que se usa en local.
+          bun-version: "1.4.3"
 
       - run: bun install --frozen-lockfile
 
@@ -34,5 +34,19 @@ jobs:
 
       # --parallel reparte los archivos entre procesos (uno por núcleo) e implica
       # --isolate. Medido en este repo: 23,6 s -> 18,1 s, con resultados idénticos.
+      # `bun run test` lleva el --preload que aísla la DB; sin él los tests
+      # tocarían la base real.
       - name: Tests
-        run: bun test --parallel
+        run: bun run test --parallel
+
+  tui:
+    name: TUI (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/hivetui
+      - name: Tests
+        run: cargo test --locked --manifest-path packages/hivetui/Cargo.toml

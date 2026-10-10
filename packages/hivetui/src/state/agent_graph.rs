@@ -58,7 +58,11 @@ pub fn tier_for(name: &str) -> AgentTier {
 /// fauna alias that the backend ships in `roster_snapshot`, keeping the same
 /// fallback for roles the swarm has never heard of.
 pub fn display_name(role: &str) -> String {
-    match role {
+    // El backend manda ids en minúscula, pero un snapshot o un perfil puede
+    // traer "BEE", "Builder" o "Quality Gate": se normaliza antes de buscar en
+    // la tabla para que no caigan al nombre crudo.
+    let key = role.trim().to_lowercase().replace([' ', '-'], "_");
+    match key.as_str() {
         "bee" => "Abeja Reina".to_string(),
         "product_manager" => "Ocelote".to_string(),
         "architecture" | "planner" => "Cóndor".to_string(),
@@ -68,12 +72,12 @@ pub fn display_name(role: &str) -> String {
         "security" => "Jaguar".to_string(),
         "test" => "Chapulín".to_string(),
         "devops" => "Águila".to_string(),
-        "verifier" | "reviewer" | "quality" => "Puma".to_string(),
+        "verifier" | "reviewer" | "quality" | "quality_gate" => "Puma".to_string(),
         "forensic" | "forensic_agent" => "Zorro".to_string(),
         "librarian" => "Armadillo".to_string(),
         "spider" => "Araña".to_string(),
         "scout" => "Halcón".to_string(),
-        "tool" | "tool_worker" => "Cangrejo".to_string(),
+        "tool" | "tool_worker" | "builder" => "Cangrejo".to_string(),
         _ => capitalize(role),
     }
 }

@@ -175,8 +175,15 @@ fn render_providers(canvas: &mut Canvas, area: Rect, state: &mut AppState, regis
         }
         let style = if is_sel { Style::new().fg(WHITE).bold() } else { Style::new().fg(SECONDARY) };
         let label = if p.is_active { format!("{}  [Activo]", p.name) } else { p.name.clone() };
-        canvas.print(area.x + 2, y, &truncate(&label, area.w.saturating_sub(4) as usize),
+        // Columna Key: sin ella no hay forma de ver a qué provider le falta la clave.
+        let (glyph, glyph_style) = match p.key_state() {
+            ProviderKeyState::Ready        => ("✓", Style::new().fg(GREEN).bold()),
+            ProviderKeyState::Missing      => ("?", Style::new().fg(AMBER).bold()),
+            ProviderKeyState::BrowserLogin => ("~", Style::new().fg(SECONDARY).bold()),
+        };
+        canvas.print(area.x + 2, y, &truncate(&label, area.w.saturating_sub(9) as usize),
             if p.is_active { Style::new().fg(GREEN).bold() } else { style });
+        canvas.print(area.right().saturating_sub(4), y, glyph, glyph_style);
 
         if register_hits {
             state.hit_map.push(MouseRegion::new(

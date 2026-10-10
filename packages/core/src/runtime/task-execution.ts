@@ -48,11 +48,27 @@ async function stopChildren(children: ProcessIdentity[]): Promise<void> {
   if (children.some(alive)) throw new Error("Owned subprocess did not stop");
 }
 
+/**
+ * `Bun.spawn` hereda `stderr` del proceso padre cuando no se indica. Dentro de
+ * la TUI eso escribe la salida de un `bun test` o un `tsc` fallido directamente
+ * sobre la pantalla alternativa y la corrompe, además de dejar `proc.stderr`
+ * vacío para quien lo lee. Aquí nunca se hereda: sin valor explícito se captura.
+ */
+function withCapturedStdio(args: any[]): any[] {
+  const asObject = !Array.isArray(args[0]) && args[0] && typeof args[0] === "object";
+  const options = (asObject ? args[0] : args[1]) ?? {};
+  const fixed = { ...options };
+  if (fixed.stderr === undefined || fixed.stderr === "inherit") fixed.stderr = "pipe";
+  if (fixed.stdout === "inherit") fixed.stdout = "pipe";
+  if (fixed.stdin === undefined || fixed.stdin === "inherit") fixed.stdin = "ignore";
+  return asObject ? [fixed, ...args.slice(1)] : [args[0], fixed, ...args.slice(2)];
+}
+
 /** Tracks only subprocess handles and descendants created within this tool call. */
 export const spawnTaskProcess: typeof Bun.spawn = ((...args: any[]) => {
   const scope = execution.getStore();
   scope?.signal.throwIfAborted();
-  const proc = (Bun.spawn as any)(...args);
+  const proc = (Bun.spawn as any)(...withCapturedStdio(args));
   if (scope) {
     const abort = () => {
       const children = descendants(proc.pid);

@@ -276,16 +276,31 @@ fn render_live_activity(canvas: &mut Canvas, area: Rect, state: &AppState, start
     let spinner_frames = &["◐", "◓", "◑", "◒"];
     let spinner = spinner_frames[(state.anim_tick as usize) % spinner_frames.len()];
 
-    // Header: show active coordinator or generic processing
-    if let Some(first_active) = active_workers.first() {
-        let display = if first_active.display_name.is_empty() {
-            agent_display_name(&first_active.name)
-        } else {
-            first_active.display_name.clone()
-        };
-        let col = worker_color(&first_active.name);
-        let header = format!("{} {} está trabajando…", spinner, display);
-        canvas.print(area.x + 2, y, &header, Style::new().fg(col).bold());
+    // Agentes activos: workers en running + quien tiene una tool en vuelo.
+    let mut agents: Vec<String> = Vec::new();
+    for w in &active_workers {
+        let name = if w.display_name.is_empty() { agent_display_name(&w.name) } else { w.display_name.clone() };
+        if !agents.contains(&name) { agents.push(name); }
+    }
+    let mut calls: Vec<&crate::state::ToolCall> = state.swarm.in_flight.values()
+        .filter(|c| !c.settled)
+        .collect();
+    calls.sort_by(|a, b| a.started_at.cmp(&b.started_at).then_with(|| a.call_id.cmp(&b.call_id)));
+    for c in &calls {
+        let name = agent_display_name(&c.agent);
+        if !agents.contains(&name) { agents.push(name); }
+    }
+
+    // Header: quién trabaja (todos los agentes) o procesamiento genérico
+    if !agents.is_empty() {
+        let col = active_workers.first()
+            .map(|w| worker_color(&w.name))
+            .or_else(|| calls.first().map(|c| worker_color(&c.agent)))
+            .unwrap_or(AMBER_BRIGHT);
+        let verb = if agents.len() == 1 { "está trabajando" } else { "están trabajando" };
+        let header = format!("{} {} {}…", spinner, agents.join(" · "), verb);
+        let shown: String = header.chars().take(area.w.saturating_sub(4) as usize).collect();
+        canvas.print(area.x + 2, y, &shown, Style::new().fg(col).bold());
         y += 1;
     } else if !state.thought.chunks.is_empty() {
         let last_chunk = state.thought.chunks.last().unwrap();
@@ -297,6 +312,26 @@ fn render_live_activity(canvas: &mut Canvas, area: Rect, state: &AppState, start
     } else {
         let header = format!("{} Procesando…", spinner);
         canvas.print(area.x + 2, y, &header, Style::new().fg(AMBER_BRIGHT).bold());
+        y += 1;
+    }
+
+    // Herramientas en vuelo, con su propio spinner
+    let max_calls = (area.bottom().saturating_sub(y + 2) as usize).min(5);
+    for c in calls.iter().take(max_calls) {
+        let line = format!(
+            "{} {} · {} {}",
+            spinner,
+            agent_display_name(&c.agent),
+            c.tool,
+            c.args_summary.replace('\n', " "),
+        );
+        let shown: String = line.trim_end().chars().take(area.w.saturating_sub(6) as usize).collect();
+        canvas.print(area.x + 3, y, &shown, Style::new().fg(c.bee_state.color()));
+        y += 1;
+    }
+    if calls.len() > max_calls {
+        let more = format!("  +{} herramientas más", calls.len() - max_calls);
+        canvas.print(area.x + 3, y, &more, Style::new().fg(DIM));
         y += 1;
     }
 
