@@ -16,7 +16,7 @@ for arg in "$@"; do
     --dry-run) DRY=1 ;;
     -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
     -*) echo "opción desconocida: $arg" >&2; exit 2 ;;
-    *) BUMP="$arg" ;;
+    *) BUMP="${arg#v}" ;;  # acepta v0.0.1 o 0.0.1
   esac
 done
 [ -n "$BUMP" ] || { echo "uso: scripts/release.sh patch|minor|major|X.Y.Z [--push] [--skip-tests] [--dry-run]" >&2; exit 2; }
