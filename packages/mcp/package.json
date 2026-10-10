@@ -1,6 +1,6 @@
 {
   "name": "@johpaz/hivecode-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "hivecode MCP Client — Model Context Protocol client layer",
   "main": "./src/index.ts",

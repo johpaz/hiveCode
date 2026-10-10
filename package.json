@@ -1,6 +1,6 @@
 {
   "name": "@johpaz/hivecode",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "hive-code — Multi-AI coding swarm. Console-first. Code-focused. Multi-provider.",
   "private": true,
   "bin": {
