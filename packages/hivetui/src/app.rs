@@ -13,7 +13,6 @@ use crossterm::{
 use futures::StreamExt;
 use tokio::io::{AsyncReadExt as _, BufReader};
 use tokio::time::{self, Duration};
-use tokio::signal::unix::{signal, SignalKind};
 
 use crate::{
     controller::{handle_key_event, handle_mouse_event, handle_paste_event},
@@ -291,6 +290,38 @@ fn skip_n_chars(buf: &str, n: usize) -> String {
         .unwrap_or_default()
 }
 
+/// Señal de terminación enviada por el proceso padre (Bun) al cerrar.
+///
+/// Unix: SIGTERM, o SIGHUP si no se puede registrar SIGTERM.
+/// Windows no tiene SIGTERM; el equivalente es el cierre de la consola
+/// (`CTRL_CLOSE_EVENT`). Ctrl-C se atiende aparte en el bucle principal.
+struct TermSignal {
+    #[cfg(unix)]
+    inner: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    inner: tokio::signal::windows::CtrlClose,
+}
+
+impl TermSignal {
+    #[cfg(unix)]
+    fn new() -> Self {
+        use tokio::signal::unix::{signal, SignalKind};
+        let inner = signal(SignalKind::terminate())
+            .unwrap_or_else(|_| signal(SignalKind::hangup()).expect("signal setup failed"));
+        Self { inner }
+    }
+
+    #[cfg(windows)]
+    fn new() -> Self {
+        let inner = tokio::signal::windows::ctrl_close().expect("signal setup failed");
+        Self { inner }
+    }
+
+    async fn recv(&mut self) -> Option<()> {
+        self.inner.recv().await
+    }
+}
+
 pub async fn run() -> Result<()> {
     ensure_tty()?;
     install_panic_hook();
@@ -327,8 +358,7 @@ pub async fn run() -> Result<()> {
 
     session.draw(&mut state)?;
 
-    let mut sigterm = signal(SignalKind::terminate())
-        .unwrap_or_else(|_| signal(SignalKind::hangup()).expect("signal setup failed"));
+    let mut sigterm = TermSignal::new();
 
     while !should_quit {
         tokio::select! {

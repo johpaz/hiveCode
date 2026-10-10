@@ -58,3 +58,13 @@ jobs:
           workspaces: packages/hivetui
       - name: Tests
         run: cargo test --locked --manifest-path packages/hivetui/Cargo.toml
+
+      # El release compila la TUI para Windows; `cargo check` no necesita linker,
+      # así que un `tokio::signal::unix` suelto falla aquí y no al publicar.
+      - name: Compila para Windows (x64 y arm64)
+        run: |
+          rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+          for t in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+            cargo check --locked --release --bins --lib --target "$t" \
+              --manifest-path packages/hivetui/Cargo.toml
+          done
