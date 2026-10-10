@@ -116,7 +116,10 @@ jobs:
           cp "$BIN" packages/hivetui/hivetui.bin
           ls -la packages/hivetui/hivetui.bin
 
+      # `shell: bash` explícito: en los runners de Windows el shell por defecto
+      # es PowerShell, donde la continuación de línea con `\` es un error de sintaxis.
       - name: Build CLI binary
+        shell: bash
         run: |
           bun build packages/cli/src/index.ts \
             --compile \
@@ -171,7 +174,7 @@ jobs:
       - name: Setup Node.js for npm publish
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies

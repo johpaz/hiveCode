@@ -1,3 +1,4 @@
+import { homedir } from "node:os"
 import { spawnTaskProcess } from "../../runtime/task-execution";
 import pkg from "../../../package.json";
 /**
@@ -80,7 +81,7 @@ export function resolveObscuraBin(): string | null {
   } catch { /* ignore */ }
 
   // 3. ~/.hivecode/bin/obscura (installed by setup-obscura.ts)
-  const managed = join(process.env.HOME ?? "/tmp", ".hivecode", "bin", "obscura")
+  const managed = join(homedir(), ".hivecode", "bin", "obscura")
   if (process.platform !== "win32" ? existsSync(managed) : existsSync(`${managed}.exe`)) {
     cachedBin = process.platform === "win32" ? `${managed}.exe` : managed
     return cachedBin
@@ -384,7 +385,7 @@ export async function closeObscura(): Promise<void> {
 
 // ── Content unpacking ─────────────────────────────────────────────────────────
 
-const ASSET_DIR = () => join(process.env.HOME ?? "/tmp", ".hivecode", "screenshots")
+const ASSET_DIR = () => join(homedir(), ".hivecode", "screenshots")
 
 function saveAsset(toolName: string, base64: string, mimeType: string): { path: string; bytes: number } {
   const dir = ASSET_DIR()

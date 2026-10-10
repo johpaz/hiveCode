@@ -1,3 +1,4 @@
+import { homedir } from "node:os"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { MCPConfig, MCPServerConfig } from "./config";
@@ -161,7 +162,7 @@ export class MCPClientManager {
 
   private expandPath(p: string): string {
     if (p.startsWith("~")) {
-      return path.join(process.env.HOME ?? "", p.slice(1));
+      return path.join(homedir(), p.slice(1));
     }
     return p;
   }

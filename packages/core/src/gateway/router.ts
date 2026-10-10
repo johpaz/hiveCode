@@ -1,3 +1,4 @@
+import { homedir } from "node:os"
 import type { Config, Binding } from "../config/loader.ts";
 
 export interface RoutingContext {
@@ -113,11 +114,11 @@ export class Router {
     const agent = agents.find((a) => a.id === agentId);
     
     if (agent?.workspace) {
-      return agent.workspace.replace(/^~/, process.env.HOME ?? "");
+      return agent.workspace.replace(/^~/, homedir());
     }
 
-    const baseDir = this.config.agent?.baseDir?.replace(/^~/, process.env.HOME ?? "") 
-      ?? `${process.env.HOME}/.hivecode/agents`;
+    const baseDir = this.config.agent?.baseDir?.replace(/^~/, homedir()) 
+      ?? `${homedir()}/.hivecode/agents`;
     
     return `${baseDir}/${agentId}/workspace`;
   }

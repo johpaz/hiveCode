@@ -1,3 +1,4 @@
+import { homedir } from "node:os"
 import { readVerifiedProcess, stopVerifiedProcess } from "@johpaz/hivecode-core/runtime/process-identity";
 /**
  * Binary Adapter
@@ -88,8 +89,8 @@ export class BinaryAdapter implements InstallationAdapter {
       path.join(process.cwd(), "dist", "hive.exe"),
       "/usr/local/bin/hive",
       "/usr/bin/hive",
-      path.join(process.env.HOME || "", ".local", "bin", "hive"),
-      path.join(process.env.HOME || "", ".bun", "bin", "hive"),
+      path.join(homedir(), ".local", "bin", "hive"),
+      path.join(homedir(), ".bun", "bin", "hive"),
     ];
 
     for (const binaryPath of commonPaths) {

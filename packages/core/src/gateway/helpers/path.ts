@@ -1,3 +1,4 @@
+import { homedir } from "node:os"
 import * as path from "node:path";
 import { fileURLToPath as nodeFileURLToPath, pathToFileURL as nodePathToFileURL } from "node:url";
 
@@ -26,7 +27,7 @@ export const pathToFileURL: typeof nodePathToFileURL =
  */
 export function expandPath(p: string): string {
   if (p.startsWith("~")) {
-    return path.join(process.env.HOME ?? "", p.slice(1));
+    return path.join(homedir(), p.slice(1));
   }
   return p;
 }

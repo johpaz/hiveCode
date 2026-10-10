@@ -1,3 +1,4 @@
+import { homedir } from "node:os"
 /**
  * Configuration utilities for installation adapters
  * 
@@ -26,7 +27,7 @@ export function getHiveDir(customDir?: string): string {
   }
   
   // Default location: same for dev and production
-  return path.join(process.env.HOME || "", ".hivecode");
+  return path.join(homedir(), ".hivecode");
 }
 
 /**
@@ -228,7 +229,7 @@ export function expandPath(input: string): string {
   
   // Expand ~ to home directory
   if (input.startsWith("~/")) {
-    return path.join(process.env.HOME || "", input.slice(2));
+    return path.join(homedir(), input.slice(2));
   }
   
   // Expand environment variables ${VAR} or $VAR

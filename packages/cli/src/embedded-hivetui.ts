@@ -1,3 +1,4 @@
+import { homedir } from "node:os"
 /**
  * Embeds the hivetui Rust binary into the compiled hivecode executable.
  * At runtime, extracts it to ~/.hivecode/bin/ and returns the path.
@@ -17,8 +18,10 @@ import path from "node:path"
 // @ts-ignore — Bun-specific asset import
 import hivetuiAsset from "../../hivetui/hivetui.bin" with { type: "file" }
 
-const CACHE_DIR = path.join(process.env.HOME ?? "/tmp", ".hivecode", "bin")
-const CACHED_PATH = path.join(CACHE_DIR, "hivetui")
+const CACHE_DIR = path.join(homedir(), ".hivecode", "bin")
+// Windows solo ejecuta un binario si el archivo termina en `.exe`.
+const EXE_SUFFIX = process.platform === "win32" ? ".exe" : ""
+const CACHED_PATH = path.join(CACHE_DIR, `hivetui${EXE_SUFFIX}`)
 
 let extracted = false
 

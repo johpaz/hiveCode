@@ -1,3 +1,4 @@
+import { homedir } from "node:os"
 /**
  * Config loader — loads from ~/.hivecode/config.json with Zod validation.
  *
@@ -72,7 +73,7 @@ let cachedConfig: Config | null = null
 const CONFIG_FILENAME = "config.json"
 
 export function getHiveDir(): string {
-  return process.env.HIVE_HOME || `${process.env.HOME || "/tmp"}/.hivecode`
+  return process.env.HIVE_HOME || `${homedir()}/.hivecode`
 }
 
 function getConfigPath(): string {
