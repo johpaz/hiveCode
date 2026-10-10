@@ -55,6 +55,13 @@ echo "versión: ${CURRENT} → ${NEXT}  (tag $TAG)"
 
 # ── Verificación ──────────────────────────────────────────────────────────────
 if [ "$SKIP_TESTS" -eq 0 ]; then
+  # La suite deja ~1 GB de directorios temporales por corrida. Acumulados agotan
+  # la cuota de /tmp y los tests empiezan a fallar en cascada por no poder crear
+  # su DB. Con un TMPDIR propio, que se borra al salir, cada corrida parte limpia.
+  TEST_TMP=$(mktemp -d -t hivecode-release-XXXXXX)
+  trap 'rm -rf "$TEST_TMP"' EXIT
+  export TMPDIR="$TEST_TMP"
+
   step "Typecheck"
   bun run lint
   step "Tests Bun"
