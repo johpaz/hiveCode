@@ -35,7 +35,7 @@ describe("weekly catalog", () => {
       expect((init?.headers as any).Authorization).toBe("Bearer test-key")
       return Response.json({ data: [{ id: "new" }] })
     }) as unknown as typeof fetch
-    expect(await discoverProviderModels(provider(), "test-key")).toEqual([{ id: "new", name: undefined, type: undefined, context: undefined }])
+    expect(await discoverProviderModels(provider(), "test-key")).toEqual([{ id: "new", name: undefined, type: undefined, context: undefined, capabilities: ["code"] }])
   })
   test("Anthropic consumes every page using native auth", async () => {
     let calls = 0
@@ -130,4 +130,145 @@ describe("weekly catalog", () => {
     const state = await (await col<CodeConfigDoc>("codeConfig")).get("provider_catalog.deepseek")
     expect(JSON.parse(state!.doc.value!).completed_slot).toBe(sunday)
   })
+})
+
+
+test("agent editor offers discovered models from the selected provider without activating them globally", async () => {
+  const {agentConfigFields, agentModelPatch, INHERIT_MODEL} = await import("../../packages/cli/src/commands-code/agent-settings")
+  const {ensureCoreAgentProfiles} = await import("../../packages/core/src/agent/agent-profiles")
+  const {ensureHiveDb} = await import("../../packages/core/src/storage/bootstrap")
+  await ensureHiveDb(); await ensureCoreAgentProfiles()
+  const config = await col<CodeConfigDoc>("codeConfig")
+  await config.put("default_provider", {key: "default_provider", value: "gemini", updated_at: sunday})
+  await reconcileProviderModels({...provider("gemini"), base_url: null}, [{id: "gemini-test-new-flash", name: "Gemini Current Flash"}], sunday)
+  const agents = await col<import("../../packages/core/src/storage/collections").AgentDoc>("agents")
+  const builder = (await agents.get("builder"))!.doc
+  await (await col<ProviderDoc>("providers")).put("secondary", {...provider("secondary"), active: false})
+  await reconcileProviderModels(provider("secondary"), [{id: "secondary-code", name: "Secondary Coder"}], sunday)
+  await (await col<ModelDoc>("models")).put("secondary-disabled", {...model("secondary-disabled"), provider_id: "secondary", enabled: false})
+  const fields = await agentConfigFields({...builder, max_input_tokens: 12345, user_instructions: "Mantener contratos"})
+  expect(fields[0]).toMatchObject({field_type: "select", default_value: INHERIT_MODEL})
+  expect(fields[0].options).toContain("Gemini Current Flash · gemini/gemini-test-new-flash")
+  expect(fields[0].options).toContain("Secondary Coder · secondary/secondary-code")
+  expect(fields[0].options?.some(option => option.includes("secondary-disabled"))).toBe(false)
+  expect(await agentModelPatch("Gemini Current Flash · gemini/gemini-test-new-flash")).toEqual({provider_id: "gemini", model_id: "gemini-test-new-flash", model_selection: "custom"})
+  const customFields = await agentConfigFields({...builder, provider_id: "gemini", model_id: "gemini-test-new-flash", model_selection: "custom"})
+  expect(customFields[0].default_value).toBe("Gemini Current Flash · gemini/gemini-test-new-flash")
+  expect(fields.find(field => field.key === "max_input_tokens")?.default_value).toBe("12345")
+  expect(fields.find(field => field.key === "user_instructions")?.default_value).toBe("Mantener contratos")
+  const patch = await agentModelPatch("gemini/gemini-test-new-flash")
+  expect(patch).toEqual({provider_id: "gemini", model_id: "gemini-test-new-flash", model_selection: "custom"})
+  expect((await (await col<ModelDoc>("models")).get("gemini-test-new-flash"))!.doc.active).toBe(false)
+  await agents.put("builder", {...builder, ...patch})
+  await ensureCoreAgentProfiles()
+  expect((await agents.get("builder"))!.doc.model_selection).toBe("custom")
+  const {ProfileHarness} = await import("../../packages/core/src/harness/profile-harness")
+  await new ProfileHarness(async () => "Listo").run({objective: "hola", sessionId: "model-fixture", workspace: "/tmp/model-fixture", provider: "hiveagents", model: "session-model"})
+  expect((await agents.get("builder"))!.doc).toMatchObject(patch)
+  expect((await agents.get("bee"))!.doc.model_id).toBe("session-model")
+  const bee = (await agents.get("bee"))!.doc
+  await agents.put("bee", {...bee, ...patch})
+  const {setCoordinatorProviderModel} = await import("../../packages/cli/src/commands-code/provider-store")
+  await setCoordinatorProviderModel("hiveagents", "another-global-model")
+  expect((await agents.get("bee"))!.doc).toMatchObject(patch)
+  await expect(agentModelPatch("gemini/missing-model")).rejects.toThrow("catálogo")
+  expect(await agentModelPatch(INHERIT_MODEL)).toEqual({model_selection: "inherit"})
+})
+
+test("DeepSeek discovery preserves coding and multimodal metadata and exposes unselected models", async () => {
+  const deepseek = provider("deepseek")
+  await (await col<ProviderDoc>("providers")).put(deepseek.id, deepseek)
+  globalThis.fetch = (async () => Response.json({object: "list", data: [{
+    id: "deepseek-flash", name: "DeepSeek-V4.1-Flash", context_window: 1048576,
+    max_output_tokens: 393216, input_modalities: ["text", "image"], output_modalities: ["text"],
+    effort: {supported_levels: ["low", "high", "max"], default_level: "high"},
+  }]})) as unknown as typeof fetch
+  const remote = await discoverProviderModels(deepseek, "test-key")
+  expect(remote[0]).toMatchObject({inputModalities: ["text", "image"], outputModalities: ["text"], maxOutputTokens: 393216, effortLevels: ["low", "high", "max"]})
+  await reconcileProviderModels(deepseek, remote, sunday)
+  const {getAvailableModelsTool} = await import("../../packages/core/src/tools/agents/get-available-models")
+  const result = await getAvailableModelsTool.execute({providerId: "deepseek", capabilities: "coding"}) as any
+  expect(result.ok).toBe(true)
+  expect(result.models).toContainEqual(expect.objectContaining({modelId: "deepseek-flash", inputModalities: ["text", "image"], capabilities: expect.arrayContaining(["code", "vision", "multimodal"])}))
+  expect((await (await col<ModelDoc>("models")).get("deepseek-flash"))!.doc.active).toBe(false)
+})
+
+test("changing a credential refreshes a completed weekly catalog before returning settings", async () => {
+  const {storeProviderApiKey} = await import("../../packages/core/src/storage/crypto")
+  const {handleUpdateProvider} = await import("../../packages/core/src/gateway/routes/providers")
+  const {sendSettingsSnapshot} = await import("../../packages/cli/src/commands-code/tui-launcher")
+  const {eventBus} = await import("../../packages/core/src/events/event-bus")
+  await (await col<ProviderDoc>("providers")).put("deepseek", provider())
+  await (await col<CodeConfigDoc>("codeConfig")).put("default_provider", {key:"default_provider", value:"deepseek", updated_at:sunday})
+  await storeProviderApiKey("deepseek", "old-test-key")
+  globalThis.fetch = (async () => Response.json({data:[{id:"previous-coding-model"}]})) as unknown as typeof fetch
+  await runDueProviderCatalogSync(sunday)
+  let events = 0, calls = 0
+  const stop = eventBus.on("catalog:updated", event => {if(event.providerId === "deepseek") events++})
+  globalThis.fetch = (async (_url, init) => {
+    calls++
+    expect((init?.headers as any).Authorization).toBe("Bearer new-test-key")
+    return Response.json({data:[{id:"fresh-multimodal-coder", name:"Current Multimodal Coder", input_modalities:["text","image"], output_modalities:["text"]}]})
+  }) as unknown as typeof fetch
+  try {
+    const response = await handleUpdateProvider(new Request("http://localhost/api/providers/deepseek", {method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({apiKey:"new-test-key"})}), response => response)
+    expect(response.status).toBe(200)
+    expect(calls).toBe(1)
+    expect(events).toBe(1)
+    const snapshots: any[] = []
+    await sendSettingsSnapshot(message => snapshots.push(message))
+    const deepseek = snapshots.find(message => message.type === "settings_data").providers.find((item:any)=>item.id === "deepseek")
+    expect(deepseek.models).toEqual(["fresh-multimodal-coder"])
+    expect(deepseek.model_names).toEqual({"fresh-multimodal-coder": "Current Multimodal Coder"})
+    const stored = (await (await col<ModelDoc>("models")).get("fresh-multimodal-coder"))!.doc
+    expect(stored.input_modalities).toEqual(["text","image"])
+    expect(stored.active).toBe(false)
+  } finally { stop() }
+})
+
+
+test("settings refresh names JEV as configured without claiming a verified response", async () => {
+  const {storeProviderApiKey} = await import("../../packages/core/src/storage/crypto")
+  const {sendSettingsSnapshot} = await import("../../packages/cli/src/commands-code/tui-launcher")
+  const providers = await col<ProviderDoc>("providers")
+  await providers.put("openrouter", provider("openrouter"))
+  await storeProviderApiKey("openrouter", "test-oracle-key")
+  globalThis.fetch = (async () => { throw new Error("Status must not perform inference") }) as unknown as typeof fetch
+  const messages: any[] = []
+  await sendSettingsSnapshot(message => messages.push(message))
+  expect(messages.find(message => message.type === "jev_status")).toMatchObject({
+    oracle: "jev", state: "ready", last_success_at: null,
+  })
+  const row = (await providers.get("openrouter"))!
+  await providers.put("openrouter", {...row.doc, active: false}, {expectedVersion:row.version})
+  messages.length = 0
+  await sendSettingsSnapshot(message => messages.push(message))
+  expect(messages.find(message => message.type === "jev_status")).toMatchObject({oracle: null, state: "off"})
+})
+
+
+test("header context belongs to BEE's configured model rather than the session default", async () => {
+  const {sendSettingsSnapshot} = await import("../../packages/cli/src/commands-code/tui-launcher")
+  await (await col<any>("agents")).put("bee", {id:"bee", provider_id:"deepseek", model_id:"bee-model", model_selection:"custom"})
+  await (await col<ModelDoc>("models")).put("bee-model", {...model("bee-model"), context_window:128000})
+  await (await col<CodeConfigDoc>("codeConfig")).put("default_provider", {key:"default_provider", value:"gemini", updated_at:0})
+  const messages: any[] = []
+  await sendSettingsSnapshot(message => messages.push(message))
+  expect(messages.find(message => message.type === "coordinator_context")).toMatchObject({
+    agent:"bee", provider:"deepseek", model:"bee-model", context_window:128000, input_tokens:null,
+  })
+})
+
+
+test("BEE's inherited header model follows configuration and restores only that session's latest input", async () => {
+  const {readCoordinatorContext} = await import("../../packages/cli/src/commands-code/header-context")
+  await (await col<any>("agents")).put("bee", {id:"bee", provider_id:"old-provider", model_id:"old-model", model_selection:"inherit"})
+  const config = await col<CodeConfigDoc>("codeConfig")
+  await config.put("default_provider", {key:"default_provider", value:"deepseek", updated_at:0})
+  await config.put("provider_model_deepseek", {key:"provider_model_deepseek", value:"bee-model", updated_at:0})
+  await (await col<ModelDoc>("models")).put("bee-model", {...model("bee-model"), context_window:128000})
+  await (await col<any>("agentRuns")).put("r", {id:"r", agent_id:"bee", session_id:"s", input_tokens:999999, updated_at:2, created_at:1,
+    context_metrics_json:JSON.stringify({model_context:{provider:"deepseek", model:"bee-model", input_tokens:32000, estimated:false}})})
+  expect(await readCoordinatorContext("s")).toMatchObject({provider:"deepseek", model:"bee-model", context_window:128000, input_tokens:32000, estimated:false})
+  expect((await readCoordinatorContext("other-session")).input_tokens).toBeNull()
 })

@@ -6,7 +6,6 @@ import { loadConfig, startGateway, getChannelManager } from "@johpaz/hivecode-co
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
 import { eventBus } from "@johpaz/hivecode-core/events/event-bus"
-import { getJevStatus } from "@johpaz/hivecode-core/agent/jev-decisions"
 import { agentAlias } from "@johpaz/hivecode-core/agent/agent-identity"
 import { describeSwarmCapabilities } from "@johpaz/hivecode-core/agent/jev-planner"
 import { getAgentService } from "@johpaz/hivecode-core/agent/service"
@@ -439,6 +438,12 @@ export async function repl(): Promise<void> {
     // Nothing in jev-planner.ts changes: this only re-emits what it already
     // produces, renamed to snake_case to match every other wire field.
     const jevUnsub = [
+      eventBus.on("agent:context", (context) => {
+        if (context.agentId !== "bee") return
+        _tuiIpcSend?.({type: "coordinator_context", agent: "bee", session_id: context.sessionId,
+          provider: context.provider, model: context.model, context_window: context.contextWindow,
+          input_tokens: context.inputTokens, estimated: context.estimated})
+      }),
       eventBus.on("jev:decision", (d) => {
         _tuiIpcSend?.({
           type: "jev_decision",
@@ -460,6 +465,7 @@ export async function repl(): Promise<void> {
         if (!s) return
         _tuiIpcSend?.({
           type: "jev_status",
+          oracle: s.oracle,
           state: s.state,
           last_error: s.lastError,
           last_success_at: s.lastSuccessAt,
@@ -482,6 +488,12 @@ export async function repl(): Promise<void> {
     // pulso del enjambre: si se pierden en un embudo lento, la UI miente.
     // El recorte por columna lo hace el consumidor, no el transporte.
     const swarmUnsub = [
+      eventBus.on("agent:lifecycle", (agent) => {
+        if (agent.sessionId && agent.sessionId !== manager.getSessionId()) return
+        _tuiIpcSend?.({ type: "worker_update", worker: agent.agentId, phase: agent.specialty,
+          status: agent.status, display_name: agent.name, current_action: agent.activity,
+          activity: `Padre: ${agent.parentId} · especialidad: ${agent.specialty}` })
+      }),
       eventBus.on("tool:call", (c) => {
         _tuiIpcSend?.({
           type: "tool_call",
@@ -545,7 +557,7 @@ export async function repl(): Promise<void> {
         // Same accessor the gateway uses, so MCP connectivity is read from the
         // live manager rather than guessed.
         const mcp = getAgentService().getMCPManager()
-        const roster = await describeSwarmCapabilities(mcp, { includeSpecialists: true })
+        const roster = await describeSwarmCapabilities(mcp, { includeSpecialists: true, includeCoordinator: true })
         if (roster.specialists.length === 0) return
         _tuiIpcSend?.({
           type: "roster_snapshot",
@@ -567,21 +579,7 @@ export async function repl(): Promise<void> {
         logger.warn(`[repl] roster_snapshot no se pudo enviar: ${(err as Error).message}`)
       }
     }
-    void sendRoster()
-
-    // Announce the current availability immediately, so the status dot is right
-    // before the first decision rather than blank until then.
-    getJevStatus()
-      .then((s) => {
-        _tuiIpcSend?.({
-          type: "jev_status",
-          state: s.state,
-          last_error: s.lastError,
-          last_success_at: s.lastSuccessAt,
-          totals: s.totals,
-        })
-      })
-      .catch(() => { /* observability is never a hard dependency */ })
+    // Send only after the Rust handshake, when the IPC transport is connected.
 
     // BEE-initiated mode changes (set_session_mode tool) propagate back to TUI
     manager.setModeChangeCallback((mode) => {
@@ -702,6 +700,7 @@ export async function repl(): Promise<void> {
       taskCount:       init.taskCount,
       tokenCount:      init.tokenCount,
       workers:         activeWorkers,
+      onReady:         sendRoster,
 
 
       onModeChange(mode) {

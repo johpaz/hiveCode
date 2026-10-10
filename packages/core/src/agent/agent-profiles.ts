@@ -1,5 +1,6 @@
 import { col, mutateDoc, toIndexable } from "../storage/hive"
 import type { AgentDoc } from "../storage/collections"
+import { SUBDIVISION_INSTRUCTIONS } from "./specialties"
 import { obscuraToolNames } from "../tools/web/obscura"
 
 /** Perfiles canónicos. `reviewer` se fusionó con `verifier`: los dos eran el
@@ -208,6 +209,8 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
   },
 }
 
+for (const definition of Object.values(CORE_AGENT_DEFINITIONS)) definition.tools.push("spawn_agent")
+
 export async function ensureCoreAgentProfiles(userId = "default"): Promise<void> {
   const agents = await col<AgentDoc>("agents")
   const now = Date.now()
@@ -232,21 +235,23 @@ export async function ensureCoreAgentProfiles(userId = "default"): Promise<void>
         user_id: existing?.doc.user_id ?? userId,
         name: definition.name,
         description: definition.description,
-        system_prompt: definition.systemPrompt,
+        system_prompt: `${definition.systemPrompt}\n\n${SUBDIVISION_INSTRUCTIONS}`,
         tone: existing?.doc.tone ?? "direct",
         role: definition.role,
         agent_type: type,
-        status: existing?.doc.status ?? "idle",
+        // The curator previously archived idle factory specialists while enabled.
+        status: existing?.doc.status === "archived" && existing.doc.enabled ? "idle" : existing?.doc.status ?? "idle",
         enabled: type === "bee" ? true : existing?.doc.enabled ?? definition.enabled,
         provider_id: inheritedProvider,
         model_id: inheritedModel,
+        model_selection: existing?.doc.model_selection ?? "inherit",
         fallback_provider_id: existing?.doc.fallback_provider_id ?? toIndexable(null),
         fallback_model_id: existing?.doc.fallback_model_id ?? toIndexable(null),
         effort: existing?.doc.effort ?? "medium",
         max_input_tokens: existing?.doc.max_input_tokens ?? 0,
         max_output_tokens: existing?.doc.max_output_tokens ?? 0,
         max_cost_usd: existing?.doc.max_cost_usd ?? 0,
-        tools_json: JSON.stringify(definition.tools),
+        tools_json: JSON.stringify([...new Set([...definition.tools, "spawn_agent"])]),
         skills_json: JSON.stringify(definition.skills),
         permission_profile: definition.permissionProfile,
         user_instructions: existing?.doc.user_instructions ?? "",

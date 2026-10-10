@@ -113,6 +113,7 @@ impl From<&IpcJevTotals> for JevTotals {
 #[derive(Debug, Clone)]
 pub struct JevState {
     pub availability: JevAvailability,
+    pub oracle: Option<String>,
     pub last_error: Option<String>,
     pub last_success_at: Option<u64>,
     pub totals: JevTotals,
@@ -130,6 +131,7 @@ impl Default for JevState {
         // mensaje no se sabe nada, y "no configurado" es la lectura correcta.
         JevState {
             availability: JevAvailability::Off,
+            oracle: None,
             last_error: None,
             last_success_at: None,
             totals: JevTotals::default(),
@@ -166,7 +168,17 @@ impl JevState {
             return None;
         }
         let mut s = String::new();
-        s.push_str(self.availability.label());
+        if let Some(oracle) = &self.oracle {
+            s.push_str(&oracle.to_uppercase());
+            s.push_str(match self.availability {
+                JevAvailability::Ready if self.last_success_at.is_some() => " activo",
+                JevAvailability::Ready => " configurado · pendiente",
+                JevAvailability::Fallback => " enfriando",
+                JevAvailability::Off => " apagado",
+            });
+        } else {
+            s.push_str(self.availability.label());
+        }
         if self.totals.decisions > 0 {
             s.push_str(&format!(" · {} dec", self.totals.decisions));
         }
@@ -195,6 +207,20 @@ mod tests {
             event_id: "jev:1".to_string(),
             availability: JevAvailability::Ready,
         }
+    }
+
+    #[test]
+    fn names_the_configured_oracle_and_requires_a_success_to_show_active() {
+        let mut state = JevState::default();
+        state.oracle = Some("jev".into());
+        state.set_availability(JevAvailability::Ready, None, None, JevTotals::default());
+        assert!(state.statusbar_summary().unwrap().contains("JEV configurado · pendiente"));
+        state.last_success_at = Some(1);
+        assert!(state.statusbar_summary().unwrap().contains("JEV activo"));
+        state.oracle = Some("kev".into());
+        assert!(state.statusbar_summary().unwrap().contains("KEV activo"));
+        state.availability = JevAvailability::Fallback;
+        assert!(state.statusbar_summary().unwrap().contains("KEV enfriando"));
     }
 
     #[test]

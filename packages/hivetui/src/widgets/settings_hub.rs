@@ -95,6 +95,8 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &mut AppState, regist
                 "↑↓ o clic: seleccionar · Enter o Confirmar: aplicar · Esc cerrar"
             } else if settings_tab == SettingsTab::Providers {
                 "↑↓/clic · Enter configurar/activar · E editar API key · Esc cerrar"
+            } else if settings_tab == SettingsTab::Agents {
+                "Tab · ↑↓/clic · Enter modelo y límites · Esc cerrar"
             } else { "Tab · ↑↓/clic · A añadir · D eliminar · Enter editar · Esc cerrar" },
             Style::new().fg(DIM));
         if let Some(hint) = footer_hint {
@@ -130,7 +132,9 @@ fn render_agents(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
             canvas.print(area.x, y, "▶ ", Style::new().fg(AMBER).bold());
         }
         let style = if selected { Style::new().fg(WHITE).bold() } else { Style::new().fg(SECONDARY) };
-        let provider_model = format!("{}/{}", agent.provider, agent.model);
+        let model_name = hub.providers.iter().find(|p| p.id == agent.provider)
+            .map(|p| p.model_name(&agent.model)).unwrap_or(&agent.model);
+        let provider_model = format!("{} · {}", model_name, agent.provider);
         canvas.print(area.x + 2, y, &truncate(&agent.name, 12), style);
         canvas.print(area.x + 15, y, &truncate(&provider_model, 31), style);
         canvas.print(area.x + 48, y, &format!("{}t {}", agent.max_turns, agent.effort), style);
@@ -382,6 +386,9 @@ fn render_models(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
                 &format!("Modelo · {provider_id}"), Style::new().fg(DIM));
             canvas.print(area.right().saturating_sub(12), area.y, "Estado", Style::new().fg(DIM));
 
+            let provider = hub.active_provider();
+            let id_x = area.x + area.w / 2;
+            canvas.print(id_x, area.y, "ID API", Style::new().fg(DIM));
             let total = models.len();
             for (i, m) in models.iter().enumerate().skip(offset).take(visible) {
                 let y = area.y + 1 + (i - offset) as u16;
@@ -395,7 +402,9 @@ fn render_models(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
                     canvas.print(area.x + 2, y, "●", Style::new().fg(GREEN).bold());
                 }
                 let style = if is_sel { Style::new().fg(WHITE).bold() } else { Style::new().fg(SECONDARY) };
-                canvas.print(area.x + 4, y, &truncate(m, area.w.saturating_sub(18) as usize), style);
+                let name = provider.map(|p| p.model_name(m)).unwrap_or(m);
+                canvas.print(area.x + 4, y, &truncate(name, (area.w / 2).saturating_sub(5) as usize), style);
+                canvas.print(id_x, y, &truncate(m, (area.w - area.w / 2).saturating_sub(13) as usize), Style::new().fg(DIM));
                 if is_active {
                     canvas.print(area.right().saturating_sub(12), y, "Activo", Style::new().fg(GREEN).bold());
                 }
@@ -407,7 +416,7 @@ fn render_models(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
             canvas.print(area.x + 2, button_y, button, Style::new().fg(AMBER).bold());
             if let Some(model) = models.get(selected) {
                 canvas.print(area.x + 2, button_y.saturating_sub(1),
-                    &truncate(&format!("Elegido: {model}"), area.w.saturating_sub(4) as usize), Style::new().fg(SECONDARY));
+                    &truncate(&format!("Elegido: {} · {model}", provider.map(|p| p.model_name(model)).unwrap_or(model)), area.w.saturating_sub(4) as usize), Style::new().fg(SECONDARY));
             }
             if register_hits && !models.is_empty() {
                 state.hit_map.push(MouseRegion::new("settings:confirm-model",

@@ -1,5 +1,5 @@
 import { listCatalogProviders } from "../../services/provider-catalog-read"
-import { syncProviderCatalog } from "../../services/provider-catalog"
+import { syncProviderCatalog, syncConfiguredProviderCatalog } from "../../services/provider-catalog"
 import { maskApiKey, storeProviderApiKey, getProviderApiKey, hasProviderApiKey } from "../../storage/crypto"
 import { col } from "../../storage/hive"
 import type { ModelDoc, ProviderDoc } from "../../storage/collections"
@@ -73,7 +73,13 @@ export async function handleCreateProvider(req: Request, addCorsHeaders: (r: Res
     created_at: existing?.doc.created_at ?? Date.now(),
   }
   await providers.put(id, provider, { expectedVersion: existing?.version ?? 0 })
-  if (id === "hiveagents" && (body.config?.apiKey || body.apiKey)) {
+  const submittedKey = body.config?.apiKey || body.apiKey
+  if (id !== "hiveagents" && submittedKey) {
+    await storeProviderApiKey(id, submittedKey)
+    try { await syncConfiguredProviderCatalog(id) }
+    catch (error) { return addCorsHeaders(Response.json({ok: false, error: (error as Error).message}, {status: 502}), req) }
+  }
+  if (id === "hiveagents" && submittedKey) {
     await storeProviderApiKey(id, body.config?.apiKey || body.apiKey)
     const ready = await loadHiveAgentsModelFromDb(HIVEAGENTS_MODEL_ID)
     if (!ready.success) {
@@ -95,6 +101,10 @@ export async function handleToggleProvider(req: Request, addCorsHeaders: (r: Res
 
   await updateProvider(providerId, { active: !!active, enabled: !!active })
   await cascadeProviderModels(providerId, !!active)
+  if (active && await hasProviderApiKey(providerId)) {
+    try { await syncConfiguredProviderCatalog(providerId) }
+    catch (error) { return addCorsHeaders(Response.json({ok: false, error: (error as Error).message}, {status: 502}), req) }
+  }
   return addCorsHeaders(Response.json({ success: true, active }), req)
 }
 
@@ -147,6 +157,10 @@ export async function handleUpdateProvider(req: Request, addCorsHeaders: (r: Res
     else if (patch.enabled !== undefined) await cascadeProviderModels(id, patch.enabled)
   }
 
+  if (body.config?.apiKey || body.apiKey || patch.active === true || patch.enabled === true) {
+    try { await syncConfiguredProviderCatalog(id) }
+    catch (error) { return addCorsHeaders(Response.json({ok: false, error: (error as Error).message}, {status: 502}), req) }
+  }
   return addCorsHeaders(Response.json({ ok: true }), req)
 }
 

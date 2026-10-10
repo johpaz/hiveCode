@@ -389,18 +389,18 @@ fn renderer_keeps_reference_chrome_on_every_screen() {
         TabId::Mesa,
         TabId::Code,
         TabId::Review,
-        TabId::Taller,
     ] {
         state.active_tab = tab;
         let mut canvas = make_canvas(120, 30);
         renderer::render(&mut canvas, &mut state);
 
         let frame = canvas.to_text_rows().join("\n");
-        // Las seis pestañas visibles en todas las vistas: el tabbar es chrome
+        // Las cinco pestañas visibles en todas las vistas: el tabbar es chrome
         // compartido y no puede desaparecer en una de ellas.
-        for label in ["ENJAMBRE", "PLAN", "MESA", "CÓDIGO", "REVISIÓN", "TALLER"] {
+        for label in ["ENJAMBRE", "PLAN", "MESA", "CÓDIGO", "REVISIÓN"] {
             assert!(frame.contains(label), "falta {label} en {tab:?}");
         }
+        assert!(!frame.contains("TALLER"));
         assert!(frame.contains("CHECKPOINTS"));
         assert!(state
             .hit_map
@@ -434,6 +434,7 @@ fn settings_hub_state(
                 has_key,
                 browser_login,
                 models: vec![format!("{id}/default")],
+                model_names: Default::default(),
             })
             .collect(),
         agents: vec![],
@@ -853,7 +854,7 @@ fn state_with_workers(running: usize, waiting: usize) -> AppState {
 }
 
 #[test]
-fn dashboard_collapses_idle_agents_instead_of_shrinking_active_cards() {
+fn office_keeps_readable_seats_and_paginates_idle_agents() {
     let mut state = state_with_workers(4, 8);
     state.active_tab = TabId::Swarm;
 
@@ -861,22 +862,19 @@ fn dashboard_collapses_idle_agents_instead_of_shrinking_active_cards() {
     renderer::render(&mut canvas, &mut state);
     let frame = canvas.to_text_rows().join("\n");
 
-    // Los ociosos se nombran en una línea colapsada, no en tarjetas.
     assert!(
-        frame.contains("idle:"),
-        "falta el resumen colapsado de agentes inactivos:\n{frame}"
+        frame.contains("OFICINA") && frame.contains("puestos") && frame.contains("PgUp/PgDn"),
+        "falta la oficina con navegación de puestos:\n{frame}"
     );
 
-    // Y las tarjetas activas siguen dibujando su contenido completo (la barra de
-    // iteraciones es lo primero que se pierde cuando una tarjeta se comprime).
-    assert!(
-        frame.contains("iter"),
-        "las tarjetas activas perdieron la barra de iteraciones:\n{frame}"
-    );
+    assert!(frame.contains('▀') || frame.contains('▄'), "debe dibujar sprites de la colmena");
+    state.dashboard.office.selected = Some("backend".into());
+    renderer::render(&mut canvas, &mut state);
+    assert!(canvas.to_text_rows().join("\n").contains("iter"), "el inspector debe conservar las métricas");
 }
 
 #[test]
-fn dashboard_names_active_workers_that_did_not_fit() {
+fn office_scroll_reaches_workers_that_did_not_fit() {
     // Muchos activos a la vez: los que no caben deben nombrarse, no desaparecer.
     let mut state = state_with_workers(12, 0);
     state.active_tab = TabId::Swarm;
@@ -885,16 +883,18 @@ fn dashboard_names_active_workers_that_did_not_fit() {
     renderer::render(&mut canvas, &mut state);
     let frame = canvas.to_text_rows().join("\n");
 
-    assert!(
-        frame.contains("más:"),
-        "los activos que no caben deberían aparecer en el resumen:\n{frame}"
-    );
+    assert!(frame.contains("puestos"), "{frame}");
+    state.dashboard_scroll = 100;
+    renderer::render(&mut canvas, &mut state);
+    let last_page = canvas.to_text_rows().join("\n");
+    assert!(last_page.contains("puestos"));
+    assert_ne!(frame, last_page, "scroll debe mostrar otros puestos");
 }
 
 #[test]
 fn terminal_below_the_minimum_gets_an_explicit_message() {
     let mut state = base_state();
-    state.active_tab = TabId::Swarm;
+    state.active_tab = TabId::Code;
 
     let mut canvas = make_canvas(80, 24);
     renderer::render(&mut canvas, &mut state);
@@ -903,4 +903,118 @@ fn terminal_below_the_minimum_gets_an_explicit_message() {
     assert!(frame.contains("demasiado pequeña"), "frame:\n{frame}");
     assert!(frame.contains("80x24"), "debe decir el tamaño actual:\n{frame}");
     assert!(frame.contains("100x24"), "debe decir el mínimo:\n{frame}");
+}
+
+#[test]
+fn office_renders_small_terminals_and_click_selects_without_leaving() {
+    for (width, height) in [(160, 40), (100, 24), (80, 24), (40, 12)] {
+        let mut state = state_with_workers(2, 0);
+        state.active_tab = TabId::Swarm;
+        let mut canvas = make_canvas(width, height);
+        renderer::render(&mut canvas, &mut state);
+        let frame = canvas.to_text_rows().join("\n");
+        assert!(!frame.contains("demasiado pequeña"), "{frame}");
+        let region = state.hit_map.regions().iter().find(|r| r.id.starts_with("office:select:")).expect("puesto seleccionable").clone();
+        hivetui::controller::handle_mouse_event(&mut state, crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: region.rect.x, row: region.rect.y, modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert_eq!(state.active_tab, TabId::Swarm);
+        assert!(state.dashboard.office.selected.is_some());
+        renderer::render(&mut canvas, &mut state);
+        assert!(canvas.to_text_rows().join("\n").contains("Tarea:"), "inspector debe aparecer");
+    }
+}
+
+
+#[test]
+fn agent_model_editor_keeps_selection_and_returns_to_settings() {
+    use hivetui::ipc::{IpcModalField, TuiMessage};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut state = settings_hub_state(vec![("gemini", true, false)], "gemini");
+    state.apply_message(BunMessage::ShowConfigModal {
+        command: "agent-config:builder".into(), title: "Configurar Builder".into(),
+        fields: vec![IpcModalField {key: "model_choice".into(), label: "Modelo".into(),
+            placeholder: None, required: Some(true), secret: None, field_type: Some("select".into()),
+            options: Some((0..16).map(|i| format!("gemini/model-{i}")).collect()), default_value: Some("gemini/model-12".into())}],
+    });
+    let ModalState::Config(modal) = &state.modal else { panic!("editor expected") };
+    assert_eq!(modal.values[0], "gemini/model-12");
+    assert!(modal.cursors[0] <= 12 && modal.cursors[0] + 6 > 12);
+    hivetui::controller::handle_key_event(&mut state, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    hivetui::controller::handle_key_event(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(state.modal, ModalState::Settings(_)));
+    assert!(state.pending_ipc.iter().any(|message| matches!(message, TuiMessage::ModalSubmit {values, ..} if values.get("model_choice").map(String::as_str) == Some("gemini/model-13"))));
+}
+
+#[test]
+fn agent_model_editor_shows_focused_field_in_short_terminal() {
+    use hivetui::ipc::IpcModalField;
+    let mut state = base_state();
+    state.apply_message(BunMessage::ShowConfigModal {
+        command: "agent-config:scout".into(), title: "Configurar Scout".into(),
+        fields: (0..10).map(|i| IpcModalField {key: format!("field-{i}"), label: format!("VISIBLE_FIELD_{i}"),
+            placeholder: None, required: None, secret: None, field_type: Some("text".into()),
+            options: None, default_value: Some(format!("VALUE_{i}"))}).collect(),
+    });
+    state.modal_focused = 9;
+    let mut canvas = make_canvas(80, 24);
+    hivetui::widgets::config_modal::render(&mut canvas, Rect {x: 0, y: 0, w: 80, h: 24}, &state);
+    assert!((0..24).any(|y| row_text(&canvas, 0, y, 80).contains("VISIBLE_FIELD_9")));
+    assert!((0..24).any(|y| row_text(&canvas, 0, y, 80).contains("VALUE_9")));
+}
+
+#[test]
+fn model_picker_displays_provider_name_and_submits_api_id() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use hivetui::ipc::TuiMessage;
+    let mut state = settings_hub_state(vec![("deepseek", true, false)], "deepseek");
+    let ModalState::Settings(hub) = &mut state.modal else { panic!("settings expected") };
+    hub.active_tab = hivetui::state::SettingsTab::Models;
+    let provider = &mut hub.providers[0];
+    provider.model = "deepseek-flash".into();
+    provider.models = vec!["deepseek-flash".into(), "deepseek-v4-pro".into()];
+    provider.model_names.insert("deepseek-flash".into(), "DeepSeek-V4.1-Flash".into());
+    let mut canvas = make_canvas(140, 40);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+    assert!(frame.contains("DeepSeek-V4.1-Flash"));
+    assert!(frame.contains("deepseek-flash"));
+    assert!(frame.contains("deepseek-v4-pro"), "missing names fall back to the API id");
+    assert!(frame.contains("ID API"));
+    hivetui::controller::handle_key_event(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(state.pending_ipc.iter().any(|message| matches!(message, TuiMessage::Submit {input} if input == "/modelo set deepseek deepseek-flash")));
+}
+
+#[test]
+fn factory_office_shows_six_profiles_without_duplicate_or_generic_seats() {
+    let mut state = AppState::default();
+    let profiles = [("bee", "Abeja Reina"), ("planner", "Cóndor"), ("scout", "Halcón"), ("builder", "Cangrejo"), ("verifier", "Puma"), ("spider", "Araña")];
+    state.apply_message(BunMessage::Init {
+        session_id: "office-factory".into(), workers: profiles.iter().map(|(id, _)| id.to_string()).collect(),
+        mode: Some("plan".into()), provider: None, model: None, project_name: None, project_path: None,
+        version: None, task_count: None, token_count: None,
+    });
+    state.apply_message(BunMessage::RosterSnapshot {
+        agentes: profiles.iter().map(|(id, alias)| hivetui::ipc::IpcRosterAgent {
+            id: id.to_string(), rol: id.to_string(), alias: alias.to_string(), funcion: "Perfil de fábrica".into(),
+            nivel: 1, tools: vec![], mcp: vec![],
+        }).collect(), mcp_servers: vec![],
+    });
+    state.apply_message(BunMessage::ActivityUpdate {
+        task_id: None, coordinator: "".into(), phase: "".into(), status: "idle".into(),
+        display_name: None, activity: None, token_count: None, level: None, current_action: None, current_file: None,
+        iteration_current: None, iteration_total: None, transversal: None,
+    });
+    assert_eq!(state.workers.workers.len(), 6, "idle clears activity without creating an empty agent");
+    state.active_tab = hivetui::state::TabId::Swarm;
+    let mut canvas = make_canvas(150, 35);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+    for name in ["@BEE", "@PLANNER", "@SCOUT", "@BUILDER", "@QUALITY GATE", "@SPIDER"] {
+        assert!(frame.contains(name), "missing {name}: {frame}");
+    }
+    assert!(frame.contains("1–6/6"), "all six seats must fit: {frame}");
+    assert!(!frame.contains("@AGENT"));
+    assert!(!frame.contains("@0"));
 }

@@ -103,12 +103,8 @@ pub struct AppState {
     pub loadout: std::collections::HashMap<String, Loadout>,
     /// Catálogo de habilidades, para `/habilidades` y la ficha.
     pub library: SkillLibrary,
-    /// Sección activa del TALLER y su scroll.
-    pub taller_section: crate::widgets::taller_layout::Section,
-    pub taller_scroll: usize,
     /// Especialista abierto en la ficha, y su posición en la lista de secciones.
     pub ficha_agent: Option<String>,
-    pub taller_agents_scroll: usize,
     pub github_connected: bool,
     pub github_repo: Option<String>,
     pub telegram_active: bool,
@@ -176,6 +172,7 @@ fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
         BunMessage::SecurityStatusUpdate { .. } => "security_status_update",
         BunMessage::HaltState { .. } => "halt_state",
         BunMessage::MetricsUpdate { .. } => "metrics_update",
+        BunMessage::CoordinatorContext { .. } => "coordinator_context",
         BunMessage::CheckpointCreated { .. } => "checkpoint_created",
         BunMessage::FileRiskUpdate { .. } => "file_risk_update",
         BunMessage::ThoughtChunk { .. } => "thought_chunk",
@@ -679,6 +676,7 @@ impl AppState {
                 self.plan = Default::default();
                 self.dashboard.resume = None;
                 self.session.session_id = session_id;
+                self.session.coordinator_context = None;
             }
 
             // ── Workers ────────────────────────────────────────────────────────
@@ -753,24 +751,27 @@ impl AppState {
                 self.workers.active_coordinator = coordinator.clone();
                 self.workers.active_phase = phase.clone();
                 self.workers.activity_status = status.clone();
-                let wstatus = status_to_worker_status(&status);
-                self.upsert_worker(
-                    coordinator.clone(),
-                    Some(phase.clone()),
-                    wstatus,
-                    display_name,
-                    activity.clone(),
-                    token_count,
-                    level,
-                    current_action,
-                    current_file,
-                    iteration_current,
-                    iteration_total,
-                    transversal,
-                    None,
-                );
-                self.note_task_worker(task_id, &coordinator, &status);
-                self.route_after_worker_activity(&coordinator, &phase, &status, activity.as_deref());
+                // Empty identity is the end-of-activity signal, not another worker.
+                if !coordinator.trim().is_empty() {
+                    let wstatus = status_to_worker_status(&status);
+                    self.upsert_worker(
+                        coordinator.clone(),
+                        Some(phase.clone()),
+                        wstatus,
+                        display_name,
+                        activity.clone(),
+                        token_count,
+                        level,
+                        current_action,
+                        current_file,
+                        iteration_current,
+                        iteration_total,
+                        transversal,
+                        None,
+                    );
+                    self.note_task_worker(task_id, &coordinator, &status);
+                    self.route_after_worker_activity(&coordinator, &phase, &status, activity.as_deref());
+                }
             }
 
             BunMessage::DashboardSnapshot {
@@ -932,6 +933,18 @@ impl AppState {
                     self.recommend_layout(TabId::Swarm, LayoutStage::Failed, "HALT activo -> Dashboard");
                 }
             }
+            BunMessage::CoordinatorContext { agent, session_id, provider, model, context_window, input_tokens, estimated } => {
+                if agent != "bee" || session_id.as_ref().is_some_and(|id| !self.session.session_id.is_empty() && id != &self.session.session_id) {
+                    return;
+                }
+                let previous = self.session.coordinator_context.as_ref().filter(|ctx| ctx.provider == provider && ctx.model == model);
+                let (tokens, estimated) = if input_tokens.is_none() {
+                    (previous.and_then(|ctx| ctx.input_tokens), previous.map_or(estimated, |ctx| ctx.estimated))
+                } else { (input_tokens, estimated) };
+                self.session.coordinator_context = Some(session::CoordinatorContext {
+                    provider, model, window: context_window, input_tokens: tokens, estimated,
+                });
+            }
             BunMessage::MetricsUpdate { token_count, cost, elapsed_secs } => {
                 if let Some(tokens) = token_count {
                     self.session.token_count = tokens;
@@ -1055,12 +1068,22 @@ impl AppState {
                     })
                     .collect();
                 let n = modal_fields.len();
+                let cursors = modal_fields.iter().zip(&values).map(|(field, value)| {
+                    if field.kind == ModalFieldKind::Select {
+                        field.options.as_ref().and_then(|options| options.iter().position(|option| option == value))
+                            .unwrap_or(0).saturating_sub(5)
+                    } else { 0 }
+                }).collect();
+                let return_to = if command.starts_with("agent-config:") {
+                    match &self.modal { ModalState::Settings(hub) => Some(hub.clone()), _ => None }
+                } else { None };
                 self.modal = ModalState::Config(ConfigModalState {
                     command,
                     title,
                     fields: modal_fields,
                     values,
-                    cursors: vec![0; n],
+                    cursors,
+                    return_to,
                     focused: 0,
                     errors: vec![false; n],
                     // Los modales de Bun se responden con `ModalSubmit`; la
@@ -1081,6 +1104,7 @@ impl AppState {
                         is_active: p.is_active, has_key: p.has_key,
                         browser_login: p.browser_login,
                         models: p.models,
+                        model_names: p.model_names,
                     }).collect();
                     hub.agents = agents.into_iter().map(|a| SettingsAgent {
                         id: a.id, name: a.name, provider: a.provider, model: a.model,
@@ -1139,7 +1163,8 @@ impl AppState {
                     availability: self.jev.availability,
                 });
             }
-            BunMessage::JevStatus { state, last_error, last_success_at, totals } => {
+            BunMessage::JevStatus { state, oracle, last_error, last_success_at, totals } => {
+                self.jev.oracle = oracle;
                 self.jev.set_availability(
                     JevAvailability::from_str(&state),
                     last_error,

@@ -35,6 +35,8 @@ export interface AgentIdentity {
  */
 const IDENTIDADES: Record<string, AgentIdentity> = {
   bee:            { alias: "Abeja Reina", funcion: "Comandante. Pregunta lo que falta, arma el plan y reparte el trabajo.", nivel: 0 },
+  planner:        { alias: "Cóndor", funcion: "Planificación. Define requisitos, contratos y tareas con aceptación.", nivel: 1 },
+  builder:        { alias: "Cangrejo", funcion: "Implementación. Construye, integra y prueba los cambios asignados.", nivel: 2 },
   product_manager:{ alias: "Ocelote",     funcion: "Producto. Traduce tu idea difusa en requisitos verificables.",        nivel: 1 },
   architecture:   { alias: "Cóndor",      funcion: "Arquitecto. Diseña: ADRs, contratos de API, orden de las fases.",     nivel: 1 },
   backend:        { alias: "Topo",        funcion: "Backend. Excava la infraestructura: servicios, endpoints, esquemas.", nivel: 2 },

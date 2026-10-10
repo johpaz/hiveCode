@@ -73,6 +73,9 @@ export interface ProfileHarnessResult {
 }
 
 export type ProfileRunner = (opts: {
+  codeSessionId?: string
+  codeTaskId?: string
+  workspace?: string
   signal?: AbortSignal
   agentId: CoreAgentType
   taskDescription: string
@@ -120,8 +123,8 @@ async function configureProfiles(workspace: string, provider?: string, model?: s
     await mutateDoc<AgentDoc>("agents", id, (row) => row && {
       ...row,
       workspace,
-      provider_id: provider || fromIndexable(row.provider_id) || row.provider_id,
-      model_id: model || fromIndexable(row.model_id) || row.model_id,
+      provider_id: row.model_selection === "custom" ? row.provider_id : provider || fromIndexable(row.provider_id) || row.provider_id,
+      model_id: row.model_selection === "custom" ? row.model_id : model || fromIndexable(row.model_id) || row.model_id,
       updated_at: Date.now(),
     })
   }
@@ -181,6 +184,9 @@ export class ProfileHarness {
       await mutateDoc<AgentDoc>("agents", agentId, (row) => row && { ...row, status: "busy", updated_at: Date.now() })
       try {
         const output = await this.runner({
+          codeSessionId: options.sessionId,
+          codeTaskId: taskId,
+          workspace: options.workspace,
           signal: options.signal,
           agentId,
           taskDescription: agentId === "bee" ? sessionPreamble + taskDescription : taskDescription,
@@ -229,7 +235,7 @@ export class ProfileHarness {
         if (policy === "plan") {
           const response = await invoke(
             "bee",
-            `Modo plan: describe un plan breve y localizado para este cambio. No modifiques código ni inicies Spec Kit.\n\n${objective}`,
+            `Modo plan: describe un plan breve y localizado para este cambio. Puedes delegar investigación a Scout o Spider y consultas técnicas a los especialistas cuando hagan falta; sus entregas deben ser de análisis. No modifiques código ni inicies Spec Kit.\n\n${objective}`,
             "harness",
           )
           await updateStage("ready")

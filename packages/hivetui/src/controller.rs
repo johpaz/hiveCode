@@ -17,7 +17,7 @@ use crate::{
     renderer::layout_areas,
     term::Rect,
     ui::{split_panes, Axis, Constraint, HitAction, SplitPane},
-    widgets::{command_popup, dashboard_layout, history, tabbar, taller_layout},
+    widgets::{command_popup, dashboard_layout, history, tabbar},
 };
 
 pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
@@ -112,7 +112,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     }
                     _ => None,
                 };
-                let model_command = matches!(hub.active_tab, SettingsTab::Models | SettingsTab::Github | SettingsTab::Mcp | SettingsTab::Skills | SettingsTab::Telegram);
+                let model_command = matches!(hub.active_tab, SettingsTab::Agents | SettingsTab::Models | SettingsTab::Github | SettingsTab::Mcp | SettingsTab::Skills | SettingsTab::Telegram);
                 if let Some(c) = cmd {
                     keep_hub_loading(state);
                     state.pending_ipc.push(TuiMessage::Submit { input: c });
@@ -136,7 +136,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     }
                     _ => None,
                 };
-                let model_command = matches!(hub.active_tab, SettingsTab::Models | SettingsTab::Github | SettingsTab::Mcp | SettingsTab::Skills | SettingsTab::Telegram);
+                let model_command = matches!(hub.active_tab, SettingsTab::Agents | SettingsTab::Models | SettingsTab::Github | SettingsTab::Mcp | SettingsTab::Skills | SettingsTab::Telegram);
                 if let Some(c) = cmd {
                     keep_hub_loading(state);
                     state.pending_ipc.push(TuiMessage::Submit { input: c });
@@ -203,7 +203,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     SettingsTab::Telegram  => Some(["/telegram connect", "/telegram edit", "/telegram status", "/telegram disconnect"][hub.selected_row.min(3)].to_string()),
                     _ => None,
                 };
-                let model_command = matches!(hub.active_tab, SettingsTab::Models | SettingsTab::Github | SettingsTab::Mcp | SettingsTab::Skills | SettingsTab::Telegram);
+                let model_command = matches!(hub.active_tab, SettingsTab::Agents | SettingsTab::Models | SettingsTab::Github | SettingsTab::Mcp | SettingsTab::Skills | SettingsTab::Telegram);
                 if let Some(c) = cmd {
                     keep_hub_loading(state);
                     state.pending_ipc.push(TuiMessage::Submit { input: c });
@@ -357,17 +357,13 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                         state.logs.visible = !state.logs.visible;
                         return false;
                     }
-                    // `/habilidades` abre el catálogo. Con un argumento, abre
-                    // además la ficha de ese agente para que cada skill diga si
-                    // él puede usarla.
+                    // Skills live in the existing settings hub; a named agent opens its card.
                     "/habilidades" | "/skills" => {
-                        state.active_tab = TabId::Taller;
-                        state.taller_section = taller_layout::Section::Habilidades;
-                        state.taller_scroll = 0;
-                        state.tab_locked = true;
-                        state.ficha_agent = (!arg.is_empty())
-                            .then(|| state.roster.resolve(arg).map(|a| a.id.clone()))
-                            .flatten();
+                        if let Some(agent) = state.roster.resolve(arg).filter(|_| !arg.is_empty()) {
+                            state.ficha_agent = Some(agent.id.clone());
+                        } else {
+                            open_skills_settings(state);
+                        }
                         return false;
                     }
                     // `/ficha <agente>` abre la ficha directa.
@@ -429,7 +425,6 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                         // Cambiar de vista a mano rompe el auto-routing: el
                         // usuario acaba de decir dónde quiere estar.
                         state.tab_locked = true;
-                        state.taller_scroll = 0;
                         return false;
                     }
                     "/welcome" => {
@@ -819,8 +814,13 @@ fn handle_dashboard_key(
     }
     let alt = modifiers.contains(KeyModifiers::ALT);
     match code {
+        KeyCode::Up | KeyCode::Down if alt => {
+            crate::widgets::office::select_next(state, if code == KeyCode::Up { -1 } else { 1 });
+            true
+        }
         KeyCode::Esc => {
             clear_pending_confirm(state);
+            state.dashboard.office.selected = None;
             state.selection = None;
             true
         }
@@ -851,6 +851,17 @@ fn handle_dashboard_key(
             if state.dashboard.resume.is_some() && !state.dashboard.halt.active {
                 confirm_or_send_task_resume(state);
                 return true;
+            }
+            if !has_pending_confirm(state) {
+                if let Some(worker) = state.dashboard.office.selected.clone() {
+                    state.focused_worker = Some(crate::widgets::office::code_worker(state, &worker));
+                    state.active_tab = TabId::Code;
+                    state.tab_locked = true;
+                    state.history_nav_mode = false;
+                    state.history_hscroll = 0;
+                    state.show_welcome = false;
+                    return true;
+                }
             }
             if state.session.mode == ReplMode::Plan
                 && state.checkpoints.selected.is_none()
@@ -888,6 +899,16 @@ fn handle_dashboard_key(
         KeyCode::BackTab if modifiers.is_empty() => false,
         _ => false,
     }
+}
+
+fn open_skills_settings(state: &mut AppState) {
+    state.ficha_agent = None;
+    state.modal = ModalState::Settings(SettingsHubState {
+        active_tab: SettingsTab::Skills,
+        loading: true,
+        ..Default::default()
+    });
+    state.pending_ipc.push(TuiMessage::RequestSettings);
 }
 
 fn handle_immersive_layout_key(
@@ -939,33 +960,7 @@ fn handle_immersive_layout_key(
             true
         }
         KeyCode::Char('s') if state.ficha_agent.is_some() => {
-            // Saltar a las habilidades de este agente, filtradas por lo que
-            // puede usar.
-            state.active_tab = TabId::Taller;
-            state.taller_section = taller_layout::Section::Habilidades;
-            state.taller_scroll = 0;
-            true
-        }
-        // ── TALLER: `←/→` cambian de sección, `↑/↓` hacen scroll ──────────
-        // Antes de ser un tab, esto eran las flechas de los checkpoints. Ahora la
-        // sección se recorre dentro de su propia vista, que es lo que el usuario
-        // espera al ver seis pestañas en el tabbar.
-        KeyCode::Left | KeyCode::Right if state.active_tab == TabId::Taller => {
-            state.taller_section = if code == KeyCode::Right {
-                state.taller_section.next()
-            } else {
-                state.taller_section.prev()
-            };
-            state.taller_scroll = 0;
-            true
-        }
-        KeyCode::Up | KeyCode::Down if state.active_tab == TabId::Taller => {
-            let delta: isize = if code == KeyCode::Down { 1 } else { -1 };
-            // El tope lo pone el número de filas de la sección: más allá, el
-            // scroll no movería nada y el usuario creería que la tecla falló.
-            let total = taller_layout::section_rows(state) as isize;
-            let next = state.taller_scroll as isize + delta;
-            state.taller_scroll = next.clamp(0, (total - 1).max(0)) as usize;
+            open_skills_settings(state);
             true
         }
         KeyCode::Left => {
@@ -1172,6 +1167,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
             }
             if state.active_tab == TabId::Swarm {
                 if let Some(area) = screen_rect_from_size(terminal::size().ok()) {
+                    let area = crate::renderer::layout_for_state(area, state).content;
                     if let Some(checkpoint_idx) = dashboard_layout::checkpoint_at(state, area, mouse.column, mouse.row) {
                         state.checkpoints.selected = Some(checkpoint_idx);
                         state.dashboard.rollback_confirm_checkpoint = None;
@@ -1179,12 +1175,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                         return;
                     }
                     if let Some(worker) = dashboard_layout::worker_at(state, area, mouse.column, mouse.row) {
-                        state.focused_worker = Some(worker);
-                        state.active_tab = TabId::Code;
-                        state.tab_locked = true;
-                        state.history_nav_mode = false;
-                        state.history_hscroll = 0;
-                        state.show_welcome = false;
+                        state.dashboard.office.selected = Some(worker);
                         state.selection = None;
                         return;
                     }
@@ -1273,6 +1264,13 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
 
 fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
     match action {
+        HitAction::Custom(ref id) if id.starts_with("office:select:") => {
+            let name = id.trim_start_matches("office:select:");
+            if crate::widgets::office::agents(state).iter().any(|a| a.worker.name == name) {
+                state.dashboard.office.selected = Some(name.to_string());
+            }
+            true
+        }
         HitAction::ActivateTab(name) => {
             let Some(tab) = TabId::from_name(&name) else {
                 return false;
@@ -1590,6 +1588,30 @@ fn copy_selected_entry_to_clipboard(state: &AppState) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn office_selection_opens_code_and_preserves_confirmation_and_input_priority() {
+        let mut state = AppState::default();
+        state.active_tab = TabId::Swarm;
+        state.workers.workers.push(crate::state::Worker::new("backend"));
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Down, KeyModifiers::ALT));
+        assert_eq!(state.dashboard.office.selected.as_deref(), Some("backend"));
+        assert_eq!(state.active_tab, TabId::Swarm);
+        state.input.set("mensaje");
+        assert!(!handle_dashboard_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, true));
+        assert_eq!(state.active_tab, TabId::Swarm);
+        state.input.clear();
+        state.dashboard.halt_confirm = true;
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(state.active_tab, TabId::Swarm);
+        assert!(state.pending_ipc.iter().any(|m| matches!(m, TuiMessage::Submit { input } if input == "/halt")));
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(state.active_tab, TabId::Code);
+        assert_eq!(state.focused_worker.as_deref(), Some("backend"));
+        state.active_tab = TabId::Swarm;
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(state.dashboard.office.selected.is_none());
+    }
+
+    #[test]
     fn a_click_only_changes_tab_on_the_tabbar_row() {
         let state = AppState::default();
         let size = Some((140, 40));
@@ -1788,6 +1810,7 @@ mod tests {
             has_key,
             browser_login,
             models: vec![format!("{id}/default")],
+            model_names: Default::default(),
         }
     }
 
@@ -1820,8 +1843,19 @@ mod tests {
     }
 
     #[test]
+    fn skills_command_uses_settings_and_removed_workshop_has_no_tab() {
+        let mut state = AppState::default();
+        state.input.set("/habilidades");
+        press(&mut state, KeyCode::Enter);
+        assert!(matches!(&state.modal, ModalState::Settings(hub) if hub.active_tab == SettingsTab::Skills));
+        assert!(state.pending_ipc.iter().any(|message| matches!(message, TuiMessage::RequestSettings)));
+        assert!(TabId::from_num(6).is_none());
+        assert!(TabId::from_name("taller").is_none());
+    }
+
+    #[test]
     fn slash_session_navigation_renders_and_submits_in_every_layout() {
-        for number in 1..=6 {
+        for number in 1..=5 {
             let tab = TabId::from_num(number).unwrap();
             let mut state = AppState::default();
             state.active_tab = tab;
@@ -2556,7 +2590,7 @@ fn handle_config_modal_key(state: &mut AppState, code: KeyCode) {
                 return;
             }
             let command = modal.command.clone();
-            state.modal = ModalState::None;
+            close_to_settings_hub(state, false);
             state.pending_ipc.push(TuiMessage::ModalCancel { command });
         }
         // Tab/BackTab siempre cambian de campo
@@ -2631,7 +2665,7 @@ fn handle_config_modal_key(state: &mut AppState, code: KeyCode) {
                         .enumerate()
                         .map(|(i, f)| (f.key.clone(), modal.values.get(i).cloned().unwrap_or_default()))
                         .collect();
-                    state.modal = ModalState::None;
+                    close_to_settings_hub(state, true);
                     state.pending_ipc.push(TuiMessage::ModalSubmit { command, values });
                 }
             }
@@ -2711,10 +2745,9 @@ Vistas (tabs)
 3 / /layout mesa        Chat + narración + razonamiento
 4 / /layout codigo      Cambios en código + workers
 5 / /layout revision    Revisión + aprobación
-6 / /layout taller      Agentes, herramientas, habilidades, MCP, registro
 /auto                  Reactivar navegación automática de layouts
 /welcome               Volver a la pantalla de bienvenida
-/habilidades           Catálogo de habilidades (de quién es cada una)
+/habilidades           Habilidades en Configuración (F2)
 /ficha <agente>        Ficha del especialista: qué puede y qué le falta
 
 Atajos

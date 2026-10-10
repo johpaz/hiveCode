@@ -32,6 +32,36 @@ export function resolveWindow(contextWindow?: number): number {
   return contextWindow && contextWindow > 0 ? contextWindow : DEFAULT_CONTEXT_WINDOW
 }
 
+// ── Project packet (preloaded in the first turn) ─────────────────────────────
+
+/** Packet size for a coordinator: a map, never source. */
+const COORDINATOR_PACKET_TOKENS = 700
+/** Packet size a worker always gets, window permitting. */
+const WORKER_PACKET_TOKENS = 2_600
+/** Hard ceiling; the preload must never crowd out history and the answer. */
+const MAX_PACKET_TOKENS = 6_000
+/** Windows at least this large can afford a bigger share for preloaded source. */
+const LARGE_WINDOW = 64_000
+
+/**
+ * Tokens of project context to preload so the agent starts with the code it
+ * needs instead of spending its first tool calls discovering it.
+ * HIVE_PRELOAD_MAX_TOKENS lowers (never raises past 12 000) the ceiling.
+ */
+export function projectPacketBudget(contextWindow: number | undefined, coordinator: boolean): number {
+  const window = resolveWindow(contextWindow)
+  if (coordinator) return Math.min(COORDINATOR_PACKET_TOKENS, Math.floor(window * 0.12))
+  const override = Number(process.env.HIVE_PRELOAD_MAX_TOKENS)
+  const ceiling = Number.isFinite(override) && override > 0 ? Math.min(12_000, override) : MAX_PACKET_TOKENS
+  if (window < LARGE_WINDOW) return Math.min(WORKER_PACKET_TOKENS, ceiling, Math.floor(window * 0.12))
+  return Math.min(ceiling, Math.max(WORKER_PACKET_TOKENS, Math.floor(window * 0.2)))
+}
+
+/** Source snippets worth fetching for a packet of this size. */
+export function packetSnippetCount(tokenBudget: number): number {
+  return tokenBudget >= 5_000 ? 8 : tokenBudget >= 3_500 ? 6 : 5
+}
+
 // ── One tool result ───────────────────────────────────────────────────────────
 
 /** Most characters one tool result may put into the context: ~8 % of the window, 4k–16k. */

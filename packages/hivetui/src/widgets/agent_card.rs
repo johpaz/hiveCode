@@ -253,7 +253,7 @@ fn wrap_line(text: &str, max: usize) -> String {
 /// Overlay de la ficha. Se dibuja sobre el contenido cuando hay un agente
 /// seleccionado; `Esc` o el comando la cierra.
 pub fn render_overlay(canvas: &mut Canvas, area: Rect, state: &AppState) -> bool {
-    let Some(agent) = taller_agent(state) else { return false };
+    let Some(agent) = card_agent(state) else { return false };
     let w = area.w.saturating_sub(6).min(110).max(40);
     let h = area.h.saturating_sub(4).min(30).max(12);
     let rect = Rect::new(
@@ -280,7 +280,7 @@ pub fn render_overlay(canvas: &mut Canvas, area: Rect, state: &AppState) -> bool
     true
 }
 
-fn taller_agent(state: &AppState) -> Option<&RosterAgent> {
+fn card_agent(state: &AppState) -> Option<&RosterAgent> {
     state.ficha_agent.as_ref().and_then(|id| state.roster.resolve(id))
 }
 

@@ -8,7 +8,7 @@ import { buildSnippet } from "@johpaz/hivecode-core/utils/search-snippet";
  */
 
 import { col } from "@johpaz/hivecode-core/storage/hive"
-import type { CodeContextCacheDoc, CodeDecisionDoc, CodeFileDoc, CodeGraphDoc } from "@johpaz/hivecode-core/storage/collections"
+import type { CodeContextCacheDoc, CodeDecisionDoc, CodeFileDoc, CodeGraphDoc, CodeTaskDoc } from "@johpaz/hivecode-core/storage/collections"
 import { searchCapabilities } from "@johpaz/hivecode-core/agent/capability-search"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import * as fs from "node:fs"
@@ -19,7 +19,7 @@ const log = logger.child("context-retriever")
 const CONTEXT_CACHE_TTL_MS = 1000 * 60 * 60 * 24 // 24 hours
 
 /** In-memory cache for ultra-fast reads (< 0.1ms). Invalidated on rebuild. */
-let _memProjectCtx: { sessionId: string; compiled: string; expiresAt: number } | null = null
+let _memProjectCtx: { sessionId: string; compiled: string; expiresAt: number; version?: number } | null = null
 
 export interface CodeSearchResult {
   filePath: string
@@ -158,7 +158,7 @@ export async function buildProjectContext(sessionId: string, workspace: string):
     // 3. Most critical files (highest exported_by count)
     const criticalRows = (await (await col<CodeGraphDoc>("codeGraph")).findBy("session_id", sessionId))
       .map((entry) => entry.doc)
-      .sort((a, b) => b.exported_by.length - a.exported_by.length)
+      .sort((a, b) => JSON.parse(b.exported_by || "[]").length - JSON.parse(a.exported_by || "[]").length)
       .slice(0, 10)
 
     const criticalFiles = criticalRows.map(r => {
@@ -173,8 +173,10 @@ export async function buildProjectContext(sessionId: string, workspace: string):
     })
 
     // 4. Active ADRs
+    const projectTaskIds = new Set((await (await col<CodeTaskDoc>("codeTasks")).findBy("session_id", sessionId)).map(row => row.doc.id))
     const adrRows = (await (await col<CodeDecisionDoc>("codeDecisions")).findBy("status", "active"))
       .map((entry) => entry.doc)
+      .filter(row => row.task_id && projectTaskIds.has(row.task_id))
       .sort((a, b) => b.created_at.localeCompare(a.created_at))
       .slice(0, 5)
 
@@ -245,4 +247,32 @@ export function getProjectContext(sessionId: string): string | null {
   }
 
   return null
+}
+
+/**
+ * Like getProjectContext, but validated against the HiveDB row. Works on a
+ * fresh process (memory empty) and sees invalidations made by other writers,
+ * which makes the first turn independent of the async reconcile finishing.
+ */
+export async function loadProjectContext(sessionId: string): Promise<string | null> {
+  try {
+    // One keyed get is the source of truth: other writers (agent-loop's
+    // refreshSourceIndex) invalidate by deleting this row, and the memory slot
+    // would otherwise outlive that for the whole TTL.
+    const row = await (await col<CodeContextCacheDoc>("codeContextCache")).get(`project_context:${sessionId}`)
+    if (!row) {
+      if (_memProjectCtx?.sessionId === sessionId) _memProjectCtx = null
+      return null
+    }
+    const expiresAt = Date.parse(row.doc.expires_at)
+    if (!Number.isFinite(expiresAt) || Date.now() >= expiresAt) return null
+    if (_memProjectCtx?.sessionId === sessionId && _memProjectCtx.version === row.version) {
+      return _memProjectCtx.compiled
+    }
+    _memProjectCtx = { sessionId, compiled: row.doc.compiled, expiresAt, version: row.version }
+    return row.doc.compiled
+  } catch (err) {
+    log.debug(`[context-retriever] loadProjectContext failed: ${(err as Error).message}`)
+    return getProjectContext(sessionId)
+  }
 }

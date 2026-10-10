@@ -251,7 +251,11 @@ fn next_key(buf: &str) -> Option<(KeyEvent, String)> {
                         _ => return None,
                     };
                     // ESC inicial + '[' + los chars de la secuencia.
-                    (code, KeyModifiers::NONE, 2 + chars_of.len())
+                    let modifiers = match seq.split(';').nth(1).and_then(|s| s.trim_end_matches(|c: char| c.is_ascii_alphabetic()).parse::<u8>().ok()) {
+                        Some(3) => KeyModifiers::ALT,
+                        _ => KeyModifiers::NONE,
+                    };
+                    (code, modifiers, 2 + chars_of.len())
                 }
                 // ESC suelto: cancelar.
                 Some(_) => (KeyCode::Esc, KeyModifiers::NONE, 1),
@@ -392,6 +396,7 @@ pub async fn run() -> Result<()> {
                 state.anim_tick = (state.anim_tick + 1) % 8;
                 state.slow_tick = (state.slow_tick + 1) % 30;
                 state.tick_layout_transition();
+                crate::widgets::office::tick(&mut state);
                 state.clock = Local::now().format("%H:%M:%S").to_string();
                 draw_pending = true;
             }

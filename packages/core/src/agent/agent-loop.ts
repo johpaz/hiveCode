@@ -1,3 +1,9 @@
+import { eventBus } from "../events/event-bus"
+import { stringList } from "./ephemeral-agents"
+import { markSourceIndexStale, refreshSourceIndex } from "./source-index"
+import { budgetTokens } from "./context-budget"
+import { withExecutionSlot } from "./execution-limits"
+import type { ContextReference } from "./project-context"
 import { runWithTaskSignal } from "../runtime/task-execution"
 /**
  * Agent Loop — native implementation, no LangGraph.
@@ -22,7 +28,7 @@ import { col, fromIndexable } from "../storage/hive"
 import type { AgentDoc, AgentRunDoc, AgentRunStatus, CodeConfigDoc, SkillDoc, ToolRunDoc } from "../storage/collections"
 import { callLLM, resolveProviderConfig, type LLMMessage } from "./llm-client"
 import { addMessage } from "./conversation-store"
-import { saveTrace, recordLLMUsage } from "./tracer"
+import { saveTrace, recordLLMUsage, capStoredPayload } from "./tracer"
 import { maybeCompact, clearOldToolResults } from "./compaction"
 import { capToolResult, fitLoopMessages, messageBudget, messageTokens } from "./context-budget"
 import type { MCPClientManager } from "@johpaz/hivecode-mcp"
@@ -59,7 +65,7 @@ async function executeTool(
   allTools: Array<{ name: string; execute?: (params: Record<string, unknown>, config?: any) => Promise<unknown> }>,
   toolName: string,
   args: unknown,
-  config: { user_id?: string; thread_id?: string; channel?: string; workspace?: string | null; signal?: AbortSignal; agent_id?: string; run_id?: string; approved_execution?: boolean }
+  config: { user_id?: string; thread_id?: string; channel?: string; workspace?: string | null; signal?: AbortSignal; agent_id?: string; run_id?: string; approved_execution?: boolean; code_session_id?: string; code_task_id?: string }
 ): Promise<unknown> {
   const tool = allTools.find(t => t.name === toolName)
   if (!tool?.execute) {
@@ -67,7 +73,11 @@ async function executeTool(
   }
   try {
     const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args
-    return await runWithTaskSignal(config.signal, () => tool.execute(parsedArgs as Record<string, unknown>, { configurable: config, signal: config.signal }))
+    if (toolName === "search_knowledge" && config.code_session_id && parsedArgs?.mode === undefined) parsedArgs.mode = "compact"
+    const invoke = () => runWithTaskSignal(config.signal, () => tool.execute(parsedArgs as Record<string, unknown>, { configurable: config, signal: config.signal }))
+    if (["task_delegate", "task_revise", "spawn_agent"].includes(toolName)) return await invoke()
+    return await withExecutionSlot(config.code_session_id ?? config.thread_id ?? "default", config.signal, invoke,
+      WORKSPACE_MUTATION_TOOLS.has(toolName) || ["shell_executor", "run_script", "code_test", "code_build"].includes(toolName) ? config.workspace ?? process.cwd() : undefined)
   } catch (err) {
     return {
       error: true,
@@ -102,6 +112,8 @@ const WORKSPACE_MUTATION_TOOLS = new Set([
   "fs_write", "fs_edit", "fs_delete", "shell_executor", "run_script",
   "git_commit", "git_rollback", "speckit_init", "speckit_artifact_write",
 ])
+/** Mutate the workspace without naming the files they touched. */
+const UNTARGETED_WORKSPACE_MUTATORS = new Set(["shell_executor", "run_script", "git_commit", "git_rollback"])
 const DB_MUTATION_TOOLS = new Set([
   "save_note", "memory_write", "write_memory", "memory_delete",
   "speckit_tasks_sync", "speckit_converge",
@@ -293,6 +305,12 @@ export interface AgentLoopOptions {
   /** Worker mode: isolated context + single-task execution */
   isolated?: boolean
   taskContext?: string | ContentPart[]
+  codeSessionId?: string
+  codeTaskId?: string
+  workspace?: string | null
+  specialty?: string
+  contextRefs?: ContextReference[]
+  contextPaths?: string[]
   onStep?: (step: StepEvent) => Promise<void>
   /** User ID for context propagation */
   userId?: string
@@ -385,6 +403,15 @@ export async function* runAgent(
   opts: AgentLoopOptions
 ): AsyncGenerator<StreamChunk> {
   const t0 = performance.now()
+  let priorEstimatedInputTokens = 0
+  if (opts.resumeRunId) {
+    const persisted = (await (await col<AgentRunDoc>("agentRuns")).get(opts.resumeRunId))?.doc
+    try { priorEstimatedInputTokens = JSON.parse(persisted?.context_metrics_json || "{}").estimated_input_tokens || 0 } catch { /* older metrics */ }
+    if (persisted?.project_context_json) {
+      const restored = JSON.parse(persisted.project_context_json)
+      opts = {...restored, ...Object.fromEntries(Object.entries(opts).filter(([, value]) => value !== undefined))} as AgentLoopOptions
+    }
+  }
 
   // Load agent config from HiveDB.
   const agents = await col<AgentDoc>("agents")
@@ -449,23 +476,6 @@ export async function* runAgent(
     }
   }
 
-  /** Snapshot the run so a crash can be resumed from this exact point. */
-  async function checkpoint(pending: RunCheckpoint["pendingToolCalls"], label: string): Promise<void> {
-    if (!isResumable) return
-    await writeCheckpoint(runId, {
-      version: 1,
-      messages,
-      iterations,
-      totalInputTokens,
-      totalOutputTokens,
-      totalCostUsd,
-      repeats: repeats.snapshot(),
-      pendingToolCalls: pending,
-    }).then((ok) => {
-      if (!ok) log.debug(`[agent-loop] ${label} checkpoint not written for ${runId}`)
-    })
-  }
-
   // Renewal stops as soon as the run stops being "running" — a lease for a
   // finished run is what keeps it looking abandoned, not owned.
   const stopLeaseRenewal = startLeaseRenewal(runId, { isActive: () => runStatus === "running" })
@@ -486,7 +496,8 @@ export async function* runAgent(
         id: runId,
         task_id: opts.threadId,
         thread_id: opts.threadId,
-        session_id: opts.threadId,
+        session_id: opts.codeSessionId ?? opts.threadId,
+        project_context_json: JSON.stringify({ codeSessionId: opts.codeSessionId, codeTaskId: opts.codeTaskId, workspace: opts.workspace, specialty: opts.specialty, contextPaths: opts.contextPaths }),
         agent_id: opts.agentId,
         kind: opts.runKind ?? (opts.isolated ? "worker" : "harness"),
         parent_run_id: opts.parentRunId ?? null,
@@ -510,6 +521,26 @@ export async function* runAgent(
     } catch (err) {
       log.debug(`[agent-loop] Failed to create run ${runId}: ${(err as Error).message}`)
     }
+  }
+
+  // Cover context compilation as well as execution so failures release the lease.
+  try {
+  /** Snapshot the run so a crash can be resumed from this exact point. */
+  async function checkpoint(pending: RunCheckpoint["pendingToolCalls"], label: string): Promise<void> {
+    if (!isResumable) return
+    await writeCheckpoint(runId, {
+      version: 1,
+      projectContext: {codeSessionId: opts.codeSessionId, codeTaskId: opts.codeTaskId, workspace: opts.workspace, specialty: opts.specialty, contextPaths: opts.contextPaths},
+      messages,
+      iterations,
+      totalInputTokens,
+      totalOutputTokens,
+      totalCostUsd,
+      repeats: repeats.snapshot(),
+      pendingToolCalls: pending,
+    }).then((ok) => {
+      if (!ok) log.debug(`[agent-loop] ${label} checkpoint not written for ${runId}`)
+    })
   }
 
   // Resolve LLM provider config — prefer agent's provider_id, fall back to codeConfig.
@@ -546,13 +577,27 @@ export async function* runAgent(
     temperature: TOOL_CALLING_TEMPERATURE,
   }
 
+  let latestModelContext: {configured_provider: string; configured_model: string; provider: string; model: string; context_window: number | null; input_tokens: number; estimated: boolean} | undefined
+  function reportModelContext(request: Parameters<typeof callLLM>[0], inputTokens: number, estimated: boolean) {
+    latestModelContext = {configured_provider: provId, configured_model: modId, provider: request.provider, model: request.model,
+      context_window: request.contextWindow ?? null, input_tokens: inputTokens, estimated}
+    eventBus.emit("agent:context", {agentId: opts.agentId, sessionId: opts.codeSessionId ?? opts.threadId,
+      provider: request.provider, model: request.model, contextWindow: request.contextWindow ?? null, inputTokens, estimated})
+  }
+  async function measuredCall(request: Parameters<typeof callLLM>[0]) {
+    reportModelContext(request, request.messages.reduce((sum, message) => sum + messageTokens(message), 0) + budgetTokens(JSON.stringify(request.tools ?? [])), true)
+    const response = await callLLM(request)
+    if (response.usage) reportModelContext(request, response.usage.input_tokens, false)
+    return response
+  }
+
   async function callProfileLLM(request: Parameters<typeof callLLM>[0]) {
     // Todas las llamadas del run son de la misma conversación: los providers que
     // rutean o cachean por sesión (OpenCode Go) lo necesitan, y el fallback de
     // abajo lo conserva porque providerCfg no trae sessionId.
     request = { sessionId: opts.threadId, ...request }
     try {
-      return await callLLM(request)
+      return await measuredCall(request)
     } catch (error) {
       if (!fallbackCfg || fallbackUsed) throw error
       fallbackUsed = true
@@ -562,7 +607,7 @@ export async function* runAgent(
         `[agent-loop] Primary provider failed; switching run=${runId} ` +
         `to fallback=${providerCfg.provider}/${providerCfg.model}: ${(error as Error).message}`,
       )
-      return callLLM({ ...request, ...providerCfg })
+      return measuredCall({ ...request, ...providerCfg })
     }
   }
 
@@ -592,6 +637,12 @@ export async function* runAgent(
     mcpManager: opts.mcpManager,
     isolated: opts.isolated,
     taskContext: opts.taskContext,
+    codeSessionId: opts.codeSessionId,
+    codeTaskId: opts.codeTaskId,
+    workspace: opts.workspace,
+    specialty: opts.specialty,
+    contextRefs: opts.contextRefs,
+    contextPaths: opts.contextPaths,
     userId: opts.userId,
     causalStreamId: causalDb ? causalStreamId : undefined,
     // The restored messages are already the pruned set from the run that
@@ -603,6 +654,11 @@ export async function* runAgent(
     // aunque el agente no haya descubierto nada nuevo.
     onLoadout: (loadout) => emitLoadout({ agentId: opts.agentId, ...loadout }),
   })
+  if (ctx.projectScope) {
+    opts.codeSessionId = ctx.projectScope.sessionId
+    opts.workspace = ctx.projectScope.workspace
+  }
+  await updateRun({context_metrics_json: JSON.stringify(ctx.contextMetrics), project_context_json: JSON.stringify({codeSessionId: opts.codeSessionId, codeTaskId: opts.codeTaskId, workspace: opts.workspace, specialty: opts.specialty, contextPaths: opts.contextPaths})})
 
   // Conditions this run executes under, stamped on every trace it produces.
   // Traces from one epoch are comparable to each other; across a boundary they
@@ -645,6 +701,7 @@ export async function* runAgent(
   }
 
   let iterations = 0
+  let estimatedInputTokens = priorEstimatedInputTokens
   let totalInputTokens = 0
   let totalOutputTokens = 0
   let totalCostUsd = 0
@@ -661,7 +718,8 @@ export async function* runAgent(
   if (isResume) {
     const restored = await readCheckpoint(runId)
     if (restored) {
-      messages = restored.messages
+      // Rebuild the project packet from current sources; old system context may be stale.
+      messages = [{role: "system", content: systemPrompt}, ...restored.messages.filter(message => message.role !== "system")]
       iterations = restored.iterations ?? 0
       totalInputTokens = restored.totalInputTokens ?? 0
       totalOutputTokens = restored.totalOutputTokens ?? 0
@@ -694,10 +752,6 @@ export async function* runAgent(
     }
   }
 
-  // The try wraps the loop, the synthesis and the finalization without
-  // re-indenting any of it: it guarantees a run never stays "running" with a
-  // live lease when the loop throws or the consumer abandons the generator.
-  try {
   // ── The loop ────────────────────────────────────────────────────────────
   while (iterations < maxSteps) {
     if (opts.signal?.aborted) {
@@ -802,7 +856,8 @@ export async function* runAgent(
       log.info(`[agent-loop] Wrap-up signal sent: run=${runId} iteration=${iterations}/${maxSteps}`)
     }
 
-    const response = await callProfileLLM({
+    estimatedInputTokens += budgetTokens(JSON.stringify(prepareMessages(messages, ctx.tools))) + budgetTokens(JSON.stringify(ctx.tools))
+    const response = await withExecutionSlot(opts.codeSessionId ?? opts.threadId, opts.signal, () => callProfileLLM({
       ...providerCfg,
       ...profileCallOptions,
       messages: prepareMessages(messages, ctx.tools),
@@ -810,7 +865,7 @@ export async function* runAgent(
       signal: opts.signal,
       onToken: opts.onToken,
       onReasoningToken: opts.onReasoningToken,
-    })
+    }))
 
     // Accumulate usage
     if (response.usage) {
@@ -820,6 +875,9 @@ export async function* runAgent(
         response.usage.input_tokens + response.usage.output_tokens
       ) * getAverageTokenCost(providerCfg.model)
     }
+
+    await updateRun({input_tokens: totalInputTokens, output_tokens: totalOutputTokens,
+      context_metrics_json: JSON.stringify({...ctx.contextMetrics, model_context: latestModelContext, estimated_input_tokens: estimatedInputTokens})})
 
     // G9: this model turn is the decision that follows the previous event in the
     // chain. Logging it before the tool calls it implies keeps the reconstructed
@@ -1024,7 +1082,7 @@ export async function* runAgent(
           task_id: opts.threadId,
           tool_name: toolName,
           call_id: tc.id,
-          args_json: argsJson,
+          args_json: capStoredPayload(argsJson),
           result_json: null,
           status: "running",
           read_only: !WORKSPACE_MUTATION_TOOLS.has(toolName) && !DB_MUTATION_TOOLS.has(toolName),
@@ -1063,7 +1121,9 @@ export async function* runAgent(
         user_id: opts.userId,
         thread_id: opts.threadId,
         channel: opts.channel,
-        workspace: agent.workspace ?? null,
+        workspace: opts.workspace ?? agent.workspace ?? null,
+        code_session_id: opts.codeSessionId,
+        code_task_id: opts.codeTaskId,
         // Delegation reads these: a worker inherits the parent's run and approval.
         agent_id: opts.agentId,
         run_id: runId,
@@ -1080,6 +1140,23 @@ export async function* runAgent(
         && "error" in toolResultJS
         && (toolResultJS as any).error
       )
+
+      // Write-back: keep the HiveDB code index in step with the workspace. Tools
+      // that name their file are patched in place; shell/git mutate blindly, so
+      // they only mark the session stale and the next context read reconciles.
+      if (!toolError && opts.codeSessionId && opts.workspace) {
+        if (["fs_write", "fs_edit", "fs_delete"].includes(toolName)) {
+          try {
+            const args = typeof tc.function.arguments === "string" ? JSON.parse(tc.function.arguments) : tc.function.arguments
+            const sourcePath = args?.path ?? args?.file_path
+            if (typeof sourcePath === "string") await refreshSourceIndex(opts.codeSessionId, opts.workspace, sourcePath)
+          } catch (error) { log.warn(`[agent-loop] Source index refresh failed: ${(error as Error).message}`) }
+        } else if (UNTARGETED_WORKSPACE_MUTATORS.has(toolName)) {
+          await markSourceIndexStale(opts.codeSessionId).catch((error) => {
+            log.warn(`[agent-loop] Source index stale mark failed: ${(error as Error).message}`)
+          })
+        }
+      }
 
       emitToolDone({
         agentId: opts.agentId,
@@ -1111,7 +1188,7 @@ export async function* runAgent(
         if (recorded) {
           await toolRuns.put(toolRunId, {
             ...recorded.doc,
-            result_json: JSON.stringify(toolResultJS),
+            result_json: capStoredPayload(JSON.stringify(toolResultJS) ?? ""),
             status: toolError ? "failed" : "completed",
             completed_at: nowSec(),
             duration_ms: toolMs,
@@ -1160,8 +1237,9 @@ export async function* runAgent(
         agentId: opts.agentId,
         agentName,
         toolUsed: r.name,
-        inputSummary: `Parallel Execution: ${r.name}`,
+        inputSummary: summarizeArgs(r.argsJson),
         outputSummary: r.toolResultLLM.substring(0, 300),
+        toolRunId: `${runId}:${r.id}`,
         success: !r.toolResultLLM.startsWith("[Tool Error]"),
         errorMessage: r.toolResultLLM.startsWith("[Tool Error]") ? r.toolResultLLM : null,
         durationMs: r.ms,
@@ -1317,7 +1395,8 @@ export async function* runAgent(
 
         try {
           const result = r.toolResultJS as any
-          const foundSkills: Array<{ name: string; body?: string }> = result?.skills ?? []
+          const allowedSkillNames = new Set(stringList(agent.skills_json))
+          const foundSkills: Array<{ name: string; body?: string }> = (result?.skills ?? []).filter((skill: {name: string}) => !agent.ephemeral || allowedSkillNames.has(skill.name))
           const foundPlaybook: Array<{ rule: string; category?: string }> = result?.playbook ?? []
 
           if (foundSkills.length > 0 || foundPlaybook.length > 0) {
@@ -1384,14 +1463,15 @@ export async function* runAgent(
         role: "user",
         content: "Basándote en lo que hiciste hasta ahora, responde al usuario con un resumen claro del estado actual. Si el objetivo no está completo, dilo explícitamente y explica el bloqueo o el siguiente paso. Sé conciso.",
       })
-      const synthesis = await callProfileLLM({
+      estimatedInputTokens += budgetTokens(JSON.stringify(prepareMessages(messages, undefined)))
+      const synthesis = await withExecutionSlot(opts.codeSessionId ?? opts.threadId, opts.signal, () => callProfileLLM({
         ...providerCfg,
         ...profileCallOptions,
         messages: prepareMessages(messages, undefined),
         tools: undefined, // no tools — force text response
         signal: opts.signal,
         onToken: opts.onToken,
-      })
+      }))
       if (synthesis.usage) {
         totalInputTokens += synthesis.usage.input_tokens
         totalOutputTokens += synthesis.usage.output_tokens
@@ -1399,6 +1479,7 @@ export async function* runAgent(
           synthesis.usage.input_tokens + synthesis.usage.output_tokens
         ) * getAverageTokenCost(providerCfg.model)
       }
+      await updateRun({context_metrics_json: JSON.stringify({...ctx.contextMetrics, model_context: latestModelContext, estimated_input_tokens: estimatedInputTokens})})
       finalContent = synthesis.content?.trim() || "No pude completar el objetivo dentro del presupuesto de pasos disponible."
       if (!opts.isolated) {
         await addMessage(opts.threadId, "assistant", finalContent)
@@ -1510,6 +1591,12 @@ const PARTIAL_RESULT_STATUSES = new Set<AgentRunStatus>(["needs_budget", "blocke
  * Returns the final response string.
  */
 export async function runAgentIsolated(opts: {
+  codeSessionId?: string
+  codeTaskId?: string
+  workspace?: string | null
+  specialty?: string
+  contextRefs?: ContextReference[]
+  contextPaths?: string[]
   agentId: string
   taskDescription: string | ContentPart[]
   threadId: string
@@ -1531,6 +1618,12 @@ export async function runAgentIsolated(opts: {
     threadId: opts.threadId,
     isolated: true,
     taskContext: opts.taskDescription,
+    codeSessionId: opts.codeSessionId,
+    codeTaskId: opts.codeTaskId,
+    workspace: opts.workspace,
+    specialty: opts.specialty,
+    contextRefs: opts.contextRefs,
+    contextPaths: opts.contextPaths,
     mcpManager: opts.mcpManager,
     parentRunId: opts.parentRunId,
     runKind: opts.runKind,

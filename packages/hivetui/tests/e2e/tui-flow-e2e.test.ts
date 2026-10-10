@@ -607,11 +607,11 @@ describe("E2E flow: ficha del especialista", () => {
   }
 
   test("el roster alimenta el tab ENJAMBRE con los alias", async () => {
-    const s = await startSession("auto")
+    const s = await startSession("auto", { cols: 160, rows: 40 })
     try {
       // El backend emite las dos cosas: la tarjeta del enjambre y el roster.
       // La tarjeta sigue viniendo de `worker_update`; el roster alimenta la
-      // ficha, TALLER y el badge del tabbar.
+      // ficha y el badge del Enjambre.
       for (const rol of ["backend", "frontend"]) {
         s.ipc.send({
           type: "worker_update", worker: rol, phase: "editando", status: "running",
@@ -688,14 +688,14 @@ describe("E2E flow: ficha del especialista", () => {
     }
   }, 20_000)
 
-  test("el badge de TALLER cuenta a los agentes bloqueados", async () => {
+  test("el badge de ENJAMBRE cuenta a los agentes bloqueados", async () => {
     const s = await startSession("auto")
     try {
       s.ipc.send(ROSTER as never)
       const frame = await waitForFrame(
         s.iter, f => frameContains(f, "1✗"), 5000, "badge de bloqueados",
       )
-      assert(frameContains(frame, "TALLER"))
+      assert(frameContains(frame, "ENJAMBRE"))
     } finally {
       s.dispose()
     }

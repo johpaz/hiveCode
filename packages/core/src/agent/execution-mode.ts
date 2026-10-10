@@ -45,7 +45,8 @@ const PLAN_BLOCKED_TOOLS = new Set([
   "git_commit", "git_push",
   "cron.create", "cron.update", "cron.pause", "cron.resume",
   "cron.delete", "cron.trigger",
-  "agent_create", "agent_archive", "task_delegate", "task_delegate_code",
+  // Delegating research/planning is allowed; children still enforce this same mode.
+  "agent_create", "agent_archive", "task_delegate_code",
   "memory_delete",
 ])
 

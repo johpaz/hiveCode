@@ -138,6 +138,7 @@ export async function agentConfigure(name: string | undefined, args: string[] = 
   await updateAgent(row.id, {
     provider_id: flags.get("provider") ?? row.provider_id,
     model_id: flags.get("model") ?? row.model_id,
+    model_selection: flags.has("provider") || flags.has("model") ? "custom" : row.model_selection,
     fallback_provider_id: flags.get("fallback-provider") ?? row.fallback_provider_id,
     fallback_model_id: flags.get("fallback-model") ?? row.fallback_model_id,
     effort: (["low", "medium", "high", "xhigh", "max"].includes(flags.get("effort") ?? "")

@@ -41,6 +41,7 @@
     "./gateway/helpers/path": "./src/gateway/helpers/path.ts",
     "./agent/service": "./src/agent/service.ts",
     "./agent/agent-loop": "./src/agent/agent-loop.ts",
+    "./agent/tracer": "./src/agent/tracer.ts",
     "./agent/context-compiler": "./src/agent/context-compiler.ts",
     "./agent/agent-profiles": "./src/agent/agent-profiles.ts",
     "./harness/adaptive-scheduler": "./src/harness/adaptive-scheduler.ts",
@@ -75,6 +76,7 @@
     "./storage/hive": "./src/storage/hive.ts",
     "./storage/ids": "./src/storage/ids.ts",
     "./storage/hivedb": "./src/storage/hivedb.ts",
+    "./storage/bootstrap": "./src/storage/bootstrap.ts",
     "./storage/causal-events": "./src/storage/causal-events.ts",
     "./storage/db-migrate": "./src/storage/db-migrate.ts",
     "./storage/collections": "./src/storage/collections.ts",
@@ -112,6 +114,10 @@
     "./services/narrative-mapping": "./src/services/narrative-mapping.ts",
     "./services/skill-catalog": "./src/services/skill-catalog.ts",
     "./services/diagnostics": "./src/services/diagnostics.ts",
-    "./services/channel-config": "./src/services/channel-config.ts"
+    "./services/channel-config": "./src/services/channel-config.ts",
+    "./agent/project-context": "./src/agent/project-context.ts",
+    "./agent/specialties": "./src/agent/specialties.ts",
+    "./agent/source-index": "./src/agent/source-index.ts",
+    "./agent/swarm-usage": "./src/agent/swarm-usage.ts"
   }
 }

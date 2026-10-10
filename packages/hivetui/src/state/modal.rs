@@ -152,9 +152,14 @@ pub struct SettingsProvider {
     pub browser_login: bool,
     /// Modelos llm habilitados del provider (los envía Bun ya filtrados).
     pub models: Vec<String>,
+    pub model_names: std::collections::HashMap<String, String>,
 }
 
 impl SettingsProvider {
+    pub fn model_name<'a>(&'a self, id: &'a str) -> &'a str {
+        self.model_names.get(id).filter(|name| !name.trim().is_empty()).map(String::as_str).unwrap_or(id)
+    }
+
     /// ¿El usuario tiene que escribir una API key para poder usar este provider?
     pub fn needs_key(&self) -> bool {
         !self.has_key && !self.browser_login
@@ -354,6 +359,7 @@ mod tests {
             has_key: true,
             browser_login: false,
             models: models.iter().map(|m| m.to_string()).collect(),
+            model_names: Default::default(),
         }
     }
 

@@ -15,7 +15,7 @@
  */
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdtempSync } from "node:fs"
+import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { col } from "@johpaz/hivecode-core/storage/hive"
@@ -142,7 +142,8 @@ beforeEach(async () => {
   await Bun.secrets.set({ service: SECRET_SERVICE, name: `provider.${PROVIDER_ID}`, value: "sk-e2e-fake" })
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await Bun.sleep(20)
   model?.stop()
   model = null
 })
@@ -749,4 +750,57 @@ describe("agent loop: partial results", () => {
       threadId: "thread-partial-failure",
     })).rejects.toThrow(/ended with failed/)
   })
+})
+
+
+test("a real spawned execution receives scoped evidence and leaves durable usage and handoff", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "hive-spawn-e2e-"))
+  writeFileSync(path.join(workspace, "lib.rs"), 'pub fn render_office() { println!("SCOPED_SPAWN_EVIDENCE"); }')
+  model = startFakeModel(turn => {
+    if (turn === 1) return {toolCalls: [{name: "spawn_agent", args: {purpose: "Investiga render_office", systemPrompt: "Entrega evidencia", context: "", activeForm: "Investigando", paths: ["lib.rs"], tools: ["save_note"], skills: []}}]}
+    if (turn === 2) return {content: "Evidencia render_office en lib.rs:1, revisión completada"}
+    return {content: "Entrega integrada con evidencia"}
+  })
+  await seedFixture({baseUrl: model.baseUrl})
+  const agents = await col<any>("agents")
+  const parent = (await agents.get(AGENT_ID))!.doc
+  await agents.put(AGENT_ID, {...parent, tools_json: JSON.stringify([...MINIMAL_TOOLS, "spawn_agent"]), workspace})
+  await (await col<any>("codeSessions")).put("spawn-project", {id: "spawn-project", project_path: workspace, status: "active", created_at: "2026-10-10", last_active: "2026-10-10"})
+  const result = await collect(runAgent({agentId: AGENT_ID, threadId: "spawn-e2e", userMessage: "Investiga y entrega", isolated: true, codeSessionId: "spawn-project", workspace}))
+  expect(result.run?.status).toBe("completed")
+  expect(model.requests).toHaveLength(3)
+  expect(JSON.stringify(model.requests[1]!.messages)).toContain("SCOPED_SPAWN_EVIDENCE")
+  const childToolNames = (model.requests[1]!.tools as any[]).map(tool => tool.function.name)
+  expect(childToolNames).toEqual(["save_note"])
+  const tasks = (await (await col<any>("tasks")).scan()).map(row => row.doc)
+  const task = tasks.find(task => task.id.startsWith("subtask:spawn-"))!
+  expect(task.status).toBe("completed")
+  expect(task.result).toContain("render_office")
+  expect(await agents.get(task.agent_id)).toBeUndefined()
+  const {getSwarmUsage} = await import("@johpaz/hivecode-core/agent/swarm-usage")
+  const runs = (await (await col<AgentRunDoc>("agentRuns")).scan()).map(row => row.doc)
+  const rootRun = runs.find(run => !run.parent_run_id)!
+  expect(await getSwarmUsage(rootRun.id)).toMatchObject({runs: 2, inputTokens: 30, outputTokens: 15})
+  const {taskStatusTool} = await import("@johpaz/hivecode-core/tools/agents")
+  const status = await taskStatusTool.execute({task_ids: [task.id]}) as any
+  expect(status.tasks[0].swarm_usage[0]).toMatchObject({runs: 1, inputTokens: 10, outputTokens: 5})
+})
+
+
+test("context telemetry reports the latest model input instead of cumulative usage", async () => {
+  const {eventBus} = await import("../../packages/core/src/events/event-bus")
+  model = startFakeModel(turn => turn === 1
+    ? {content:"", toolCalls:[{name:"save_note", args:{key:"ctx", value:"v"}}], usage:{input:1000, output:10}}
+    : {content:"Hecho", usage:{input:2000, output:20}})
+  await seedFixture({baseUrl:model.baseUrl})
+  const contexts: any[] = []
+  const stop = eventBus.on("agent:context", context => { if(context.agentId === AGENT_ID) contexts.push(context) })
+  try {
+    await collect(runAgent({agentId:AGENT_ID, userMessage:"nota", threadId:"context-meter"}))
+    expect(contexts.filter(context => !context.estimated).map(context => context.inputTokens)).toEqual([1000,2000])
+    expect(contexts.at(-1)).toMatchObject({sessionId:"context-meter", provider:PROVIDER_ID, model:MODEL_ID, contextWindow:128000, inputTokens:2000, estimated:false})
+    const run = (await (await col<AgentRunDoc>("agentRuns")).scan()).find(entry => entry.doc.session_id === "context-meter")!.doc
+    expect(run.input_tokens).toBe(3000)
+    expect(JSON.parse(run.context_metrics_json!).model_context.input_tokens).toBe(2000)
+  } finally { stop() }
 })

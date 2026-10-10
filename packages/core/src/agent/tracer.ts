@@ -5,11 +5,80 @@
  * Fire-and-forget so tracing never blocks the main agent loop.
  */
 
+import { createHash } from "node:crypto"
 import { col, nextId, updateDoc } from "../storage/hive"
-import type { AgentDoc, TraceDoc } from "../storage/collections"
+import type { AgentDoc, ToolRunDoc, TraceDoc } from "../storage/collections"
 import { logger } from "../utils/logger"
+import { clipMiddle } from "./context-budget"
 
 const log = logger.child("tracer")
+
+/**
+ * Most characters of one tool argument/result kept in HiveDB. The replayable
+ * record is the point, but one `fs_read` of a lockfile must not become a
+ * megabyte row; past this the middle is cut and a sha256 says what was lost.
+ */
+export const MAX_STORED_PAYLOAD_CHARS = 64_000
+
+export function capStoredPayload(text: string, max = MAX_STORED_PAYLOAD_CHARS): string {
+  if (text.length <= max) return text
+  const digest = createHash("sha256").update(text).digest("hex").slice(0, 16)
+  return clipMiddle(text, max, `sha256:${digest}`)
+}
+
+export interface CompletedToolRun {
+  /** Run the call belongs to (agent-loop run id, or a code task). */
+  runId: string
+  taskId: string
+  callId: string
+  toolName: string
+  args: unknown
+  result: unknown
+  success: boolean
+  durationMs: number
+  mutatesWorkspace?: boolean
+}
+
+const stringify = (value: unknown): string => {
+  if (typeof value === "string") return value
+  try { return JSON.stringify(value) ?? "" } catch { return String(value) }
+}
+
+/**
+ * Persist a finished tool call (full arguments and result, capped) and return
+ * its id so a trace can link to it. Never throws: telemetry must not affect
+ * the agent. Returns null when the write failed.
+ */
+export async function recordCompletedToolRun(run: CompletedToolRun): Promise<string | null> {
+  try {
+    const id = `${run.runId}:${run.callId}`
+    const now = Math.floor(Date.now() / 1000)
+    const toolRuns = await col<ToolRunDoc>("toolRuns")
+    const existing = await toolRuns.get(id)
+    const doc: ToolRunDoc = {
+      id,
+      run_id: run.runId,
+      task_id: run.taskId,
+      tool_name: run.toolName,
+      call_id: run.callId,
+      args_json: capStoredPayload(stringify(run.args)),
+      result_json: capStoredPayload(stringify(run.result)),
+      status: run.success ? "completed" : "failed",
+      read_only: !run.mutatesWorkspace,
+      mutates_workspace: run.mutatesWorkspace === true,
+      mutates_db: false,
+      started_at: now - Math.ceil(run.durationMs / 1000),
+      completed_at: now,
+      duration_ms: run.durationMs,
+      error: run.success ? null : capStoredPayload(stringify(run.result), 2_000),
+    }
+    await toolRuns.put(id, doc, { expectedVersion: existing?.version ?? 0 })
+    return id
+  } catch (err) {
+    log.debug(`[tracer] Failed to record tool run: ${(err as Error).message}`)
+    return null
+  }
+}
 
 export interface TraceInput {
   threadId: string
@@ -22,6 +91,8 @@ export interface TraceInput {
   errorMessage?: string | null
   durationMs?: number
   tokensUsed?: number
+  /** `toolRuns` row holding the full arguments and result behind this trace. */
+  toolRunId?: string | null
   /** G9 causal stream this trace belongs to, for the reflector's thread analysis. */
   causalStreamId?: string | null
   /** Epoch fingerprint, so the reflector can spot a requalification boundary. */
@@ -50,6 +121,7 @@ export function saveTrace(trace: TraceInput): void {
         error_message: trace.errorMessage ?? null,
         duration_ms: trace.durationMs ?? null,
         tokens_used: trace.tokensUsed ?? null,
+        tool_run_id: trace.toolRunId ?? null,
         causal_stream_id: trace.causalStreamId ?? null,
         run_epoch: trace.runEpoch ?? null,
         created_at: now,

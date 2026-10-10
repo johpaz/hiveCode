@@ -1,3 +1,4 @@
+import { syncConfiguredProviderCatalog } from "@johpaz/hivecode-core/services/provider-catalog"
 /**
  * Provider commands — manage LLM providers and API keys.
  *
@@ -127,6 +128,7 @@ export async function providerList(): Promise<void> {
       baseUrl: result.baseUrl || null,
       enabled: true,
     })
+    await syncConfiguredProviderCatalog(result.provider)
     if (result.model) {
       await setProviderModel(result.provider, result.model)
     }
@@ -148,6 +150,7 @@ export async function providerAdd(name?: string): Promise<void> {
     enabled: true,
   })
 
+  await syncConfiguredProviderCatalog(result.provider)
   if (result.model) {
     await setProviderModel(result.provider, result.model)
   }
@@ -241,6 +244,11 @@ export async function providerEdit(name?: string): Promise<void> {
     message: "Nueva Base URL (Enter para mantener):",
     placeholder: row.base_url ?? "https://api...",
   })
+
+  // Save the new connection before discovery so model choices use its credentials.
+  if (!isCancel(baseUrl) && baseUrl && typeof baseUrl === "string") await upsertProvider(providerId, {baseUrl})
+  if (!isCancel(apiKey) && apiKey && typeof apiKey === "string") await storeProviderApiKey(providerId, apiKey)
+  if (await getProviderApiKey(providerId)) await syncConfiguredProviderCatalog(providerId)
 
   // ── Modelo ───────────────────────────────────────────────────────────────────
   let model = currentModel

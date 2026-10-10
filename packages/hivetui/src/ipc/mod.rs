@@ -182,6 +182,17 @@ pub enum BunMessage {
         transversal: Option<bool>,
     },
 
+    CoordinatorContext {
+        agent: String,
+        #[serde(default)]
+        session_id: Option<String>,
+        provider: String,
+        model: String,
+        context_window: Option<u64>,
+        input_tokens: Option<u64>,
+        #[serde(default)]
+        estimated: bool,
+    },
     DashboardSnapshot {
         #[serde(default)]
         workers: Vec<WorkerSnapshotEntry>,
@@ -468,6 +479,8 @@ pub enum BunMessage {
     /// tras fallos. La UI no debe pintar `off` como error.
     JevStatus {
         state: String,
+        #[serde(default)]
+        oracle: Option<String>,
         last_error: Option<String>,
         last_success_at: Option<u64>,
         totals: IpcJevTotals,
@@ -796,6 +809,9 @@ pub struct IpcSettingsProvider {
     /// uno primero.
     #[serde(default)]
     pub models: Vec<String>,
+    /// Provider display names keyed by stable API identifier.
+    #[serde(default)]
+    pub model_names: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

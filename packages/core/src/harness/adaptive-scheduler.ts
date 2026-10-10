@@ -1,7 +1,7 @@
 import { col } from "../storage/hive.ts"
 import type { JobDoc } from "../storage/collections.ts"
 
-export const DEFAULT_MAX_AGENT_CONCURRENCY = 3
+export const DEFAULT_MAX_AGENT_CONCURRENCY = 4
 export const DEFAULT_MAX_REPAIR_CYCLES = 2
 
 export interface ScheduledJobPayload {

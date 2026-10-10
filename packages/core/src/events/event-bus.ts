@@ -2,6 +2,8 @@ import { EventEmitter } from "events";
 import { logger } from "../utils/logger";
 
 export interface EventMap {
+  "agent:context": { agentId: string; sessionId: string; provider: string; model: string; contextWindow: number | null; inputTokens: number; estimated: boolean };
+  "catalog:updated": { providerId: string; synced: number; at: number };
   "message:received": {
     channel: string;
     userId: string;
@@ -183,6 +185,16 @@ export interface EventMap {
     waitingFor: string[];
     reason: string;
     taskId: string | null;
+    at: number;
+  };
+  "agent:lifecycle": {
+    agentId: string;
+    parentId: string;
+    name: string;
+    specialty: string;
+    status: "running" | "done" | "failed";
+    activity: string;
+    sessionId?: string;
     at: number;
   };
 }

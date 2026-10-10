@@ -46,6 +46,7 @@ export interface RepeatTrackerSnapshot {
 
 export interface RunCheckpoint {
   version: 1
+  projectContext?: { codeSessionId?: string; codeTaskId?: string; workspace?: string | null; specialty?: string; contextPaths?: string[] }
   messages: LLMMessage[]
   iterations: number
   totalInputTokens: number

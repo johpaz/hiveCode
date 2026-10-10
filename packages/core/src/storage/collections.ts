@@ -44,6 +44,10 @@ export interface ModelDoc {
   name: string;
   model_type: "llm" | "stt" | "tts" | "vision" | "embedding";
   context_window: number;
+  input_modalities?: string[];
+  output_modalities?: string[];
+  max_output_tokens?: number;
+  effort_levels?: string[];
   capabilities: string | null;
   enabled: boolean;
   active: boolean;
@@ -81,6 +85,10 @@ export interface AgentDoc {
   permission_profile?: "orchestrate" | "read_only" | "write_workspace" | "verify" | "review" | "web_automation";
   user_instructions?: string;
   config_version?: number;
+  model_selection?: "inherit" | "custom";
+  /** Ephemeral agents have an explicit, non-discoverable capability boundary. */
+  ephemeral?: boolean;
+  spawn_depth?: number;
   workspace: string | null;
   lastTraceAt?: number;
   created_at: number;
@@ -280,6 +288,8 @@ export interface TraceDoc {
   error_message: string | null;
   duration_ms: number | null;
   tokens_used: number | null;
+  /** `toolRuns` row with the full arguments/result this summary was cut from. */
+  tool_run_id?: string | null;
   /**
    * G9 causal stream this trace belongs to — one per agent-loop invocation, so
    * `causalThread()` can reconstruct the decision chain that produced it.
@@ -612,6 +622,8 @@ export interface CodeTraceDoc {
   duration_ns: number | null;
   tokens_in: number | null;
   tokens_out: number | null;
+  /** `toolRuns` row with the full arguments/result the summaries were cut from. */
+  tool_run_id?: string | null;
   analyzed: boolean;
   created_at: string;
 }
@@ -666,6 +678,9 @@ export interface CodeGraphDoc {
   complexity: number;
   last_modified: string | null;
   indexed_at: string;
+  content_hash?: string;
+  symbols_json?: string;
+  relations_complete?: boolean;
 }
 
 export interface CodeRecoveryPointDoc {
@@ -750,6 +765,8 @@ export interface CodeFileDoc {
   functions: string;
   classes: string;
   updated_at: number;
+  content_hash?: string;
+  symbols_json?: string;
 }
 
 export interface ProjectDoc {
@@ -902,6 +919,8 @@ export interface AgentRunDoc {
   agent_id: string;
   kind: "chat" | "worker" | "harness" | "verification" | "review";
   parent_run_id?: string | null;
+  project_context_json?: string;
+  context_metrics_json?: string;
   profile_type?: "bee" | "scout" | "planner" | "builder" | "verifier" | "reviewer" | "spider";
   objective: string;
   status: AgentRunStatus;

@@ -2,7 +2,7 @@
 
 **Multi-AI Coding Swarm — Consola-first. Enfocado en código. Multi-proveedor.**
 
-`hivecode` es un harness de ingeniería de software con cinco perfiles estables: **BEE**, **Scout**, **Builder**, **Verifier** y **Reviewer**. Solo activa agentes bajo demanda, limita la concurrencia global a tres y usa Spec Kit nativo como protocolo obligatorio para features, arquitectura, migraciones y refactors amplios.
+`hivecode` es un harness de ingeniería de software con seis perfiles estables: **BEE**, **Planner**, **Scout**, **Builder**, **Quality Gate** (`verifier`) y **Spider**. Activa ejecuciones y especialistas temporales bajo demanda, limita por defecto a cuatro las llamadas activas a modelos o herramientas por sesión y usa Spec Kit nativo para features, arquitectura, migraciones y refactors amplios.
 
 > **Runtime:** Bun >= 1.4.2
 > **Base de datos:** HiveDB WAL — única fuente de verdad
@@ -10,8 +10,9 @@
 > **Licencia:** hivecode-NC-1.0 (no comercial)
 
 **Documentación técnica:**
+
 - [`docs/harness.md`](./docs/harness.md) — arquitectura completa del harness, las 4 capas del sistema, Learning Harness y comparación con Google ADK / Antigravity CLI.
-- [`docs/agent-harness.md`](./docs/agent-harness.md) — arquitectura vigente: perfiles, delegación paralela, planner (Spec Kit), oráculo Jev/Kev, budgets y gates.
+- [`docs/agent-harness.md`](./docs/agent-harness.md) — referencia vigente de agentes: herramientas, skills, especialidades, contexto HiveDB, oficina del enjambre y oráculos JEV/KEV.
 - [`docs/workers.md`](./docs/workers.md) — referencia histórica del pipeline de compatibilidad.
 - [`docs/code-context-retrieval.md`](./docs/code-context-retrieval.md) — cómo los workers obtienen contexto del proyecto: resumen precacheado + búsqueda HiveDB index.
 

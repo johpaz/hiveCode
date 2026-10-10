@@ -13,7 +13,7 @@ export async function listCatalogModels(providerId: string): Promise<ModelDoc[]>
   await ensureIndexes([["models", "provider_id"]])
   return (await (await col<ModelDoc>("models")).findBy("provider_id", providerId))
     .map(row => row.doc)
-    .filter(model => model.model_type === "llm" && model.enabled && model.deprecated_at == null)
+    .filter(model => model.model_type === "llm" && model.enabled && model.deprecated_at == null && model.catalog_missing_since_slot == null)
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 

@@ -151,9 +151,9 @@ impl Loadout {
     }
 }
 
-/// Una habilidad, resumida para el TALLER.
+/// Una habilidad, resumida para la ficha del agente.
 ///
-/// No es el catálogo completo: al TALLER le basta nombre, categoría, descripción
+/// No es el catálogo completo: a la ficha le basta nombre, categoría, descripción
 /// corta y si está activa. El `body` de la skill son cientos de líneas de
 /// markdown que no caben en ninguna columna.
 #[derive(Debug, Clone, Default)]

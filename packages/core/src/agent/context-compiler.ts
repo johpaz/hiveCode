@@ -1,3 +1,5 @@
+import { buildContextPacket, resolveProjectScope, type ContextReference, type ProjectScope } from "./project-context"
+import { selectSpecialty, REQUIRED_PROFILE_SKILLS, FACTORY_SPECIALTIES } from "./specialties"
 /**
  * Context Compiler — Implementa las 4 estrategias de Context Engineering:
  * 
@@ -34,6 +36,7 @@ import { describeSwarmCapabilities, planJevContext } from "./jev-planner"
 import { emitJevDecision } from "./jev-decisions"
 import { getRecentMessages, getSummary, getScratchpad, toAPIMessages } from "./conversation-store"
 import { relevantConversationMemory } from "./conversation-memory"
+import { PROMPT_VOLATILE_MARKER } from "./prompt-cache"
 import { formatContext, estimateTokens } from "../utils/toon"
 import { buildSystemPromptWithProjects } from "./prompt-builder"
 import { createAllTools } from "../tools/index"
@@ -41,7 +44,7 @@ import { getMCPManager as getSingletonMCPManager } from "../mcp/singleton"
 import { syncMCPToolsToDB, syncMCPToolsToIndex } from "../mcp/tool-sync"
 import { getUserDate, getUserTime } from "../utils/date"
 import { col, fromIndexable } from "../storage/hive"
-import { COMPACT_RATIO, budgetTokens, fitMessagesToBudget, resolveWindow } from "./context-budget"
+import { COMPACT_RATIO, budgetTokens, fitMessagesToBudget, projectPacketBudget, resolveWindow } from "./context-budget"
 import type { AgentDoc, CodePlaybookDoc, McpServerDoc, ModelDoc, ProjectDoc, SkillDoc, TaskDoc } from "../storage/collections"
 
 const log = logger.child("context-compiler")
@@ -75,6 +78,8 @@ export interface ContextTool {
 
 export interface CompiledContext {
   systemPrompt: string
+  projectScope?: ProjectScope | null
+  contextMetrics?: { system: number; skills: number; tools: number; history: number; project: number; total: number }
   /**
    * The `# RESUMEN DE LA CONVERSACIÓN` block already folded into `systemPrompt`.
    * Exposed so a caller-supplied `systemPromptOverride` can compose it in instead
@@ -149,6 +154,12 @@ export async function compileContext(opts: {
   channel?: string
   isolated?: boolean
   taskContext?: string | ContentPart[]
+  codeSessionId?: string
+  codeTaskId?: string
+  workspace?: string | null
+  specialty?: string
+  contextRefs?: ContextReference[]
+  contextPaths?: string[]
   mcpManager?: MCPClientManager | null
   /**
    * G9 causal stream for this invocation. Enables the causal context window:
@@ -320,8 +331,12 @@ export async function compileContext(opts: {
   // change model/budgets/instructions, but cannot silently grant more tools.
   const configuredToolNames = new Set(parseStringList(agent.tools_json))
   const isCoreProfile = !!agent.agent_type
-  const allTools = isCoreProfile
-    ? [...nativeTools, ...mcpToolExecutors].filter(tool => configuredToolNames.has(tool.name))
+  const boundedCapabilities = isCoreProfile || agent.ephemeral === true || !!agent.tool_allowlist_json
+  const allowlist = agent.tool_allowlist_json ? new Set(parseStringList(agent.tool_allowlist_json)) : configuredToolNames
+  const objectiveForSpecialty = typeof (taskContext ?? userMessage) === "string" ? (taskContext ?? userMessage) as string : JSON.stringify(taskContext ?? userMessage)
+  const specialty = selectSpecialty(agent.agent_type, objectiveForSpecialty, opts.specialty)
+  const allTools = boundedCapabilities
+    ? [...nativeTools, ...mcpToolExecutors].filter(tool => (configuredToolNames.has(tool.name) || (!isCoreProfile && !agent.ephemeral && agent.tools_json == null)) && allowlist.has(tool.name))
     : [...nativeTools, ...mcpToolExecutors]
 
   // Loadout policy, by role:
@@ -338,15 +353,23 @@ export async function compileContext(opts: {
   //
   // MCP tools are always discovered dynamically via search_knowledge(type="mcp").
   const isCoordinator = agent.agent_type === "bee"
-  const isSpecialistProfile = isCoreProfile && !isCoordinator
+  const isSpecialistProfile = (isCoreProfile || agent.ephemeral === true) && !isCoordinator
 
   const initialToolNames = new Set(MINIMAL_TOOLS)
   if (isCoordinator) {
     for (const name of configuredToolNames) {
-      if (name.startsWith("speckit_") || COORDINATOR_PINNED_TOOLS.has(name)) initialToolNames.add(name)
+      if (name === "spawn_agent" || name === "get_project_context" || name.startsWith("speckit_") || COORDINATOR_PINNED_TOOLS.has(name)) initialToolNames.add(name)
     }
   } else if (isSpecialistProfile) {
     for (const name of configuredToolNames) initialToolNames.add(name)
+  }
+  if (specialty?.id === "repository") {
+    initialToolNames.delete("web_search")
+    initialToolNames.delete("web_fetch")
+  }
+  if (specialty && ["backend", "frontend", "data", "integration", "devops"].includes(specialty.id)) {
+    initialToolNames.delete("web_search")
+    initialToolNames.delete("web_fetch")
   }
   const filteredNativeTools: ContextTool[] = allTools.filter(t => initialToolNames.has(t.name))
 
@@ -385,7 +408,7 @@ export async function compileContext(opts: {
     minimalSkills = await getMinimalSkills()
     log.info(`[context-compiler] [STEP-8b] ✅ Loaded ${minimalSkills.length} minimal skills`)
 
-    const configuredSkillNames = new Set(parseStringList(agent.skills_json))
+    const configuredSkillNames = new Set(agent.ephemeral ? parseStringList(agent.skills_json) : isCoreProfile ? [...(REQUIRED_PROFILE_SKILLS[agent.agent_type!] ?? parseStringList(agent.skills_json)), ...(specialty?.skills ?? [])] : parseStringList(agent.skills_json))
     if (configuredSkillNames.size > 0) {
       const skillsCol = await col<SkillDoc>("skills")
       configuredSkills = (await skillsCol.scan())
@@ -408,7 +431,7 @@ export async function compileContext(opts: {
     }
 
     // Discover additional skills via HiveDB capability search (coordinator only)
-    if (!isWorker) {
+    if (!isWorker && !isCoreProfile) {
       const inputForSkills = taskContext || userMessage
       const textMessage = typeof inputForSkills === "string"
         ? inputForSkills
@@ -583,7 +606,10 @@ export async function compileContext(opts: {
   systemPrompt += `\n\n# ENTORNO ACTUAL\n${workspaceLine}\n`
 
 
-  // Inject scratchpad (Strategy: WRITE) — usando TOON para ahorro de tokens
+  // Inject scratchpad (Strategy: WRITE) — usando TOON para ahorro de tokens.
+  // Changes every turn, so it is appended after the prompt-cache marker below
+  // together with the summary and retrieved memory, not here.
+  let scratchpadSection = ""
   if (scratchpadNotes.length > 0) {
     const scratchpadData: Record<string, string> = {}
     for (const n of scratchpadNotes) {
@@ -591,13 +617,31 @@ export async function compileContext(opts: {
     }
     // TOON comprime el formato clave-valor
     const scratchpadContent = formatContext(scratchpadData)
-    systemPrompt += `\n\n# SCRATCHPAD (Persistent Notes)\n${scratchpadContent}\n`
+    scratchpadSection = `\n\n# SCRATCHPAD (Persistent Notes)\n${scratchpadContent}\n`
   }
 
-  systemPrompt += conversationSummarySection
+  let projectTokens = 0
+  const projectScope = isCoreProfile || agent.ephemeral || opts.codeSessionId || opts.workspace || agent.workspace
+    ? await resolveProjectScope({ sessionId: opts.codeSessionId, workspace: opts.workspace ?? agent.workspace, taskId: opts.codeTaskId }) : null
+  if (projectScope) {
+    const packetOptions = { query: isCoordinator ? undefined : objectiveForSpecialty,
+      paths: opts.contextPaths, references: opts.contextRefs, summaryOnly: isCoordinator,
+      tokenBudget: projectPacketBudget(modelContextWindow, isCoordinator) }
+    let packet
+    try { packet = await buildContextPacket(projectScope, packetOptions) }
+    catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("instructions exceed context budget")) throw error
+      packet = await buildContextPacket(projectScope, {...packetOptions, tokenBudget: Math.min(12_000, Math.floor(modelContextWindow * 0.25))})
+    }
+    systemPrompt += `\n\n${packet.context}\nContext version: ${packet.version}\nReferences: ${JSON.stringify(packet.references)}\nOmitted (request targeted context): ${packet.omitted.join(", ")}`
+    projectTokens = packet.estimatedTokens
+    log.info(`[context-compiler] Project packet: ${packet.estimatedTokens} tokens; refs=${packet.references.length}; cached=${packet.cached}`)
+  }
+  if (isCoordinator) systemPrompt += `\nFactory specialties (loadouts, not extra agents): ${FACTORY_SPECIALTIES.map(item => `${item.owner}/${item.id}: ${item.description}`).join("; ")}`
+  if (specialty) systemPrompt += `\n\n# ESPECIALIDAD ${specialty.id}\n${specialty.instructions}`
 
   // Inject active/recent project state from DB (coordinator only)
-  if (!isWorker) {
+  if (!isWorker && !projectScope) {
     try {
       const projects = await col<ProjectDoc>("projects")
       const tasksCol = await col<TaskDoc>("tasks")
@@ -641,7 +685,7 @@ export async function compileContext(opts: {
       `Estas 4 herramientas nativas están SIEMPRE disponibles en tu contexto y tienen prioridad sobre MCP:\n\n` +
       `${minimalToolsDocs}\n\n` +
       `**REGLAS DE USO:**\n` +
-      `1. Llama \`get_project_context()\` PRIMERO para obtener el resumen global del proyecto.\n` +
+      `1. Si ya recibiste PROJECT CONTEXT, úsalo. Consulta get_project_context solo para ampliar información faltante, con query, paths y scope="task".\n` +
       `2. Si necesitas una herramienta que no esté en la lista arriba → USA \`search_knowledge\` para encontrarla:\n` +
       `   - Herramientas nativas: \`search_knowledge(type="tools", query="<qué necesitas>")\`\n` +
       `   - Herramientas MCP (externas): \`search_knowledge(type="mcp", query="<qué necesitas>")\`\n` +
@@ -657,15 +701,11 @@ export async function compileContext(opts: {
       `- Herramientas MCP (externas): type="mcp"\n` +
       `- Todo: type="all"\n` +
       `\n## REGLA CRÍTICA — Delegación a workers\n` +
-      `Los workers arrancan con herramientas mínimas (save_note, notify, report_progress, search_knowledge).\n` +
-      `**ANTES de crear o delegar a un worker**, SIEMPRE debes:\n` +
-      `1. Usar \`search_knowledge(type="tools", query="<tarea del worker>")\` para identificar qué herramientas necesita.\n` +
-      `2. Incluir esas herramientas en el campo \`tools\` al crear el agente con \`create_agent\`, o\n` +
-      `   en el campo \`task_description\` de \`task_delegate\` como instrucción explícita:\n` +
-      `   "Usa las herramientas: web_search, fs_read, ... para completar esta tarea."\n` +
-      `3. El worker con esa instrucción usará \`search_knowledge\` para activar las tools por nombre.\n` +
-      `Ejemplo: si el worker debe investigar en internet → busca "web search herramienta internet, herramientas de navegacion, browser" → obtienes "web_search" → dile al worker que use web_search.\n` +
-      `4. Las herramientas se inyectan dinamicamente vía search_knowledge — NO están en tu contexto por defecto\n`
+      `Los seis perfiles de fábrica ya tienen tools delimitadas y especialidades disponibles.\n` +
+      `Usa task_delegate con specialty, paths, acceptance y context_refs cuando corresponda.\n` +
+      `No repitas búsquedas de capacidades conocidas: descubre solo lo que falta con search_knowledge(type="tools", mode="compact", query=...).\n` +
+      `Para cargar instrucciones de una skill adicional, pide su nombre exacto con mode="full", type="skills", limit=1.\n`
+
 
 
     // Inject developer preferences from ACE reflector (coordinator only)
@@ -738,6 +778,10 @@ export async function compileContext(opts: {
     }
   }
 
+  // Everything above is stable across the turns of a run (identity, rules,
+  // packet, skills, task); what follows changes each turn. See prompt-cache.ts.
+  systemPrompt += PROMPT_VOLATILE_MARKER + scratchpadSection.trimStart() + conversationSummarySection
+
   if (systemPromptExtraCausal) {
     systemPrompt += systemPromptExtraCausal
   }
@@ -761,6 +805,7 @@ export async function compileContext(opts: {
   const maxSystemPromptChars = Math.max(8000, Math.floor(modelContextWindow * SYSTEM_PROMPT_RATIO * 3.5))
   if (systemPrompt.length > maxSystemPromptChars) {
     const originalLen = systemPrompt.length
+    if (isCoreProfile || agent.ephemeral) throw new Error(`Mandatory agent instructions exceed context budget (${budgetTokens(systemPrompt)} tokens). Select fewer skills or a larger model window.`)
     systemPrompt = systemPrompt.substring(0, maxSystemPromptChars) +
       `\n\n[... System prompt truncated (${originalLen} chars → ${maxSystemPromptChars} chars) ...]`
     log.warn(`[context-compiler] System prompt truncated: ${originalLen} → ${maxSystemPromptChars} chars (window ${modelContextWindow})`)
@@ -772,7 +817,7 @@ export async function compileContext(opts: {
   messages = fitMessagesToBudget(
     messages,
     Math.max(
-      Math.floor(modelContextWindow * 0.25),
+      256,
       Math.floor(modelContextWindow * COMPACT_RATIO) - systemTokens - toolTokens,
     ),
   )
@@ -792,6 +837,10 @@ export async function compileContext(opts: {
     `total≈${estimatedTotal}/${modelContextWindow} (${Math.round((estimatedTotal / modelContextWindow) * 100)}%)`
   )
 
+  if ((isCoreProfile || agent.ephemeral) && estimatedTotal > Math.floor(modelContextWindow * COMPACT_RATIO)) {
+    throw new Error(`Required context and tools exceed the model input budget (${estimatedTotal}/${modelContextWindow}); reduce optional skills or use a larger window`)
+  }
+
   if (jevDecision) {
     emitJevDecision({
       agentId,
@@ -807,6 +856,8 @@ export async function compileContext(opts: {
 
   return {
     systemPrompt,
+    projectScope,
+    contextMetrics: {system: Math.max(0, systemTokens - projectTokens - Math.ceil(skillBodyChars / 3.5)), skills: Math.ceil(skillBodyChars / 3.5), tools: toolTokens, history: messageTokenTotal, project: projectTokens, total: estimatedTotal},
     conversationSummarySection,
     messages,
     tools: finalTools,

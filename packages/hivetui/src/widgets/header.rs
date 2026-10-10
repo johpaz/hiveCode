@@ -71,21 +71,24 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
 
         // tokens
         sep!();
-        let tok = token_meter(state.session.token_count);
+        let context = state.session.coordinator_context.as_ref();
+        let tok = token_meter(context.and_then(|ctx| ctx.input_tokens), context.and_then(|ctx| ctx.window), context.is_some_and(|ctx| ctx.estimated));
         canvas.print(x, y, &tok, Style::new().fg(SECONDARY));
         x += cell_width(&tok) as u16;
 
         // provider  ·  model
-        if !state.session.provider.is_empty() {
+        let provider = context.map(|ctx| ctx.provider.as_str()).unwrap_or(&state.session.provider);
+        let model = context.map(|ctx| ctx.model.as_str()).unwrap_or(&state.session.model);
+        if !provider.is_empty() {
             sep!();
-            let provider = truncate_cells(&state.session.provider, 18);
+            let provider = truncate_cells(&format!("BEE {provider}"), 18);
             canvas.print(x, y, &provider, Style::new().fg(SECONDARY));
             x += cell_width(&provider) as u16;
 
-            if !state.session.model.is_empty() {
+            if !model.is_empty() {
                 canvas.print(x, y, " · ", Style::new().fg(DIM));
                 x += 3;
-                let model = truncate_cells(&state.session.model, 28);
+                let model = truncate_cells(model, 28);
                 canvas.print(x, y, &model, Style::new().fg(SECONDARY));
                 x += cell_width(&model) as u16;
             }
@@ -120,13 +123,15 @@ fn mode_badge(mode: &ReplMode) -> (&'static str, Color, Color) {
     }
 }
 
-fn token_meter(n: u64) -> String {
-    if n == 0 {
-        return "ctx:0 tok".to_string();
+fn token_meter(tokens: Option<u64>, window: Option<u64>, estimated: bool) -> String {
+    let used = tokens.map(|n| format!("{}{}", if estimated { "~" } else { "" }, fmt_tokens(n))).unwrap_or_else(|| "—".into());
+    match window.filter(|limit| *limit > 0) {
+        Some(limit) => match tokens {
+            Some(n) => format!("ctx:{used} / {} ({}%)", fmt_tokens(limit), ((n as u128 * 100) / limit as u128)),
+            None => format!("ctx:{used} / {}", fmt_tokens(limit)),
+        },
+        None => format!("ctx:{used} tok"),
     }
-    const SOFT_LIMIT: u64 = 200_000;
-    let pct = ((n.min(SOFT_LIMIT) * 100) / SOFT_LIMIT).max(1);
-    format!("ctx:{} / 200k ({}%)", fmt_tokens(n), pct)
 }
 
 #[cfg(test)]
@@ -138,15 +143,44 @@ mod tests {
         let mut state = AppState::default();
         state.session.provider = "provider-with-a-very-long-name".to_string();
         state.session.model = "model-with-a-very-long-name-and-context".to_string();
-        state.session.token_count = 42_000;
+        state.apply_message(crate::ipc::BunMessage::CoordinatorContext {agent:"bee".into(), session_id:None,
+            provider:"custom-provider".into(), model:"custom-bee-model".into(), context_window:Some(128_000), input_tokens:Some(42_000), estimated:true});
+        state.session.token_count = 900_000;
         state.clock = "12:34:56".to_string();
 
         let mut canvas = Canvas::new(80, 2);
         render(&mut canvas, Rect::new(0, 0, 80, 2), &state);
         let rows = canvas.to_text_rows();
 
-        assert!(rows[0].contains("ctx:42.0k"));
+        assert!(rows[0].contains("ctx:~42.0k"));
         assert!(rows[0].contains("12:34:56"));
+    }
+
+    #[test]
+    fn header_keeps_bees_model_and_context_when_specialist_metrics_arrive() {
+        let mut state = AppState::default();
+        state.session.session_id = "s".into();
+        state.session.provider = "session-provider".into();
+        state.session.model = "session-model".into();
+        state.apply_message(crate::ipc::BunMessage::CoordinatorContext {agent:"bee".into(), session_id:Some("s".into()),
+            provider:"bee-provider".into(), model:"bee-model".into(), context_window:Some(128_000), input_tokens:Some(32_000), estimated:false});
+        state.apply_message(crate::ipc::BunMessage::MetricsUpdate {token_count:Some(900_000), cost:None, elapsed_secs:None});
+        state.apply_message(crate::ipc::BunMessage::CoordinatorContext {agent:"scout".into(), session_id:Some("s".into()),
+            provider:"scout-provider".into(), model:"scout-model".into(), context_window:Some(200_000), input_tokens:Some(999), estimated:false});
+        let mut canvas = Canvas::new(160, 2);
+        render(&mut canvas, Rect::new(0,0,160,2), &state);
+        let row = &canvas.to_text_rows()[0];
+        assert!(row.contains("BEE bee-provider"), "{row}");
+        assert!(row.contains("bee-model"), "{row}");
+        assert!(row.contains("ctx:32.0k / 128.0k (25%)"), "{row}");
+        assert!(!row.contains("900.0k"));
+    }
+
+    #[test]
+    fn meter_uses_the_actual_window_and_has_no_invented_limit() {
+        assert_eq!(token_meter(Some(32_000), Some(128_000), false), "ctx:32.0k / 128.0k (25%)");
+        assert_eq!(token_meter(Some(32_000), None, true), "ctx:~32.0k tok");
+        assert_eq!(token_meter(None, Some(128_000), false), "ctx:— / 128.0k");
     }
 
     #[test]
@@ -158,7 +192,7 @@ mod tests {
         render(&mut canvas, Rect::new(0, 0, 80, 2), &state);
         let row = &canvas.to_text_rows()[0];
 
-        assert!(row.contains("ctx:0 tok"));
+        assert!(row.contains("ctx:— tok"));
         assert!(!row.contains("tokens:["));
     }
 }

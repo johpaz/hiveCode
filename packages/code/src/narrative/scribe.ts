@@ -615,6 +615,7 @@ export class Scribe {
     durationNs?: number
     tokensIn?: number
     tokensOut?: number
+    toolRunId?: string | null
   }): void {
     const id = String(nextNumericId())
     const doc: CodeTraceDoc = {
@@ -629,6 +630,7 @@ export class Scribe {
       duration_ns: trace.durationNs ?? 0,
       tokens_in: trace.tokensIn ?? 0,
       tokens_out: trace.tokensOut ?? 0,
+      tool_run_id: trace.toolRunId ?? null,
       analyzed: false,
       created_at: nowIso(),
     }

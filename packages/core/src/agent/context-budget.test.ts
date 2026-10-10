@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import {
-  capToolResult, clipMiddle, fitLoopMessages, fitMessagesToBudget, messageBudget, messageTokens, toolResultCap,
+  capToolResult, clipMiddle, fitLoopMessages, fitMessagesToBudget, messageBudget, messageTokens, packetSnippetCount,
+  projectPacketBudget, toolResultCap,
 } from "./context-budget"
 import type { LLMMessage } from "./llm-client"
 
@@ -95,5 +96,42 @@ describe("messageBudget", () => {
   test("is the window's share minus the tool schemas, never below a quarter", () => {
     expect(messageBudget(50_000, undefined)).toBe(40_000)
     expect(messageBudget(50_000, [{ big: "x".repeat(200_000) }])).toBe(12_500)
+  })
+})
+
+describe("projectPacketBudget", () => {
+  const saved = process.env.HIVE_PRELOAD_MAX_TOKENS
+  afterEach(() => {
+    if (saved === undefined) delete process.env.HIVE_PRELOAD_MAX_TOKENS
+    else process.env.HIVE_PRELOAD_MAX_TOKENS = saved
+  })
+
+  test("coordinators keep a map-sized packet", () => {
+    expect(projectPacketBudget(131_072, true)).toBe(700)
+    expect(projectPacketBudget(4_000, true)).toBe(480)
+  })
+
+  test("a default-size window keeps the historical 2600-token packet", () => {
+    delete process.env.HIVE_PRELOAD_MAX_TOKENS
+    expect(projectPacketBudget(undefined, false)).toBe(2_600)
+    expect(projectPacketBudget(32_768, false)).toBe(2_600)
+  })
+
+  test("large windows preload more, capped at 6000", () => {
+    delete process.env.HIVE_PRELOAD_MAX_TOKENS
+    expect(projectPacketBudget(64_000, false)).toBe(6_000)
+    expect(projectPacketBudget(200_000, false)).toBe(6_000)
+  })
+
+  test("HIVE_PRELOAD_MAX_TOKENS lowers the ceiling", () => {
+    process.env.HIVE_PRELOAD_MAX_TOKENS = "3000"
+    expect(projectPacketBudget(128_000, false)).toBe(3_000)
+    expect(projectPacketBudget(32_768, false)).toBe(2_600)
+  })
+
+  test("snippet count grows with the budget", () => {
+    expect(packetSnippetCount(2_600)).toBe(5)
+    expect(packetSnippetCount(4_000)).toBe(6)
+    expect(packetSnippetCount(6_000)).toBe(8)
   })
 })

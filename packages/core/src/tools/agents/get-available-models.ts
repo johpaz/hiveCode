@@ -1,7 +1,7 @@
 /**
  * Get Available Models Tool
  *
- * Permite a los agentes consultar providers y modelos activos en la BD
+ * Permite a los agentes consultar providers activos y modelos disponibles en la BD
  * para seleccionar el modelo óptimo al crear nuevos agentes.
  *
  * @category agents
@@ -13,7 +13,7 @@ import type { ModelDoc, ProviderDoc } from "../../storage/collections";
 
 export const getAvailableModelsTool: Tool = {
   name: "get_available_models",
-  description: "Obtener lista de providers y modelos activos de la base de datos. Sinónimos: ver modelos, listar providers, modelos disponibles, consultar modelos, provider activo, qué modelos tengo, modelos para código, modelos para chat",
+  description: "Obtener lista de providers activos y modelos disponibles de la base de datos. Sinónimos: ver modelos, listar providers, modelos disponibles, consultar modelos, provider activo, qué modelos tengo, modelos para código, modelos para chat",
   parameters: {
     type: "object",
     properties: {
@@ -48,10 +48,10 @@ export const getAvailableModelsTool: Tool = {
           .map((provider) => [provider.id, provider])
       );
 
-      const capNeedle = capabilities?.toLowerCase();
+      const capNeedle = capabilities?.toLowerCase() === "coding" ? "code" : capabilities?.toLowerCase();
       const result = (await models.scan())
         .map((entry) => entry.doc)
-        .filter((model) => model.enabled && model.active)
+        .filter((model) => model.enabled && model.deprecated_at == null && model.catalog_missing_since_slot == null)
         .filter((model) => activeProviders.has(model.provider_id))
         .filter((model) => !providerId || model.provider_id === providerId)
         .filter((model) => !modelType || model.model_type === modelType)
@@ -72,6 +72,10 @@ export const getAvailableModelsTool: Tool = {
             modelType: model.model_type,
             contextWindow: model.context_window,
             capabilities: model.capabilities ? JSON.parse(model.capabilities) : null,
+            inputModalities: model.input_modalities ?? null,
+            outputModalities: model.output_modalities ?? null,
+            maxOutputTokens: model.max_output_tokens ?? null,
+            effortLevels: model.effort_levels ?? null,
           };
         });
 

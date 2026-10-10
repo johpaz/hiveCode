@@ -1,3 +1,4 @@
+import { CORE_AGENT_TYPES } from "@johpaz/hivecode-core/agent/agent-profiles"
 import { getCodeConfig, setCodeConfig } from "@johpaz/hivecode-core/storage/code-config"
 import { listCatalogModels, listCatalogProviders } from "@johpaz/hivecode-core/services/provider-catalog-read"
 import { col, toIndexable } from "@johpaz/hivecode-core/storage/hive"
@@ -132,6 +133,7 @@ export async function setCoordinatorProviderModel(providerId: string, modelId: s
   const rows = await agents.findBy("role", "coordinator")
   const now = Date.now()
   for (const entry of rows) {
+    if (entry.doc.model_selection === "custom") continue
     await agents.put(entry.id, {
       ...entry.doc,
       provider_id: providerId || toIndexable(null),
@@ -143,13 +145,10 @@ export async function setCoordinatorProviderModel(providerId: string, modelId: s
 
 export async function listEnabledCoordinatorNames(): Promise<string[]> {
   const agents = await col<AgentDoc>("agents")
-  const order = ["bee", "scout", "builder", "verifier", "spider"]
   const rows = await agents.scan()
-  return rows
-    .map((entry) => entry.doc)
-    .filter((agent) => agent.enabled && !!agent.agent_type)
-    .sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id))
-    .map((agent) => agent.name)
+  const enabled = new Set(rows.filter(entry => entry.doc.enabled && entry.doc.status !== "archived").map(entry => entry.doc.id))
+  return ["bee", "planner", "scout", "builder", "verifier", "spider"].filter(id => CORE_AGENT_TYPES.some(type => type === id) && enabled.has(id))
+
 }
 
 export async function loadCodeCliState(): Promise<{

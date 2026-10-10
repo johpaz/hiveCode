@@ -79,7 +79,9 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     // se omite. `off` no se dibuja nunca — un oráculo que el usuario no
     // activó no merece ocupar una celda.
     let avail = area.w.saturating_sub(left_w + 1) as usize;
-    let chip = jev_chip(state).or_else(|| jev_short(state));
+    let chip = jev_chip(state)
+        .filter(|(text, _)| cell_width(text) + 2 <= avail)
+        .or_else(|| jev_short(state).filter(|(text, _)| cell_width(text) + 2 <= avail));
     let chip_w = chip.as_ref().map(|(t, _)| cell_width(t)).unwrap_or(0);
 
     let reserved = chip_w + if chip_w > 0 { 2 } else { 0 };
@@ -114,15 +116,15 @@ fn jev_chip(state: &AppState) -> Option<(String, Style)> {
 /// Variante corta para terminales estrechos: sin el conteo de decisiones.
 fn jev_short(state: &AppState) -> Option<(String, Style)> {
     let availability = state.jev.availability;
-    if !availability.is_configured() || state.jev.totals.saved_tokens == 0 {
+    if !availability.is_configured() {
         return None;
     }
     Some((
-        format!(
-            "{} {}",
-            availability.glyph(),
-            fmt_tokens(state.jev.totals.saved_tokens)
-        ),
+        format!("{} {}", availability.glyph(), match state.jev.oracle.as_deref() {
+            Some("jev") => "JEV".to_string(),
+            Some("kev") => "KEV".to_string(),
+            _ => fmt_tokens(state.jev.totals.saved_tokens),
+        }),
         Style::new().fg(availability.color()),
     ))
 }
@@ -205,6 +207,16 @@ mod tests {
 
         // Algo del oráculo sobrevive, pero sin desbordar la fila.
         assert!(row.chars().count() <= 46, "{row}");
+    }
+
+    #[test]
+    fn a_narrow_terminal_identifies_jev_before_its_first_decision() {
+        let mut state = AppState::default();
+        state.jev.oracle = Some("jev".into());
+        state.jev.set_availability(JevAvailability::Ready, None, None, JevTotals::default());
+        let mut canvas = Canvas::new(46, 1);
+        let row = bar(&mut canvas, 46, &state);
+        assert!(row.contains("JEV"), "{row}");
     }
 
     #[test]

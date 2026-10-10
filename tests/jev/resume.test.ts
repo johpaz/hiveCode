@@ -6,6 +6,9 @@
  * it receives, so "did fs_write run twice" is an assertion, not an inference.
  */
 import { describe, expect, test, beforeEach, afterAll, mock } from "bun:test"
+import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import path from "node:path"
 import { col } from "@johpaz/hivecode-core/storage/hive"
 import { closeHiveDb } from "@johpaz/hivecode-core/storage/hivedb"
 import type { AgentDoc, AgentRunDoc } from "@johpaz/hivecode-core/storage/collections"
@@ -97,14 +100,21 @@ async function seedRun(runId: string, status: AgentRunDoc["status"] = "interrupt
   })
 }
 
+const previousDbPath = process.env.HIVE_DB_PATH
 beforeEach(async () => {
+  closeHiveDb()
+  process.env.HIVE_DB_PATH = path.join(mkdtempSync(path.join(tmpdir(), "hive-resume-")), "db")
   turn = 0
   toolCallCount = 0
   responses = []
   await seedAgent()
 })
 
-afterAll(() => { closeHiveDb() })
+afterAll(() => {
+  closeHiveDb()
+  if (previousDbPath === undefined) delete process.env.HIVE_DB_PATH
+  else process.env.HIVE_DB_PATH = previousDbPath
+})
 
 describe("resume", () => {
   test("a resumed run restores the transcript and continues from its iteration", async () => {

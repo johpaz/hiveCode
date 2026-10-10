@@ -16,7 +16,7 @@ describe("adaptive harness policy", () => {
   })
 
   test("uses bounded defaults", () => {
-    expect(DEFAULT_MAX_AGENT_CONCURRENCY).toBe(3)
+    expect(DEFAULT_MAX_AGENT_CONCURRENCY).toBe(4)
     expect(DEFAULT_MAX_REPAIR_CYCLES).toBe(2)
   })
 })

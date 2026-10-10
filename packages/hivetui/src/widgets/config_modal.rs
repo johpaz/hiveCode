@@ -39,7 +39,14 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &AppState) {
 
     let mut row_y = area.y + 1;
 
-    for (i, field) in modal.fields.iter().enumerate() {
+    // Keep the focused field visible when the form exceeds the terminal height.
+    let available = modal_h.saturating_sub(3);
+    let focused = state.modal_focused.min(modal.fields.len().saturating_sub(1));
+    let mut first = 0;
+    while first < focused && modal.fields[first..=focused].iter()
+        .map(|f| field_height(f.kind, f.options.as_ref().map(|o| o.len()).unwrap_or(0)))
+        .sum::<u16>() > available { first += 1; }
+    for (i, field) in modal.fields.iter().enumerate().skip(first) {
         if row_y + 1 >= area.bottom() {
             break;
         }

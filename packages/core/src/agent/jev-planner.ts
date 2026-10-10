@@ -64,7 +64,7 @@ export interface JevSpecialist {
  */
 export async function describeSwarmCapabilities(
   mcpManager: { getServerTools(key: string): unknown[] | undefined } | null,
-  opts: { includeSpecialists: boolean },
+  opts: { includeSpecialists: boolean; includeCoordinator?: boolean },
 ): Promise<{ mcpServers: JevMcpServer[]; specialists: JevSpecialist[] }> {
   const servers = (await (await col<McpServerDoc>("mcpServers")).scan({})).map(e => e.doc)
   const mcpServers: JevMcpServer[] = servers.map(server => {
@@ -85,7 +85,7 @@ export async function describeSwarmCapabilities(
   }
   const specialists = (await (await col<AgentDoc>("agents")).scan({}))
     .map(e => e.doc)
-    .filter(a => a.role === "worker" && a.enabled && a.status !== "archived")
+    .filter(a => (a.role === "worker" || (opts.includeCoordinator && a.id === "bee")) && !a.ephemeral && a.enabled && a.status !== "archived")
     .map(a => ({
       id: a.id,
       // `agent_type` es el rol canónico; sin él, el nombre es lo mejor que hay.
@@ -95,7 +95,7 @@ export async function describeSwarmCapabilities(
       description: (a.description ?? a.name).slice(0, 200),
       funcion: agentFunction(a.agent_type ?? a.name),
       nivel: agentTierLevel(a.agent_type ?? a.name),
-      tools: parse(a.tool_allowlist_json).slice(0, 12),
+      tools: parse(a.tools_json).filter(tool => a.tool_allowlist_json == null || parse(a.tool_allowlist_json).includes(tool)),
       mcp: parse(a.mcp_server_ids_json)
         .map(id => byId.get(id))
         .filter((s): s is JevMcpServer => !!s)
@@ -224,7 +224,7 @@ export async function planJevContext(input: {
         coordinator: "No bounded specialist task is needed",
         ...Object.fromEntries(agents.map(a => [a.id, [
           a.description,
-          a.tools.length ? `tools: ${a.tools.join(", ")}` : "",
+          a.tools.length ? `tools: ${a.tools.slice(0, 12).join(", ")}` : "",
           a.mcp.length ? `MCP: ${a.mcp.map(m => `${m.name} (${m.state})`).join(", ")}` : "",
         ].filter(Boolean).join(" · ").slice(0, 400)])),
       },
@@ -325,6 +325,12 @@ export async function structuralParallelism(calls: ToolCallLike[]): Promise<{ ki
   if (calls.length < 2) return undefined
   const names = calls.map(c => c.function.name)
   if (names.every(n => READ_ONLY_TOOLS.test(n))) return { kind: "reads", safe: true }
+  if (names.every(n => n === "spawn_agent")) {
+    const safe = calls.every(call => {
+      try { return (typeof call.function.arguments === "string" ? JSON.parse(call.function.arguments) : call.function.arguments)?.parallel !== false } catch { return false }
+    })
+    return { kind: "delegations", safe }
+  }
   if (!names.every(n => n === "task_delegate")) return undefined
 
   const ids = calls.map(call => {

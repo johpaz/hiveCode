@@ -6,6 +6,7 @@
  * unused workers are archived.
  */
 
+import { CORE_AGENT_TYPES } from "./agent-profiles"
 import { col, nextId, toIndexable } from "../storage/hive"
 import type { AgentDoc, CursorDoc, PlaybookDoc, ReflectionDoc } from "../storage/collections"
 import { logger } from "../utils/logger"
@@ -55,9 +56,10 @@ export async function runCurator(): Promise<void> {
     const cutoff = Date.now() - DAYS_BEFORE_ARCHIVE * 86400_000
     const staleWorkers = (await agents.scan()).filter((entry) =>
       entry.doc.role === "worker" &&
+      !CORE_AGENT_TYPES.some(id => id === entry.doc.id) &&
       entry.doc.status !== "archived" &&
       entry.doc.enabled &&
-      (entry.doc.lastTraceAt ?? 0) < cutoff
+      (entry.doc.lastTraceAt ?? entry.doc.created_at) < cutoff
     )
 
     for (const worker of staleWorkers) {

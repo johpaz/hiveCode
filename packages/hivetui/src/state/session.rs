@@ -1,6 +1,6 @@
 /// Tab activo en el layout principal.
 ///
-/// El orden de `ALL` **es** el orden de los atajos 1-6: `from_num` deriva del
+/// El orden de `ALL` **es** el orden de los atajos 1-5: `from_num` deriva del
 /// índice, así que la lista del tabbar y la numeración no pueden desincronizarse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TabId {
@@ -15,18 +15,15 @@ pub enum TabId {
     Code,
     /// Veredictos, conflictos y seguridad.
     Review,
-    /// Configuración: agentes, skills, herramientas, MCP, logs.
-    Taller,
 }
 
 /// La lista canónica de vistas. El tabbar la consume; `from_num` deriva de aquí.
-pub const ALL_TABS: [TabId; 6] = [
+pub const ALL_TABS: [TabId; 5] = [
     TabId::Swarm,
     TabId::Plan,
     TabId::Mesa,
     TabId::Code,
     TabId::Review,
-    TabId::Taller,
 ];
 
 impl TabId {
@@ -51,7 +48,6 @@ impl TabId {
             TabId::Mesa => "mesa",
             TabId::Code => "codigo",
             TabId::Review => "revision",
-            TabId::Taller => "taller",
         }
     }
 
@@ -63,7 +59,6 @@ impl TabId {
             TabId::Mesa => "MESA",
             TabId::Code => "CÓDIGO",
             TabId::Review => "REVISIÓN",
-            TabId::Taller => "TALLER",
         }
     }
 
@@ -122,6 +117,15 @@ impl From<&str> for ReplMode {
 }
 
 #[derive(Debug, Clone)]
+pub struct CoordinatorContext {
+    pub provider: String,
+    pub model: String,
+    pub window: Option<u64>,
+    pub input_tokens: Option<u64>,
+    pub estimated: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct SessionState {
     pub mode: ReplMode,
     pub provider: String,
@@ -132,6 +136,7 @@ pub struct SessionState {
     pub version: String,
     pub task_count: u32,
     pub token_count: u64,
+    pub coordinator_context: Option<CoordinatorContext>,
     pub workers: Vec<String>,
 }
 
@@ -149,6 +154,7 @@ impl Default for SessionState {
             version: "0.1.0".to_string(),
             task_count: 0,
             token_count: 0,
+            coordinator_context: None,
             workers: Vec::new(),
         }
     }

@@ -71,6 +71,7 @@ pub struct DashboardMetrics {
 
 #[derive(Debug, Clone, Default)]
 pub struct DashboardState {
+    pub office: OfficeState,
     pub levels: Vec<DashboardLevel>,
     pub blackboard_events: Vec<BlackboardEvent>,
     pub security: SecurityState,
@@ -85,6 +86,17 @@ pub struct DashboardState {
     /// Detener el enjambre es tan irreversible como un rollback, así que pasa por
     /// la misma confirmación de dos pasos.
     pub halt_confirm: bool,
+}
+
+/// Local cell coordinates and paths for the animated office scene.
+#[derive(Debug, Clone, Default)]
+pub struct OfficeState {
+    pub selected: Option<String>,
+    pub positions: std::collections::HashMap<String, (u16, u16)>,
+    pub homes: std::collections::HashMap<String, (u16, u16)>,
+    pub targets: std::collections::HashMap<String, (u16, u16)>,
+    pub routes: std::collections::HashMap<String, std::collections::VecDeque<(u16, u16)>>,
+    pub viewport: (u16, u16),
 }
 
 impl DashboardState {

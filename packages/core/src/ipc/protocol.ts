@@ -94,6 +94,7 @@ export type BunMessage =
   | ({ type: "activity_update"; coordinator: string; phase: string; status: string; display_name?: string; activity?: string; task_id?: string; token_count?: number } & WorkerDashboardFields)
   | { type: "narrative_chunk"; coordinator: string; phase: string; content: string; content_type?: string; stream_id?: string; task_id?: string; replay?: boolean }
   | { type: "blackboard_event"; timestamp: string; agent: string; event_type: string; content: string }
+  | { type: "coordinator_context"; agent: string; session_id?: string; provider: string; model: string; context_window: number | null; input_tokens: number | null; estimated: boolean }
   | { type: "metrics_update"; token_count?: number; cost?: string; elapsed_secs?: number }
   | {
       type: "dashboard_snapshot"
@@ -245,6 +246,7 @@ export type BunMessage =
    */
   | {
       type: "jev_status"
+      oracle?: "jev" | "kev" | null
       state: "off" | "ready" | "fallback"
       last_error: string | null
       last_success_at: number | null

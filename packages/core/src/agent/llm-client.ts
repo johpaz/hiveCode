@@ -11,6 +11,7 @@ import { createProviderAdapter, SUPPORTED_LLM_PROVIDERS } from "../services/prov
  */
 
 import { logger } from "../utils/logger"
+import { stripVolatileMarker } from "./prompt-cache"
 import { getProviderApiKey, isFreeProvider } from "../storage/crypto"
 import type { LLMProvider } from "./llm-providers/interface"
 
@@ -174,6 +175,14 @@ function getProvider(provider: string): LLMProvider {
 export async function callLLM(options: LLMCallOptions): Promise<LLMResponse> {
   try {
     const callOptions = await resolveCallOptionsFromDb(options)
+    // Only Anthropic uses the cache boundary (it places cache_control on it);
+    // every other provider must never see the marker.
+    if (callOptions.provider !== "anthropic") {
+      callOptions.messages = callOptions.messages.map((m) =>
+        m.role === "system" && typeof m.content === "string"
+          ? { ...m, content: stripVolatileMarker(m.content) }
+          : m)
+    }
     return await getProvider(callOptions.provider).call(callOptions)
   } catch (err) {
     const msg = (err as Error).message

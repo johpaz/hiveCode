@@ -1,3 +1,8 @@
+import { readCoordinatorContext } from "./header-context"
+import { getJevStatus } from "@johpaz/hivecode-core/agent/jev-decisions"
+import { eventBus } from "@johpaz/hivecode-core/events/event-bus"
+import { syncConfiguredProviderCatalog } from "@johpaz/hivecode-core/services/provider-catalog"
+import { agentConfigFields, agentModelPatch } from "./agent-settings"
 import { ALL_COMMANDS } from "@johpaz/hivecode-code/coordinator/command-parser"
 import { listCatalogModels, listCatalogProviders } from "@johpaz/hivecode-core/services/provider-catalog-read"
 import { startProviderCatalogScheduler } from "@johpaz/hivecode-core/services/provider-catalog"
@@ -139,6 +144,7 @@ export interface TuiCallbacks {
   tokenCount:       number
   workers:          string[]
   onSubmit:   (input: string) => Promise<{ output: string; newMode?: string; newProvider?: string; newModel?: string; newTokenCount?: number }>
+  onReady?: () => Promise<void>
   onModeChange?:  (mode: string) => void
   onExit?:        () => void
   /**
@@ -215,6 +221,9 @@ export async function launchTui(callbacks: TuiCallbacks, stdio?: TuiStdio): Prom
       broadcastUiMessage(msg)
     }
 
+    const stopCatalogUpdates = eventBus.on("catalog:updated", () => {
+      void sendSettingsSnapshot(send).catch(error => logger.warn(`Catalog snapshot: ${error.message}`))
+    })
     // Subscribe to real-time logs and forward to TUI
     const logCb = (entry: LogEntry) => {
       send({
@@ -343,6 +352,7 @@ export async function launchTui(callbacks: TuiCallbacks, stdio?: TuiStdio): Prom
     }).catch(error => { logger.error(`Skill reload initialization failed: ${error.message}`); return null })
     const stopCatalogScheduler = startProviderCatalogScheduler()
     proc.exited.then(async (code) => {
+      stopCatalogUpdates()
       await stopCatalogScheduler()
       await (await skillStartup)?.stopSkillCatalogReload()
       process.stderr.write(`[tui] hivetui exited with code: ${code}\n`)
@@ -396,7 +406,7 @@ async function sendSessionSnapshot(
 }
 
 function isSettingsCommand(input: string): boolean {
-  return /^\/(telegram|modelo|github|mcp|skill)(?:\s|$)/.test(input)
+  return /^\/(provider|telegram|modelo|github|mcp|skill|agent)(?:\s|$)/.test(input)
 }
 
 async function handleTuiMessage(
@@ -419,6 +429,9 @@ async function handleTuiMessage(
         token_count:   callbacks.tokenCount,
         workers:       callbacks.workers,
       })
+      await callbacks.onReady?.()
+      await sendOracleStatus(send)
+      send(await readCoordinatorContext(callbacks.sessionId))
       send({ type: "quick_menu", items: ALL_COMMANDS.map(command => ({ label: command.command, cmd: command.command, desc: command.description })) })
       // Dump session state so TUI can rebuild on startup
       await sendSessionSnapshot(send, callbacks.sessionId, "init")
@@ -435,30 +448,13 @@ async function handleTuiMessage(
           const row = await agentsCol.get(agentConfigMatch[1].toLowerCase())
           if (!row?.doc.agent_type) throw new Error(`Perfil core no encontrado: ${agentConfigMatch[1]}`)
           const profile = row.doc
-          const field = (key: string, label: string, placeholder: string): ModalField => ({
-            key, label, placeholder, required: false, secret: false, field_type: "text",
-          })
           const values = await callbacks.tuiControl?.showConfigModal?.(
-            `agent-config:${profile.id}`,
-            `Configurar ${profile.name}`,
-            [
-              field("provider", "Provider", String(profile.provider_id ?? "")),
-              field("model", "Modelo", String(profile.model_id ?? "")),
-              field("fallback_provider", "Provider fallback", String(profile.fallback_provider_id ?? "")),
-              field("fallback_model", "Modelo fallback", String(profile.fallback_model_id ?? "")),
-              field("effort", "Effort", profile.effort ?? "medium"),
-              field("max_turns", "Máx. turnos", String(profile.max_iterations)),
-              field("max_input_tokens", "Máx. tokens entrada", String(profile.max_input_tokens ?? 0)),
-              field("max_output_tokens", "Máx. tokens salida", String(profile.max_output_tokens ?? 0)),
-              field("max_cost_usd", "Costo máximo USD", String(profile.max_cost_usd ?? 0)),
-              field("user_instructions", "Instrucciones adicionales", profile.user_instructions ?? ""),
-            ],
+            `agent-config:${profile.id}`, `Configurar ${profile.name}`, await agentConfigFields(profile),
           )
           if (values) {
             await agentsCol.put(profile.id, {
               ...profile,
-              provider_id: values.provider || profile.provider_id,
-              model_id: values.model || profile.model_id,
+              ...await agentModelPatch(values.model_choice),
               fallback_provider_id: values.fallback_provider || profile.fallback_provider_id,
               fallback_model_id: values.fallback_model || profile.fallback_model_id,
               effort: (["low", "medium", "high", "xhigh", "max"].includes(values.effort)
@@ -478,7 +474,7 @@ async function handleTuiMessage(
           send({ type: "status", running: false, msg: "Listo" })
           break
         }
-        send({ type: "activity_update", coordinator: "agent", phase: input, status: "thinking" })
+        send({ type: "activity_update", coordinator: "bee", phase: input, status: "thinking" })
         const result = await callbacks.onSubmit(input)
         if (result.output) {
           send({ type: "history_append", role: "assistant", content: result.output, content_type: isLikelyMarkdown(result.output) ? "markdown" : "plain", agent: "bee", timestamp: new Date().toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" }) })
@@ -496,6 +492,7 @@ async function handleTuiMessage(
         }
         if (isSettingsCommand(input)) {
           await sendSettingsSnapshot(send)
+          send(await readCoordinatorContext(callbacks.sessionId))
         }
       } catch (err) {
         send({
@@ -546,11 +543,13 @@ async function handleTuiMessage(
             : `${providerId} no tiene API key`)
         }
 
+        await syncConfiguredProviderCatalog(providerId)
+
         // Cambiar de provider sin modelo compatible da 401 en la primera
         // petición, así que se fija el primero habilitado del nuevo provider.
         const models = (await (await col<ModelDoc>("models")).findBy("provider_id", providerId))
           .map(entry => entry.doc)
-          .filter(m => m.model_type === "llm" && m.enabled && m.deprecated_at == null)
+          .filter(m => m.model_type === "llm" && m.enabled && m.deprecated_at == null && m.catalog_missing_since_slot == null)
           .sort((a, b) => a.id.localeCompare(b.id))
         const configuredModel = await getProviderModel(providerId)
         const model = models.find(m => m.id === configuredModel)?.id ?? models[0]?.id
@@ -593,6 +592,14 @@ async function handleTuiMessage(
           ...(model && { new_model: model }),
         })
         send({ type: "status", running: false, msg: `Provider ${providerId} activo` })
+        if (providerId === "openrouter" || providerId === "hiveagents") {
+          const oracle = await sendOracleStatus(send)
+          const name = oracle.oracle?.toUpperCase()
+          if (name) send({ type: "history_append", role: "system", content:
+            oracle.state === "fallback" ? `⚠ ${name} en espera: ${oracle.lastError ?? "reintentará automáticamente"}` :
+            oracle.lastSuccessAt ? `● ${name} activo: ya respondió correctamente.` :
+            `● ${name} configurado. Se usará en las próximas decisiones; pendiente de la primera respuesta.` })
+        }
       } catch (err) {
         send({
           type:    "history_append",
@@ -1030,6 +1037,7 @@ async function sendDashboardSnapshot(
   // `sessions`/`SessionDoc` collection was write-only history — nothing ever
   // wrote it — so its read always missed and this aggregation was the only
   // live path anyway.)
+  send(await readCoordinatorContext(sessionId))
   let metrics: { token_count?: number; cost?: string; elapsed_secs?: number } = {}
   try {
     const tasks = await findDocsBy<CodeTaskDoc>("codeTasks", "session_id", sessionId)
@@ -1113,7 +1121,19 @@ function fallbackWorkerLevel(name: string): number {
 
 // ── Settings Snapshot ─────────────────────────────────────────────────────────
 
+export async function sendOracleStatus(send: (msg: object) => void) {
+  const status = await getJevStatus()
+  send({type: "jev_status", oracle: status.oracle, state: status.state,
+    last_error: status.lastError, last_success_at: status.lastSuccessAt, totals: {
+      decisions: status.totals.decisions, saved_tokens: status.totals.savedTokens, cost_usd: status.totals.costUsd,
+    }})
+  return status
+}
+
 export async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> {
+  await sendOracleStatus(send)
+  send(await readCoordinatorContext())
+
   // Cada sección tiene su propio try-catch para que un error en MCP no borre los providers
   let providers: any[] = []
   try {
@@ -1152,6 +1172,7 @@ export async function sendSettingsSnapshot(send: (msg: object) => void): Promise
         browser_login: browserLogin,
         // Los ids ya vienen filtrados por model_type/enabled en modelsByProvider.
         // La TUI los usa para listar solo los del provider activo.
+        model_names: Object.fromEntries((modelsByProvider.get(provider.id) ?? []).map(m => [m.id, m.name || m.id])),
         models: (modelsByProvider.get(provider.id) ?? [])
           .slice()
           .sort((a, b) => a.id.localeCompare(b.id))

@@ -1,3 +1,6 @@
+import { getSwarmUsage } from "../../agent/swarm-usage";
+import { runEphemeralAgent } from "../../agent/ephemeral-agents";
+import { resolveProjectScope, scopeFromConfig, resolveContextReferences, type ContextReference } from "../../agent/project-context";
 /**
  * Agents Tools - 14 tools
  * 
@@ -6,7 +9,7 @@
 
 import type { Tool } from "../types.ts";
 import crypto from "node:crypto";
-import { col } from "../../storage/hive.ts";
+import { col, ensureIndexes } from "../../storage/hive.ts";
 import type {
   AgentBusMessageDoc,
   AgentDoc,
@@ -391,10 +394,10 @@ export const agentCreateTool: Tool = {
       };
     }
 
-    if (!model.enabled || !model.active) {
+    if (!model.enabled || model.deprecated_at != null || model.catalog_missing_since_slot != null) {
       return { 
         ok: false, 
-        error: `Modelo '${modelId}' no está activo. Usá get_available_models para ver modelos activos.` 
+        error: `Modelo '${modelId}' no está disponible. Usá get_available_models para ver modelos disponibles.`
       };
     }
 
@@ -542,6 +545,11 @@ export const taskDelegateTool: Tool = {
   parameters: {
     type: "object",
     properties: {
+      specialty: { type: "string", description: "Factory specialty owned by the selected worker" },
+      session_id: { type: "string", description: "Explicit code session" },
+      workspace: { type: "string", description: "Project workspace" },
+      paths: { type: "array", items: { type: "string" }, description: "Files assigned to this task" },
+      context_refs: { type: "array", items: { type: "object" }, description: "Versioned code ranges from get_project_context" },
       worker_id: { type: "string", description: "ID of the worker agent (scout, builder, verifier, spider, planner, ...)" },
       task_description: { type: "string", description: "Clear, detailed instructions for the worker" },
       acceptance: {
@@ -576,6 +584,13 @@ export const taskDelegateTool: Tool = {
     if (!worker) return { ok: false, error: `Worker not found: ${workerId}` };
     if (!worker.enabled) return { ok: false, error: `Worker is disabled: ${worker.name}` };
 
+    const scope = await resolveProjectScope(scopeFromConfig(params, config));
+    const refs = Array.isArray(params.context_refs) ? params.context_refs as ContextReference[] : [];
+    const paths = Array.isArray(params.paths) ? params.paths.filter((p): p is string => typeof p === "string") : [];
+    if (refs.length && !scope) return {ok: false, error: "References require an explicit project session"};
+    if (scope) await resolveContextReferences(scope, refs);
+    const specialty = typeof params.specialty === "string" ? params.specialty : undefined;
+    const contextMetadata = { code_session_id: scope?.sessionId, code_task_id: scope?.taskId, workspace: scope?.workspace, specialty, paths, context_refs: refs };
     const tasksCol = await col<TaskDoc>("tasks");
     const acceptance = parseAcceptance(params.acceptance, taskDescription);
     const taskName = taskDescription.slice(0, 60);
@@ -599,13 +614,13 @@ export const taskDelegateTool: Tool = {
         depends_on: null,
         result: null,
         error: null,
-        metadata: JSON.stringify({ worker_id: workerId, acceptance, ref }),
+        metadata: JSON.stringify({ worker_id: workerId, acceptance, ref, ...contextMetadata }),
         created_at: now(),
         updated_at: now(),
         completed_at: null,
       } satisfies TaskDoc, { expectedVersion: 0 });
     } else {
-      await updateTask(taskId, { status: "in_progress", agent_id: workerId, metadata: JSON.stringify({ worker_id: workerId, acceptance, ref }) });
+      await updateTask(taskId, { status: "in_progress", agent_id: workerId, metadata: JSON.stringify({ worker_id: workerId, acceptance, ref, ...contextMetadata }) });
     }
     const resolvedProjectId = projectId ?? existing?.doc.project_id ?? "";
 
@@ -618,6 +633,8 @@ export const taskDelegateTool: Tool = {
       const result = await runAgentIsolated({
         agentId: workerId,
         taskDescription: buildWorkerBrief(taskDescription, acceptance),
+        codeSessionId: scope?.sessionId, codeTaskId: scope?.taskId, workspace: scope?.workspace,
+        specialty, contextRefs: refs, contextPaths: paths,
         threadId: delegationThreadId(taskId, workerId),
         parentRunId: config?.configurable?.run_id,
         runKind: "worker",
@@ -686,7 +703,7 @@ export const taskReviseTool: Tool = {
     const task = await findDelegatedTask(String(taskId));
     if (!task) return { ok: false, error: `Task not found: ${taskId}. Use the task_id that task_delegate returned (e.g. "000000000000003") or the ref you gave it.` };
     const resolvedId = task.id;
-    let meta: { worker_id?: string; acceptance?: unknown } = {};
+    let meta: { worker_id?: string; acceptance?: unknown; code_session_id?: string; code_task_id?: string; workspace?: string; specialty?: string; paths?: string[] } = {};
     try { meta = JSON.parse(task.metadata ?? "{}"); } catch { /* legacy row without metadata */ }
     const workerId = meta.worker_id ?? task.agent_id;
     const worker = workerId ? (await (await col<AgentDoc>("agents")).get(workerId))?.doc : null;
@@ -710,6 +727,10 @@ export const taskReviseTool: Tool = {
           ].join("\n\n"),
           acceptance,
         ),
+        codeSessionId: config?.configurable?.code_session_id ?? meta.code_session_id,
+        codeTaskId: config?.configurable?.code_task_id ?? meta.code_task_id,
+        workspace: config?.configurable?.workspace ?? meta.workspace,
+        specialty: meta.specialty, contextPaths: meta.paths,
         threadId: delegationThreadId(resolvedId, worker.id),
         parentRunId: config?.configurable?.run_id,
         runKind: "worker",
@@ -765,12 +786,13 @@ export const taskStatusTool: Tool = {
   parameters: {
     type: "object",
     properties: {
-      task_ids: { type: "array", description: "List of task IDs", items: { type: "number" } },
+      task_ids: { type: "array", description: "List of task IDs", items: {type: "string"} },
+      full_result: {type: "boolean", description: "Read full durable evidence; default is a compact summary"},
     },
     required: ["task_ids"],
   },
   execute: async (params: Record<string, unknown>) => {
-    const taskIds = params.task_ids as number[];
+    const taskIds = params.task_ids as Array<string | number>;
 
     try {
       const tasksCol = await col<TaskDoc>("tasks");
@@ -781,13 +803,23 @@ export const taskStatusTool: Tool = {
       return {
         ok: true,
         task_count: tasks.length,
-        tasks: tasks.map((t) => ({
+        tasks: await Promise.all(tasks.map(async (t) => ({
           id: t.id,
           name: t.name,
           status: t.status,
           progress: t.progress,
-          result: t.result,
-        })),
+          result: params.full_result === true ? t.result : t.result?.slice(0, 2400),
+          result_reference: {collection: "tasks", id: t.id},
+          swarm_usage: await (async () => {
+            const runs = await col<import("../../storage/collections").AgentRunDoc>("agentRuns");
+            await ensureIndexes([["agentRuns", "task_id"], ["agentRuns", "thread_id"]]);
+            const threadId = JSON.parse(t.metadata || "{}").execution_thread_id ?? `task-${t.id}-${t.agent_id}`;
+            const matches = await Promise.all([runs.findBy("task_id", t.id), runs.findBy("thread_id", threadId)]);
+            const taskRuns = [...new Map(matches.flat().map(row => [row.doc.id, row.doc])).values()];
+            const roots = taskRuns.filter(run => !taskRuns.some(other => other.id === run.parent_run_id));
+            return Promise.all(roots.map(run => getSwarmUsage(run.id)));
+          })(),
+        }))),
       };
     } catch (error) {
       return { ok: false, error: `Failed to get task status: ${(error as Error).message}` };
@@ -936,6 +968,13 @@ export const spawnAgentTool: Tool = {
   parameters: {
     type: "object",
     properties: {
+      specialty: { type: "string", description: "A specialty owned by the parent agent" },
+      session_id: { type: "string", description: "Explicit project session" },
+      paths: { type: "array", items: { type: "string" }, description: "Assigned files" },
+      tools: { type: "array", items: { type: "string" }, description: "Minimal subset of parent tools" },
+      skills: { type: "array", items: { type: "string" }, description: "Minimal subset of parent skills" },
+      context_refs: { type: "array", items: { type: "object" }, description: "Versioned code ranges from get_project_context" },
+      acceptance: { type: "array", items: { type: "object" }, description: "Verifiable acceptance criteria" },
       purpose: { type: "string", description: "Qué debe hacer este agente (descripción específica)" },
       systemPrompt: { type: "string", description: "Identidad y reglas del agente" },
       context: { type: "string", description: "Contexto comprimido para este agente (archivos relevantes, estado actual)" },
@@ -947,172 +986,7 @@ export const spawnAgentTool: Tool = {
     },
     required: ["purpose", "systemPrompt", "context", "activeForm"],
   },
-  execute: async (params: Record<string, unknown>, config?: any) => {
-    const purpose = params.purpose as string;
-    const systemPrompt = params.systemPrompt as string;
-    let context = params.context as string;
-    const activeForm = params.activeForm as string;
-    const timeoutMs = (params.timeoutMs as number) ?? 120_000;
-    const maxRetries = (params.maxRetries as number) ?? 2;
-    const parentAgentId = config?.configurable?.agent_id ?? "main";
-    const threadId = config?.configurable?.thread_id ?? "default";
-
-    // Resolve provider/model from parent agent or params
-    const parentAgent = (await (await col<AgentDoc>("agents")).get(parentAgentId))?.doc;
-    const providerId = (params.providerId as string) ?? parentAgent?.provider_id ?? "anthropic";
-    const modelId = (params.modelId as string) ?? parentAgent?.model_id ?? "claude-sonnet-4-6";
-
-    const t0 = performance.now();
-    let retries = 0;
-    let lastResult = "";
-    let evalStructural = false;
-    let evalSemantic = false;
-    let evalNotes = "";
-
-    const runOnce = async (): Promise<string> => {
-      const agentId = `spawn-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
-      const ephemeralThreadId = `${threadId}:spawn:${agentId}`;
-
-      log.info(`[spawn_agent] Creating ephemeral agent ${agentId}: ${purpose.slice(0, 80)}`);
-
-      try {
-        // §39.3 — all subagents inherit the file-reading protocol
-        const FILE_READING_PROTOCOL = `\n\n## Protocolo de lectura de archivos (§39 — obligatorio)\nPara archivos > 500 líneas: parse_ast primero → localizar con search_in_files → fs_read(offset, limit).\nNunca: fs_read sobre archivo grande sin offset/limit — retorna warning y mapa AST.\nPara entender impacto de un cambio: search_in_files("from './modulo'") o find_imports(path) antes de modificar.\nOffset negativo: fs_read(path, offset=-20, limit=20) lee las últimas 20 líneas.`;
-        const augmentedSystemPrompt = systemPrompt + FILE_READING_PROTOCOL;
-
-        await (await col<AgentDoc>("agents")).put(agentId, {
-          id: agentId,
-          user_id: config?.configurable?.user_id ?? parentAgent?.user_id ?? "default-user",
-          name: `spawn:${purpose.slice(0, 40)}`,
-          description: purpose,
-          system_prompt: augmentedSystemPrompt,
-          tone: "direct",
-          role: "worker",
-          status: "idle",
-          enabled: true,
-          provider_id: providerId,
-          model_id: modelId,
-          tools_json: null,
-          skills_json: null,
-          parent_id: parentAgentId,
-          max_iterations: 5,
-          workspace: config?.configurable?.workspace ?? null,
-          created_at: now(),
-          updated_at: now(),
-        });
-
-        const { runAgentIsolated } = await import("../../agent/agent-loop.ts");
-        const taskWithContext = `${purpose}\n\n# CONTEXTO\n${context}`;
-
-        const resultPromise = runAgentIsolated({ agentId, taskDescription: taskWithContext, threadId: ephemeralThreadId });
-        const timeoutPromise = new Promise<string>((_, reject) =>
-          setTimeout(() => reject(new Error(`Agent timeout after ${timeoutMs}ms`)), timeoutMs)
-        );
-
-        return await Promise.race([resultPromise, timeoutPromise]);
-      } finally {
-        try { await (await col<AgentDoc>("agents")).delete(agentId); } catch { /* ignore */ }
-      }
-    };
-
-    // Semantic evaluation helper — one small LLM call to judge mandate fulfillment
-    const runEvalSemantic = async (mandate: string, output: string): Promise<{ pass: boolean; notes: string }> => {
-      try {
-        const { callLLM, resolveProviderConfig } = await import("../../agent/llm-client.ts");
-        const coordinator = (await (await col<AgentDoc>("agents")).findBy("role", "coordinator"))
-          .map((entry) => entry.doc)[0];
-
-        let provId = coordinator?.provider_id
-        let modId = coordinator?.model_id
-        if (!provId || !modId) {
-          const fallbackProvider = (await getCodeConfig("default_provider")) || "gemini"
-          const modelKey = `provider_model_${fallbackProvider}`
-          const modelValue = await getCodeConfig(modelKey)
-          provId = provId || fallbackProvider
-          modId = modId || modelValue || "gemini-2.5-flash"
-        }
-        const providerCfg = await resolveProviderConfig(provId, modId);
-        const resp = await callLLM({
-          provider: providerCfg.provider,
-          model: providerCfg.model,
-          apiKey: providerCfg.apiKey,
-          messages: [{
-            role: "user",
-            content: `MANDATO: ${mandate}\n\nOUTPUT DEL AGENTE:\n${output.slice(0, 2000)}\n\n` +
-              `¿El output cumple el mandato? Responde PASS o FAIL en la primera línea. ` +
-              `En la segunda línea explica brevemente qué falta o qué está mal (si hay algo).`,
-          }],
-          maxTokens: 256,
-          tools: [],
-        });
-        const text = (typeof resp.content === "string" ? resp.content : "") as string;
-        const firstLine = text.split("\n")[0].trim().toUpperCase();
-        const notes = text.split("\n").slice(1).join(" ").trim();
-        return { pass: firstLine.startsWith("PASS"), notes: notes || (firstLine.startsWith("PASS") ? "OK" : "Incomplete output") };
-      } catch {
-        return { pass: true, notes: "Semantic eval unavailable — skipped" };
-      }
-    };
-
-    try {
-      lastResult = await runOnce();
-      const durationMs = Math.round(performance.now() - t0);
-
-      evalStructural = !!lastResult && lastResult.length > 20 && !lastResult.startsWith("No pude");
-      log.info(`[spawn_agent] evalStructural: ${evalStructural ? "✅" : "⚠️"}`);
-
-      if (evalStructural) {
-        const semResult = await runEvalSemantic(purpose, lastResult);
-        evalSemantic = semResult.pass;
-        evalNotes = semResult.notes;
-        log.info(`[spawn_agent] evalSemantic: ${evalSemantic ? "✅ PASS" : "⚠️ FAIL"} — ${evalNotes}`);
-
-        // Retry loop if semantic eval fails
-        while (!evalSemantic && retries < maxRetries) {
-          retries++;
-          log.info(`[spawn_agent] Retry ${retries}/${maxRetries} — prepending evaluator feedback`);
-          context = `# FEEDBACK DEL EVALUADOR (intento anterior)\n${evalNotes}\n\n# CONTEXTO ORIGINAL\n${context}`;
-          lastResult = await runOnce();
-          evalStructural = !!lastResult && lastResult.length > 20 && !lastResult.startsWith("No pude");
-          if (evalStructural) {
-            const sem2 = await runEvalSemantic(purpose, lastResult);
-            evalSemantic = sem2.pass;
-            evalNotes = sem2.notes;
-            log.info(`[spawn_agent] Retry ${retries} evalSemantic: ${evalSemantic ? "✅ PASS" : "⚠️ FAIL"} — ${evalNotes}`);
-          }
-        }
-      }
-
-      return {
-        ok: evalStructural,
-        agentId: `spawn-done`,
-        purpose,
-        status: evalStructural ? "completed" : "failed",
-        result: lastResult,
-        durationMs,
-        evalStructural,
-        evalSemantic,
-        retries,
-        evalNotes,
-      };
-    } catch (err) {
-      const durationMs = Math.round(performance.now() - t0);
-      const isTimeout = (err as Error).message.includes("timeout");
-      log.error(`[spawn_agent] failed: ${(err as Error).message}`);
-
-      return {
-        ok: false,
-        agentId: `spawn-err`,
-        purpose,
-        status: isTimeout ? "timeout" : "failed",
-        error: (err as Error).message,
-        durationMs,
-        evalStructural: false,
-        evalSemantic: false,
-        retries,
-      };
-    }
-  },
+  execute: runEphemeralAgent,
 };
 
 export function createTools(): Tool[] {

@@ -2,6 +2,7 @@ import { col, ensureIndexes } from "../storage/hive"
 import type { CodeConfigDoc, ModelDoc, ProviderDoc } from "../storage/collections"
 import { getProviderApiKey } from "../storage/crypto"
 import { HIVEAGENTS_MODEL_ID } from "../agent/llm-providers/hiveagents"
+import { eventBus } from "../events/event-bus"
 import { logger } from "../utils/logger"
 
 const log = logger.child("provider-catalog")
@@ -14,7 +15,7 @@ export function latestCatalogSlot(now = Date.now()): number {
   return SUNDAY_ANCHOR + Math.floor((now - SUNDAY_ANCHOR) / WEEK) * WEEK
 }
 
-interface RemoteModel { id: string; name?: string; context?: number; type?: ModelDoc["model_type"] }
+interface RemoteModel { id: string; name?: string; context?: number; type?: ModelDoc["model_type"]; inputModalities?: string[]; outputModalities?: string[]; maxOutputTokens?: number; effortLevels?: string[]; capabilities?: string[] }
 interface SyncState { completed_slot?: number; attempted_at?: number; succeeded_at?: number; error?: string; synced?: number; deprecated?: number }
 interface SyncResult { synced: number; deprecated: number; skipped?: string }
 const stateKey = (id: string) => `provider_catalog.${id}`
@@ -70,8 +71,24 @@ export async function discoverProviderModels(provider: ProviderDoc, apiKey: stri
       else if (/^(tts-|.*-tts)/i.test(id)) type = "tts"
       else if (/^(dall-e|gpt-image|imagen-)/i.test(id)) type = "vision"
       const context = row.inputTokenLimit ?? row.context_length ?? row.context_window
+      const list = (value: unknown): string[] | undefined => Array.isArray(value) && value.every(item => typeof item === "string") ? value : undefined
+      const input = list(row.input_modalities ?? row.architecture?.input_modalities)
+      const output = list(row.output_modalities ?? row.architecture?.output_modalities)
+      const effort = list(row.effort?.supported_levels)
+      const maxOutput = row.max_output_tokens ?? row.outputTokenLimit
+      const capabilities = new Set(list(row.capabilities) ?? [])
+      if (output?.includes("text")) capabilities.add("chat")
+      if (input?.includes("image")) capabilities.add("vision")
+      if (input?.includes("text") && input.includes("image")) capabilities.add("multimodal")
+      if (effort?.length) capabilities.add("reasoning")
+      // DeepSeek's conversational API is also its documented coding-agent backend.
+      if (provider.id === "deepseek" && (type === undefined || type === "llm")) capabilities.add("code")
       models.push({ id, name: row.displayName ?? row.display_name ?? row.name, type,
-        context: typeof context === "number" && context > 0 ? context : undefined })
+        context: typeof context === "number" && context > 0 ? context : undefined,
+        ...(input && {inputModalities: input}), ...(output && {outputModalities: output}),
+        ...(effort && {effortLevels: effort}), ...(typeof maxOutput === "number" && maxOutput > 0 && {maxOutputTokens: maxOutput}),
+        ...(capabilities.size && {capabilities: [...capabilities]}),
+      })
     }
     const next = nativeGemini ? data.nextPageToken : data.has_more ? data.last_id ?? rows.at(-1)?.id : data.next_cursor
     if (!next && data.has_more) throw new Error(`${provider.id}: paginación incompleta`)
@@ -115,10 +132,20 @@ export async function reconcileProviderModels(provider: ProviderDoc, remote: Rem
     const old = current?.doc
     const returning = old?.deprecated_at != null
     const doc: ModelDoc = {
-      ...old, id: key, provider_id: provider.id, name: old?.name ?? model.name ?? model.id,
+      ...old, id: key, provider_id: provider.id, name: model.name ?? old?.name ?? model.id,
       model_type: old?.model_type ?? model.type ?? "llm",
       context_window: old?.context_window ?? model.context ?? 32768,
-      capabilities: old?.capabilities ?? null,
+      capabilities: (() => {
+        if (!model.capabilities) return old?.capabilities ?? null
+        try {
+          const prior = JSON.parse(old?.capabilities ?? "[]")
+          return Array.isArray(prior) ? JSON.stringify([...new Set([...prior, ...model.capabilities])]) : old?.capabilities ?? null
+        } catch { return old?.capabilities ?? JSON.stringify(model.capabilities) }
+      })(),
+      ...(model.inputModalities && {input_modalities: model.inputModalities}),
+      ...(model.outputModalities && {output_modalities: model.outputModalities}),
+      ...(model.maxOutputTokens && {max_output_tokens: model.maxOutputTokens}),
+      ...(model.effortLevels && {effort_levels: model.effortLevels}),
       // New/returning models require selection; never undo a manual disable.
       enabled: returning ? old?.catalog_enabled_before_deprecation ?? true : old?.enabled ?? true,
       active: returning ? false : old?.active ?? false,
@@ -158,6 +185,7 @@ export function syncProviderCatalog(provider: ProviderDoc, now = Date.now()): Pr
       const remote = await discoverProviderModels(provider, key)
       const result = await reconcileProviderModels(provider, remote, now)
       await saveState(provider.id, { completed_slot: latestCatalogSlot(now), attempted_at: now, succeeded_at: now, ...result })
+      eventBus.emit("catalog:updated", {providerId: provider.id, synced: result.synced, at: now})
       log.info(`${provider.id}: ${result.synced} modelos, ${result.deprecated} deprecados`)
       return result
     } catch (error) {
@@ -170,6 +198,16 @@ export function syncProviderCatalog(provider: ProviderDoc, now = Date.now()): Pr
   })().finally(() => locks.delete(provider.id))
   locks.set(provider.id, work)
   return work
+}
+
+/** Credential/activation changes refresh immediately, independent of the weekly slot. */
+export async function syncConfiguredProviderCatalog(providerId: string): Promise<SyncResult> {
+  // A request started before the credential change must not satisfy this refresh.
+  const pending = locks.get(providerId)
+  if (pending) await pending.catch(() => undefined)
+  const provider = (await (await col<ProviderDoc>("providers")).get(providerId))?.doc
+  if (!provider || provider.category !== "llm") throw new Error(`Provider LLM no encontrado: ${providerId}`)
+  return syncProviderCatalog(provider)
 }
 
 export async function runDueProviderCatalogSync(now = Date.now()): Promise<void> {

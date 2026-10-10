@@ -32,8 +32,10 @@ import { checkAutomaticInterruption } from "../modes/interruptions"
 import { broadcastNarrative, broadcastPhase, broadcastMode, broadcastPhaseStart, broadcastPhaseEnd, broadcastTaskEnd, broadcastThinking } from "@johpaz/hivecode-core/gateway/task-streaming"
 import { validateCommand } from "@johpaz/hivecode-core/tools/code/command-validator"
 import { incrementTaskCounter, shouldRunReflector, runReflector, startReflectorCron, stopReflectorCron } from "../agent/reflector"
-import { updateFileIndex, reconcileCodeIndex } from "../agent/code-indexer"
-import { getProjectContext, buildProjectContext } from "../agent/context-retriever"
+import { updateFileIndex, reconcileCodeIndex, flushIndexRebuild } from "../agent/code-indexer"
+import { consumeStaleSourceIndex } from "@johpaz/hivecode-core/agent/source-index"
+import { recordCompletedToolRun } from "@johpaz/hivecode-core/agent/tracer"
+import { loadProjectContext, buildProjectContext } from "../agent/context-retriever"
 import { existsSync } from "node:fs"
 import { isAbsolute, relative, resolve } from "node:path"
 import { fileURLToPath } from "@johpaz/hivecode-core/gateway/helpers/path"
@@ -338,8 +340,8 @@ export class CoordinatorManager extends CoordinatorBase {
     this.loadProjectAdrs(projectPath)
     // Index the project in the background: detect external edits and new files,
     // then build the global project context the agents are primed with.
-    void reconcileCodeIndex(sessionId, projectPath).then(() => {
-      if (!getProjectContext(sessionId)) {
+    void reconcileCodeIndex(sessionId, projectPath).then(async () => {
+      if (!(await loadProjectContext(sessionId))) {
         return buildProjectContext(sessionId, projectPath)
       }
     }).catch((err) => {
@@ -2120,7 +2122,16 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
         .map((entry) => entry.doc)
         .sort((a, b) => b.last_active.localeCompare(a.last_active))[0]
       if (activeSession?.id) {
-        const projectCtx = getProjectContext(activeSession.id)
+        await flushIndexRebuild(activeSession.id)
+        // shell/git changed files the index never heard about: catch up by mtime.
+        if (consumeStaleSourceIndex(activeSession.id) && activeSession.project_path) {
+          await reconcileCodeIndex(activeSession.id, activeSession.project_path)
+        }
+        let projectCtx = await loadProjectContext(activeSession.id)
+        if (!projectCtx && activeSession.project_path) {
+          await buildProjectContext(activeSession.id, activeSession.project_path)
+          projectCtx = await loadProjectContext(activeSession.id)
+        }
         if (projectCtx) {
           sections.push(projectCtx)
         }
@@ -2546,8 +2557,22 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
     const success = !(result && typeof result === "object" && "ok" in (result as any) && (result as any).ok === false)
     const outputSummary = typeof result === "string" ? result.slice(0, 2000) : JSON.stringify(result).slice(0, 2000)
 
+    // Full arguments/result go to toolRuns; the trace keeps the short summary
+    // and links to it, so nothing is lost to the 2000-char cut.
+    const toolRunId = await recordCompletedToolRun({
+      runId: `code:${this.activeSessionId ?? "session"}:${taskId}`,
+      taskId,
+      callId: `${msg.toolName}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+      toolName: msg.toolName!,
+      args: msg.toolArgs ?? {},
+      result,
+      success,
+      durationMs: Number(toolDurationNs) / 1_000_000,
+      mutatesWorkspace: writeTools.has(msg.toolName!),
+    })
+
     // Write tool execution trace (SPEC §5.4)
-    this.writeToolTrace(name, msg.toolName, inputSummary, outputSummary, success, toolDurationNs)
+    this.writeToolTrace(name, msg.toolName, inputSummary, outputSummary, success, toolDurationNs, toolRunId)
 
     // Learning Harness — capture tool failure (fire-and-forget, WAL-safe)
     if (!success && this.activeTaskId) {
@@ -2636,6 +2661,7 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
     outputSummary: string,
     success: boolean,
     durationNs: bigint,
+    toolRunId: string | null = null,
   ): void {
     try {
       this.scribe.writeTrace({
@@ -2647,6 +2673,7 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
         outputSummary,
         success,
         durationNs: Number(durationNs),
+        toolRunId,
       })
     } catch (err) {
       log.warn(`[coordinator-manager] ⚠️ Failed to write trace for ${toolName}: ${(err as Error).message}`)

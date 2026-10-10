@@ -1,3 +1,4 @@
+import { buildContextPacket, resolveProjectScope, scopeFromConfig, readProjectSource, fingerprint } from "../../agent/project-context";
 import { buildSnippet } from "../../utils/search-snippet";
 /**
  * Core Tools - 4 tools
@@ -27,14 +28,6 @@ import {
 import { CORE_TOOL_CATALOG } from "../../agent/tool-selector.ts";
 
 const log = logger.child("core");
-
-async function getActiveCodeSessionId(): Promise<string> {
-  const sessions = await col<CodeSessionDoc>("codeSessions");
-  const active = (await sessions.findBy("status", "active"))
-    .map((entry) => entry.doc)
-    .sort((a, b) => b.last_active.localeCompare(a.last_active))[0];
-  return active?.id ?? "";
-}
 
 // ─── Bilingual dictionary: Spanish → English ────────────────────────────────
 
@@ -171,6 +164,9 @@ export const searchKnowledgeTool: Tool = {
   parameters: {
     type: "object",
     properties: {
+      mode: { type: "string", enum: ["full", "compact"], description: "Compact returns references and short descriptions, without skill bodies." },
+      session_id: { type: "string", description: "Explicit project session" },
+      workspace: { type: "string", description: "Project workspace" },
       query: {
         type: "string",
         description: "Término de búsqueda (nombre, descripción, categoría, función, clase). Se busca primero en español, luego en inglés si hay pocos resultados.",
@@ -187,10 +183,11 @@ export const searchKnowledgeTool: Tool = {
     },
     required: ["query"],
   },
-  execute: async (params: Record<string, unknown>) => {
+  execute: async (params: Record<string, unknown>, config?: any) => {
     const query = params.query as string;
     const type = (params.type as string) ?? "all";
-    const limit = (params.limit as number) ?? 10;
+    const limit = Math.max(1, Math.min(50, Number(params.limit) || 10));
+    const compact = params.mode === "compact";
     const MIN_RESULTS_FOR_BILINGUAL = 2;
 
     try {
@@ -214,14 +211,15 @@ export const searchKnowledgeTool: Tool = {
         ? ["tool", "skill", "playbook", "mcp"] as CapabilityType[]
         : (typeMap[type] ?? []).filter(t => t !== "code");
 
-      let activeSessionId = "";
+      let scope = null;
       if (wantsCode) {
-        try {
-          activeSessionId = await getActiveCodeSessionId();
-        } catch {
-          activeSessionId = "";
+        try { scope = await resolveProjectScope(scopeFromConfig(params, config)); }
+        catch (error) {
+          if (type === "code") throw error;
+          result.code_scope_error = (error as Error).message;
         }
       }
+      const activeSessionId = scope?.sessionId ?? "";
 
       const coreCatalog = new Map(CORE_TOOL_CATALOG.map(t => [t.name, t]));
       const toolsCol = await col<ToolDoc>("tools");
@@ -271,7 +269,8 @@ export const searchKnowledgeTool: Tool = {
           id: s.id, name: s.name, description: s.description, category: s.category,
           tools: s.tools, triggers: s.triggers,
           preferred_agents: parseJsonOr(s.preferred_agents, []),
-          body: s.body ? (s.body.length > 1500 ? s.body.substring(0, 1500) + "…" : s.body) : undefined,
+          body: !compact && s.body ? (params.mode === "full" ? s.body : s.body.length > 1500 ? s.body.substring(0, 1500) + "…" : s.body) : undefined,
+          reference: compact ? { kind: "skill", id: s.id, version: s.version_num } : undefined,
           active: s.active, rank: hit.score,
         };
       }
@@ -303,9 +302,12 @@ export const searchKnowledgeTool: Tool = {
         const entry = await codeFilesCol.get(hit.rawId);
         const c = entry?.doc;
         if (!c) return null;
+        let content = c.content;
+        try { if (scope) content = await readProjectSource(scope, c.file_path); } catch { return null; }
         return {
           file_path: c.file_path,
-          snippet: buildSnippet(c.content, normalizedQuery),
+          snippet: compact ? undefined : buildSnippet(content, normalizedQuery),
+          reference: scope ? { kind: "code", sessionId: scope.sessionId, id: c.id, filePath: c.file_path, hash: fingerprint(content) } : undefined,
           rank: hit.score,
         };
       }
@@ -315,6 +317,7 @@ export const searchKnowledgeTool: Tool = {
         let added = 0;
         for (const hit of hits) {
           if (seenIds.has(hit.id)) continue;
+          if (compact && seenIds.size >= limit) break;
           let entry: any = null;
           let bucket: any[] | null = null;
           switch (hit.type) {
@@ -374,28 +377,28 @@ export const getProjectContextTool: Tool = {
   description: "Retrieve the global project context summary: structure, key files, critical modules, and active ADRs. Call this FIRST before exploring the project — it replaces fs_list/fs_glob for understanding the codebase.",
   parameters: {
     type: "object",
-    properties: {},
+    properties: {
+      session_id: { type: "string", description: "Explicit code session" },
+      workspace: { type: "string", description: "Project workspace" },
+      task_id: { type: "string", description: "Task whose decisions and state should be loaded" },
+      query: { type: "string", description: "Symbol, contract or missing evidence to retrieve" },
+      paths: { type: "array", items: { type: "string" }, description: "Relevant files" },
+      token_budget: { type: "number", minimum: 200, maximum: 12000, description: "Project-context budget; expand when evidence is missing" },
+      scope: { type: "string", enum: ["summary", "task"], description: "Small project map or task-specific code ranges" },
+    },
     required: [],
   },
-  execute: async (_params: Record<string, unknown>, _config?: any) => {
+  execute: async (params: Record<string, unknown>, config?: any) => {
     try {
-      const sessionId = await getActiveCodeSessionId();
-      if (!sessionId) {
-        return { ok: false, error: "No active session found." };
-      }
-
-      const cacheEntry = await (await col<CodeContextCacheDoc>("codeContextCache")).get(`project_context:${sessionId}`);
-      const cacheRow = cacheEntry?.doc;
-
-      if (cacheRow?.compiled && new Date(cacheRow.expires_at).getTime() > Date.now()) {
-        return { ok: true, context: cacheRow.compiled };
-      }
-
-      return {
-        ok: false,
-        error: "Project context not cached yet. Run 'hivecode init' or wait for reconciliation.",
-        hint: "You can still use search_knowledge(type='code', query='...') to find specific symbols.",
-      };
+      const scope = await resolveProjectScope(scopeFromConfig(params, config));
+      if (!scope) return { ok: false, error: "No project session found. Supply session_id and workspace." };
+      const packet = await buildContextPacket(scope, {
+        query: typeof params.query === "string" ? params.query : undefined,
+        paths: Array.isArray(params.paths) ? params.paths.filter((p): p is string => typeof p === "string") : undefined,
+        tokenBudget: typeof params.token_budget === "number" ? params.token_budget : undefined,
+        summaryOnly: params.scope !== "task" && !params.query && !params.paths,
+      });
+      return { ok: true, ...packet };
     } catch (error) {
       return { ok: false, error: `Failed to retrieve project context: ${(error as Error).message}` };
     }

@@ -7,7 +7,7 @@ use crate::{
         conflict_bar,
         dashboard_layout, focus_layout, header, info_modal, input, logs_panel,
         plan_approval_modal, plan_layout, review_layout, settings_hub, statusbar, tabbar,
-        taller_layout, welcome,
+        welcome,
     },
 };
 #[cfg(not(test))]
@@ -72,11 +72,30 @@ pub fn layout_areas(area: Rect, panels: &PanelLayoutState) -> ChromeAreas {
 const MIN_COLS: u16 = 100;
 const MIN_ROWS: u16 = 24;
 
+pub fn layout_for_state(area: Rect, state: &AppState) -> ChromeAreas {
+    let mut panels = state.panels.clone();
+    if state.active_tab == TabId::Swarm && area.h < MIN_ROWS {
+        panels.header_height = 1;
+        panels.input_height = 2;
+        panels.footer_height = 1;
+    }
+    let mut chrome = layout_areas(area, &panels);
+    // Swarm already renders its checkpoint strip and actions inside the dashboard.
+    if state.active_tab == TabId::Swarm && state.dashboard.resume.is_none() {
+        chrome.content.h += chrome.checkpoint.h;
+        chrome.checkpoint.y += chrome.checkpoint.h;
+        chrome.checkpoint.h = 0;
+    }
+    chrome
+}
+
 pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
     canvas.clear();
     let area = canvas.area();
 
-    if area.w < MIN_COLS || area.h < MIN_ROWS {
+    let compact_office = state.active_tab == TabId::Swarm && area.w >= 20 && area.h >= 10;
+    if (area.w < MIN_COLS || area.h < MIN_ROWS) && !compact_office {
+        state.hit_map.clear();
         render_too_small(canvas, area);
         return (0, 0);
     }
@@ -136,7 +155,7 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
     // `/logs` — overlay sobre el área de contenido. Antes las entradas se
     // acumulaban en `state.logs` sin que ningún widget las leyera.
     if state.logs.visible {
-        let areas = layout_areas(area, &state.panels);
+        let areas = layout_for_state(area, state);
         logs_panel::render(canvas, areas.content, state);
     }
 
@@ -184,7 +203,7 @@ fn render_too_small(canvas: &mut Canvas, area: Rect) {
 }
 
 fn render_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {
-    let areas = layout_areas(area, &state.panels);
+    let areas = layout_for_state(area, state);
 
     canvas.with_clip(areas.header, |canvas| header::render(canvas, areas.header, state));
     canvas.with_clip(areas.tabbar, |canvas| tabbar::render(canvas, areas.tabbar, state));
@@ -195,7 +214,6 @@ fn render_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {
         TabId::Code      => code_layout::render(canvas, areas.content, state),
         TabId::Review    => review_layout::render(canvas, areas.content, state),
         TabId::Swarm     => dashboard_layout::render(canvas, areas.content, state),
-        TabId::Taller    => taller_layout::render_for_state(canvas, areas.content, state),
     });
 
     canvas.with_clip(areas.checkpoint, |canvas| checkpoint_bar::render(canvas, areas.checkpoint, state));
@@ -221,9 +239,12 @@ fn render_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {
 
 fn register_hit_regions(state: &mut AppState, area: Rect) {
     state.hit_map.clear();
-    let areas = layout_areas(area, &state.panels);
+    let areas = layout_for_state(area, state);
 
     register_chrome_regions(state, areas);
+    if state.active_tab == TabId::Swarm {
+        dashboard_layout::register_office_hits(state, areas.content);
+    }
 
     for (tab, rect) in tabbar::tab_regions(areas.tabbar, state) {
         state.hit_map.push(MouseRegion::new(

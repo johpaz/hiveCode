@@ -1,4 +1,5 @@
 import { logger } from "../../utils/logger"
+import { splitSystemPrompt } from "../prompt-cache"
 import { resolveMaxTokens } from "./interface"
 import type { LLMCallOptions, LLMProvider, LLMResponse, LLMToolCall } from "./interface"
 import type { ContentPart, LLMMessage } from "../llm-client"
@@ -105,7 +106,17 @@ export class AnthropicProvider implements LLMProvider {
       max_tokens: resolveMaxTokens(options.maxTokens, options.contextWindow) ?? 16384,
       messages: anthropicMessages,
     }
-    if (systemText) body.system = systemText
+    if (systemText) {
+      // Tools and the stable prefix of the system prompt are identical across a
+      // run's turns: one breakpoint at the end of that prefix caches both.
+      const { stable, volatile } = splitSystemPrompt(systemText)
+      body.system = volatile.trim()
+        ? [
+            { type: "text", text: stable, cache_control: { type: "ephemeral" } },
+            { type: "text", text: volatile },
+          ]
+        : stable
+    }
     if (tools.length) body.tools = tools
 
     // Extended thinking — only for supported models

@@ -234,6 +234,7 @@ export function frameText(frame: FrameSnapshot): string {
 export type SessionOptions = {
   cols?: number
   rows?: number
+  workers?: string[]
   /** Unix sockets on Linux/macOS, loopback TCP on Windows. Defaults to TCP. */
   transport?: "tcp" | "unix"
 }
@@ -250,7 +251,7 @@ export async function startSession(mode: string, options: SessionOptions = {}): 
   initFrame: FrameSnapshot
   dispose: () => void
 }> {
-  const { transport = "tcp", ...size } = options
+  const { transport = "tcp", workers, ...size } = options
   const { endpoint, server, waitForConnection } = transport === "unix"
     ? await createUnixIpcServer()
     : await createTcpIpcServer()
@@ -263,7 +264,7 @@ export async function startSession(mode: string, options: SessionOptions = {}): 
   ipc.send({
     type: "init",
     session_id: sessionId,
-    workers: ["bee", "backend", "frontend", "security", "test", "devops"],
+    workers: workers ?? ["bee", "backend", "frontend", "security", "test", "devops"],
     mode,
     provider: "anthropic",
     model: "claude-sonnet-4-5",
