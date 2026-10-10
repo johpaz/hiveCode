@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { MCPConfig, MCPServerConfig } from "./config";
+import pkg from "../package.json";
 import { Logger, type LogHandler } from "./logger";
 import * as path from "node:path";
 import {
@@ -249,7 +250,7 @@ export class MCPClientManager {
       transport = this.createTransportForServer(state);
 
       client = this.factories?.client() ?? new Client(
-        { name: "hive", version: "0.1.0" },
+        { name: "hive", version: pkg.version },
         { capabilities: {} }
       );
 

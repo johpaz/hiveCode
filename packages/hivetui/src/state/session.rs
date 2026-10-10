@@ -151,7 +151,7 @@ impl Default for SessionState {
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
             session_id: String::new(),
-            version: "0.1.0".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
             task_count: 0,
             token_count: 0,
             coordinator_context: None,

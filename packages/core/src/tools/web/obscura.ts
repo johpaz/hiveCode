@@ -1,4 +1,5 @@
 import { spawnTaskProcess } from "../../runtime/task-execution";
+import pkg from "../../../package.json";
 /**
  * Browser automation via Obscura (https://obscura.sh) — direct MCP 2.0 client.
  *
@@ -40,7 +41,7 @@ const MCP_PROTOCOL_2_0 = "2026-07-28"
 /** Legacy fallback revision for servers that still use the initialize handshake. */
 const MCP_LEGACY_FALLBACK = "2025-06-18"
 
-const CLIENT_INFO = { name: "hivecode", version: "0.1.0" } as const
+const CLIENT_INFO = { name: "hivecode", version: pkg.version } as const
 
 /**
  * Per-request `_meta` prescribed by MCP 2.0 (2026-07-28): every request carries

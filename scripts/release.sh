@@ -78,16 +78,12 @@ if [ "$DRY" -eq 1 ]; then
 fi
 
 # ── Versionar, commit y tag ───────────────────────────────────────────────────
-step "Subiendo versión a $NEXT"
-for pkg in package.json packages/cli/package.json; do
-  NEXT="$NEXT" PKG="$pkg" bun -e '
-    const f = process.env.PKG;
-    const j = JSON.parse(await Bun.file(f).text());
-    j.version = process.env.NEXT;
-    await Bun.write(f, JSON.stringify(j, null, 2) + "\n");
-  '
-done
-git add package.json packages/cli/package.json
+step "Subiendo versión a $NEXT (todos los paquetes + Cargo)"
+bun scripts/set-version.ts "$NEXT"
+# `--locked` falla si Cargo.lock no coincide con los manifiestos: mejor aquí que en CI.
+cargo metadata --locked --offline --no-deps --format-version 1 \
+  --manifest-path packages/hivetui/Cargo.toml >/dev/null
+git add package.json packages/*/package.json packages/hivetui/Cargo.toml packages/hivetui/Cargo.lock
 git commit -m "chore(release): $TAG"
 git tag -a "$TAG" -m "hivecode $TAG"
 echo "✓ commit y tag $TAG creados (local)"

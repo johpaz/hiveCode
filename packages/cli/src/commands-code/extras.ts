@@ -13,6 +13,7 @@ import {
   hiveNote, hiveSpinner, hiveConfirm, isCancel,
 } from "../cli-ui.ts"
 import { col } from "@johpaz/hivecode-core/storage/hive"
+import pkg from "../../../../package.json"
 import { formatIdCandidates, resolveIdFragment, shortId } from "@johpaz/hivecode-core/storage/ids"
 import type {
   CodeFileChangeDoc,
@@ -243,7 +244,7 @@ export async function upgrade(): Promise<void> {
     const response = await fetch("https://api.github.com/repos/johpaz/hivecode/releases/latest")
     const data = await response.json()
     const latestVersion = data.tag_name as string
-    const currentVersion = "v0.1.0"
+    const currentVersion = `v${pkg.version}`
 
     if (latestVersion === currentVersion) {
       spinner.stop("Ya tienes la última versión")
