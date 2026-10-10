@@ -1,6 +1,6 @@
 {
   "name": "hivecode-monorepo",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "hive-code — Multi-AI coding swarm. Console-first. Code-focused. Multi-provider.",
   "private": true,
   "bin": {
