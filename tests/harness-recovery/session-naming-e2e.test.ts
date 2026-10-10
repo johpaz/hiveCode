@@ -101,11 +101,33 @@ describe("session naming through the real model path", () => {
 
     await nameSessionFromFirstMessage(sessionId)
 
-    const sent = fake!.requests[0] as { messages: Array<{ role: string; content: string }> }
+    const sent = fake!.requests[0] as {
+      messages: Array<{ role: string; content: string }>
+      max_tokens?: number
+      chat_template_kwargs?: { enable_thinking?: boolean }
+    }
     expect(sent.messages).toHaveLength(2)
     expect(sent.messages[0].role).toBe("system")
     // The user's words travel verbatim — the title must reflect their request.
     expect(sent.messages[1].content).toBe("migra el esquema a Postgres")
+  })
+
+  test("the call is bounded and tells a reasoning model not to think", async () => {
+    const sessionId = await sessionWithFirstMessage("arregla el login con OAuth")
+
+    await nameSessionFromFirstMessage(sessionId)
+
+    const sent = fake!.requests[0] as {
+      max_tokens?: number
+      chat_template_kwargs?: { enable_thinking?: boolean }
+    }
+    // Measured on Qwen3.6-35B-A3B through llm-api: without these, the model
+    // spent 1228 tokens reasoning and returned an EMPTY answer after 22 s — and
+    // the cap alone only made it fail sooner. With thinking off the same call
+    // answers in 8 tokens and ~0.9 s. If this regresses, titles silently stop
+    // appearing and every session keeps its 120-char provisional instead.
+    expect(sent.max_tokens).toBe(64)
+    expect(sent.chat_template_kwargs?.enable_thinking).toBe(false)
   })
 
   test("a provider error keeps the provisional title", async () => {

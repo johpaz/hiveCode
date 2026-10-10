@@ -465,7 +465,6 @@ hivecode exit                          # Detener el sistema
 /run                                  Ejecutar tarea en modo actual
 /logs     list|follow                 Ver logs del sistema
 /note                                 Guardar nota en scratchpad
-/env                                  Variables de entorno no sensibles
 /version                              Versión de hivecode
 /doctor                               Diagnóstico del sistema
 /help [comando]                       Ayuda detallada
@@ -477,6 +476,12 @@ Una sesión nace con tu **primer mensaje**, no al abrir la TUI: abrir y cerrar s
 escribir no deja filas huéfanas en el selector. Su nombre es ese pedido — el
 agente lo titula en segundo plano con una llamada corta, y si esa llamada falla
 queda el texto del mensaje, así que nunca ves una sesión sin nombre.
+
+Esa llamada va **acotada a 64 tokens y con el razonamiento desactivado**, porque
+un modelo que razona se gasta el presupuesto entero pensando y devuelve una
+respuesta vacía: medido con Qwen3.6-35B, sin esos dos ajustes la llamada usaba
+1228 tokens y 22 s para no contestar nada; con ellos responde en 8 tokens y
+≈ 0,9 s.
 
 ```
 /session list                  Sesiones de este proyecto, con su título y fecha

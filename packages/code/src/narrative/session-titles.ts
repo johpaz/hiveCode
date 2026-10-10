@@ -25,6 +25,8 @@ const log = logger.child("session-titles")
 
 /** A title is a line, not a paragraph. */
 const MAX_TITLE_CHARS = 80
+/** 3-6 words plus slack. See the note on the call below for why it is capped. */
+const TITLE_MAX_TOKENS = 64
 
 /**
  * The indexes the naming path queries. `createIndex` is idempotent (bootstrap.ts
@@ -75,6 +77,13 @@ const defaultTitleLLM: TitleLLM = async (userMessage) => {
   const providerCfg = await resolveProviderConfig(provider, model)
   const response = await callLLM({
     ...providerCfg,
+    // A title is a handful of tokens. Without these two a reasoning model
+    // spends the entire budget thinking and returns nothing: measured on
+    // Qwen3.6-35B-A3B, 1228 tokens and 22 s produced an EMPTY answer, and the
+    // cap alone only made it fail faster. With thinking off the same call
+    // answers in 8 tokens and ~1.5 s.
+    maxTokens: TITLE_MAX_TOKENS,
+    extraBody: { chat_template_kwargs: { enable_thinking: false } },
     messages: [
       {
         role: "system",
