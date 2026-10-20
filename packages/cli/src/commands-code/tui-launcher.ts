@@ -1,5 +1,4 @@
 import { readCoordinatorContext } from "./header-context"
-import { getJevStatus } from "@johpaz/hivecode-core/agent/jev-decisions"
 import { eventBus } from "@johpaz/hivecode-core/events/event-bus"
 import { syncConfiguredProviderCatalog } from "@johpaz/hivecode-core/services/provider-catalog"
 import { agentConfigFields, agentModelPatch } from "./agent-settings"
@@ -437,7 +436,6 @@ async function handleTuiMessage(
         workers:       callbacks.workers,
       })
       await callbacks.onReady?.()
-      await sendOracleStatus(send)
       send(await readCoordinatorContext(callbacks.sessionId))
       send({ type: "quick_menu", items: ALL_COMMANDS.map(command => ({ label: command.command, cmd: command.command, desc: command.description })) })
       // Dump session state so TUI can rebuild on startup
@@ -599,14 +597,6 @@ async function handleTuiMessage(
           ...(model && { new_model: model }),
         })
         send({ type: "status", running: false, msg: `Provider ${providerId} activo` })
-        if (providerId === "openrouter" || providerId === "hiveagents") {
-          const oracle = await sendOracleStatus(send)
-          const name = oracle.oracle?.toUpperCase()
-          if (name) send({ type: "history_append", role: "system", content:
-            oracle.state === "fallback" ? `⚠ ${name} en espera: ${oracle.lastError ?? "reintentará automáticamente"}` :
-            oracle.lastSuccessAt ? `● ${name} activo: ya respondió correctamente.` :
-            `● ${name} configurado. Se usará en las próximas decisiones; pendiente de la primera respuesta.` })
-        }
       } catch (err) {
         send({
           type:    "history_append",
@@ -1132,17 +1122,7 @@ function fallbackWorkerLevel(name: string): number {
 
 // ── Settings Snapshot ─────────────────────────────────────────────────────────
 
-export async function sendOracleStatus(send: (msg: object) => void) {
-  const status = await getJevStatus()
-  send({type: "jev_status", oracle: status.oracle, state: status.state,
-    last_error: status.lastError, last_success_at: status.lastSuccessAt, totals: {
-      decisions: status.totals.decisions, saved_tokens: status.totals.savedTokens, cost_usd: status.totals.costUsd,
-    }})
-  return status
-}
-
 export async function sendSettingsSnapshot(send: (msg: object) => void): Promise<void> {
-  await sendOracleStatus(send)
   send(await readCoordinatorContext())
 
   // Cada sección tiene su propio try-catch para que un error en MCP no borre los providers

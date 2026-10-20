@@ -22,16 +22,15 @@ mensaje ─▶ compilar contexto ─▶ llamada al modelo ─▶ ¿herramientas?
 
 1. **Cancelación.** Si `signal.aborted`, termina con `Generación detenida.` (`runStatus = cancelled`).
 2. **Presupuestos.** Si se alcanza `max_input_tokens`, `max_output_tokens` o `max_cost_usd` del agente, termina con `needs_budget`.
-3. **Poda Jev** (`planJevIteration`, opcional). Decide si el historial acumulado sigue valiendo su costo y si el turno está terminado. Solo se ejecuta cuando hay peso que podar. Cualquier fallo deja mensajes y herramientas intactos.
-4. **Checkpoint periódico** cada `checkpointEvery` iteraciones (`agentRuns.checkpoint_json`).
-5. **Aviso de cierre.** Cuando quedan `WRAP_UP_STEPS_REMAINING = 3` pasos, se le dice al modelo que concluya.
-6. **Llamada al modelo** (`callProfileLLM`) dentro de `withExecutionSlot`. Temperatura 0.3.
-7. **Herramientas.** Por cada llamada:
+3. **Checkpoint periódico** cada `checkpointEvery` iteraciones (`agentRuns.checkpoint_json`).
+4. **Aviso de cierre.** Cuando quedan `WRAP_UP_STEPS_REMAINING = 3` pasos, se le dice al modelo que concluya.
+5. **Llamada al modelo** (`callProfileLLM`) dentro de `withExecutionSlot`. Temperatura 0.3.
+6. **Herramientas.** Por cada llamada:
    - Modo: `canExecuteTool` (bloqueos de `plan`) y confirmación (`approval`), ver [modes.md](./modes.md).
    - Se escribe un checkpoint **antes** de ejecutar, para que un fallo a mitad no repita llamadas ya hechas.
-   - Un lote puede correr en paralelo si `jevWantsParallel` o `structuralParallelism` lo permiten; las que tocan el mismo archivo se serializan.
+   - Un lote puede correr en paralelo si `structuralParallelism` lo permite (lecturas independientes, o delegaciones a workers distintos que no escriben el mismo workspace); las que tocan el mismo archivo se serializan.
    - Cada resultado se acota (`capToolResult`), se formatea en TOON para ahorrar tokens y se registra en telemetría (`tool_call`/`tool_done` por IPC).
-8. **Detección de bucles** tras cada resultado (ver abajo) y checkpoint posterior (`post-tool`).
+7. **Detección de bucles** tras cada resultado (ver abajo) y checkpoint posterior (`post-tool`).
 9. **Salida.** Si el modelo responde sin herramientas, ese texto es la respuesta. Si se agotan los pasos sin texto, hace una llamada final de síntesis; el estado queda `max_steps:<n>`.
 
 El tope de pasos es, en orden: `opts.maxSteps`, `HIVECODE_AGENT_MAX_STEPS`, `max_steps`/`max_iterations` del agente.
@@ -65,9 +64,17 @@ Si el modelo escribe una llamada como texto que no se puede convertir en una lla
 
 Un turno sin texto ni llamada a herramienta no es una respuesta. Los modelos lo producen después de un tramo largo con muchas herramientas (el turno se va en pensar, o la respuesta se corta), y terminar ahí tiraba todo el trabajo hecho: en una corrida real, el run de ejecución de BEE se perdió así tras 25 minutos, y otros tres workers con él (4 de los 7 bloqueos de esa corrida). El bucle pide hasta `MAX_EMPTY_RETRIES = 2` veces que continúe ("Tu última respuesta llegó vacía…"); si sigue vacío, termina como antes (`model_returned_no_tool_calls_and_no_content`). No se aplica a `error` ni a `max_tokens`, que tienen su propio camino. Con `HIVE_LLM_RAW_LOG` se registran estas respuestas (`empty: true`, motivo de parada y cuánto pensó) para ver qué las provoca.
 
+## Avisar cuando un run no termina
+
+Un run que acaba `blocked`, `failed` o `needs_budget` (salvo que lo haya cancelado el usuario) emite un `StepEvent` de tipo `blocked` con el motivo en palabras (`describeBlocker`): "repitió la misma llamada (shell_executor) sin avanzar", "el modelo devolvió respuestas vacías y no pudo continuar", "agotó sus 40 pasos sin terminar"… Los códigos crudos (`repeated_tool_call:…`) siguen en la base de datos, pero ya no hace falta ir a buscarlos: el aviso sube por el harness (`agent_blocked`) hasta el chat de la TUI ([harness.md](./harness.md#avisos-de-bloqueo)).
+
+## Avisar cuando un run no termina
+
+Un run que acaba `blocked`, `failed` o `needs_budget` (salvo que lo haya cancelado el usuario) emite un `StepEvent` de tipo `blocked` con el motivo en palabras (`describeBlocker`): "repitió la misma llamada (shell_executor) sin avanzar", "el modelo devolvió respuestas vacías y no pudo continuar", "agotó sus 40 pasos sin terminar"… Los códigos crudos (`repeated_tool_call:…`) siguen en la base de datos, pero ya no hace falta ir a buscarlos: el aviso sube por el harness (`agent_blocked`) hasta el chat de la TUI ([harness.md](./harness.md#avisos-de-bloqueo)).
+
 ## Checkpoints y reanudación
 
-`agent/run-store.ts` guarda un snapshot completo y reanudable de cada run (`writeCheckpoint`, `readCheckpoint`, `reclaimRun`) con un *lease* renovado (`startLeaseRenewal`, `LEASE_SECONDS`), de modo que otro proceso no pise un run vivo. `resumeRunId` retoma un run desde su checkpoint: los mensajes restaurados ya están podados y se omite la pasada Jev. Un run que se quedó corto y dejó checkpoint queda marcado como reanudable. `resumable: false` desactiva el snapshot (evals, reproducciones masivas).
+`agent/run-store.ts` guarda un snapshot completo y reanudable de cada run (`writeCheckpoint`, `readCheckpoint`, `reclaimRun`) con un *lease* renovado (`startLeaseRenewal`, `LEASE_SECONDS`), de modo que otro proceso no pise un run vivo. `resumeRunId` retoma un run desde su checkpoint: los mensajes restaurados son los del checkpoint. Un run que se quedó corto y dejó checkpoint queda marcado como reanudable. `resumable: false` desactiva el snapshot (evals, reproducciones masivas).
 
 ## Registro causal (G9)
 

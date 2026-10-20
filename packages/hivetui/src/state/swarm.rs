@@ -117,7 +117,6 @@ impl WaitingAgent {
     /// que varios agentes esperando lo mismo se vean como una sola causa.
     pub fn reason_label(&self) -> &'static str {
         match self.reason.as_str() {
-            "jev_secuencial" => "en secuencia",
             "subagente" => "esperando subagente",
             "dependencia" => "esperando dependencia",
             "turno" => "esperando turno",
@@ -282,7 +281,7 @@ mod tests {
         let w = WaitingAgent {
             agent: "topo".to_string(),
             waiting_for: vec![],
-            reason: "jev_secuencial".to_string(),
+            reason: "dependencia".to_string(),
             since: 0,
         };
         swarm.set_waiting(w.clone());

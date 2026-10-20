@@ -259,3 +259,40 @@ describe("approving a plan made in plan mode", () => {
     expect(executing.prompts.some(p => p.includes("delega el plan"))).toBe(true)
   })
 })
+
+describe("a blocked worker is announced", () => {
+  test("agent_blocked reaches the listener with the reason", async () => {
+    const events: Array<{ type: string; agent?: string; message: string }> = []
+    const runner: ProfileRunner = async options => {
+      await options.onStep?.({ type: "blocked", message: "repitió la misma llamada (shell_executor) sin avanzar" })
+      return "entrega parcial"
+    }
+    await new ProfileHarness(runner).run({
+      objective: "hola", sessionId: "s-blocked-1", workspace: "/workspace/test",
+      onEvent: event => events.push(event),
+    })
+    expect(events).toContainEqual({ type: "agent_blocked", agent: "bee", message: "repitió la misma llamada (shell_executor) sin avanzar" })
+  })
+
+  test("BEE blocked with nothing to show fails the task instead of carrying on", async () => {
+    const runner: ProfileRunner = async options => {
+      await options.onStep?.({ type: "blocked", message: "el modelo devolvió respuestas vacías y no pudo continuar" })
+      return ""
+    }
+    const events: Array<{ type: string; message: string }> = []
+    await expect(new ProfileHarness(runner).run({
+      objective: "hola", sessionId: "s-blocked-2", workspace: "/workspace/test",
+      onEvent: event => events.push(event),
+    })).rejects.toThrow(/BEE quedó bloqueado: el modelo devolvió respuestas vacías/)
+    expect(events.some(event => event.type === "agent_failed")).toBe(true)
+  })
+
+  test("a worker blocked but with something to hand over does not fail the task", async () => {
+    const runner: ProfileRunner = async options => {
+      await options.onStep?.({ type: "blocked", message: "agotó sus 40 pasos sin terminar" })
+      return "esto es lo que logré"
+    }
+    const result = await new ProfileHarness(runner).run({ objective: "hola", sessionId: "s-blocked-3", workspace: "/workspace/test" })
+    expect(result.response).toBe("esto es lo que logré")
+  })
+})

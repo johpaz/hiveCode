@@ -603,7 +603,7 @@ describe("E2E flow: ficha del especialista", () => {
     agent: "agent-topo",
     tools: ["fs_read"],
     skills: ["busqueda_hivedb"],
-    origen: "jev_pruned" as const,
+    origen: "perfil" as const,
     minimal: ["busqueda_hivedb"],
     at: 1,
   }
@@ -642,7 +642,7 @@ describe("E2E flow: ficha del especialista", () => {
     }
   }, 20_000)
 
-  test("la ficha muestra la carga efectiva y por qué JEV la podó", async () => {
+  test("la ficha muestra la carga efectiva del último turno", async () => {
     const s = await startSession("auto")
     try {
       s.ipc.send(ROSTER as never)
@@ -655,7 +655,6 @@ describe("E2E flow: ficha del especialista", () => {
         s.iter, f => frameContains(f, "CARGA AHORA"), 5000, "ficha abierta",
       )
       assert(frameContains(frame, "Construye servicios"), "falta la función del agente")
-      assert(frameContains(frame, "podada por jev"), "no explica el tamaño de la carga")
       assert(frameContains(frame, "busqueda_hivedb"), "no lista las skills activas")
     } finally {
       s.dispose()

@@ -889,11 +889,6 @@ export interface UsageRollupDoc {
   toonJsonTokens: number;
   toonToonTokens: number;
   toonJsonBytes: number;
-  /** Jev decision plane: how many decisions ran, what they cost, what they saved. */
-  jevDecisions?: number;
-  jevCostUsd?: number;
-  jevSavedTokens?: number;
-  jevSavedCostUsd?: number;
   byProvider: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }>;
   byModel: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }>;
 }

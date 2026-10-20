@@ -219,6 +219,7 @@ export class ProfileHarness {
       options.signal?.throwIfAborted()
       options.onEvent?.({ type: "agent_activated", agent: agentId, message: taskDescription })
       await mutateDoc<AgentDoc>("agents", agentId, (row) => row && { ...row, status: "busy", updated_at: Date.now() })
+      let blockedReason: string | undefined
       try {
         const output = await this.runner({
           codeSessionId: options.sessionId,
@@ -237,6 +238,11 @@ export class ProfileHarness {
             ? Math.max(DEFAULT_MAX_HARNESS_STEPS, CORE_AGENT_DEFINITIONS[agentId]?.maxTurns ?? 0)
             : undefined,
           onStep: async step => {
+            if (step.type === "blocked") {
+              blockedReason = step.message
+              options.onEvent?.({ type: "agent_blocked", agent: agentId, message: step.message })
+              return
+            }
             options.onEvent?.({
               type: "agent_progress",
               agent: agentId,
@@ -247,6 +253,11 @@ export class ProfileHarness {
           },
         })
         options.signal?.throwIfAborted()
+        // BEE blocked with nothing to show is not a finished step: carrying on would plan, verify
+        // and "converge" on top of no result. Fail loudly instead, with the reason.
+        if (blockedReason && agentId === "bee" && !output.trim()) {
+          throw new Error(`BEE quedó bloqueado: ${blockedReason}`)
+        }
         options.onEvent?.({ type: "agent_completed", agent: agentId, message: output.slice(0, 160) })
         return output
       } catch (error) {

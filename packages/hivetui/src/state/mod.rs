@@ -10,7 +10,6 @@ mod harness;
 mod history;
 mod input;
 mod logs;
-mod jev;
 mod modal;
 mod panels;
 mod roster;
@@ -37,7 +36,6 @@ pub use filemap::{FileEntry, FileMapState, RiskLevel};
 pub use harness::{HarnessHealth, HarnessState};
 pub use history::{HistoryEntry, HistoryState, Role};
 pub use input::InputState;
-pub use jev::{JevAvailability, JevDecision, JevState, JevTotals};
 pub use logs::{LogEntry, LogState};
 pub use modal::{
     ConfigModalState, InfoModalState, ModalAction, ModalField, ModalFieldKind, ModalState,
@@ -93,8 +91,6 @@ pub struct AppState {
     pub routing: LayoutRoutingState,
     pub modal: ModalState,
     pub logs: LogState,
-    /// Plano de decisión: disponibilidad del oráculo y rastro de sus decisiones.
-    pub jev: JevState,
     /// Telemetría del enjambre: tool calls en vuelo y agentes en espera.
     pub swarm: SwarmState,
     /// El enjambre: alias, rol, función, tools y estado de MCP por especialista.
@@ -204,8 +200,6 @@ fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
         BunMessage::LibrarianProgress { .. } => "librarian_progress",
         BunMessage::MemoryUpdate { .. } => "memory_update",
         BunMessage::SettingsData { .. } => "settings_data",
-        BunMessage::JevDecision { .. } => "jev_decision",
-        BunMessage::JevStatus { .. } => "jev_status",
         BunMessage::ToolCall { .. } => "tool_call",
         BunMessage::ToolDone { .. } => "tool_done",
         BunMessage::Esperando { .. } => "esperando",
@@ -1157,46 +1151,6 @@ impl AppState {
                 }
             }
 
-            // ── Jev: plano de decisión ──────────────────────────────────────────
-            // Antes esto se calculaba en el backend y se tiraba: nadie estaba
-            // suscrito al event bus. Acá queda el rastro.
-            BunMessage::JevDecision { agent_id, kind, summary, saved_tokens,
-                                      cost_usd, latency_ms, event_id, totals } => {
-                self.jev.totals = JevTotals::from(&totals);
-                // La decisión va también al stream: es el "por qué" del agente,
-                // y en MESA es lo queKimi llama la cadena de razonamiento.
-                self.thought.push(StreamEntry::Decision {
-                    agent: agent_id.clone(),
-                    ts: 0,
-                    kind: kind.clone(),
-                    summary: summary.clone(),
-                    saved_tokens,
-                });
-                self.jev.record(JevDecision {
-                    agent_id,
-                    kind,
-                    summary,
-                    saved_tokens,
-                    cost_usd,
-                    latency_ms,
-                    event_id,
-                    availability: self.jev.availability,
-                });
-            }
-            BunMessage::JevStatus { state, oracle, last_error, last_success_at, totals } => {
-                self.jev.oracle = oracle;
-                self.jev.set_availability(
-                    JevAvailability::from_str(&state),
-                    last_error,
-                    last_success_at,
-                    JevTotals::from(&totals),
-                );
-                // Recovered: the oracle was cooling down and now answers again.
-                if self.jev.availability == JevAvailability::Ready {
-                    self.jev.last_error = None;
-                }
-            }
-
             // ── Telemetría del enjambre ─────────────────────────────────────────
             BunMessage::ToolCall { agent, tool, call_id, args_summary,
                                    bee_state, task_id, at } => {
@@ -1263,7 +1217,7 @@ impl AppState {
                 self.swarm.set_waiting(waiting);
                 let _ = task_id;
             }
-            BunMessage::CargaActual { agent, tools, skills, origen, minimal, at } => {
+            BunMessage::CargaActual { agent, tools, skills, minimal, at, .. } => {
                 // Reemplaza, no acumula: cada turno emite la suya y la anterior
                 // ya no describe lo que el agente tiene delante.
                 self.loadout.insert(
@@ -1271,7 +1225,6 @@ impl AppState {
                     Loadout {
                         tools,
                         skills,
-                        pruned: origen == "jev_pruned",
                         minimal,
                         at,
                     },
@@ -2085,29 +2038,14 @@ mod loadout_tests {
             agent: "agent-1".into(),
             tools: vec!["fs_read".into()],
             skills: vec![],
-            origen: "jev_pruned".into(),
+            origen: "perfil".into(),
             minimal: vec![],
             at: 2,
         });
 
         let loadout = &state.loadout["agent-1"];
         assert_eq!(loadout.tools.len(), 1, "la carga anterior sigue ahí");
-        assert!(loadout.pruned, "no marca que JEV podó");
         assert_eq!(loadout.at, 2);
-    }
-
-    #[test]
-    fn the_pruned_flag_survives_the_wire() {
-        let mut state = state_with_roster();
-        state.apply_message(BunMessage::CargaActual {
-            agent: "agent-1".into(),
-            tools: vec![],
-            skills: vec![],
-            origen: "jev_pruned".into(),
-            minimal: vec![],
-            at: 1,
-        });
-        assert!(state.loadout["agent-1"].pruned);
     }
 
     #[test]

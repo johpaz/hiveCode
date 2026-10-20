@@ -32,8 +32,6 @@ import { COORDINATOR_PINNED_TOOLS, MINIMAL_TOOLS } from "./minimal-loadout"
 import { getHiveDb } from "../storage/hivedb"
 import { causalLogEnabled } from "../storage/causal-events"
 import { syncPlaybookToIndex } from "./playbook-selector"
-import { describeSwarmCapabilities, planJevContext } from "./jev-planner"
-import { emitJevDecision } from "./jev-decisions"
 import { getRecentMessages, getSummary, getScratchpad, toAPIMessages } from "./conversation-store"
 import { relevantConversationMemory } from "./conversation-memory"
 import { PROMPT_VOLATILE_MARKER } from "./prompt-cache"
@@ -90,18 +88,6 @@ export interface CompiledContext {
   tools: LLMToolDef[]
   allTools: ContextTool[]
   skills: SkillDescriptor[]  // Skills loaded (minimal + discovered)
-  /**
-   * What Jev decided about this turn, when it was asked. Absent when the
-   * decision plane is off, unavailable, or produced nothing to prune.
-   */
-  jevDecision?: {
-    summary: string
-    savedTokens: number
-    latencyMs: number
-    costUsd: number
-    recommendedAgentId: string | null
-    mcpOff: string[]
-  }
 }
 
 // ─── G9 causal context (buildAgentContext) ──────────────────────────────────
@@ -168,16 +154,11 @@ export async function compileContext(opts: {
    */
   causalStreamId?: string
   /**
-   * Skip the Jev pruning pass. Used when resuming: the restored messages are
-   * already the pruned set from the run that checkpointed them.
-   */
-  skipJev?: boolean
-  /**
    * Se llama una vez por compilación con la carga **efectiva** de este turno.
    *
-   * No es el perfil declarado: JEV poda el conjunto y `search_knowledge` lo
-   * amplía, así que lo que el agente tiene delante cambia cada turno. La ficha
-   * del especialista usa esto para no mentir.
+   * No es el perfil declarado: `search_knowledge` lo amplía, así que lo que el
+   * agente tiene delante cambia a lo largo de la tarea. La ficha del
+   * especialista usa esto para no mentir.
    */
   /**
    * The window the provider will really read (resolveProviderConfig). Falls back
@@ -188,12 +169,12 @@ export async function compileContext(opts: {
     tools: string[]
     skills: string[]
     /** De dónde salió el conjunto de herramientas. */
-    origen: "perfil" | "jev_pruned"
+    origen: "perfil"
     /** Las skills que están en la carga mínima: no dependen de descubrir nada. */
     minimal: string[]
   }) => void
 }): Promise<CompiledContext> {
-  const { agentId, threadId, mcpManager, userMessage, isolated, taskContext, causalStreamId, skipJev } = opts
+  const { agentId, threadId, mcpManager, userMessage, isolated, taskContext, causalStreamId } = opts
 
   // Fallback: Get MCP Manager from singleton if not provided
   const effectiveMcpManager = mcpManager ?? (() => {
@@ -383,10 +364,6 @@ export async function compileContext(opts: {
   }))
 
   let toolsForLLM: LLMToolDef[] = nativeToolsForLLM
-  // Populated by the Jev pass in STEP-9d. Kept separate from toolsForLLM so the
-  // unpruned loadout stays available as the fallback if Jev is unavailable.
-  let jevToolsForLLM: LLMToolDef[] | null = null
-  let jevDecision: CompiledContext["jevDecision"] | null = null
   // G9 causal memory block, appended once the system prompt exists (STEP-9e).
   let systemPromptExtraCausal = ""
 
@@ -495,59 +472,6 @@ export async function compileContext(opts: {
   }
   let messages: LLMMessage[] = toAPIMessages(recentMessages)
 
-  // [STEP-9d] STRATEGY 1.5 — Jev decides what the model actually pays for.
-  //
-  // Everything above assembled the maximal context; this is where most of it is
-  // dropped, in one cheap round-trip, before the prefill that dominates the turn.
-  // Optional in the strict sense: when Jev is unavailable or unconfigured,
-  // planJevContext returns null and the unpruned context is used unchanged.
-  const objectiveSource = taskContext || userMessage
-  const objectiveText = typeof objectiveSource === "string"
-    ? objectiveSource
-    : Array.isArray(objectiveSource)
-      ? objectiveSource.filter(p => p.type === "text").map(p => (p as { text: string }).text).join("\n")
-      : String(objectiveSource)
-
-  if (!skipJev) {
-    try {
-      const swarm = await describeSwarmCapabilities(effectiveMcpManager, { includeSpecialists: !isWorker })
-      const jevPlan = await planJevContext({
-        objective: objectiveText,
-        messages,
-        tools: toolsForLLM,
-        allTools,
-        skills: allSkills,
-        scratchpadNotes: scratchpadNotes.map(n => ({ key: n.key, value: String(n.value ?? "") })),
-        isWorker,
-        swarm,
-      })
-
-      if (jevPlan) {
-        const before = messages.length
-        messages = jevPlan.messages
-        jevToolsForLLM = jevPlan.tools
-        allSkills = jevPlan.skills
-        jevDecision = {
-          summary: `${before} → ${messages.length} mensajes · ${jevPlan.selectedToolNames.length} tools`,
-          savedTokens: 0,
-          latencyMs: jevPlan.decision.latencyMs,
-          costUsd: jevPlan.decision.costUsd,
-          recommendedAgentId: jevPlan.agentId,
-          mcpOff: jevPlan.agentMcpOff,
-        }
-        log.info(
-          `[context-compiler] [STEP-9d] ✅ Jev pruned ${before}→${messages.length} msgs, ` +
-          `${jevPlan.selectedToolNames.length} tools, ${jevPlan.skills.length} skills ` +
-          `(${jevPlan.decision.latencyMs}ms, $${jevPlan.decision.costUsd.toFixed(6)})`,
-        )
-      } else {
-        log.info("[context-compiler] [STEP-9d] Jev unavailable — keeping unpruned context")
-      }
-    } catch (err) {
-      log.warn(`[context-compiler] [STEP-9d] ⚠️ Jev planning failed, keeping unpruned context: ${(err as Error).message}`)
-    }
-  }
-
   // [STEP-9e] G9 causal context window.
   //
   // buildAgentContext() reconstructs this run's decision chain and anomalies from
@@ -564,6 +488,14 @@ export async function compileContext(opts: {
   const causalWindow = Number(agent.max_input_tokens) > 0
     ? Number(agent.max_input_tokens)
     : 32_000
+  // The objective in plain text, for the causal window below.
+  const objectiveSource = taskContext || userMessage
+  const objectiveText = typeof objectiveSource === "string"
+    ? objectiveSource
+    : Array.isArray(objectiveSource)
+      ? objectiveSource.filter(p => p.type === "text").map(p => (p as { text: string }).text).join("\n")
+      : String(objectiveSource)
+
   if (summary && totalTokens > TOKEN_COMPACT_THRESHOLD && causalStreamId && causalLogEnabled()) {
     try {
       const causalDb = await getHiveDb()
@@ -754,11 +686,11 @@ export async function compileContext(opts: {
       `\n# CURRENT TASK\n${opts.taskContext}\n\nFocus ONLY on this task. Do not deviate.`
   }
 
-  const finalTools = jevToolsForLLM ?? toolsForLLM
+  const finalTools = toolsForLLM
 
   // ── Telemetría de carga para la TUI ─────────────────────────────────────
   // `finalTools` y `allSkills` son la verdad de ESTE turno, y cambian en cada
-  // uno: JEV poda el conjunto, y `search_knowledge` lo amplía. Mostrar el
+  // uno: `search_knowledge` lo amplía. Mostrar el
   // `tools_json`/`skills_json` declarado sería mostrar una lista que ya no es la
   // que el agente tiene delante.
   //
@@ -769,7 +701,7 @@ export async function compileContext(opts: {
       opts.onLoadout({
         tools: finalTools.map(t => t.function.name).filter(Boolean),
         skills: allSkills.map(s => s.name),
-        origen: jevToolsForLLM ? "jev_pruned" : "perfil",
+        origen: "perfil",
         minimal: minimalSkills.map(s => s.name),
       })
     } catch (err) {
@@ -827,7 +759,7 @@ export async function compileContext(opts: {
 
   log.info(
     `[context-compiler] ✅ DONE: ${allTools.length} permitted tools, ` +
-    `${finalTools.length} selected tools${jevToolsForLLM ? " (jev-pruned)" : ""}, ` +
+    `${finalTools.length} selected tools, ` +
     `${messages.length} messages, ` +
     `${allSkills.length} skills (${minimalSkills.length} minimal, ${discoveredSkills.length} discovered), ` +
     `isolated=${isWorker}`
@@ -841,19 +773,6 @@ export async function compileContext(opts: {
     throw new Error(`Required context and tools exceed the model input budget (${estimatedTotal}/${modelContextWindow}); reduce optional skills or use a larger window`)
   }
 
-  if (jevDecision) {
-    emitJevDecision({
-      agentId,
-      kind: "context",
-      summary: jevDecision.summary,
-      savedTokens: jevDecision.savedTokens,
-      costUsd: jevDecision.costUsd,
-      latencyMs: jevDecision.latencyMs,
-      provider: agent.provider_id ?? "unknown",
-      model: agent.model_id ?? "unknown",
-    })
-  }
-
   return {
     systemPrompt,
     projectScope,
@@ -863,7 +782,6 @@ export async function compileContext(opts: {
     tools: finalTools,
     allTools,
     skills: allSkills,
-    jevDecision: jevDecision ?? undefined,
   }
 }
 

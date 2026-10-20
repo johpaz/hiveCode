@@ -130,7 +130,7 @@ La interfaz es un **terminal Rust compilado** (`packages/hivetui/`) con renderer
 | 4 | **CÓDIGO** | Diff activo o mapa de archivos y panel lateral de workers. |
 | 5 | **REVISIÓN** | Hallazgos del Quality Gate, mapa de riesgo y veredicto. |
 
-La vista activa se enruta automáticamente según el estado de la tarea y puede fijarse pulsando 1–5. Otras superficies: la **ficha del agente** (`i` o `/ficha <agente>`: capacidades, carga efectiva y decisiones del oráculo), el **registro** (`/logs`) y la **configuración** (`F2`).
+La vista activa se enruta automáticamente según el estado de la tarea y puede fijarse pulsando 1–5. Otras superficies: la **ficha del agente** (`i` o `/ficha <agente>`: capacidades y carga efectiva), el **registro** (`/logs`) y la **configuración** (`F2`).
 
 ### Cabecera, estado y mascota
 
@@ -222,7 +222,6 @@ En `approval`, las tareas complejas tienen además dos puertas: **aprobar especi
 - **Paralelo:** varias delegaciones corren a la vez si son workers distintos y como máximo uno escribe el workspace. El tope por defecto son cuatro llamadas activas por sesión (`HIVE_MAX_AGENT_CONCURRENCY`, de 1 a 32).
 - **Reparación:** si el Quality Gate devuelve `FAIL`, hay hasta dos ciclos de reparación con `task_revise`.
 - **Especialistas temporales:** un responsable puede crear un especialista para una subtarea independiente. Hereda los permisos del padre y desaparece al terminar; la evidencia queda en HiveDB.
-- **Oráculos JEV/KEV:** modelos pequeños opcionales deciden qué contexto entra al prompt. No conceden permisos; sin ellos todo funciona por el camino clásico.
 
 El detalle de perfiles, delegación y especialidades está en [`docs/harness.md`](./docs/harness.md); el bucle que ejecuta a cada uno, en [`docs/agent-loop.md`](./docs/agent-loop.md); sus herramientas y skills, en [`docs/tools.md`](./docs/tools.md) y [`docs/skills.md`](./docs/skills.md). El pipeline anterior de once coordinadores solo se conserva para reanudar planes viejos (`HIVECODE_LEGACY_HARNESS=1`).
 

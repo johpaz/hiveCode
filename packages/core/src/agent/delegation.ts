@@ -5,7 +5,7 @@
  * Hive continues delegated jobs on a durable gateway queue and wakes the
  * coordinator for a fan-in turn. hiveCode runs in one process, so the same
  * shape happens inside the turn: sibling `task_delegate` calls run concurrently
- * (the loop decides that with `jevWantsParallel`), each returns its evidence,
+ * (the loop decides that with `structuralParallelism`), each returns its evidence,
  * and the coordinator is the fan-in — it judges, or sends a task back with
  * `task_revise` on the worker's own thread.
  */

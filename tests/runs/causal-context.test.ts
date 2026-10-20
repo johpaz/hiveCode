@@ -2,9 +2,8 @@
  * Causal context injection — the token-saving side of the G9 log.
  *
  * buildAgentContext() is the one part of the causal log that ADDS to the prompt
- * instead of removing from it. The risk is therefore inverted from Jev's: not
- * "does it delete something it should not" but "does it silently stop paying for
- * the memory it is supposed to project". These tests pin the gating.
+ * instead of removing from it. The risk is therefore that it silently stops paying
+ * for the memory it is supposed to project, or pays when it should not. These tests pin the gating.
  */
 import { describe, expect, test } from "bun:test"
 

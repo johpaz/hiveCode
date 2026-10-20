@@ -74,6 +74,14 @@ El harness ejecuta a BEE con al menos `DEFAULT_MAX_HARNESS_STEPS = 40` pasos, pa
 
 Para auditar qué se delegó, `/task delegations` lista las delegaciones recientes con el agente que las hizo, el worker y la especialidad, la descripción, los criterios, el estado y la duración ([development.md](./development.md#diagnóstico)).
 
+### Avisos de bloqueo
+
+Cuando un worker no termina, el harness emite `agent_blocked` (o `agent_failed` si lanzó un error) con el motivo, y el coordinador lo muestra en el chat de la TUI como un mensaje de sistema, `⚠ builder se bloqueó: repitió la misma llamada (shell_executor) sin avanzar`, y marca al worker como `blocked` en el panel del enjambre. BEE suele recuperarse solo (reasigna o usa `task_revise`), pero la persona ve que pasó. Si el que se bloquea es **BEE** y no deja nada que mostrar, la tarea falla con `BEE quedó bloqueado: <motivo>` en lugar de seguir planificando, verificando y "convergiendo" sobre un resultado vacío.
+
+### Avisos de bloqueo
+
+Cuando un worker no termina, el harness emite `agent_blocked` (o `agent_failed` si lanzó un error) con el motivo, y el coordinador lo muestra en el chat de la TUI como un mensaje de sistema, `⚠ builder se bloqueó: repitió la misma llamada (shell_executor) sin avanzar`, y marca al worker como `blocked` en el panel del enjambre. BEE suele recuperarse solo (reasigna o usa `task_revise`), pero la persona ve que pasó. Si el que se bloquea es **BEE** y no deja nada que mostrar, la tarea falla con `BEE quedó bloqueado: <motivo>` en lugar de seguir planificando, verificando y "convergiendo" sobre un resultado vacío.
+
 ### Concurrencia
 
 `agent/execution-limits.ts`: `withExecutionSlot` limita las llamadas activas a modelo/herramienta **por sesión** (por defecto 4; `HIVE_MAX_AGENT_CONCURRENCY`, de 1 a 32). Esperar a un hijo no consume plaza. Además, un solo *writer* por workspace a la vez.

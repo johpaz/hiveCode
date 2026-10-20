@@ -47,6 +47,18 @@ Cada provider implementa `LLMProvider.call(options)` (`agent/llm-providers/inter
 
 `packages/core/src/gateway` expone rutas HTTP/WS (`routes/`: agentes, auth, canales, chat, config, cron, MCP, modelos, providers, skills, tareas, herramientas, usuarios, workspace…). Arranca dentro del mismo proceso que el REPL. Los canales externos (Telegram) viven en `channels/`.
 
-## Oráculos JEV/KEV (opcionales)
+## Qué se probó y se quitó: los oráculos Jev/Kev
 
-Modelos pequeños que deciden qué entra al prompt: `jev-planner.ts` poda historial, herramientas, skills y reglas antes de cada llamada, decide si un lote de llamadas puede correr en paralelo y poda resultados viejos entre iteraciones. Si el oráculo no está disponible devuelven `null` y el llamador sigue por el camino clásico. No conceden permisos.
+Hubo modelos pequeños (Jev en OpenRouter, Kev en HiveAgents) que decidían qué contexto, qué herramientas y qué siguiente acción recibía cada llamada, y si un lote podía ir en paralelo. **Se eliminaron.** En una medición con la misma tarea (un CRUD de 6 tareas, tres corridas):
+
+| | Sin oráculo | Jev | Kev |
+|---|---|---|---|
+| Tiempo | 26,8 min | 48,5 min | 29,6 min |
+| Tokens de entrada | 12,0 M | 9,7 M | 13,3 M |
+| Ahorro estimado por poda | – | ~1,5 % | ~0 % |
+| Respuestas perdidas o vacías | 0 | 9 | 0 |
+| Consultas fallidas | – | 0 de 253 | 108 de 119 |
+
+Por qué no sirvieron para agentes de código: cada decisión se tomaba con extractos de 650 caracteres por resultado, sin el plan ni el estado de las tareas, y daba `finish` (quitar todas las herramientas) a un BEE a mitad de planificar, con confianza superior a 0,85, cuatro veces seguidas. La latencia no era el problema (63 s en 48 min); lo eran sus decisiones. Además, su restricción de herramientas era permanente para el resto del run (un error que se corrigió antes de quitarlo) y Kev tenía un tope de 9 000 caracteres por petición que rechazaba casi todo.
+
+Si algún día se reintroduce un modelo de decisión con contexto suficiente, debería ser **solo consejero** (nunca quitar herramientas ni decidir cuándo termina un agente) y medirse contra una corrida sin él con `scripts/bench-run.ts`. Lo que sí se conserva de aquel trabajo: el inventario del swarm (`agent/swarm-capabilities.ts`), la regla estructural de paralelismo y los avisos de bloqueo.

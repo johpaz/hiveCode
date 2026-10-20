@@ -747,6 +747,22 @@ export class CoordinatorManager extends CoordinatorBase {
           : undefined,
         onEvent: event => {
           if (this.activeTaskId && this.cancelledTasks.has(this.activeTaskId)) return
+          // A worker that stops short of its goal is announced in the chat, with the reason. The
+          // harness may well recover (BEE re-delegates or revises), but nobody should have to find
+          // out from the database that half of a job was lost.
+          if (event.agent && (event.type === "agent_blocked" || event.type === "agent_failed")) {
+            this.onIpcEvent?.("history_append", {
+              role: "system",
+              content: `⚠ ${event.agent} ${event.type === "agent_blocked" ? "se bloqueó" : "falló"}: ${event.message}`,
+              agent: event.agent,
+              task_id: this.activeTaskId ?? undefined,
+            })
+            this.onIpcEvent?.("worker_update", {
+              worker: event.agent, phase: event.type, status: "blocked",
+              activity: event.message.slice(0, 160), task_id: this.activeTaskId,
+            })
+            return
+          }
           if (event.agent) {
             if (event.type === "agent_progress") {
               this.emitNarrativeChunk({

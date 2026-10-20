@@ -110,7 +110,7 @@ test("compact discovery returns references, without injecting skill bodies", asy
 
 test("compiler automatically supplies a task packet and a factory specialty", async () => {
   const compiled = await compileContext({agentId: "builder", threadId: "task-a", userMessage: "Mejorar la interfaz TUI render_office",
-    codeSessionId: "a", workspace: scope.workspace, isolated: true, skipJev: true, contextPaths: ["src/lib.rs"]})
+    codeSessionId: "a", workspace: scope.workspace, isolated: true, contextPaths: ["src/lib.rs"]})
   expect(compiled.systemPrompt).toContain("RUST_PROJECT_A")
   expect(compiled.systemPrompt).toContain("ESPECIALIDAD frontend")
   expect(compiled.tools.some(tool => tool.function.name === "spawn_agent")).toBe(true)
@@ -209,7 +209,7 @@ test("factory agents survive curator cleanup and enabled archived profiles recov
 })
 
 test("office roster includes BEE and canonical factory ids with their actual tools", async () => {
-  const {describeSwarmCapabilities} = await import("../../packages/core/src/agent/jev-planner")
+  const {describeSwarmCapabilities} = await import("../../packages/core/src/agent/swarm-capabilities")
   const {listEnabledCoordinatorNames} = await import("../../packages/cli/src/commands-code/provider-store")
   expect(await listEnabledCoordinatorNames()).toEqual(["bee", "planner", "scout", "builder", "verifier", "spider"])
   const roster = await describeSwarmCapabilities(null, {includeSpecialists: true, includeCoordinator: true})

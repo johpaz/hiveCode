@@ -119,11 +119,11 @@ describe("swarm telemetry emits what the TUI needs", () => {
     let seen: { reason: string; waitingFor: string[] } | undefined
     const off = eventBus.on("agent:waiting", (e) => { seen = e })
     try {
-      emitWaiting({ agentId: "a1", reason: "jev_secuencial", waitingFor: ["a2", "a3"] })
+      emitWaiting({ agentId: "a1", reason: "dependencia", waitingFor: ["a2", "a3"] })
     } finally {
       off()
     }
-    expect(seen?.reason).toBe("jev_secuencial")
+    expect(seen?.reason).toBe("dependencia")
     expect(seen?.waitingFor).toEqual(["a2", "a3"])
   })
 
@@ -192,7 +192,7 @@ describe("swarm telemetry on the wire", () => {
 
   it("an empty waiting list still parses", () => {
     // Un agente puede esperar sin saber a quién: "en secuencia" no depende de nadie.
-    const w: BunMessage = { type: "esperando", agent: "topo", esperando_a: [], razon: "jev_secuencial", at: 1 }
+    const w: BunMessage = { type: "esperando", agent: "topo", esperando_a: [], razon: "dependencia", at: 1 }
     const back = unwrap(JSON.parse(serialize(wrap(messagePriority(w), w)))) as BunMessage
     if (back.type !== "esperando") throw new Error("tipo incorrecto")
     expect(back.esperando_a).toEqual([])

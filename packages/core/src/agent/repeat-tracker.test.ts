@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { RepeatTracker, changedWorkspace } from "./agent-loop.ts"
+import { RepeatTracker, changedWorkspace, describeBlocker } from "./agent-loop.ts"
 
 /** One model step = one batch of calls recorded between two nextStep() calls. */
 function step(tracker: RepeatTracker, calls: Array<[string, string]>) {
@@ -104,5 +104,17 @@ describe("what counts as changing the workspace", () => {
     expect(changedWorkspace("shell_executor", JSON.stringify({ cmd: "echo x > a.txt" }), "ok: true")).toBe(true)
     expect(changedWorkspace("shell_executor", JSON.stringify({ cmd: "echo x > a.txt" }), "ok: false")).toBe(false)
     expect(changedWorkspace("shell_executor", "not json", "ok: true")).toBe(false)
+  })
+})
+
+describe("saying why a run stopped, in words", () => {
+  test("every blocker the loop can set has a readable reason", () => {
+    expect(describeBlocker("repeated_tool_call:shell_executor", "blocked")).toContain("repitió la misma llamada (shell_executor)")
+    expect(describeBlocker("model_returned_no_tool_calls_and_no_content", "blocked")).toContain("vacías")
+    expect(describeBlocker("output_truncated", "blocked")).toContain("cortó")
+    expect(describeBlocker("max_steps:40", "blocked")).toContain("40 pasos")
+    expect(describeBlocker("max_input_tokens:1000", "needs_budget")).toContain("límite")
+    expect(describeBlocker(null, "needs_budget")).toContain("presupuesto")
+    expect(describeBlocker("algo_nuevo", "blocked")).toBe("algo_nuevo")
   })
 })

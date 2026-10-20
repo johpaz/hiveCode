@@ -2,7 +2,7 @@
  * Identidad del enjambre — alias, rol interno y función, en un solo lugar.
  *
  * Este módulo **no** arma el roster: eso lo sigue haciendo
- * `describeSwarmCapabilities()` en `jev-planner.ts`, que lee `AgentDoc` y ya sabe
+ * `describeSwarmCapabilities()` en `swarm-capabilities.ts`, que lee `AgentDoc` y ya sabe
  * qué herramientas y qué MCP tiene cada agente de verdad. Aquí vive solo el
  * Mapping rol → nombre legible, que es dato de presentación y no de capacidad.
  *

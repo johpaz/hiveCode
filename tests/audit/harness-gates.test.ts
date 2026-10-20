@@ -253,3 +253,32 @@ test("a plan older than the reuse window is not resumed", async () => {
     else process.env.HIVE_DB_PATH = previousDb
   }
 })
+
+test("a blocked worker shows up in the chat as a visible warning", async () => {
+  const previousDb = process.env.HIVE_DB_PATH
+  const previousCwd = process.cwd()
+  closeHiveDb()
+  process.env.HIVE_DB_PATH = mkdtempSync(join(tmpdir(), "hive-warn-"))
+  process.chdir(mkdtempSync(join(tmpdir(), "hive-warn-cwd-")))
+  ProfileHarness.prototype.run = (async (options: any) => {
+    options.onEvent({ type: "agent_blocked", agent: "builder", message: "repitió la misma llamada (shell_executor) sin avanzar" })
+    return { taskId: "t", complexity: "complex", status: "ready", response: "x", repairCycles: 0 }
+  }) as unknown as typeof realRun
+  try {
+    const manager = new CoordinatorManager()
+    const events: Array<{ event: string; payload: any }> = []
+    manager.setIpcCallback((event, payload) => events.push({ event, payload }))
+
+    await manager.runTask("diseña un arnés para una CLI llamada bee-notes con tests", "plan")
+
+    const warning = events.find(e => e.event === "history_append" && String(e.payload.content).includes("se bloqueó"))
+    expect(warning?.payload.role).toBe("system")
+    expect(warning?.payload.content).toContain("builder se bloqueó: repitió la misma llamada")
+    expect(events.some(e => e.event === "worker_update" && e.payload.worker === "builder" && e.payload.status === "blocked")).toBe(true)
+  } finally {
+    process.chdir(previousCwd)
+    closeHiveDb()
+    if (previousDb === undefined) delete process.env.HIVE_DB_PATH
+    else process.env.HIVE_DB_PATH = previousDb
+  }
+})

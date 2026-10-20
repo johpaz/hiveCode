@@ -2,7 +2,7 @@
 //!
 //! Llega como un snapshot completo en `init` y en cada alta o baja de agente,
 //! **nunca** en el camino caliente. Es la serialización de
-//! `describeSwarmCapabilities()` — la misma función sobre la que enruta Jev — a
+//! `describeSwarmCapabilities()` — la misma función de la que sale el roster — a
 //! propósito: un segundo roster leyendo un campo de capacidad distinto
 //! divergiría, y la UI terminaría anunciando herramientas que el agente no
 //! tiene.
@@ -84,9 +84,8 @@ impl RosterAgent {
         }
     }
 
-    /// ¿Tiene algún MCP apagado? Es la razón por la que `planJevContext` devuelve
-    /// `agentMcpOff`: el especialista correcto, pero inoperable hasta que el
-    /// usuario encienda eso.
+    /// ¿Tiene algún MCP apagado? El especialista puede ser el correcto y aun así
+    /// estar inoperable hasta que el usuario encienda eso.
     pub fn blocked_by(&self) -> Vec<&str> {
         self.mcp
             .iter()
@@ -121,16 +120,12 @@ pub struct McpRef {
 
 /// La carga efectiva de un agente en el último turno.
 ///
-/// No es el perfil declarado. JEV poda el conjunto y el descubrimiento lo
-/// amplía, así que lo que el agente tiene delante cambia aunque no haya nada
-/// nuevo que encontrar.
+/// No es el perfil declarado: el descubrimiento (`search_knowledge`) lo amplía,
+/// así que lo que el agente tiene delante cambia a lo largo de la tarea.
 #[derive(Debug, Clone, Default)]
 pub struct Loadout {
     pub tools: Vec<String>,
     pub skills: Vec<String>,
-    /// JEV podó el conjunto en este turno. Explica por qué es más corto que la
-    /// carga base, en vez de dejar que el usuario lo note como un bug.
-    pub pruned: bool,
     /// Skills en la carga mínima: disponibles sin descubrir nada.
     pub minimal: Vec<String>,
     pub at: u64,
@@ -224,7 +219,7 @@ impl RosterState {
     }
 
     /// Especialistas bloqueados por algún MCP apagado. La TUI los marca antes de
-    /// que Jev tenga nada que decir.
+    /// que se les delegue nada.
     pub fn blocked(&self) -> Vec<&RosterAgent> {
         self.by_id.values().filter(|a| !a.is_operable()).collect()
     }

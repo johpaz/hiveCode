@@ -838,12 +838,12 @@ mod swarm_tests {
         state.swarm.set_waiting(WaitingAgent {
             agent: "backend".to_string(),
             waiting_for: vec![],
-            reason: "jev_secuencial".to_string(),
+            reason: "dependencia".to_string(),
             since: 0,
         });
 
         let (line, _) = agent_live_line(&state, &w);
-        assert!(line.contains("en secuencia"), "{line}");
+        assert!(line.contains("esperando dependencia"), "{line}");
     }
 
     #[test]
@@ -961,14 +961,14 @@ mod swarm_tests {
         state.swarm.set_waiting(WaitingAgent {
             agent: "backend".to_string(),
             waiting_for: vec![],
-            reason: "jev_secuencial".to_string(),
+            reason: "dependencia".to_string(),
             since: 0,
         });
 
         let mut canvas = Canvas::new(100, 30);
         render(&mut canvas, Rect::new(0, 0, 100, 30), &state);
         let frame = canvas.to_text_rows().join("\n");
-        assert!(frame.contains("en secuencia"), "{frame}");
+        assert!(frame.contains("esperando dependencia"), "{frame}");
     }
 
     #[test]

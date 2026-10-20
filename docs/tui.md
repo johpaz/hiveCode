@@ -9,7 +9,7 @@
 | `src/main.rs`, `app.rs` | Arranque, bucle principal, modo headless. |
 | `src/controller.rs` | Entrada de teclado y ratón; convierte teclas en cambios de estado y mensajes IPC. |
 | `src/ipc/mod.rs` | Cliente IPC y tipos serde de los mensajes. |
-| `src/state/` | Estado de la aplicación: `session`, `history`, `input`, `modal`, `plan`, `review`, `diff`, `workers`, `swarm`, `roster`, `thought`, `logs`, `checkpoint`, `conflicts`, `harness`, `jev`… |
+| `src/state/` | Estado de la aplicación: `session`, `history`, `input`, `modal`, `plan`, `review`, `diff`, `workers`, `swarm`, `roster`, `thought`, `logs`, `checkpoint`, `conflicts`, `harness`… |
 | `src/widgets/` | Pantallas y componentes: `focus_layout` (Mesa), `plan_layout`, `code_layout`, `review_layout`, `office` y `office_scene` (Enjambre), `header`, `statusbar`, `tabbar`, `input`, `command_popup`, `settings_hub`, `config_modal`, `info_modal`, `plan_approval_modal`, `agent_card`, `activity_toast`. |
 | `src/term/`, `src/ui/` | Canvas de celdas, estilos, tema, Markdown, tablas, listas virtuales, hit-testing. |
 

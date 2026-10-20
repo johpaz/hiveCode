@@ -7,7 +7,7 @@ import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
 import { eventBus } from "@johpaz/hivecode-core/events/event-bus"
 import { agentAlias } from "@johpaz/hivecode-core/agent/agent-identity"
-import { describeSwarmCapabilities } from "@johpaz/hivecode-core/agent/jev-planner"
+import { describeSwarmCapabilities } from "@johpaz/hivecode-core/agent/swarm-capabilities"
 import { getAgentService } from "@johpaz/hivecode-core/agent/service"
 import { setTuiSendFn } from "@johpaz/hivecode-core/gateway/channel-notify"
 import { maybeLoadHiveAgentsModelFromDb } from "@johpaz/hivecode-core/agent/hiveagents-loader"
@@ -349,9 +349,9 @@ export async function repl(): Promise<void> {
   // Lazy IPC forwarder — populated once TUI socket is ready, null before that.
   // Events fired before TUI connects (should not happen in practice) are silently dropped.
   let _tuiIpcSend: ((msg: any) => void) | null = null
-  // Jev event-bus subscriptions, torn down with the TUI so a relaunch does not
+  // Event-bus subscriptions, torn down with the TUI so a relaunch does not
   // leave a stale listener forwarding into a closed socket.
-  const tuiJevUnsubscribers: Array<() => void> = []
+  const tuiUnsubscribers: Array<() => void> = []
   manager.setIpcCallback((event, payload) => {
     if (!_tuiIpcSend) return
     const p = payload as any
@@ -431,56 +431,16 @@ export async function repl(): Promise<void> {
       _tuiIpcSend?.({ type: "status", running: true, msg: message })
     })
 
-    // ── JEV → TUI ────────────────────────────────────────────────────────────
-    // The decision plane already emits `jev:decision` and `jev:status` on the
-    // event bus (packages/core/src/agent/jev-decisions.ts) and nothing was
-    // subscribed, so the whole reasoning trail — what it pruned, how many
-    // tokens it saved, whether tools may run in parallel — was computed and
-    // discarded. The TUI is the first consumer.
-    //
-    // Nothing in jev-planner.ts changes: this only re-emits what it already
-    // produces, renamed to snake_case to match every other wire field.
-    const jevUnsub = [
+    // ── Contexto del coordinador → TUI ───────────────────────────────────────
+    const contextUnsub = [
       eventBus.on("agent:context", (context) => {
         if (context.agentId !== "bee") return
         _tuiIpcSend?.({type: "coordinator_context", agent: "bee", session_id: context.sessionId,
           provider: context.provider, model: context.model, context_window: context.contextWindow,
           input_tokens: context.inputTokens, estimated: context.estimated})
       }),
-      eventBus.on("jev:decision", (d) => {
-        _tuiIpcSend?.({
-          type: "jev_decision",
-          agent_id: d.agentId,
-          kind: d.kind,
-          summary: d.summary,
-          saved_tokens: d.savedTokens,
-          cost_usd: d.costUsd,
-          latency_ms: d.latencyMs,
-          event_id: d.eventId,
-          totals: {
-            decisions: d.totals.decisions,
-            saved_tokens: d.totals.savedTokens,
-            cost_usd: d.totals.costUsd,
-          },
-        })
-      }),
-      eventBus.on("jev:status", (s) => {
-        if (!s) return
-        _tuiIpcSend?.({
-          type: "jev_status",
-          oracle: s.oracle,
-          state: s.state,
-          last_error: s.lastError,
-          last_success_at: s.lastSuccessAt,
-          totals: {
-            decisions: s.totals.decisions,
-            saved_tokens: s.totals.savedTokens,
-            cost_usd: s.totals.costUsd,
-          },
-        })
-      }),
     ]
-    tuiJevUnsubscribers.push(...jevUnsub)
+    tuiUnsubscribers.push(...contextUnsub)
 
     // ── Telemetría de herramientas y esperas → TUI ───────────────────────────
     // Antes el enjambre llamaba a sus herramientas a ciegas: la TUI recibía
@@ -533,7 +493,7 @@ export async function repl(): Promise<void> {
         })
       }),
       // Carga efectiva del turno. Llega por agente y reemplaza la anterior:
-      // cada turno emite la suya, y JEV puede haber podado el conjunto.
+      // cada turno emite la suya, y el descubrimiento puede haber ampliado el conjunto.
       eventBus.on("agent:loadout", (l) => {
         _tuiIpcSend?.({
           type: "carga_actual",
@@ -546,12 +506,12 @@ export async function repl(): Promise<void> {
         })
       }),
     ]
-    tuiJevUnsubscribers.push(...swarmUnsub)
+    tuiUnsubscribers.push(...swarmUnsub)
 
     // ── Roster → TUI ──────────────────────────────────────────────────────────
     // One snapshot of the whole swarm: alias, rol, función, tools and MCP state
     // per specialist. It re-uses `describeSwarmCapabilities()`, the same function
-    // Jev routes over — deliberately, so the TUI can never advertise a tool an
+    // the swarm roster is built from, so the TUI can never advertise a tool an
     // agent does not actually have.
     //
     // Sent on init and on agent create/archive, never per frame.
@@ -747,10 +707,10 @@ export async function repl(): Promise<void> {
 
       onExit() {
         _tuiIpcSend = null
-        // Drop the Jev subscriptions before the socket closes, so a relaunch
+        // Drop the subscriptions before the socket closes, so a relaunch
         // does not accumulate listeners forwarding into a dead socket.
-        while (tuiJevUnsubscribers.length) {
-          try { tuiJevUnsubscribers.pop()?.() } catch { /* best effort */ }
+        while (tuiUnsubscribers.length) {
+          try { tuiUnsubscribers.pop()?.() } catch { /* best effort */ }
         }
         // Close session and stop workers
         manager.closeSession()

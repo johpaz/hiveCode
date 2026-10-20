@@ -12,8 +12,6 @@
 //! | `Razonamiento` | `thought_chunk` — el modelo pensando | **colapsado** |
 //! | `Narracion` | `narrative_chunk` — lo que el agente dice | expandido |
 //! | `ToolStart` / `ToolDone` | `tool_call` / `tool_done` | expandido |
-//! | `Decision` | `jev:decision` — el "por qué" del oráculo | **colapsado** |
-//! | `Poda` | `CompiledContext.jevDecision.summary` | **colapsado** |
 //! | `Pregunta` | `agentMcpOff` — el agente necesita algo del usuario | expandido |
 //! | `Bloqueado` | `esperando` | expandido |
 //! | `Error` | errores de tool y del enjambre | expandido |
@@ -57,21 +55,6 @@ pub enum StreamEntry {
         duracion_ms: u64,
         resumen: String,
     },
-    /// Una decisión de Jev: paralelismo, delegación, siguiente acción.
-    Decision {
-        agent: String,
-        ts: u64,
-        kind: String,
-        summary: String,
-        saved_tokens: u64,
-    },
-    /// Jev podó el contexto de este turno.
-    Poda {
-        agent: String,
-        ts: u64,
-        resumen: String,
-        saved_tokens: u64,
-    },
     /// El agente no puede seguir sin que intervenga el usuario.
     ///
     /// Es la pregunta de aclaración de Kimi: no se cuela en la narración, se
@@ -102,8 +85,6 @@ impl StreamEntry {
             | StreamEntry::Narracion { agent, .. }
             | StreamEntry::ToolStart { agent, .. }
             | StreamEntry::ToolDone { agent, .. }
-            | StreamEntry::Decision { agent, .. }
-            | StreamEntry::Poda { agent, .. }
             | StreamEntry::Pregunta { agent, .. }
             | StreamEntry::Bloqueado { agent, .. }
             | StreamEntry::Error { agent, .. } => agent,
@@ -116,8 +97,6 @@ impl StreamEntry {
             | StreamEntry::Narracion { ts, .. }
             | StreamEntry::ToolStart { ts, .. }
             | StreamEntry::ToolDone { ts, .. }
-            | StreamEntry::Decision { ts, .. }
-            | StreamEntry::Poda { ts, .. }
             | StreamEntry::Pregunta { ts, .. }
             | StreamEntry::Bloqueado { ts, .. }
             | StreamEntry::Error { ts, .. } => *ts,
@@ -130,7 +109,7 @@ impl StreamEntry {
     pub fn is_verbose(&self) -> bool {
         matches!(
             self,
-            StreamEntry::Razonamiento { .. } | StreamEntry::Decision { .. } | StreamEntry::Poda { .. }
+            StreamEntry::Razonamiento { .. }
         )
     }
 
@@ -142,8 +121,6 @@ impl StreamEntry {
             StreamEntry::ToolStart { .. } => "⚙",
             StreamEntry::ToolDone { ok: true, .. } => "✓",
             StreamEntry::ToolDone { ok: false, .. } => "✗",
-            StreamEntry::Decision { .. } => "◆",
-            StreamEntry::Poda { .. } => "⧗",
             StreamEntry::Pregunta { .. } => "💬",
             StreamEntry::Bloqueado { .. } => "⏳",
             StreamEntry::Error { .. } => "✗",
@@ -163,20 +140,6 @@ impl StreamEntry {
                     format!("{tool} · {duracion_ms}ms")
                 } else {
                     format!("{tool} · {duracion_ms}ms · {resumen}")
-                }
-            }
-            StreamEntry::Decision { kind, summary, saved_tokens, .. } => {
-                if *saved_tokens > 0 {
-                    format!("{kind} · {summary} · ahorró {}", crate::ui::terminal_primitives::fmt_tokens(*saved_tokens))
-                } else {
-                    format!("{kind} · {summary}")
-                }
-            }
-            StreamEntry::Poda { resumen, saved_tokens, .. } => {
-                if *saved_tokens > 0 {
-                    format!("{resumen} · ahorró {}", crate::ui::terminal_primitives::fmt_tokens(*saved_tokens))
-                } else {
-                    resumen.clone()
                 }
             }
             StreamEntry::Pregunta { texto, .. } => texto.clone(),
@@ -332,7 +295,7 @@ impl ThoughtStreamState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{BeeState, JevAvailability, JevDecision, McpState};
+    use crate::state::{BeeState, McpState};
 
     fn chunk(coordinator: &str, phase: &str, content: &str) -> ThoughtChunk {
         ThoughtChunk {
@@ -369,35 +332,15 @@ mod tests {
     }
 
     #[test]
-    fn only_reasoning_decisions_and_pruning_default_to_collapsed() {
+    fn only_reasoning_defaults_to_collapsed() {
         // El criterio se decide una vez, no en cada widget: si un panel colapsa
         // el razonamiento y otro no, la pantalla se contradice.
         assert!(StreamEntry::Razonamiento { agent: "a".into(), ts: 0, texto: "x".into() }.is_verbose());
-        assert!(StreamEntry::Decision {
-            agent: "a".into(), ts: 0, kind: "parallel".into(),
-            summary: "s".into(), saved_tokens: 0,
-        }.is_verbose());
         assert!(!StreamEntry::Narracion { agent: "a".into(), ts: 0, texto: "x".into() }.is_verbose());
         assert!(!StreamEntry::ToolStart {
             agent: "a".into(), ts: 0, call_id: "c0".into(), tool: "fs_read".into(),
             resumen: String::new(), bee_state: BeeState::Reading,
         }.is_verbose());
-    }
-
-    #[test]
-    fn a_jev_decision_shows_what_it_saved_only_when_it_saved_something() {
-        // `parallel` nunca ahorra tokens: "ahorró 0" es ruido.
-        let sin = StreamEntry::Decision {
-            agent: "a".into(), ts: 0, kind: "parallel".into(),
-            summary: "2 herramientas en paralelo".into(), saved_tokens: 0,
-        };
-        assert!(!sin.summary().contains("ahorró"));
-
-        let con = StreamEntry::Decision {
-            agent: "a".into(), ts: 0, kind: "context".into(),
-            summary: "18 → 6".into(), saved_tokens: 8_200,
-        };
-        assert!(con.summary().contains("ahorró 8.2k"), "{}", con.summary());
     }
 
     #[test]
@@ -465,11 +408,9 @@ mod tests {
             StreamEntry::Narracion { agent: "a".into(), ts: 2, texto: "x".into() },
             StreamEntry::ToolStart { agent: "a".into(), ts: 3, call_id: "c3".into(), tool: "t".into(), resumen: String::new(), bee_state: BeeState::Reading },
             StreamEntry::ToolDone { agent: "a".into(), ts: 4, call_id: "c3".into(), tool: "t".into(), ok: true, duracion_ms: 1, resumen: String::new() },
-            StreamEntry::Decision { agent: "a".into(), ts: 5, kind: "k".into(), summary: "s".into(), saved_tokens: 0 },
-            StreamEntry::Poda { agent: "a".into(), ts: 6, resumen: "s".into(), saved_tokens: 0 },
-            StreamEntry::Pregunta { agent: "a".into(), ts: 7, texto: "p".into(), mcp_apagados: vec![] },
-            StreamEntry::Bloqueado { agent: "a".into(), ts: 8, esperando_a: vec![], razon: "r".into() },
-            StreamEntry::Error { agent: "a".into(), ts: 9, mensaje: "m".into() },
+            StreamEntry::Pregunta { agent: "a".into(), ts: 5, texto: "p".into(), mcp_apagados: vec![] },
+            StreamEntry::Bloqueado { agent: "a".into(), ts: 6, esperando_a: vec![], razon: "r".into() },
+            StreamEntry::Error { agent: "a".into(), ts: 7, mensaje: "m".into() },
         ];
         for (i, v) in variants.iter().enumerate() {
             assert_eq!(v.agent(), "a");
@@ -499,34 +440,12 @@ mod tests {
         stream.push_waiting(&WaitingAgent {
             agent: "topo".into(),
             waiting_for: vec![],
-            reason: "jev_secuencial".into(),
+            reason: "dependencia".into(),
             since: 5,
         });
         match &stream.entries[0] {
-            StreamEntry::Bloqueado { razon, .. } => assert_eq!(razon, "en secuencia"),
+            StreamEntry::Bloqueado { razon, .. } => assert_eq!(razon, "esperando dependencia"),
             other => panic!("{other:?}"),
         }
-    }
-
-    #[test]
-    fn a_poda_line_carries_what_it_saved() {
-        let p = StreamEntry::Poda { agent: "a".into(), ts: 1, resumen: "42 → 18 mensajes".into(), saved_tokens: 8_200 };
-        assert!(p.summary().contains("42 → 18"));
-        assert!(p.summary().contains("8.2k"));
-    }
-
-    #[test]
-    fn the_jev_state_is_what_feeds_the_decision_lines() {
-        // El stream no inventa: consume lo que JEV ya emitió.
-        let mut jev = crate::state::JevState::default();
-        jev.record(JevDecision {
-            agent_id: "topo".into(), kind: "parallel".into(),
-            summary: "2 herramientas en secuencia".into(), saved_tokens: 0,
-            cost_usd: 0.0, latency_ms: 40, event_id: "e".into(),
-            availability: JevAvailability::Ready,
-        });
-        let d = &jev.last_by_agent["topo"];
-        assert_eq!(d.kind, "parallel");
-        let _ = McpState::Active;
     }
 }

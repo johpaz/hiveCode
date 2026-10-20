@@ -33,14 +33,12 @@ import { maybeCompact, clearOldToolResults } from "./compaction"
 import { capToolResult, fitLoopMessages, messageBudget, messageTokens } from "./context-budget"
 import type { MCPClientManager } from "@johpaz/hivecode-mcp"
 import { compileContext } from "./context-compiler"
-import { jevWantsParallel, structuralParallelism } from "./jev-planner"
-import { emitJevDecision } from "./jev-decisions"
+import { structuralParallelism } from "./swarm-capabilities"
 import { formatToolResult } from "../utils/toon"
 import { getAverageTokenCost } from "../storage/usage"
 import type { ContentPart } from "./llm-client"
 import { getExecutionMode, canExecuteTool, callRequiresConfirmation, canPromptForConfirmation, getBlockReason, shellCommandMutates } from "./execution-mode"
 import { canRequestToolApproval, requestToolApproval, toolApprovalDetail } from "./tool-approval"
-import { planJevIteration } from "./jev-planner"
 import { createStuckLoopDetector, getInterventionMessage } from "./stuck-loop"
 import { buildRunEpoch, formatEpochKey } from "./run-epoch"
 import {
@@ -107,6 +105,23 @@ const SINGLE_TOOL_DOMINANCE_LIMIT = 5
 const DOMINANCE_EXEMPT_TOOLS = new Set(["task_delegate", "task_revise", "task_status"])
 /** Sampling temperature for the tool-calling loop. Matches the worker loop's 0.3. */
 const TOOL_CALLING_TEMPERATURE = 0.3
+/**
+ * Why a run stopped short, in words for the person watching. The raw `blocker` codes are for the
+ * database; a worker that "ended blocked" with nothing on screen is what leaves people lost.
+ */
+export function describeBlocker(blocker: string | null, status: string): string {
+  if (!blocker) return status === "needs_budget" ? "alcanzó su límite de presupuesto" : `terminó en estado ${status}`
+  const [code, detail] = [blocker.split(":")[0], blocker.slice(blocker.indexOf(":") + 1)]
+  switch (code) {
+    case "repeated_tool_call": return `repitió la misma llamada (${detail}) sin avanzar`
+    case "model_returned_no_tool_calls_and_no_content": return "el modelo devolvió respuestas vacías y no pudo continuar"
+    case "output_truncated": return "su respuesta se cortó por el límite de longitud"
+    case "max_steps": return `agotó sus ${detail} pasos sin terminar`
+    case "max_input_tokens": case "max_output_tokens": case "max_cost_usd": return `alcanzó su límite (${blocker})`
+    default: return blocker.slice(0, 160)
+  }
+}
+
 /** Times a turn is re-asked after a tool call written as text failed to run. */
 const MAX_MARKUP_RETRIES = 2
 /** Times an empty turn (no text, no call) is re-asked before the run is given up. */
@@ -238,7 +253,7 @@ export class RepeatTracker {
     if (this.window.length > REPEAT_WINDOW) this.window.shift()
 
     // The streak is of consecutive *steps* using this tool. Five different reads
-    // issued together (the oracle approved running them in parallel) are one step,
+    // issued together (running them in parallel was judged safe) are one step,
     // not five repetitions.
     if (toolName === this.lastToolName) {
       if (this.step !== this.streakStep) {
@@ -363,8 +378,7 @@ export interface AgentLoopOptions {
   /** Reasoning tokens as the model produces them. Drives `thought_chunk`. */
   onReasoningToken?: (token: string) => void
   /**
-   * Resume this run from its checkpoint instead of starting a new one. The
-   * restored messages are already the pruned set, so the Jev pass is skipped.
+   * Resume this run from its checkpoint instead of starting a new one.
    */
   resume?: boolean
   /**
@@ -377,7 +391,8 @@ export interface AgentLoopOptions {
 }
 
 export interface StepEvent {
-  type: "text" | "tool_call" | "tool_result"
+  /** `blocked`: the run ended without finishing; `message` says why, in words a person can read. */
+  type: "text" | "tool_call" | "tool_result" | "blocked"
   message: string
   toolName?: string
   isError?: boolean
@@ -677,13 +692,10 @@ export async function* runAgent(
     contextPaths: opts.contextPaths,
     userId: opts.userId,
     causalStreamId: causalDb ? causalStreamId : undefined,
-    // The restored messages are already the pruned set from the run that
-    // checkpointed them; pruning them again would compound the loss.
-    skipJev: isResume,
     contextWindow: providerCfg.contextWindow,
     // La ficha del especialista muestra la carga de ESTE turno, no el perfil
-    // declarado: JEV poda y el descubrimiento amplía, así que la lista cambia
-    // aunque el agente no haya descubierto nada nuevo.
+    // declarado: el descubrimiento (`search_knowledge`) lo amplía, así que la
+    // lista cambia a lo largo de la tarea.
     onLoadout: (loadout) => emitLoadout({ agentId: opts.agentId, ...loadout }),
   })
   if (ctx.projectScope) {
@@ -747,8 +759,6 @@ export async function* runAgent(
   let emptyRetries = 0
 
   // ── Resume from checkpoint ────────────────────────────────────────────────
-  // The restored messages are already the pruned set from the run that wrote
-  // them, so the Jev pass must not prune them again.
   if (isResume) {
     const restored = await readCheckpoint(runId)
     if (restored) {
@@ -810,44 +820,6 @@ export async function* runAgent(
       break
     }
 
-    // Jev decides whether the history gathered so far is still worth paying for,
-    // and whether the turn is done. Skipped below the prune threshold: a
-    // decision costs latency, so it only runs when there is real weight to drop.
-    // Any failure leaves messages and the loadout exactly as they were.
-    const jevIteration = await planJevIteration({
-      objective: typeof opts.userMessage === "string"
-        ? opts.userMessage
-        : Array.isArray(opts.userMessage)
-          ? opts.userMessage.filter(p => p.type === "text").map(p => (p as { text: string }).text).join("\n")
-          : String(opts.userMessage),
-      messages,
-      tools: ctx.tools,
-    }).catch((err) => {
-      log.warn(`[agent-loop] Jev iteration fallback: ${(err as Error).message}`)
-      return null
-    })
-
-    if (jevIteration) {
-      messages = jevIteration.messages
-      ctx.tools = jevIteration.tools
-      log.info(
-        `[agent-loop] Jev action=${jevIteration.action} omitted=${jevIteration.omittedResults} ` +
-        `msgs=${messages.length} tools=${ctx.tools.length} (${jevIteration.decision.latencyMs}ms)`,
-      )
-      emitJevDecision({
-        agentId: opts.agentId,
-        kind: "iteration",
-        provider: provId,
-        model: modId,
-        summary: `${jevIteration.action} · ${jevIteration.omittedResults} resultados podados`,
-        savedTokens: 0,
-        costUsd: jevIteration.decision.costUsd,
-        latencyMs: jevIteration.decision.latencyMs,
-      })
-      // "finish" is not a break: it empties the tool loadout so the next call
-      // has to compose a text answer. The loop exits on that answer, through
-      // the normal path.
-    }
 
     if (iterations > 1 && (iterations - 1) % checkpointEvery === 0) {
       await updateRun({
@@ -1114,9 +1086,6 @@ export async function* runAgent(
       approvedTools.push(tc)
     }
 
-    // Jev decides whether this batch may run concurrently. When it is
-    // unavailable it returns null and the sequential-by-default behavior below
-    // stands — correctness never depends on the answer, only speed does.
     // ── Checkpoint: pending tool_calls recorded BEFORE execution ────────────
     // A crash between here and the post-tool checkpoint must not re-run these
     // tools on resume: a write that half-ran would happen twice.
@@ -1127,44 +1096,10 @@ export async function* runAgent(
 
     let runConcurrently = false
     if (approvedTools.length > 1) {
-      const jevParallel = await jevWantsParallel(
+      // Structural rule, no model involved: independent reads, and distinct, non-colliding delegations.
+      runConcurrently = (await structuralParallelism(
         approvedTools.map(tc => ({ function: { name: tc.function.name, arguments: tc.function.arguments } })),
-      ).catch((err) => {
-        log.warn(`[agent-loop] Jev parallel fallback: ${(err as Error).message}`)
-        return null
-      })
-      if (!jevParallel) {
-        // No oracle answered: the structural rule alone still parallelizes
-        // independent reads and distinct, non-colliding delegations.
-        runConcurrently = (await structuralParallelism(
-          approvedTools.map(tc => ({ function: { name: tc.function.name, arguments: tc.function.arguments } })),
-        ).catch(() => undefined))?.safe === true
-      } else {
-        runConcurrently = jevParallel.parallel
-        // When the batch cannot be parallelized, the agent is not idle — it is
-        // waiting on the oracle. Telling the TUI *why* is the difference between
-        // "stuck" and "running serially because two tools touch the same file".
-        if (!runConcurrently) {
-          emitWaiting({
-            agentId: opts.agentId,
-            reason: "jev_secuencial",
-            taskId: opts.threadId,
-          })
-        }
-        if (jevParallel.decision) {
-          log.info(`[agent-loop] Jev parallel=${runConcurrently} calls=${approvedTools.length} (${jevParallel.decision.latencyMs}ms)`)
-          emitJevDecision({
-            agentId: opts.agentId,
-            kind: "parallel",
-            provider: provId,
-            model: modId,
-            summary: `${approvedTools.length} herramientas ${runConcurrently ? "en paralelo" : "en secuencia"}`,
-            savedTokens: 0,
-            costUsd: jevParallel.decision.costUsd,
-            latencyMs: jevParallel.decision.latencyMs,
-          })
-        }
-      }
+      ).catch(() => undefined))?.safe === true
     }
 
     // Phase 2: Parallel Execution
@@ -1637,6 +1572,12 @@ export async function* runAgent(
     `[agent-loop] Done: run=${runId} status=${runStatus} agent=${agentName} iterations=${iterations} ` +
     `tokens=${totalInputTokens + totalOutputTokens} elapsed=${durationMs}ms`
   )
+
+  // A run that did not finish says so, loudly. Whoever launched it (the harness, then the TUI)
+  // decides what to do next, but nobody should have to dig through the database to find out.
+  if (opts.onStep && (runStatus === "blocked" || runStatus === "failed" || runStatus === "needs_budget") && blocker !== "aborted_by_signal") {
+    await opts.onStep({ type: "blocked", message: describeBlocker(blocker, runStatus), isError: true }).catch(() => {})
+  }
 
   await updateRun({
     status: runStatus,

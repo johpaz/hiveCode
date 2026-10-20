@@ -227,26 +227,6 @@ test("changing a credential refreshes a completed weekly catalog before returnin
 })
 
 
-test("settings refresh names JEV as configured without claiming a verified response", async () => {
-  const {storeProviderApiKey} = await import("../../packages/core/src/storage/crypto")
-  const {sendSettingsSnapshot} = await import("../../packages/cli/src/commands-code/tui-launcher")
-  const providers = await col<ProviderDoc>("providers")
-  await providers.put("openrouter", provider("openrouter"))
-  await storeProviderApiKey("openrouter", "test-oracle-key")
-  globalThis.fetch = (async () => { throw new Error("Status must not perform inference") }) as unknown as typeof fetch
-  const messages: any[] = []
-  await sendSettingsSnapshot(message => messages.push(message))
-  expect(messages.find(message => message.type === "jev_status")).toMatchObject({
-    oracle: "jev", state: "ready", last_success_at: null,
-  })
-  const row = (await providers.get("openrouter"))!
-  await providers.put("openrouter", {...row.doc, active: false}, {expectedVersion:row.version})
-  messages.length = 0
-  await sendSettingsSnapshot(message => messages.push(message))
-  expect(messages.find(message => message.type === "jev_status")).toMatchObject({oracle: null, state: "off"})
-})
-
-
 test("header context belongs to BEE's configured model rather than the session default", async () => {
   const {sendSettingsSnapshot} = await import("../../packages/cli/src/commands-code/tui-launcher")
   await (await col<any>("agents")).put("bee", {id:"bee", provider_id:"deepseek", model_id:"bee-model", model_selection:"custom"})

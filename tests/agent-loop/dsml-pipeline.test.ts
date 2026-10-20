@@ -45,12 +45,13 @@ afterAll(async () => {
   else process.env.HIVE_DB_PATH = previousDbPath
 })
 
-async function run(agentId: string, thread: string, opts: { streaming?: boolean } = {}) {
+async function run(agentId: string, thread: string, opts: { streaming?: boolean; onStep?: (step: { type: string; message: string }) => Promise<void> } = {}) {
   const chunks: StreamChunk[] = []
   for await (const chunk of runAgent({
     agentId, userMessage: "lee las notas", threadId: thread, workspace,
     // Giving the loop a token sink is what makes it use the provider's streaming path.
     ...(opts.streaming ? { onToken: () => {} } : {}),
+    ...(opts.onStep ? { onStep: opts.onStep as never } : {}),
   })) chunks.push(chunk)
   return {
     toolResults: chunks.flatMap(c => c.tools?.messages?.map((m: any) => String(m.content ?? "")) ?? []),
@@ -223,5 +224,30 @@ describe("HIVE_LLM_RAW_LOG records empty responses too", () => {
     } finally {
       delete process.env.HIVE_LLM_RAW_LOG
     }
+  })
+})
+
+describe("a run that stops short announces it", () => {
+  test("empty answers end the run with a `blocked` step that says why", async () => {
+    model = startFakeModel(() => ({ content: "" }))
+    await seedFixture({ baseUrl: model.baseUrl })
+    const steps: Array<{ type: string; message: string }> = []
+
+    const { run: summary } = await run("builder", "t-announce-empty", { onStep: async step => { steps.push(step) } })
+
+    expect(summary?.status).toBe("blocked")
+    const blocked = steps.filter(step => step.type === "blocked")
+    expect(blocked).toHaveLength(1)
+    expect(blocked[0].message).toContain("vacías")
+  })
+
+  test("a run that finishes normally says nothing of the kind", async () => {
+    model = startFakeModel(() => ({ content: "Todo en orden." }))
+    await seedFixture({ baseUrl: model.baseUrl })
+    const steps: Array<{ type: string; message: string }> = []
+
+    await run("builder", "t-announce-ok", { onStep: async step => { steps.push(step) } })
+
+    expect(steps.filter(step => step.type === "blocked")).toHaveLength(0)
   })
 })

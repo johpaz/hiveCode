@@ -1,0 +1,186 @@
+/**
+ * One measured run of a task, with no TUI, so that two configurations can be compared fairly.
+ *
+ *   bun scripts/bench-run.ts --project ~/Agents/Bee --reset --out /tmp/bench/base.json \
+ *       --task "crea un proyecto bun llamado inventario: …"
+ *
+ * It runs the task in `auto` mode exactly as the TUI would (CoordinatorManager.runTask), then reads
+ * what the run left in HiveDB (runs, tokens, blockers, revisions, concurrency), the odd model
+ * responses it logged (HIVE_LLM_RAW_LOG) and whether the delivered project works (`bun test`).
+ * Everything goes to --out as JSON plus a short table on stdout. Run it once per configuration and
+ * compare the JSON files: it is how Jev/Kev were measured before they were removed.
+ *
+ * Progress is announced as it happens: a blocked worker or a failed integration is printed at once
+ * with a "⚠", and a run that goes quiet for too long prints an "ALERTA", because a silent stall
+ * is the worst outcome of all.
+ *
+ * `--reset` wipes the project (git reset --hard && git clean -fdx, task worktrees and branches).
+ * It is meant for a throwaway project and is refused unless asked for explicitly.
+ */
+import { execFileSync } from "node:child_process"
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { dirname, resolve } from "node:path"
+import { parseArgs } from "node:util"
+
+const { values } = parseArgs({
+  options: {
+    project: { type: "string" },
+    task: { type: "string" },
+    out: { type: "string" },
+    reset: { type: "boolean", default: false },
+    "max-minutes": { type: "string", default: "55" },
+    "stall-minutes": { type: "string", default: "7" },
+  },
+})
+if (!values.project || !values.task || !values.out) {
+  console.error("uso: bun scripts/bench-run.ts --project <dir> --task <texto> --out <archivo.json> [--reset]")
+  process.exit(2)
+}
+
+const project = resolve(values.project)
+const out = resolve(values.out)
+const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=bench", "-c", "user.email=bench@local", ...args], { cwd: project, stdio: "pipe" }).toString()
+
+if (!existsSync(`${project}/.git`)) { console.error(`✗ ${project} no es un repositorio git`); process.exit(2) }
+mkdirSync(dirname(out), { recursive: true })
+
+if (values.reset) {
+  for (const line of git("worktree", "list", "--porcelain").split("\n")) {
+    const path = /^worktree (.+)$/.exec(line)?.[1]
+    if (path && path !== project) { try { git("worktree", "remove", "--force", path) } catch { /* already gone */ } }
+  }
+  git("worktree", "prune")
+  for (const branch of git("branch", "--list", "hivecode/*").split("\n").map(b => b.replace(/^[*+\s]+/, "")).filter(Boolean)) { try { git("branch", "-D", branch) } catch { /* in use */ } }
+  git("reset", "--hard"); git("clean", "-fdxq")
+}
+
+const rawLog = out.replace(/\.json$/, "") + ".raw.jsonl"
+rmSync(rawLog, { force: true })
+process.env.HIVE_LLM_RAW_LOG = rawLog
+process.env.HIVE_LOG_CONSOLE = "false"
+process.chdir(project)
+
+const { CoordinatorManager } = await import("../packages/code/src/workers/coordinator-manager")
+const { setExecutionMode, getExecutionMode } = await import("../packages/core/src/agent/execution-mode")
+const { col } = await import("../packages/core/src/storage/hive")
+const { logger } = await import("../packages/core/src/utils/logger")
+logger.setConsole(false)
+
+const stamp = () => new Date().toISOString().slice(11, 19)
+const say = (line: string) => console.log(`[${stamp()}] ${line}`)
+
+const previousMode = getExecutionMode()
+setExecutionMode("auto")
+const manager = new CoordinatorManager()
+let lastEvent = Date.now()
+let final = ""
+const warnings: string[] = []
+manager.setIpcCallback((event, payload: any) => {
+  lastEvent = Date.now()
+  if (event === "history_append" && typeof payload?.content === "string" && payload.content.startsWith("⚠")) {
+    warnings.push(payload.content)
+    say(payload.content)
+  }
+  if (event === "conflict_alert") say(`⚠ ALERTA de integración: ${payload?.reason ?? ""} ${String(payload?.detail ?? "").split("\n")[0].slice(0, 160)}`)
+})
+manager.setTaskCompleteCallback(text => { final = text })
+
+const startedAt = Date.now()
+say(`arranca: proyecto=${project}`)
+await manager.startAll()
+
+const stallMs = Number(values["stall-minutes"]) * 60_000
+const watchdog = setInterval(() => {
+  const quiet = Date.now() - lastEvent
+  if (quiet > stallMs) { say(`ALERTA: ${Math.round(quiet / 60000)} min sin ningún evento del coordinador`); lastEvent = Date.now() }
+}, 30_000)
+const heartbeat = setInterval(() => say(`latido: ${Math.round((Date.now() - startedAt) / 60000)} min`), 120_000)
+
+let error: string | undefined
+let timedOut = false
+const limit = new Promise<void>(resolveLimit => setTimeout(() => { timedOut = true; resolveLimit() }, Number(values["max-minutes"]) * 60_000))
+try {
+  await Promise.race([manager.runTask(values.task!, "auto"), limit])
+  if (timedOut) { error = `tiempo máximo (${values["max-minutes"]} min) agotado`; const id = manager.getActiveTaskId(); if (id) await manager.cancelTask(id).catch(() => {}) }
+} catch (err) {
+  error = (err as Error).message
+  say(`✗ la tarea falló: ${error.slice(0, 200)}`)
+}
+clearInterval(watchdog); clearInterval(heartbeat)
+const finishedAt = Date.now()
+say(`terminó en ${((finishedAt - startedAt) / 60000).toFixed(1)} min${error ? ` (con error)` : ""}`)
+
+// ── What the run left behind ────────────────────────────────────────────────────────────────
+const ms = (t: number) => (t < 1e12 ? t * 1000 : t)
+const runs = (await (await col<any>("agentRuns")).scan()).map(e => e.doc).filter(r => ms(r.created_at) >= startedAt - 1000)
+const tools = (await (await col<any>("toolRuns")).scan()).map(e => e.doc).filter(t => ms(t.started_at) >= startedAt - 1000)
+const dur = (r: any) => (ms(r.completed_at ?? r.updated_at) - ms(r.created_at)) / 1000
+const workers = runs.filter(r => r.kind === "worker")
+const events = workers.flatMap(r => [[ms(r.created_at), 1], [ms(r.completed_at ?? r.updated_at), -1]] as const).sort((a, b) => a[0] - b[0])
+let active = 0, maxConcurrent = 0
+for (const [, delta] of events) { active += delta; maxConcurrent = Math.max(maxConcurrent, active) }
+
+const isRevision = (r: any) => String(r.objective).startsWith("Revisión de una tarea")
+const sum = (items: any[], f: (r: any) => number) => items.reduce((s, r) => s + f(r), 0)
+
+const blockers: Record<string, number> = {}
+for (const r of runs.filter(r => r.status === "blocked")) blockers[String(r.blocker)] = (blockers[String(r.blocker)] ?? 0) + 1
+
+const readLines = (file: string) => (existsSync(file) ? readFileSync(file, "utf-8").trim().split("\n").filter(Boolean).map(l => JSON.parse(l)) : [])
+const raw = readLines(rawLog)
+
+let tests = { pass: 0, fail: 0, files: 0, ran: false }
+{
+  const ran = Bun.spawnSync(["bun", "test"], { cwd: project, timeout: 180_000 })
+  const text = `${ran.stdout.toString()}${ran.stderr.toString()}`
+  tests = {
+    ran: /\d+ pass/.test(text),
+    pass: Number(/(\d+) pass/.exec(text)?.[1] ?? 0),
+    fail: Number(/(\d+) fail/.exec(text)?.[1] ?? 0),
+    files: Number(/across (\d+) file/.exec(text)?.[1] ?? 0),
+  }
+}
+
+const leftoverWorktrees = git("worktree", "list", "--porcelain").split("\n").filter(l => l.startsWith("worktree ")).length - 1
+const result = {
+  task: values.task,
+  minutes: +((finishedAt - startedAt) / 60000).toFixed(2),
+  error: error ?? null,
+  integrated: leftoverWorktrees === 0 && existsSync(`${project}/package.json`),
+  leftoverWorktrees,
+  projectTests: tests,
+  runs: {
+    total: runs.length,
+    byAgent: Object.fromEntries([...new Set(runs.map(r => r.agent_id))].map(a => [a, runs.filter(r => r.agent_id === a).length])),
+    blocked: runs.filter(r => r.status === "blocked").length,
+    blockers,
+    revisions: workers.filter(isRevision).length,
+    maxConcurrentWorkers: maxConcurrent,
+  },
+  tokens: { input: sum(runs, r => r.input_tokens), output: sum(runs, r => r.output_tokens) },
+  workerMinutes: {
+    total: +(sum(workers, dur) / 60).toFixed(1),
+    revisions: +(sum(workers.filter(isRevision), dur) / 60).toFixed(1),
+  },
+  delegations: { delegate: tools.filter(t => t.tool_name === "task_delegate").length, revise: tools.filter(t => t.tool_name === "task_revise").length },
+  modelOddities: {
+    markupDropped: raw.filter(r => r.parsed === 0 && !r.empty).length,
+    emptyResponses: raw.filter(r => r.empty).length,
+  },
+  warningsShown: warnings,
+  finalAnswer: final.slice(0, 600),
+}
+writeFileSync(out, JSON.stringify(result, null, 2))
+setExecutionMode(previousMode)
+await manager.stopAll().catch(() => {})
+
+const t = result
+say(`resultado → ${out}`)
+console.log([
+  `  tiempo        ${t.minutes} min${t.error ? `  ⚠ ${t.error}` : ""}`,
+  `  integrado     ${t.integrated ? "sí" : "NO"}   tests del proyecto: ${t.projectTests.pass} pasan / ${t.projectTests.fail} fallan (${t.projectTests.files} archivos)`,
+  `  runs          ${t.runs.total}  bloqueados ${t.runs.blocked}  revisiones ${t.runs.revisions}  concurrencia máx. ${t.runs.maxConcurrentWorkers}`,
+  `  tokens        ${(t.tokens.input / 1e6).toFixed(1)} M entrada / ${(t.tokens.output / 1e6).toFixed(2)} M salida`,
+  `  rarezas       marcado perdido ${t.modelOddities.markupDropped}, respuestas vacías ${t.modelOddities.emptyResponses}`,
+].join("\n"))
+process.exit(0)

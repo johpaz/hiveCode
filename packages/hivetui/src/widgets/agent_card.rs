@@ -13,10 +13,9 @@ use crate::{
 ///
 /// 1. **¿Qué es?** — alias, rol y función en una línea.
 /// 2. **¿Qué puede hacer?** — la carga base declarada.
-/// 3. **¿Qué tiene *ahora*?** — la carga efectiva del último turno, que JEV puede
-///    haber podado. Mostrar solo la base mentiría en la dirección contraria.
-/// 4. **¿Por qué no avanza?** — la espera, la última decisión de JEV y la tool
-///    en vuelo.
+/// 3. **¿Qué tiene *ahora*?** — la carga efectiva del último turno, que el
+///    descubrimiento puede haber ampliado. Mostrar solo la base mentiría.
+/// 4. **¿Por qué no avanza?** — la espera y la tool en vuelo.
 ///
 /// La sección de habilidades es la que responde "¿puedo pedirle esto?": cada
 /// fila dice si este agente puede usarla y, si no puede, qué tool le falta.
@@ -74,15 +73,11 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState, agent: &RosterA
     y = chips(canvas, area, y, &agent.tools.iter().take(6).map(|s| s.as_str()).collect::<Vec<_>>(), agent.color());
     y = chips(canvas, area, y, &base_skill_names(state, agent), GREEN);
 
-    // ── Carga ahora: la efectiva, que JEV puede haber podado ─────────────
+    // ── Carga ahora: la efectiva, que el descubrimiento puede haber ampliado ──
     match state.loadout.get(&agent.id) {
         Some(loadout) => {
-            let marca = if loadout.pruned { "  podada por jev" } else { "" };
-            y = field(
-                canvas, area, y, "CARGA AHORA",
-                &format!("{}{marca}", loadout.summary()),
-            );
-            y = chips(canvas, area, y, &loadout.tools.iter().take(6).map(|s| s.as_str()).collect::<Vec<_>>(), if loadout.pruned { YELLOW } else { agent.color() });
+            y = field(canvas, area, y, "CARGA AHORA", &loadout.summary());
+            y = chips(canvas, area, y, &loadout.tools.iter().take(6).map(|s| s.as_str()).collect::<Vec<_>>(), agent.color());
             y = chips(canvas, area, y, &loadout.skills.iter().take(4).map(|s| s.as_str()).collect::<Vec<_>>(), GREEN);
         }
         None => {
@@ -97,20 +92,6 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState, agent: &RosterA
     if y < area.bottom() {
         canvas.print(area.x + 1, y, &ellipsize_cells(&line, area.w.saturating_sub(4) as usize), Style::new().fg(color));
         y += 1;
-    }
-
-    // ── Última decisión de JEV ──────────────────────────────────────────
-    if let Some(decision) = state.jev.last_by_agent.get(&agent.id) {
-        let detalle = decision
-            .saved_tokens_display()
-            .map(|t| format!(" · ahorró {t}"))
-            .unwrap_or_default();
-        y = field(
-            canvas, area, y, "ÚLTIMA DECISIÓN",
-            &format!("{} · {}{detalle}", decision.kind, decision.summary),
-        );
-    } else if state.jev.availability.is_configured() {
-        y = field(canvas, area, y, "ÚLTIMA DECISIÓN", "todavía ninguna");
     }
 
     // ── Habilidades: puede, no puede, y por qué ────────────────────────
@@ -347,15 +328,14 @@ mod tests {
 
     #[test]
     fn it_separates_the_declared_loadout_from_the_current_one() {
-        // La distinction que importa: lo declarado y lo que el agente tiene
-        // ahora no son lo mismo cuando JEV poda.
+        // La distinción que importa: lo declarado y lo que el agente tiene
+        // ahora no son lo mismo cuando el descubrimiento amplía el conjunto.
         let mut state = base();
         state.loadout.insert(
             "id-backend".into(),
             Loadout {
                 tools: vec!["fs_read".into()],
                 skills: vec!["busqueda_hivedb".into()],
-                pruned: true,
                 minimal: vec!["busqueda_hivedb".into()],
                 at: 1,
             },
@@ -363,7 +343,6 @@ mod tests {
         let frame = draw(&state);
         assert!(frame.contains("CARGA BASE"), "{frame}");
         assert!(frame.contains("CARGA AHORA"), "{frame}");
-        assert!(frame.contains("podada por jev"), "no explica el porqué: {frame}");
     }
 
     #[test]
@@ -381,24 +360,6 @@ mod tests {
         // El motivo del bloqueo: sin él, "bloqueada" no es accionable.
         assert!(frame.contains("le falta"), "{frame}");
         assert!(frame.contains("browser_click"), "no dice qué falta: {frame}");
-    }
-
-    #[test]
-    fn it_shows_the_last_jev_decision_when_there_is_one() {
-        let mut state = base();
-        state.jev.record(crate::state::JevDecision {
-            agent_id: "id-backend".into(),
-            kind: "context".into(),
-            summary: "18 → 6 mensajes".into(),
-            saved_tokens: 8_200,
-            cost_usd: 0.001,
-            latency_ms: 61,
-            event_id: "e1".into(),
-            availability: crate::state::JevAvailability::Ready,
-        });
-        let frame = draw(&state);
-        assert!(frame.contains("ÚLTIMA DECISIÓN"), "{frame}");
-        assert!(frame.contains("ahorró"), "{frame}");
     }
 
     #[test]

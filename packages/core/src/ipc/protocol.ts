@@ -186,7 +186,7 @@ export type BunMessage =
   /**
    * An agent cannot advance until something else happens.
    *
-   * `reason` names the cause (`"jev_secuencial"`, `"subagente"`,
+   * `reason` names the cause (`"subagente"`,
    * `"dependencia"`) rather than a sentence, so the UI can group waiting agents
    * by why they are stuck.
    */
@@ -201,9 +201,8 @@ export type BunMessage =
   /**
    * La carga efectiva de un agente en este turno.
    *
-   * No es el perfil declarado. JEV poda el conjunto y `search_knowledge` lo
-   * amplía, así que la lista cambia en cada turno aunque no haya nada nuevo
-   * que descubrir. Sin esto, la ficha del especialista anunciaría herramientas
+   * No es el perfil declarado: `search_knowledge` lo amplía, así que la lista
+   * cambia a lo largo de la tarea. Sin esto, la ficha del especialista anunciaría herramientas
    * que el agente ya no tiene.
    *
    * Llega por agente y **reemplaza** la anterior: cada turno emite la suya.
@@ -214,48 +213,10 @@ export type BunMessage =
       tools: string[]
       skills: string[]
       /** De dónde salió el conjunto de herramientas. */
-      origen: "perfil" | "jev_pruned"
+      origen: "perfil"
       /** Skills en la carga mínima: disponibles sin descubrir nada. */
       minimal: string[]
       at: number
-    }
-  /**
-   * A Jev decision was served and the caller is applying it.
-   *
-   * Jev (the decision plane) already emits this on the event bus
-   * (`jev-decisions.ts` → `eventBus`) and nothing was subscribed. The TUI is
-   * the first consumer: this is the "why" behind an agent's behaviour — what it
-   * pruned, whether tools may run in parallel, which specialist it picked.
-   *
-   * Snake_case on the wire, like every other field here (`eventId` →
-   * `event_id`). `summary` already arrives truncated to 160 chars.
-   */
-  | {
-      type: "jev_decision"
-      agent_id: string
-      /** Which decision: "context" (prune + delegate), "parallel", "iteration". */
-      kind: string
-      summary: string
-      saved_tokens: number
-      cost_usd: number
-      latency_ms: number
-      /** Stable id, so the TUI can dedupe across a reconnect. */
-      event_id: string
-      totals: { decisions: number; saved_tokens: number; cost_usd: number }
-    }
-  /**
-   * Availability of the decision plane.
-   *
-   * `off` means "not configured" and must not be rendered as an error;
-   * `fallback` means it is cooling down after failures and deserves a warning.
-   */
-  | {
-      type: "jev_status"
-      oracle?: "jev" | "kev" | null
-      state: "off" | "ready" | "fallback"
-      last_error: string | null
-      last_success_at: number | null
-      totals: { decisions: number; saved_tokens: number; cost_usd: number }
     }
   | {
       type: "roster_snapshot"
@@ -367,16 +328,9 @@ const LOW_TYPES = new Set<BunMessage["type"]>([
   "memory_update", "librarian_progress", "dashboard_snapshot", "metrics_update",
   // High-volume token streams: they must never delay a critical alert.
   "assistant_chunk", "thought_chunk",
-  // Status flips are rare and tiny; a stale availability dot is worth nothing.
-  "jev_status",
   // One snapshot of the whole swarm per agent created or archived. Rare enough
   // to be safe on the lagging channel, and it must never delay a critical alert.
   "roster_snapshot",
-  // `jev_decision` is deliberately NOT here. It stays on `normal` because it is
-  // the reasoning trail the user actually reads — the same thing Kimi surfaces
-  // as "the logical chain of reasoning and decision-making". Putting it on
-  // `low` would let it be dropped exactly when the swarm gets busy. The TUI
-  // collapses and caps it on its own side instead of losing it in transit.
 ])
 
 export function messagePriority(msg: BunMessage): IpcPriority {

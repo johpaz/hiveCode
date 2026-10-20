@@ -29,7 +29,6 @@ async function loadoutOf(agentId: string): Promise<string[]> {
     threadId: `loadout-${agentId}`,
     userMessage: "hola",
     isolated: true,
-    skipJev: true,
     onLoadout: loadout => { tools = loadout.tools },
   })
   return tools

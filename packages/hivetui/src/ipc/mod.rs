@@ -474,35 +474,6 @@ pub enum BunMessage {
         telegram_active: bool,
     },
 
-    // ── Jev: el plano de decisión ───────────────────────────────────────────
-    // Jev ya emitía estos eventos en el event bus del backend y nadie estaba
-    // suscrito: se calculaba el "por qué" de cada decisión y se tiraba. Esta es
-    // la primeraconsumer.
-    /// Una decisión servida y aplicada: qué podó, si puede paralelizar, a qué
-    /// especialista delegó.
-    JevDecision {
-        agent_id: String,
-        /// "context" (podar + delegar), "parallel", "iteration".
-        kind: String,
-        summary: String,
-        saved_tokens: u64,
-        cost_usd: f64,
-        latency_ms: u64,
-        /// Id estable, para deduplicar tras una reconexión.
-        event_id: String,
-        totals: IpcJevTotals,
-    },
-    /// Disponibilidad del oráculo. `off` = no configurado; `fallback` = enfriándose
-    /// tras fallos. La UI no debe pintar `off` como error.
-    JevStatus {
-        state: String,
-        #[serde(default)]
-        oracle: Option<String>,
-        last_error: Option<String>,
-        last_success_at: Option<u64>,
-        totals: IpcJevTotals,
-    },
-
     // ── Telemetría del enjambre ───────────────────────────────────────────
     // Antes de esto la TUI solo recibía `current_action`, un texto libre que el
     // backend llenaba con "ejecutando <phase>": no decía qué herramienta corría
@@ -538,7 +509,7 @@ pub enum BunMessage {
         at: u64,
     },
     /// Un agente no puede avanzar hasta que pase algo. `razon` nombra la causa
-    /// (`"jev_secuencial"`, `"subagente"`, `"dependencia"`), no una frase, para
+    /// (`"subagente"`, `"dependencia"`), no una frase, para
     /// que la UI pueda agrupar por motivo.
     Esperando {
         agent: String,
@@ -565,8 +536,8 @@ pub enum BunMessage {
     },
     /// La carga efectiva de un agente en este turno.
     ///
-    /// No es el perfil declarado: JEV poda el conjunto y el descubrimiento lo
-    /// amplía, así que la lista cambia aunque no haya nada nuevo que encontrar.
+    /// No es el perfil declarado: el descubrimiento (`search_knowledge`) lo
+    /// amplía, así que la lista cambia a lo largo de la tarea.
     /// Reemplaza la anterior del mismo agente.
     CargaActual {
         agent: String,
@@ -588,15 +559,6 @@ pub enum BunMessage {
     /// y corrompa el canal IPC cuando TypeScript agrega nuevos tipos.
     #[serde(other)]
     Unknown,
-}
-
-/// Acumulado del oráculo. Viaja con cada decisión para que el statusbar pueda
-/// mostrar "ahorró N tokens / $X" sin pedir nada.
-#[derive(Debug, Clone, Deserialize)]
-pub struct IpcJevTotals {
-    pub decisions: u64,
-    pub saved_tokens: u64,
-    pub cost_usd: f64,
 }
 
 /// Un especialista del roster.
@@ -1170,14 +1132,14 @@ mod tests {
 
     #[test]
     fn a_sequential_wait_with_no_targets_still_parses() {
-        // "en secuencia" no depende de nadie: la lista vacía es legítima.
+        // Una espera sin dependencias concretas: la lista vacía es legítima.
         let msg = parse(
-            r#"{"protocol_version":1,"priority":"normal","seq":5,"type":"esperando","payload":{"agent":"topo","esperando_a":[],"razon":"jev_secuencial","at":1}}"#,
+            r#"{"protocol_version":1,"priority":"normal","seq":5,"type":"esperando","payload":{"agent":"topo","esperando_a":[],"razon":"dependencia","at":1}}"#,
         );
         match msg {
             BunMessage::Esperando { esperando_a, razon, .. } => {
                 assert!(esperando_a.is_empty());
-                assert_eq!(razon, "jev_secuencial");
+                assert_eq!(razon, "dependencia");
             }
             other => panic!("esperaba esperando, llegó {other:?}"),
         }
@@ -1218,77 +1180,6 @@ mod tests {
         match msg {
             BunMessage::ToolCall { call_id, bee_state, task_id, .. } => {
                 assert_eq!(call_id, "c9");
-                assert_eq!(bee_state, "");
-                assert!(task_id.is_none());
-            }
-            other => panic!("esperaba tool_call, llegó {other:?}"),
-        }
-    }
-
-    // ── Jev ────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn jev_decision_deserializes_its_savings() {
-        let msg = parse(
-            r#"{"protocol_version":1,"priority":"normal","seq":7,"type":"jev_decision","payload":{"agent_id":"a1","kind":"context","summary":"18 → 6 mensajes · 3 tools","saved_tokens":8200,"cost_usd":0.0003,"latency_ms":61,"event_id":"jev:m2k9:3","totals":{"decisions":12,"saved_tokens":48200,"cost_usd":0.021}}}"#,
-        );
-        match msg {
-            BunMessage::JevDecision { agent_id, kind, summary, saved_tokens, cost_usd, latency_ms, event_id, totals } => {
-                assert_eq!(agent_id, "a1");
-                assert_eq!(kind, "context");
-                assert!(summary.contains("18"));
-                assert_eq!(saved_tokens, 8_200);
-                assert!((cost_usd - 0.0003).abs() < 1e-9, "el costo llega como f64 exacto");
-                assert_eq!(latency_ms, 61);
-                assert_eq!(event_id, "jev:m2k9:3");
-                assert_eq!(totals.decisions, 12);
-                assert_eq!(totals.saved_tokens, 48_200);
-                assert!((totals.cost_usd - 0.021).abs() < 1e-9);
-            }
-            other => panic!("esperaba jev_decision, llegó {other:?}"),
-        }
-    }
-
-    #[test]
-    fn an_unavailable_oracle_reports_off_and_keeps_its_null_error() {
-        // `off` = no configurado. Si `state` se perdiera, quedaría como string
-        // vacío y la TUI asumiría "listo".
-        let msg = parse(
-            r#"{"protocol_version":1,"priority":"low","seq":8,"type":"jev_status","payload":{"state":"off","last_error":null,"last_success_at":null,"totals":{"decisions":0,"saved_tokens":0,"cost_usd":0}}}"#,
-        );
-        match msg {
-            BunMessage::JevStatus { state, last_error, last_success_at, .. } => {
-                assert_eq!(state, "off");
-                assert!(last_error.is_none());
-                assert!(last_success_at.is_none());
-            }
-            other => panic!("esperaba jev_status, llegó {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_cooling_oracle_keeps_its_error_text() {
-        let msg = parse(
-            r#"{"protocol_version":1,"priority":"low","seq":9,"type":"jev_status","payload":{"state":"fallback","last_error":"OpenRouter HTTP 429","last_success_at":1700000000,"totals":{"decisions":3,"saved_tokens":900,"cost_usd":0.001}}}"#,
-        );
-        match msg {
-            BunMessage::JevStatus { state, last_error, .. } => {
-                assert_eq!(state, "fallback");
-                assert_eq!(last_error.as_deref(), Some("OpenRouter HTTP 429"));
-            }
-            other => panic!("esperaba jev_status, llegó {other:?}"),
-        }
-    }
-
-    #[test]
-    fn optional_swarm_fields_missing_from_the_wire_do_not_break_the_parse() {
-        // El backend puede omitir `task_id` y `bee_state`. Con `#[serde(default)]`
-        // debe parsear igual; sin él, el mensaje entero se descarta.
-        let msg = parse(
-            r#"{"protocol_version":1,"priority":"normal","seq":10,"type":"tool_call","payload":{"agent":"a1","tool":"fs_read","call_id":"c1","args_summary":"","at":1}}"#,
-        );
-        match msg {
-            BunMessage::ToolCall { bee_state, task_id, .. } => {
                 assert_eq!(bee_state, "");
                 assert!(task_id.is_none());
             }

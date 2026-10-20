@@ -99,11 +99,11 @@ export const x = 1
   })
 
   it("lee la variante con [TOOL_CALL] y atributo directo", () => {
-    const texto = `<${ZWSP}tool_call>[TOOL_CALL] <function=web_search><parameter=query>jev hivecode</parameter></function>[/TOOL_CALL]</${ZWSP}tool_call>`
+    const texto = `<${ZWSP}tool_call>[TOOL_CALL] <function=web_search><parameter=query>hivecode swarm</parameter></function>[/TOOL_CALL]</${ZWSP}tool_call>`
     const { tool_calls } = extractToolCallsFromText(texto, new Map())
 
     expect(tool_calls[0].function.name).toBe("web_search")
-    expect(JSON.parse(tool_calls[0].function.arguments)).toEqual({ query: "jev hivecode" })
+    expect(JSON.parse(tool_calls[0].function.arguments)).toEqual({ query: "hivecode swarm" })
   })
 
   it("aplica el mapa de nombres que exige el provider", () => {

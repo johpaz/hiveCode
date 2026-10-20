@@ -119,16 +119,15 @@ export function emitToolDone(input: {
 /**
  * La carga efectiva de un agente en un turno.
  *
- * No es el perfil declarado. JEV poda el conjunto de herramientas y
- * `search_knowledge` lo amplía, así que lo que el agente tiene delante cambia en
- * cada turno aunque no haya descubierto nada nuevo. La ficha del especialista
+ * No es el perfil declarado: `search_knowledge` lo amplía, así que lo que el
+ * agente tiene delante cambia a lo largo de la tarea. La ficha del especialista
  * muestra esto para no anunciar herramientas que ya no tiene.
  */
 export function emitLoadout(input: {
   agentId: string
   tools: string[]
   skills: string[]
-  origen: "perfil" | "jev_pruned"
+  origen: "perfil"
   minimal: string[]
 }): void {
   try {
@@ -148,8 +147,7 @@ export function emitLoadout(input: {
 /**
  * Un agente que no puede seguir porque depende de otro.
  *
- * `razon` es una etiqueta corta y legible: `"jev_secuencial"` cuando Jev decidió
- * que el lote no era seguro en paralelo, `"subagente"` mientras espera un
+ * `razon` es una etiqueta corta y legible: `"subagente"` mientras espera un
  * `spawn_agent`, `"dependencia"` cuando la fase depende de otra.
  */
 export function emitWaiting(input: {
