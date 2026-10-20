@@ -38,7 +38,7 @@ import { emitJevDecision } from "./jev-decisions"
 import { formatToolResult } from "../utils/toon"
 import { getAverageTokenCost } from "../storage/usage"
 import type { ContentPart } from "./llm-client"
-import { getExecutionMode, canExecuteTool, requiresConfirmation, getBlockReason } from "./execution-mode"
+import { getExecutionMode, canExecuteTool, requiresConfirmation, canPromptForConfirmation, getBlockReason } from "./execution-mode"
 import { planJevIteration } from "./jev-planner"
 import { createStuckLoopDetector, getInterventionMessage } from "./stuck-loop"
 import { buildRunEpoch, formatEpochKey } from "./run-epoch"
@@ -990,6 +990,19 @@ export async function* runAgent(
         const toolResultLLM = formatToolResult(toolResultJS, cleanModel)
         results.push({
           toolResultLLM, id: tc.id, name: toolName, ms: 0,
+          sig: toolCallSignature(toolName, tc.function.arguments),
+        })
+        continue
+      }
+
+      if (currentMode === "approval" && !opts.approvedExecution && requiresConfirmation(toolName) && !canPromptForConfirmation()) {
+        const toolResultJS = {
+          ok: false,
+          error: `[APPROVAL REQUIRED] '${toolName}' necesita confirmación del usuario y aquí no hay forma de pedirla.`,
+          hint: "No reintentes. Informa al usuario que esta acción espera su aprobación (o que cambie a modo auto).",
+        }
+        results.push({
+          toolResultLLM: formatToolResult(toolResultJS, cleanModel), id: tc.id, name: toolName, ms: 0,
           sig: toolCallSignature(toolName, tc.function.arguments),
         })
         continue

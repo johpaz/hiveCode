@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkspaceManager } from "../../packages/code/src/workspace/manager";
@@ -8,7 +8,7 @@ import { WorkspaceManager } from "../../packages/code/src/workspace/manager";
 const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, stdio: "pipe" });
 
-test("integrating a task leaves out the agent's .hive-bak backups", async () => {
+test("integrating a task leaves out .hive-bak backups and node_modules", async () => {
   const repo = mkdtempSync(join(tmpdir(), "hive-ws-repo-"));
   git(repo, "init", "-q", "-b", "main");
   writeFileSync(join(repo, "a.ts"), "export const a = 1\n");
@@ -22,11 +22,15 @@ test("integrating a task leaves out the agent's .hive-bak backups", async () => 
     writeFileSync(join(assignment.worktreePath, "b.ts"), "export const b = 2\n");
     writeFileSync(join(assignment.worktreePath, "a.ts.hive-bak.1792500929938"), "export const a = 1\n");
 
+    mkdirSync(join(assignment.worktreePath, "node_modules", "dep"), { recursive: true });
+    writeFileSync(join(assignment.worktreePath, "node_modules", "dep", "index.js"), "module.exports = 1\n");
+
     const result = await manager.integrate(assignment);
 
     expect(result.status).toBe("integrated");
     expect(git(repo, "status", "--short").toString()).toContain("b.ts");
     expect(git(repo, "status", "--short").toString()).not.toContain("hive-bak");
+    expect(git(repo, "status", "--short").toString()).not.toContain("node_modules");
   } finally {
     await manager.cleanup(assignment);
   }

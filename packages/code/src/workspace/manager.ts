@@ -111,8 +111,9 @@ export class WorkspaceManager {
       assignment.worktreePath,
     )
     if (untracked.ok && untracked.stdout) {
-      // Los respaldos de fs_write/fs_edit (`<archivo>.hive-bak.<ts>`) son del agente, no del proyecto.
-      const files = untracked.stdout.split("\0").filter(file => file && !/\.hive-bak\.\d+$/.test(file))
+      // Ni los respaldos de fs_write/fs_edit (`<archivo>.hive-bak.<ts>`) ni las dependencias
+      // instaladas son del proyecto, aunque el builder no haya escrito un .gitignore.
+      const files = untracked.stdout.split("\0").filter(file => file && !/\.hive-bak\.\d+$/.test(file) && !/(^|\/)node_modules\//.test(file))
       if (files.length > 0) {
         await this.runCommand(["git", "add", "-N", "--", ...files], assignment.worktreePath)
       }

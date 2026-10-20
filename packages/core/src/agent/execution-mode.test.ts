@@ -16,3 +16,19 @@ describe("planning tools", () => {
     }
   })
 })
+
+describe("canPromptForConfirmation", () => {
+  test("never prompts inside the TUI, whatever stdin looks like", async () => {
+    const { canPromptForConfirmation } = await import("./execution-mode")
+    const previous = process.env.HIVECODE_TUI
+    try {
+      process.env.HIVECODE_TUI = "1"
+      expect(canPromptForConfirmation()).toBe(false)
+      delete process.env.HIVECODE_TUI
+      expect(canPromptForConfirmation()).toBe(process.stdin.isTTY === true)
+    } finally {
+      if (previous === undefined) delete process.env.HIVECODE_TUI
+      else process.env.HIVECODE_TUI = previous
+    }
+  })
+})

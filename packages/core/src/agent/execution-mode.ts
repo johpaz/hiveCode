@@ -62,6 +62,15 @@ export function canExecuteTool(toolName: string, mode?: ExecutionMode): boolean 
   return true
 }
 
+/**
+ * The y/N prompt for a confirmable tool reads `process.stdin`. Inside the TUI the
+ * keyboard belongs to the TUI process, so that prompt can never be answered and
+ * the task hangs forever. Only prompt when a person can actually answer.
+ */
+export function canPromptForConfirmation(): boolean {
+  return process.env.HIVECODE_TUI !== "1" && process.stdin.isTTY === true
+}
+
 export function requiresConfirmation(toolName: string): boolean {
   return CONFIRM_REQUIRED_TOOLS.has(toolName)
 }

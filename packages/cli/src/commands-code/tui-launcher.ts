@@ -320,6 +320,8 @@ export async function launchTui(callbacks: TuiCallbacks, stdio?: TuiStdio): Prom
     }
 
     // ── Launch TUI binary (Bun.listen is synchronous — socket ready now) ───
+    // El teclado es de la TUI: ninguna herramienta debe esperar un y/N por stdin.
+    process.env.HIVECODE_TUI = "1"
     process.stderr.write(`[tui] launching: ${binPath}\n`)
     process.stderr.write(`[tui] IPC: ${ipcServer.endpoint}\n`)
     // The child owns the TTY. Anything Bun left reading stdin (a wizard prompt,

@@ -9,11 +9,18 @@
 > **TUI:** Rust + crossterm, renderer custom (`packages/hivetui/`)
 > **Licencia:** hivecode-NC-1.0 (no comercial)
 
-**Documentación técnica:**
+**Documentación técnica** (índice en [`docs/`](./docs/README.md)):
 
-- [`docs/agent-harness.md`](./docs/agent-harness.md) — referencia vigente: perfiles, herramientas, skills, especialidades, delegación, contexto HiveDB, oficina del enjambre y oráculos JEV/KEV.
-- [`docs/plans/2026-10-10-hivedb-context.md`](./docs/plans/2026-10-10-hivedb-context.md) — cómo los agentes obtienen contexto del proyecto: caché, aislamiento, presupuestos y entrega durable.
-- [`docs/workers.md`](./docs/workers.md) — referencia histórica del pipeline de compatibilidad (los once coordinadores por niveles).
+| Documento | Contenido |
+|-----------|-----------|
+| [`architecture.md`](./docs/architecture.md) | Paquetes, procesos, flujo de una tarea y persistencia. |
+| [`modes.md`](./docs/modes.md) | `plan`, `approval` y `auto`: bloqueos, aprobación y transiciones. |
+| [`harness.md`](./docs/harness.md) | `ProfileHarness`, perfiles, delegación, especialidades y workspaces con `git worktree`. |
+| [`agent-loop.md`](./docs/agent-loop.md) | El bucle de agente: contexto, herramientas, detección de bucles, checkpoints. |
+| [`tools.md`](./docs/tools.md) | Catálogo de herramientas, permisos, sandbox y llamadas en texto. |
+| [`skills.md`](./docs/skills.md) | Formato `SKILL.md`, carga, selección y skills empaquetadas. |
+| [`tui.md`](./docs/tui.md) | Vistas, teclas, modales, protocolo IPC y modo headless. |
+| [`development.md`](./docs/development.md) | Ejecutar desde fuente, pruebas, variables de entorno, depuración y publicación. |
 
 ---
 
@@ -105,7 +112,7 @@ La interfaz es un **terminal Rust compilado** (`packages/hivetui/`) con renderer
 | # | Vista | Contenido |
 |---|-------|-----------|
 | 1 | **ENJAMBRE** | La oficina: un puesto por perfil, su herramienta en vuelo, esperas y agentes bloqueados por un MCP apagado. `Alt+↑/↓` selecciona, `Enter` abre CÓDIGO. |
-| 2 | **PLAN** | Spec, plan y fases + strip de aprobación interactiva (modo `approval`). |
+| 2 | **PLAN** | Spec, plan y fases. En modo `plan`, `Enter` aprueba el plan. |
 | 3 | **MESA** | La conversación con BEE y, a la derecha, su razonamiento en vivo. Mientras trabaja muestra un loader con los agentes y herramientas activas. |
 | 4 | **CÓDIGO** | Diff activo o mapa de archivos y panel lateral de workers. |
 | 5 | **REVISIÓN** | Hallazgos del Quality Gate, mapa de riesgo y veredicto. |
@@ -121,7 +128,8 @@ La cabecera muestra el modo (`PLAN` / `APPROVAL` / `AUTO`), los workers activos,
 | Widget | Activación |
 |--------|-----------|
 | `command_popup` | Tecla `/` — lista de comandos disponibles con navegación |
-| `settings_hub` | `F2` o `Ctrl+Shift+S` — providers, modelos, agentes, MCP, skills, GitHub, Telegram |
+| `settings_hub` | `F2` o `Ctrl+S` — providers, modelos, agentes, MCP, skills, GitHub, Telegram |
+| `plan_approval_modal` | Tras un plan: ejecutar automáticamente, aprobar fase por fase, agregar contexto o cancelar |
 | `config_modal` | `Enter` en un provider del hub — introducir su API key sin volver a elegirlo |
 | `info_modal` | `?` — ayuda contextual del tab activo |
 | `resume_badge` | `Enter` ×2 sobre `[▶ RESUME]` — reanuda una tarea que quedó a medias si el proceso murió. La primera pulsación arma, la segunda reanuda |
@@ -163,7 +171,7 @@ El TUI también funciona en modo headless (`HIVETUI_HEADLESS=1`) para testing: e
 cd packages/hivetui && cargo build --release
 ```
 
----
+Teclas principales: `Shift+Tab` cambia de modo, `1`–`5` de vista, `/` abre los comandos, `F2` la configuración, `Ctrl+U` borra la línea. La lista completa está en [`docs/tui.md`](./docs/tui.md).
 
 ---
 
@@ -172,10 +180,14 @@ cd packages/hivetui && cargo build --release
 | Modo | Qué hace | Comando rápido |
 |------|----------|---------------|
 | `plan` | BEE enruta y el Planner define spec, plan y tareas. **Ningún archivo se modifica.** | `/mode set plan` |
-| `approval` | Hay un gate de aprobación antes de implementar y otro al converger. | `/mode set approval` |
+| `approval` | Plan, visto bueno y ejecución. Las escrituras piden confirmación; la tarea se ejecuta en un `git worktree` y el diff se integra al terminar. | `/mode set approval` |
 | `auto` | Ejecución completa sin intervención. | `/mode set auto` |
 
-`Shift+Tab` recorre los modos. Delegar en modo `plan` está permitido para investigación y planificación, pero no concede permiso de escritura: `fs_write`, `fs_edit`, `shell_executor`, tests/build y commits siguen bloqueados.
+`Shift+Tab` recorre los modos. El modo **persiste entre ejecuciones** (`~/.hivecode/execution_mode`). Delegar en modo `plan` está permitido para investigación y planificación, pero no concede permiso de escritura: `fs_write`, `fs_edit`, `shell_executor`, tests/build y commits siguen bloqueados.
+
+Tras un plan, la TUI abre un modal: **ejecutar automáticamente**, **aprobar fase por fase**, **agregar contexto** o **cancelar** (equivalentes a `/approve auto`, `/approve review`, texto libre y `/reject`). `/halt` detiene la tarea activa.
+
+> **Limitación conocida:** en la TUI no hay todavía un modal propio para las puertas `specification` y `convergence` del harness, ni confirmación herramienta por herramienta: sin teclado disponible, una herramienta que pide confirmación devuelve `[APPROVAL REQUIRED]` en vez de bloquearse. Detalle en [`docs/modes.md`](./docs/modes.md).
 
 ---
 
@@ -197,9 +209,12 @@ cd packages/hivetui && cargo build --release
 - **Especialistas temporales:** un responsable puede crear un especialista para una subtarea independiente. Hereda los permisos del padre y desaparece al terminar; la evidencia queda en HiveDB.
 - **Oráculos JEV/KEV:** modelos pequeños opcionales deciden qué contexto entra al prompt. No conceden permisos; sin ellos todo funciona por el camino clásico.
 
-El detalle de herramientas, skills y especialidades por perfil está en [`docs/agent-harness.md`](./docs/agent-harness.md). El pipeline anterior de once coordinadores por niveles está archivado en [`docs/workers.md`](./docs/workers.md).
+El detalle de perfiles, delegación y especialidades está en [`docs/harness.md`](./docs/harness.md); el bucle que ejecuta a cada uno, en [`docs/agent-loop.md`](./docs/agent-loop.md); sus herramientas y skills, en [`docs/tools.md`](./docs/tools.md) y [`docs/skills.md`](./docs/skills.md). El pipeline anterior de once coordinadores solo se conserva para reanudar planes viejos (`HIVECODE_LEGACY_HARNESS=1`).
+
+**Tareas que escriben.** En `approval` y `auto`, una tarea que muta archivos corre en un `git worktree` aislado (`/tmp/hivecode-worktrees/<tarea>`, rama `hivecode/task-*`). Al terminar, el diff se integra en tu proyecto y el worktree se elimina. Por eso el proyecto debe ser un repositorio git con al menos un commit. En `plan` no se crea worktree.
 
 ---
+
 ## Learning Harness — Autocorrección
 
 El sistema detecta sus propios fallos durante la ejecución y genera propuestas de mejora que el operador puede revisar y aplicar. No hay autocorrección automática — **las propuestas en estado `pending` no tienen ningún efecto** hasta que el operador las apruebe.
@@ -340,11 +355,13 @@ Las API keys se almacenan en **Bun.secrets** (gestión segura del runtime), no e
 ```
 packages/
 ├── cli/        CLI: comandos externos, REPL, launchers
-├── code/       Motor: CoordinatorManager, workers, plan-parser
-├── core/       Gateway HTTP/WS, HiveDB, agent loop, tools, context compiler
+├── code/       Motor: CoordinatorManager, workspaces (git worktree), narrativa, checkpoints
+├── core/       Gateway HTTP/WS, HiveDB, ProfileHarness, agent loop, tools, context compiler, IPC
 ├── hivetui/    TUI Rust/crossterm — renderer custom, sin dependencias de Ratatui
-├── mcp/        Cliente Model Context Protocol
+├── mcp/        Cliente Model Context Protocol (stdio, SSE, WebSocket, HTTP)
 └── skills/     Skills empaquetadas
+docs/           Documentación técnica (ver el índice arriba)
+tests/          Regresiones (audit/), integración, e2e
 ```
 
 ### Base de datos — HiveDB

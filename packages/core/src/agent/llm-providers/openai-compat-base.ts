@@ -511,6 +511,50 @@ const MISTRAL_FN_OPEN = /<function(?:\s*=\s*"?([\w.-]+)"?)?\s*>/
 const MISTRAL_PARAM_ATTR = /<parameter\s+name\s*=\s*"([\w.-]+)"\s*>([\s\S]*?)(?:<\/parameter>|\/parameter>)/g
 const MISTRAL_PARAM = /<parameter(?:\s*=\s*"?([\w.-]+)"?)?\s*>([\s\S]*?)(?:<\/parameter>|\/parameter>)/g
 
+/**
+ * Formato nativo de DeepSeek cuando el servidor no lo convierte a tool_calls:
+ *
+ *     <｜DSML｜function_calls>
+ *     <｜DSML｜invoke name="fs_write">
+ *     <｜DSML｜parameter name="path" string="true">a.ts</｜DSML｜parameter>
+ *     <｜DSML｜parameter name="opts" string="false">{"x":1}</｜DSML｜parameter>
+ *     </｜DSML｜invoke>
+ *     </｜DSML｜function_calls>
+ *
+ * `string="true"` es texto literal (código de archivos incluido: no se recorta ni se
+ * colapsa nada) y `string="false"` es JSON. La barra es la de ancho completo (U+FF5C);
+ * se acepta también `|` porque algunos servidores la normalizan. El bloque puede llegar
+ * cortado, así que el cierre de `function_calls` es opcional.
+ */
+const DSML_BAR = "[\uFF5C|]"
+const DSML_BLOCK = new RegExp(`<${DSML_BAR}DSML${DSML_BAR}function_calls>([\\s\\S]*?)(?:</${DSML_BAR}DSML${DSML_BAR}function_calls>|$)`, "g")
+const DSML_INVOKE = new RegExp(`<${DSML_BAR}DSML${DSML_BAR}invoke\\s+name\\s*=\\s*"([\\w.-]+)"\\s*>([\\s\\S]*?)</${DSML_BAR}DSML${DSML_BAR}invoke>`, "g")
+const DSML_PARAM = new RegExp(`<${DSML_BAR}DSML${DSML_BAR}parameter\\s+name\\s*=\\s*"([\\w.-]+)"(?:\\s+string\\s*=\\s*"(true|false)")?\\s*>([\\s\\S]*?)</${DSML_BAR}DSML${DSML_BAR}parameter>`, "g")
+
+function extractDsmlToolCalls(content: string, toolNameMap: Map<string, string>): { content: string; tool_calls: LLMToolCall[] } {
+  const tool_calls: LLMToolCall[] = []
+  const stripped = content.replace(DSML_BLOCK, (_whole, inner: string) => {
+    for (const invoke of inner.matchAll(DSML_INVOKE)) {
+      const args: Record<string, unknown> = {}
+      for (const param of invoke[2].matchAll(DSML_PARAM)) {
+        const raw = param[3]
+        let value: unknown = raw
+        if (param[2] === "false") {
+          try { value = JSON.parse(raw) } catch { value = raw }
+        }
+        args[param[1]] = value
+      }
+      tool_calls.push({
+        id: crypto.randomUUID(),
+        type: "function",
+        function: { name: toolNameMap.get(invoke[1]) ?? invoke[1], arguments: JSON.stringify(args) },
+      })
+    }
+    return ""
+  })
+  return { content: tool_calls.length > 0 ? stripped.trim() : content, tool_calls }
+}
+
 /** Recorta el valor y colapsa el whitespace que el modelo indenta. */
 function cleanParamValue(raw: string): string {
   return raw.replace(/^\s+|\s+$/g, "").replace(/\s+/g, " ")
@@ -525,6 +569,9 @@ export function extractToolCallsFromText(
   toolNameMap: Map<string, string>,
   knownToolNames?: Set<string>,
 ): { content: string; tool_calls: LLMToolCall[] } {
+  const dsml = extractDsmlToolCalls(content, toolNameMap)
+  if (dsml.tool_calls.length > 0) return dsml
+
   const tool_calls: LLMToolCall[] = []
   let extractedContent = content
 
