@@ -24,7 +24,9 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &AppState) {
     let inner_w = modal_w.saturating_sub(4) as usize;
     let lines = detail_lines(if modal.detail.is_empty() { &modal.summary } else { &modal.detail }, inner_w);
     // Se ajusta al contenido; sólo se desplaza cuando no cabe.
-    let max_h = (full_area.h.saturating_sub(4)).min(22).max(CHROME_ROWS + 3);
+    // Una puerta del harness trae un plan entero: puede usar casi toda la pantalla.
+    let cap = if modal.is_gate() { u16::MAX } else { 22 };
+    let max_h = (full_area.h.saturating_sub(4)).min(cap).max(CHROME_ROWS + 3);
     let modal_h = (CHROME_ROWS + lines.len() as u16).clamp(CHROME_ROWS + 1, max_h);
     let modal_x = full_area.x + (full_area.w.saturating_sub(modal_w)) / 2;
     let modal_y = full_area.y + (full_area.h.saturating_sub(modal_h)) / 2;
@@ -32,13 +34,16 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &AppState) {
 
     canvas.fill_rect(area, ' ', Style::new().bg(BG_ELEVATED));
     canvas.draw_border(area, Style::new().fg(AMBER));
-    canvas.print_centered(area.x, area.y, area.w, " ⬡ AUTORIZAR HERRAMIENTA ", Style::new().fg(AMBER).bold());
+    let title = if modal.title.is_empty() { "AUTORIZAR HERRAMIENTA" } else { modal.title.as_str() };
+    canvas.print_centered(area.x, area.y, area.w, &format!(" ⬡ {title} "), Style::new().fg(AMBER).bold());
 
     canvas.print(area.x + 2, area.y + 2, &modal.agent, Style::new().fg(SECONDARY));
     let agent_w = modal.agent.chars().count() as u16;
-    canvas.print(area.x + 3 + agent_w, area.y + 2, "quiere ejecutar", Style::new().fg(DIM));
+    let verb = if modal.is_gate() { "propone" } else { "quiere ejecutar" };
+    let verb_w = verb.chars().count() as u16;
+    canvas.print(area.x + 3 + agent_w, area.y + 2, verb, Style::new().fg(DIM));
     canvas.print(
-        area.x + 3 + agent_w + 16,
+        area.x + 4 + agent_w + verb_w,
         area.y + 2,
         &modal.tool,
         Style::new().fg(WHITE).bold(),
@@ -56,11 +61,18 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &AppState) {
     }
 
     let hint_y = area.bottom().saturating_sub(1);
-    canvas.print(area.x + 2, hint_y, "↩/y autorizar", Style::new().fg(GREEN));
-    canvas.print(area.x + 17, hint_y, "·", Style::new().fg(DIM));
-    canvas.print(area.x + 19, hint_y, "Esc/n rechazar", Style::new().fg(RED));
+    let (yes, no) = if modal.is_gate() {
+        ("↩/y aprobar", "Esc/n cancelar")
+    } else {
+        ("↩/y autorizar", "Esc/n rechazar")
+    };
+    let yes_w = yes.chars().count() as u16;
+    let no_w = no.chars().count() as u16;
+    canvas.print(area.x + 2, hint_y, yes, Style::new().fg(GREEN));
+    canvas.print(area.x + 3 + yes_w, hint_y, "·", Style::new().fg(DIM));
+    canvas.print(area.x + 5 + yes_w, hint_y, no, Style::new().fg(RED));
     if lines.len() > visible {
-        canvas.print(area.x + 35, hint_y, "·", Style::new().fg(DIM));
-        canvas.print(area.x + 37, hint_y, "↑↓ desplazar", Style::new().fg(DIM));
+        canvas.print(area.x + 6 + yes_w + no_w, hint_y, "·", Style::new().fg(DIM));
+        canvas.print(area.x + 8 + yes_w + no_w, hint_y, "↑↓/PgUp/PgDn desplazar", Style::new().fg(DIM));
     }
 }

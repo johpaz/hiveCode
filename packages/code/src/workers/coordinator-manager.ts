@@ -118,6 +118,12 @@ export class CoordinatorManager extends CoordinatorBase {
   private cancellations = new Map<string, Promise<void>>()
   private workerTasks = new Map<PhaseName, string>()
   private toolTasks = new Map<string, { taskId: string; worker: Bun.Worker }>()
+  /**
+   * Plans made in `plan` mode, by the objective they answer. When the person approves that
+   * same objective, the harness continues from the plan instead of planning a second time.
+   */
+  private plannedTasks = new Map<string, { harnessTaskId: string; at: number }>()
+  private static readonly PLAN_REUSE_MS = 30 * 60_000
   private taskAborts = new Map<string, AbortController>()
   private taskExecutions = new Map<string, Promise<unknown>>()
   private trackExecution<T>(taskId: string, action: Promise<T>): Promise<T> {
@@ -679,7 +685,13 @@ export class CoordinatorManager extends CoordinatorBase {
     // retained below only to resume legacy plans when explicitly requested.
     if (process.env.HIVECODE_LEGACY_HARNESS !== "1") {
       const harness = new ProfileHarness()
+      const planned = this.plannedTasks.get(description)
+      this.plannedTasks.delete(description)
+      const reusePlan = mode !== "plan" && planned && Date.now() - planned.at < CoordinatorManager.PLAN_REUSE_MS
+        ? planned.harnessTaskId
+        : undefined
       const result = await this.trackExecution(this.activeTaskId, harness.run({
+        resumeTaskId: reusePlan,
         signal: this.taskAborts.get(this.activeTaskId)?.signal,
         objective: description,
         sessionId: sessionId,
@@ -781,10 +793,30 @@ export class CoordinatorManager extends CoordinatorBase {
         })
       }
 
-      if (result.status === "completed") {
-        if (result.complexity !== "conversation" && mode !== "plan") {
-          await this.integrateTaskWorkspace(this.activeTaskId, "auto")
+      // Remember the plan so approving it later executes it instead of planning again.
+      if (mode === "plan" && result.status === "ready" && result.featureDir) {
+        this.plannedTasks.set(description, { harnessTaskId: result.taskId, at: Date.now() })
+        if (this.plannedTasks.size > 20) this.plannedTasks.delete(this.plannedTasks.keys().next().value as string)
+      }
+
+      let finalResponse = result.response
+      let integrationHeld = false
+      if (result.status === "completed" && result.complexity !== "conversation" && mode !== "plan") {
+        // Integration can fail (conflict, patch that does not apply). The task is not done then:
+        // the work sits in its worktree and the person has to know, not read "listo".
+        const outcome = await this.integrateTaskWorkspace(this.activeTaskId, "auto")
+        if (outcome !== "completed") {
+          integrationHeld = true
+          const held = this.getTaskWorkspaceInfo(this.activeTaskId)
+          finalResponse = `${result.response}\n\n⚠ El trabajo terminó pero NO se pudo aplicar a tu proyecto.` +
+            (held ? ` Quedó en ${held.path} (rama ${held.branch}).` : "")
         }
+      }
+      if (integrationHeld) {
+        this.scribe.updateTaskStatus(this.activeTaskId, "paused")
+        this.taskSupervisor.updateStage(this.activeTaskId, "waiting_user")
+        this.emitTaskUpdate("paused", { title: description, mode })
+      } else if (result.status === "completed") {
         this.scribe.updateTaskStatus(this.activeTaskId, "completed")
         this.taskSupervisor.updateStage(this.activeTaskId, "completed")
         this.emitTaskUpdate("completed", { title: description, mode })
@@ -792,9 +824,13 @@ export class CoordinatorManager extends CoordinatorBase {
         this.scribe.updateTaskStatus(this.activeTaskId, "paused")
         this.taskSupervisor.updateStage(this.activeTaskId, "waiting_user")
         this.emitTaskUpdate("paused", { title: description, mode })
+        // Waiting with nothing written yet (a plan, or the gate before implementing) leaves no
+        // worktree behind; one with a diff is kept for the person to come back to.
+        await this.cleanupTaskWorkspaceIfClean(this.activeTaskId, "paused")
       } else {
         this.scribe.updateTaskStatus(this.activeTaskId, "cancelled")
         this.emitTaskUpdate("cancelled", { title: description, mode })
+        await this.cleanupTaskWorkspaceIfClean(this.activeTaskId, "cancelled")
       }
 
       this.scribe.updateTaskMetadata(this.activeTaskId, {
@@ -805,9 +841,9 @@ export class CoordinatorManager extends CoordinatorBase {
         linesRemoved: 0,
         durationMs: Math.round(performance.now() - taskStartTime),
       })
-      this.scribe.completeTurn(turnId, result.response, this.activeTaskId)
-      if (this.onTaskComplete) this.onTaskComplete(result.response)
-      if (result.response && !this.onTaskComplete) process.stdout.write(result.response + "\n")
+      this.scribe.completeTurn(turnId, finalResponse, this.activeTaskId)
+      if (this.onTaskComplete) this.onTaskComplete(finalResponse)
+      if (finalResponse && !this.onTaskComplete) process.stdout.write(finalResponse + "\n")
       return
     }
 

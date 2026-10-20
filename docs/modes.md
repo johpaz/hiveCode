@@ -42,9 +42,24 @@ Detalles de implementación:
 - `specification`: tras el plan Spec Kit, antes de implementar.
 - `convergence`: tras el Quality Gate, antes de cerrar.
 
-La decisión llega por `options.approve`. Si no hay `approve` cableado, la tarea queda en `waiting_user` (con `nextAction` persistido) y es retomable.
+La decisión llega por `options.approve`. Si no hay `approve` cableado (p. ej. el reintento del recovery scheduler), la tarea queda en `waiting_user` con `nextAction` persistido y es retomable.
 
-> **Limitación conocida.** `CoordinatorManager` solo cablea `approve` cuando le llega `onApprovalCheckpoint`, y el REPL lo pasa únicamente fuera de la TUI (`!quiet`). Dentro de la TUI, `approval` se usa a través del modal ("Aprobar fase por fase"); las puertas `specification` y `convergence` no abren hoy un modal propio. La confirmación por herramienta (siguiente sección) sí tiene su modal; falta conectar estas dos puertas al mismo mecanismo.
+**Quién contesta.** En la consola, `run.ts` pasa `onApprovalCheckpoint`. Dentro de la TUI no existe ese callback, y `CoordinatorManager` conecta las puertas al mismo canal IPC que la autorización de herramientas (`tool_approval_request` con `kind: "gate"`): la TUI abre un modal grande, con el mismo teclado (`↩`/`y` aprueba, `Esc`/`n` cancela, `↑↓` y `PgUp/PgDn` desplazan).
+
+| Puerta | Título del modal | Qué se muestra | Si se cancela |
+|--------|------------------|----------------|---------------|
+| `specification` | APROBAR ESPECIFICACIÓN Y PLAN | El resumen de BEE más `spec.md`, `plan.md` y `tasks.md` de `specs/<feature>/` (cada uno recortado a 3 000 caracteres) | La tarea termina `cancelled` y se borran su worktree y su rama (no hay diff que conservar) |
+| `convergence` | APROBAR RESULTADO | El resumen final de BEE | La tarea queda `waiting_user` |
+
+El resumen de BEE puede ser inútil si el turno agotó sus pasos; por eso se adjuntan los artefactos, que son lo que realmente se aprueba. El texto de un resumen que solo contenga marcado DSML se descarta (`stripDsmlBlocks`).
+
+**Un plan aprobado se reutiliza.** Cuando `plan` termina con un plan Spec Kit (`status: ready` y `featureDir`), `CoordinatorManager` lo recuerda por el texto del objetivo (hasta 20 planes, 30 minutos). Si la persona aprueba ese mismo objetivo ("Ejecutar automáticamente" o "Aprobar fase por fase"), la ejecución llama a `ProfileHarness.run({ resumeTaskId })` y **no vuelve a planificar**: va directo a la ejecución, o a la puerta `specification` en `approval`. No se reutiliza si:
+
+- el objetivo cambió (por ejemplo "Agregar contexto" añade texto);
+- pasaron más de 30 minutos, o se aprobó ya una vez (el plan se consume);
+- los artefactos `specs/<feature>/` ya no están en el workspace de la ejecución.
+
+En cualquiera de esos casos se planifica de nuevo, como antes. Antes de este cambio, aprobar el plan lo planificaba dos veces: el segundo plan sustituía al que la persona acababa de revisar y costaba varios minutos y tokens más.
 
 ## Confirmación por herramienta
 

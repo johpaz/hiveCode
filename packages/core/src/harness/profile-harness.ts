@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises"
+import { readdir, readFile, stat } from "node:fs/promises"
 import * as path from "node:path"
 import { col, fromIndexable, mutateDoc } from "../storage/hive.ts"
 import type { AgentDoc, HarnessTaskDoc } from "../storage/collections.ts"
@@ -106,6 +106,14 @@ function passed(output: string): boolean {
   return PASS_RE.test(output) && !FAIL_RE.test(output)
 }
 
+async function directoryExists(dir: string): Promise<boolean> {
+  try {
+    return (await stat(dir)).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 async function newestFeatureDir(workspace: string): Promise<string | undefined> {
   const specs = path.join(workspace, "specs")
   try {
@@ -115,6 +123,26 @@ async function newestFeatureDir(workspace: string): Promise<string | undefined> 
   } catch {
     return undefined
   }
+}
+
+const GATE_FILE_CHARS = 3_000
+
+/**
+ * What the person is asked to approve at the specification gate: the artifacts the
+ * Planner wrote, not only BEE's summary of them. A run that spent its steps can end with
+ * a summary that says nothing, and approving a plan you cannot read is not approving it.
+ */
+export async function specificationEvidence(workspace: string, featureDir: string, summary: string): Promise<string> {
+  const parts = [summary.trim()]
+  for (const file of ["spec.md", "plan.md", "tasks.md"]) {
+    try {
+      const text = (await readFile(path.join(workspace, featureDir, file), "utf-8")).trim()
+      if (!text) continue
+      const clipped = text.length > GATE_FILE_CHARS ? `${text.slice(0, GATE_FILE_CHARS)}\n…` : text
+      parts.push(`── ${featureDir}/${file} ──\n${clipped}`)
+    } catch { /* artifact not written: the summary is all there is */ }
+  }
+  return parts.filter(Boolean).join("\n\n")
 }
 
 async function configureProfiles(workspace: string, provider?: string, model?: string): Promise<void> {
@@ -165,6 +193,15 @@ export class ProfileHarness {
       updatedAt: now,
     }
     if (!existing) await tasks.put(taskId, task, { expectedVersion: 0 })
+    else {
+      // Resumed from another code task (an approved plan): point it at this run's task and workspace.
+      await tasks.put(taskId, {
+        ...existing.doc,
+        parentTaskId: options.parentTaskId ?? existing.doc.parentTaskId,
+        worktreePath: options.workspace,
+        updatedAt: now,
+      }, { expectedVersion: existing.version })
+    }
     await configureProfiles(options.workspace, options.provider, options.model)
     const sessionPreamble = sessionHistoryPreamble(options.history)
 
@@ -257,10 +294,15 @@ ${objective}`,
         return { taskId, complexity, status: "completed", response, repairCycles: 0 }
       }
 
-      let planning = existing?.doc.planId
-        ? `Reanudando artefactos Spec Kit desde ${existing.doc.planId}.`
+      // A plan approved after a `plan` run is reused, not redone. Only if its artifacts are still
+      // there: they live in the workspace, and a resumed task may be pointed at another one.
+      const reusablePlan = existing?.doc.planId && await directoryExists(path.join(options.workspace, existing.doc.planId))
+        ? existing.doc.planId
+        : undefined
+      let planning = reusablePlan
+        ? `Reanudando artefactos Spec Kit desde ${reusablePlan}.`
         : ""
-      let featureDir = existing?.doc.planId
+      let featureDir = reusablePlan
       if (!featureDir) {
         await updateStage("planning")
         planning = await invoke(
@@ -299,7 +341,7 @@ ${objective}`,
         if (!options.approve) {
           return { taskId, complexity, status: "waiting_user", response: planning, featureDir, repairCycles: 0 }
         }
-        const decision = await options.approve("specification", planning)
+        const decision = await options.approve("specification", await specificationEvidence(options.workspace, featureDir, planning))
         if (decision !== "approve") {
           await updateStage("cancelled")
           return { taskId, complexity, status: "cancelled", response: planning, featureDir, repairCycles: 0 }

@@ -259,6 +259,9 @@ export abstract class OpenAICompatBase implements LLMProvider {
         final_content = extracted.content
       }
     }
+    // Without tools on offer (a synthesis pass) the model may still write a call; there is
+    // nothing to run, and the user should not be shown the markup as if it were the answer.
+    if (!final_tool_calls?.length) final_content = stripDsmlBlocks(final_content)
 
     final_tool_calls = ensureToolCallIds(final_tool_calls)
 
@@ -388,6 +391,9 @@ export abstract class OpenAICompatBase implements LLMProvider {
         final_content = extracted.content
       }
     }
+    // Without tools on offer (a synthesis pass) the model may still write a call; there is
+    // nothing to run, and the user should not be shown the markup as if it were the answer.
+    if (!final_tool_calls?.length) final_content = stripDsmlBlocks(final_content)
 
     final_tool_calls = ensureToolCallIds(final_tool_calls)
 
@@ -534,6 +540,13 @@ const DSML_TAG = (name: string) => `${DSML_BAR}DSML${DSML_BAR}\\s*${name}`
 const DSML_BLOCK = new RegExp(`<${DSML_TAG("(?:function_|tool_)?calls")}\\s*>([\\s\\S]*?)(?:</${DSML_TAG("(?:function_|tool_)?calls")}\\s*>|$)`, "g")
 const DSML_INVOKE = new RegExp(`<${DSML_TAG("invoke")}\\s+name\\s*=\\s*"([\\w.-]+)"\\s*>([\\s\\S]*?)</${DSML_TAG("invoke")}\\s*>`, "g")
 const DSML_PARAM = new RegExp(`<${DSML_TAG("parameter")}\\s+name\\s*=\\s*"([\\w.-]+)"(?:\\s+string\\s*=\\s*"(true|false)")?\\s*>([\\s\\S]*?)</${DSML_TAG("parameter")}\\s*>`, "g")
+
+/** Removes DSML tool-call markup from text that has no tools to run it with. */
+export function stripDsmlBlocks(content: string): string {
+  if (!content.includes("DSML")) return content
+  DSML_BLOCK.lastIndex = 0
+  return content.replace(DSML_BLOCK, "").trim()
+}
 
 function extractDsmlToolCalls(content: string, toolNameMap: Map<string, string>): { content: string; tool_calls: LLMToolCall[] } {
   const tool_calls: LLMToolCall[] = []

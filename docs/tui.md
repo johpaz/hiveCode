@@ -68,7 +68,7 @@ En **Providers**, cada fila muestra el estado de la clave: `✓` guardada, `?` f
 | `info_modal` | `?` o `show_info_modal`; `↑/↓` desplaza, `Esc` cierra. |
 | `plan_approval_modal` | Tras un plan en `plan`/`approval`: ejecutar automáticamente, fase por fase, agregar contexto, cancelar. Ver [modes.md](./modes.md#aprobación-del-plan-modal). |
 | `ReviewConfirm` | Confirmación de `Alt+A/R/M`. |
-| `tool_approval_modal` | **AUTORIZAR HERRAMIENTA**: una herramienta de `approval` pide permiso. `↩`/`y` autoriza, `Esc`/`n` rechaza, `↑↓` desplaza. Se ajusta al tamaño de los argumentos. |
+| `tool_approval_modal` | **AUTORIZAR HERRAMIENTA** (una herramienta de `approval` pide permiso) y las puertas del harness **APROBAR ESPECIFICACIÓN Y PLAN** / **APROBAR RESULTADO** (`kind: "gate"`). `↩`/`y` aprueba, `Esc`/`n` rechaza o cancela, `↑↓`/`PgUp`/`PgDn` desplazan. Se ajusta al contenido; las puertas pueden ocupar casi toda la pantalla. |
 | `resume_badge` | `▶ RESUME` en el enjambre: `Enter` arma, `Enter` otra vez reanuda una tarea interrumpida. |
 
 ## Protocolo IPC
@@ -87,11 +87,11 @@ Los `critical` se envían de inmediato; los `low` pueden ir con retraso. `tool_c
 
 ### TUI → Bun (`TuiMessage`)
 
-`ready`, `submit` (texto del input, incluye `/approve …`, `/reject`, `/halt`), `mode_change`, `modal_submit`, `modal_cancel`, `info_modal_close`, `suspended`, `exit`, `rollback`, `task_resume`, `request_settings`, `provider_activate`, `tool_approval_response` (`{ request_id, approve }`), entre otros definidos en `protocol.ts`.
+`ready`, `submit` (texto del input, incluye `/approve …`, `/reject`, `/halt`), `mode_change`, `modal_submit`, `modal_cancel`, `info_modal_close`, `suspended`, `exit`, `rollback`, `task_resume`, `request_settings`, `provider_activate`, `tool_approval_response` (`{ request_id, approve }`, también para las puertas), entre otros definidos en `protocol.ts`.
 
 ## Revisión de cambios (`Alt+A/R/M`)
 
-Estas teclas aprueban, rechazan o piden modificar **cambios de archivos** en modo `approval`. No son las puertas `specification`/`convergence` del harness (ver la limitación en [modes.md](./modes.md#puertas-de-aprobación-del-harness)) ni la autorización por herramienta, que tiene su propio modal.
+Estas teclas aprueban, rechazan o piden modificar **cambios de archivos** en modo `approval`. No son las puertas `specification`/`convergence` del harness ni la autorización por herramienta, que tiene su propio modal.
 
 ## Modo headless
 

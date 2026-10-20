@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test"
-import { extractToolCallsFromText } from "@johpaz/hivecode-core/agent/llm-providers/openai-compat-base"
+import { extractToolCallsFromText, stripDsmlBlocks } from "@johpaz/hivecode-core/agent/llm-providers/openai-compat-base"
 
 // DeepSeek emite sus llamadas en DSML cuando el servidor no las convierte a
 // tool_calls. Sin parser, el bloque se veía crudo en la TUI y la herramienta
@@ -57,6 +57,12 @@ describe("formato DSML de DeepSeek", () => {
   it("acepta `tool_calls` como envoltorio", () => {
     const wrapped = block().replaceAll("function_calls", "tool_calls")
     expect(extractToolCallsFromText(wrapped, new Map()).tool_calls).toHaveLength(2)
+  })
+
+  it("stripDsmlBlocks quita el marcado de un texto sin herramientas que ejecutarlo", () => {
+    const text = `Resumen del estado.\n${block().split("\n").slice(1).join("\n")}`
+    expect(stripDsmlBlocks(text)).toBe("Resumen del estado.")
+    expect(stripDsmlBlocks("sin marcado")).toBe("sin marcado")
   })
 
   it("no toca un texto sin DSML", () => {

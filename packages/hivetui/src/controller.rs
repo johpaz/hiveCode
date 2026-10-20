@@ -227,6 +227,14 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 approval.scroll += 1;
                 None
             }
+            KeyCode::PageUp => {
+                approval.scroll = approval.scroll.saturating_sub(10);
+                None
+            }
+            KeyCode::PageDown => {
+                approval.scroll += 10;
+                None
+            }
             _ => None,
         };
         if let Some(approve) = answer {
@@ -1688,6 +1696,8 @@ mod tests {
             tool: tool.to_string(),
             summary: "{\"path\":\"a.txt\"}".to_string(),
             detail: "{\n  \"path\": \"a.txt\"\n}".to_string(),
+            kind: String::new(),
+            title: String::new(),
         });
     }
 
@@ -1756,6 +1766,43 @@ mod tests {
         handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         assert_eq!(last_tool_answer(&state), Some(("r2".to_string(), false)));
         assert!(matches!(state.modal, ModalState::None));
+    }
+
+    #[test]
+    fn a_harness_gate_opens_the_approval_modal() {
+        let mut state = AppState::default();
+        state.apply_message(crate::ipc::BunMessage::ToolApprovalRequest {
+            request_id: "g1".to_string(),
+            agent: "bee".to_string(),
+            tool: "Implementar el plan".to_string(),
+            summary: "APROBAR ESPECIFICACIÓN Y PLAN".to_string(),
+            detail: "# Plan\n1. algo".to_string(),
+            kind: "gate".to_string(),
+            title: "APROBAR ESPECIFICACIÓN Y PLAN".to_string(),
+        });
+        match &state.modal {
+            ModalState::ToolApproval(a) => assert!(a.is_gate()),
+            other => panic!("modal inesperado: {other:?}"),
+        }
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(last_tool_answer(&state), Some(("g1".to_string(), false)));
+    }
+
+    #[test]
+    fn page_keys_scroll_a_long_gate_without_answering() {
+        let mut state = AppState::default();
+        ask_tool(&mut state, "g2", "gate");
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        match &state.modal {
+            ModalState::ToolApproval(a) => assert_eq!(a.scroll, 10),
+            other => panic!("{other:?}"),
+        }
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        match &state.modal {
+            ModalState::ToolApproval(a) => assert_eq!(a.scroll, 0),
+            other => panic!("{other:?}"),
+        }
+        assert!(last_tool_answer(&state).is_none());
     }
 
     #[test]

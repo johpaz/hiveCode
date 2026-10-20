@@ -201,7 +201,7 @@ Tras un plan, la TUI abre un modal: **ejecutar automáticamente**, **aprobar fas
 
 En `approval`, cada escritura (`fs_write`, `fs_edit`, `fs_delete`, `git_commit`) abre un modal **AUTORIZAR HERRAMIENTA** con los argumentos exactos: `Enter`/`y` autoriza, `Esc`/`n` rechaza. Un rechazo no se reintenta por otra vía. Cambiar de modo con `Shift+Tab` durante una tarea solo afecta a la siguiente.
 
-> **Limitación conocida:** las puertas `specification` y `convergence` del harness aún no tienen modal propio en la TUI (se usa el modal del plan y la autorización por herramienta). Detalle en [`docs/modes.md`](./docs/modes.md).
+En `approval`, las tareas complejas tienen además dos puertas: **aprobar especificación y plan** (con `spec.md`, `plan.md` y `tasks.md` a la vista) antes de implementar, y **aprobar resultado** antes de cerrar. Detalle en [`docs/modes.md`](./docs/modes.md).
 
 ---
 

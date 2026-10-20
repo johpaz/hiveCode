@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkspaceManager } from "../../packages/code/src/workspace/manager";
@@ -71,6 +71,34 @@ test("integrating a task leaves out agent scratch but keeps legitimate dotfiles"
     expect(status).not.toContain(".smoke");
     expect(status).not.toContain(".verify-");
     expect(status).not.toContain("run.log");
+  } finally {
+    await manager.cleanup(assignment);
+  }
+});
+
+test("integrating a task that edits a file the project has but git does not track yet", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "hive-ws-repo-"));
+  git(repo, "init", "-q", "-b", "main");
+  writeFileSync(join(repo, "a.ts"), "export const a = 1\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "init");
+  // Lo que deja la pasada de planificación en el proyecto real: sin versionar.
+  mkdirSync(join(repo, "specs", "001-x"), { recursive: true });
+  writeFileSync(join(repo, "specs", "001-x", "plan.md"), "# Plan v1\n");
+
+  const manager = new WorkspaceManager({ rootDir: mkdtempSync(join(tmpdir(), "hive-ws-root-")) });
+  const assignment = manager.createAssignment({ taskId: "untracked-edit", projectPath: repo, mutating: true });
+  await manager.prepare(assignment);
+  try {
+    // La implementación reescribe el plan y añade código.
+    writeFileSync(join(assignment.worktreePath, "specs", "001-x", "plan.md"), "# Plan v2\n");
+    writeFileSync(join(assignment.worktreePath, "b.ts"), "export const b = 2\n");
+
+    const result = await manager.integrate(assignment);
+
+    expect(result.status).toBe("integrated");
+    expect(readFileSync(join(repo, "specs", "001-x", "plan.md"), "utf-8")).toBe("# Plan v2\n");
+    expect(readFileSync(join(repo, "b.ts"), "utf-8")).toBe("export const b = 2\n");
   } finally {
     await manager.cleanup(assignment);
   }

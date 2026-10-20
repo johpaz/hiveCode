@@ -166,6 +166,15 @@ export class WorkspaceManager {
         assignment.projectPath,
       )
       if (applied.ok) return { status: "integrated", diff }
+      // `--3way` needs every touched file in the index. A file the project has but git does not
+      // track yet (Spec Kit artifacts from the planning pass, for one) is not there, so a task
+      // that edits it cannot be merged. The baseline already holds those files, so a plain apply
+      // against the working tree is exact; it is all-or-nothing, so it cannot half-apply.
+      const plain = await this.runCommand(
+        ["git", "apply", "--whitespace=nowarn", patchPath],
+        assignment.projectPath,
+      )
+      if (plain.ok) return { status: "integrated", diff }
       const error = applied.stderr || applied.stdout || "unknown integration failure"
       return /conflict|patch does not apply|failed/i.test(error)
         ? { status: "conflict", diff, error }

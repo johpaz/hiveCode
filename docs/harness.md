@@ -30,7 +30,7 @@ Cada tarea es un documento `harnessTasks` con `stage` (`understanding → planni
 
 1. **Planning.** BEE delega el plan al `planner` (y opcionalmente una investigación al `scout`, en paralelo). El planner produce `spec.md`, `plan.md`, `tasks.md` bajo `specs/<feature>/` y responde con `FEATURE_DIR: specs/...`. Si falta, el harness busca el directorio más reciente en `specs/`; si no hay ninguno, falla.
 2. **Plan listo.** En `policy: "plan"` termina aquí (`status: ready`).
-3. **Puerta `specification`** (solo `approval`): `waiting_user` hasta que `approve("specification", plan)` responda `approve`; `cancel` termina la tarea como `cancelled`.
+3. **Puerta `specification`** (solo `approval`): `waiting_user` hasta que `approve("specification", evidencia)` responda `approve`; `cancel` termina la tarea como `cancelled`. La evidencia es el resumen de BEE más los artefactos del plan (`specificationEvidence`).
 4. **Executing.** BEE lee `tasks.md`, delega cada tarea al worker de su *lane* (`scout`, `builder`, `spider`) con criterios de aceptación. Las tareas independientes se delegan en el **mismo paso** para correr en paralelo (tope `MAX_PARALLEL_WORKERS = 3`, un solo `builder` por conjunto de archivos). Esta fase corre con `approvedExecution = true`.
 5. **Quality Gate.** BEE delega al `verifier`, que reproduce cada criterio y revisa el diff y debe terminar con `VERDICT: PASS` o `VERDICT: FAIL`.
 6. **Reparación.** Si es `FAIL`, hasta `DEFAULT_MAX_REPAIR_CYCLES = 2` ciclos con `task_revise`/`builder` y nuevo Quality Gate. Si no converge, la tarea falla con `Quality gate did not converge`.
@@ -41,7 +41,7 @@ Los vereditos se reconocen con `VERDICT|VEREDICTO|STATUS|ESTADO: PASS|APPROVED|A
 
 ### Reanudación y errores
 
-El `stage` y `nextAction` se persisten tras cada transición. `resumeTaskId` retoma una tarea sin rehacer el plan (`planId` guarda el `FEATURE_DIR`). Un error se escribe en `blocker` y la tarea queda `failed` (o `cancelled` si la señal de abortar estaba activa).
+El `stage` y `nextAction` se persisten tras cada transición. `resumeTaskId` retoma una tarea sin rehacer el plan (`planId` guarda el `FEATURE_DIR`), siempre que `specs/<feature>/` exista en el workspace de la nueva ejecución; si no, se planifica otra vez. Es lo que usa la aprobación de un plan hecho en `plan` ([modes.md](./modes.md#puertas-de-aprobación-del-harness)): al reanudar, la tarea se reasocia a la nueva tarea de código y a su workspace. Un error se escribe en `blocker` y la tarea queda `failed` (o `cancelled` si la señal de abortar estaba activa).
 
 El historial de la sesión se antepone al mensaje de BEE (`sessionHistoryPreamble`, máx. 12 000 caracteres, 1 500 por turno, los turnos más nuevos primero), porque cada tarea abre un hilo nuevo.
 
@@ -97,7 +97,7 @@ Si no se pide una, `selectSpecialty` elige por expresiones regulares sobre la ta
 - **No mutante** (modo `plan`, conversación): usa el directorio del proyecto, sin worktree.
 - **Mutante**: `git worktree add -B hivecode/task-<slug> /tmp/hivecode-worktrees/<slug>` más una referencia base `refs/hivecode/baselines/<slug>`. Requiere un repo git con al menos un commit.
 - **`diff`**: marca los archivos nuevos con `git add -N` y compara con la referencia base. Excluye siempre los respaldos `*.hive-bak.<ts>` que dejan `fs_write`/`fs_edit`, `node_modules/` y el scratch de verificación (ver abajo), aunque el builder no haya escrito `.gitignore`.
-- **`integrate`**: aplica el diff al proyecto con `git apply --3way`. Resultados: `integrated`, `noop`, `conflict`, `failed`. En `approval` se muestra el diff para aprobarlo antes de integrar.
+- **`integrate`**: aplica el diff al proyecto con `git apply --3way`; si falla, reintenta con un `git apply` normal (todo o nada). `--3way` exige que cada archivo tocado esté en el índice, y no lo están los que el proyecto tiene sin versionar, como los artefactos Spec Kit que deja la pasada de planificación en `plan`; el baseline ya los contiene, así que el apply normal es exacto. Resultados: `integrated`, `noop`, `conflict`, `failed`. En `approval` se muestra el diff para aprobarlo antes de integrar.
 - **`cleanup`**: borra worktree y rama.
 
 El worktree de la sesión se acepta como alcance válido de `get_project_context` (`isWorktreeOf` en `agent/project-context.ts`); sin eso, los builders fallaban con "Session and workspace do not match".
@@ -105,5 +105,7 @@ El worktree de la sesión se acepta como alcance válido de `get_project_context
 Los comandos del shell del sandbox usan un `HOME` y `TMPDIR` fuera del workspace (`os.tmpdir()/hivecode-home/<hash>`), para que cachés como `.bun`, `.npm` o `.tools` no acaben dentro del proyecto.
 
 Los prompts del Builder y del Quality Gate les piden dejar sus archivos temporales en `$TMPDIR`. Como red de seguridad, el diff descarta además el scratch que dejaron corridas reales: `.qg/`, `.smoke/`, `.scratch/`, `.tmp/`, `.cache/`, `.verify-*` y cualquier `*.log` **sin versionar** (`WORKSPACE_NOISE` en `workspace/manager.ts`). Dotfiles legítimos como `.gitignore` o `.github/` sí se integran. Un scratch con otro nombre sí se integraría: no hay forma de saber qué archivos son "del proyecto".
+
+**Si la integración falla** (`conflict`/`failed`), la tarea **no** se da por completada: queda en pausa, el worktree se conserva y la respuesta final añade "⚠ El trabajo terminó pero NO se pudo aplicar a tu proyecto" con la ruta y la rama. Antes, ese caso solo dejaba una alerta en la barra de estado y la tarea figuraba como "listo".
 
 **Cancelar.** `/halt` no integra ni borra el worktree: queda en `/tmp/hivecode-worktrees/<tarea>` con su rama y el mensaje de cancelación da la ruta. Se elimina a mano con `git worktree remove --force <ruta>` y `git branch -D <rama>`; no hay limpieza automática de worktrees cancelados.
