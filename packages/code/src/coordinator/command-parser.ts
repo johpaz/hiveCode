@@ -343,6 +343,7 @@ export const COMMAND_CATALOG = [
   { command: "/task list", category: "task", description: "listar tareas recientes" },
   { command: "/task status", category: "task", description: "estado detallado de tarea" },
   { command: "/task cancel", category: "task", description: "cancelar tarea en curso" },
+  { command: "/task delegations", category: "task", description: "quién delegó qué a quién, y cómo terminó" },
   { command: "/task rollback", category: "task", description: "revertir cambios de tarea" },
   { command: "/session list", category: "session", description: "listar sesiones recientes" },
   { command: "/session resume", category: "session", description: "reanudar sesion por id" },
@@ -519,7 +520,7 @@ const HELP_CATEGORIES: Record<string, { desc: string; commands: string[] }> = {
   mcp:       { desc: "Integrar servidores MCP", commands: ["/mcp list", "/mcp add", "/mcp enable", "/mcp disable", "/mcp test"] },
   skill:     { desc: "Cargar y activar skills", commands: ["/skill list", "/skill enable", "/skill disable", "/skill info", "/skill add"] },
   mode:      { desc: "Cambiar modo Plan/Approval/Auto", commands: ["/mode get", "/mode set", "/mode history"] },
-  task:      { desc: "Gestionar tareas", commands: ["/task list", "/task status", "/task cancel", "/task rollback"] },
+  task:      { desc: "Gestionar tareas", commands: ["/task list", "/task status", "/task delegations", "/task cancel", "/task rollback"] },
   narrative: { desc: "Buscar en el historial", commands: ["/narrative show", "/narrative search", "/narrative export"] },
   ace:       { desc: "Aprendizaje adaptativo", commands: ["/ace status", "/ace playbook list", "/ace playbook reset", "/ace reflector run"] },
   github:    { desc: "Integraci\u00f3n con GitHub", commands: ["/github status", "/github whoami", "/github set-repo", "/github connect", "/github disconnect"] },
@@ -1622,6 +1623,14 @@ async function handleTaskCommand(
           `  Creada: ${row.created_at}`,
           "",
         ].join("\n"))
+    }
+    case "delegations": {
+      const { listDelegations, formatDelegations } = await import("@johpaz/hivecode-core/agent/delegation-log")
+      const limitIdx = rest.indexOf("--limit")
+      const limit = limitIdx === -1 ? 15 : Number(rest[limitIdx + 1])
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) return { handled: true, output: "--limit debe ser un entero entre 1 y 100" }
+      const taskId = rest.find((word, i) => !word.startsWith("--") && rest[i - 1] !== "--limit")
+      return display("\n" + formatDelegations(await listDelegations({ limit, taskId })) + "\n")
     }
     case "cancel": {
       const id = rest[0]

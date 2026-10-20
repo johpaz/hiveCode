@@ -1853,6 +1853,33 @@ mod tests {
     }
 
     #[test]
+    fn page_keys_scroll_the_focused_response_in_mesa_and_clamp_at_the_top() {
+        let mut state = AppState::default();
+        state.active_tab = TabId::Mesa;
+        state.history.scroll = 7;
+
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(state.history.scroll, 12);
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(state.history.scroll, 7);
+        // Nunca por debajo de cero.
+        for _ in 0..5 {
+            handle_key_event(&mut state, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        }
+        assert_eq!(state.history.scroll, 0);
+    }
+
+    #[test]
+    fn page_keys_do_not_scroll_mesa_while_a_modal_has_the_keyboard() {
+        let mut state = AppState::default();
+        state.active_tab = TabId::Mesa;
+        state.history.scroll = 7;
+        state.apply_message(crate::ipc::BunMessage::PlanApprovalRequest);
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(state.history.scroll, 7, "el modal del plan se queda con las teclas");
+    }
+
+    #[test]
     fn a_request_waits_while_settings_is_open() {
         let mut state = AppState::default();
         handle_key_event(&mut state, KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));

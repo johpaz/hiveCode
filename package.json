@@ -36,6 +36,7 @@
     "./agent/conversation-store": "./packages/core/src/agent/conversation-store.ts",
     "./agent/execution-mode": "./packages/core/src/agent/execution-mode.ts",
     "./agent/tool-approval": "./packages/core/src/agent/tool-approval.ts",
+    "./agent/delegation-log": "./packages/core/src/agent/delegation-log.ts",
     "./agent/tool-selector": "./packages/core/src/agent/tool-selector.ts",
     "./agent/skill-selector": "./packages/core/src/agent/skill-selector.ts",
     "./agent/playbook-selector": "./packages/core/src/agent/playbook-selector.ts",

@@ -72,6 +72,8 @@ El harness ejecuta a BEE con al menos `DEFAULT_MAX_HARNESS_STEPS = 40` pasos, pa
 - **`task_status`**: estado de una delegación.
 - **`spawn_agent`**: subagente efímero para una subtarea independiente. Hereda solo herramientas y skills del padre, no puede crear otra generación y se destruye al terminar; la evidencia queda en HiveDB.
 
+Para auditar qué se delegó, `/task delegations` lista las delegaciones recientes con el agente que las hizo, el worker y la especialidad, la descripción, los criterios, el estado y la duración ([development.md](./development.md#diagnóstico)).
+
 ### Concurrencia
 
 `agent/execution-limits.ts`: `withExecutionSlot` limita las llamadas activas a modelo/herramienta **por sesión** (por defecto 4; `HIVE_MAX_AGENT_CONCURRENCY`, de 1 a 32). Esperar a un hijo no consume plaza. Además, un solo *writer* por workspace a la vez.

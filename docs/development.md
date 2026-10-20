@@ -92,7 +92,7 @@ rm -rf /tmp/hivecode-worktrees
 - `hivecode doctor`: providers, llavero, base de datos, propuestas pendientes.
 - `/logs list|follow` dentro de la TUI y `HIVE_LOG_CONSOLE` para ver el log en consola.
 - Bun recoge las trazas de herramientas en `code_traces` y los eventos del harness en la narrativa (`/narrative show|search`).
-- Las delegaciones (`task_delegate`) no tienen un log propio: se reconstruyen desde la narrativa y las trazas.
+- **`/task delegations [--limit N] [texto]`** muestra quién delegó qué a quién (hora, agente origen → worker/especialidad, herramienta, descripción recortada, criterios, estado, duración y error). Sale de `toolRuns`, que ya guarda los argumentos de cada llamada (`agent/delegation-log.ts`); incluye `task_delegate`, `task_revise` y `spawn_agent`. El texto filtra por el id de la tarea externa.
 
 ## Convenciones de cambios
 
