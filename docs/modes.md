@@ -53,10 +53,10 @@ La decisión llega por `options.approve`. Si no hay `approve` cableado (p. ej. e
 
 El resumen de BEE puede ser inútil si el turno agotó sus pasos; por eso se adjuntan los artefactos, que son lo que realmente se aprueba. El texto de un resumen que solo contenga marcado DSML se descarta (`stripDsmlBlocks`).
 
-**Un plan aprobado se reutiliza.** Cuando `plan` termina con un plan Spec Kit (`status: ready` y `featureDir`), `CoordinatorManager` lo recuerda por el texto del objetivo (hasta 20 planes, 30 minutos). Si la persona aprueba ese mismo objetivo ("Ejecutar automáticamente" o "Aprobar fase por fase"), la ejecución llama a `ProfileHarness.run({ resumeTaskId })` y **no vuelve a planificar**: va directo a la ejecución, o a la puerta `specification` en `approval`. No se reutiliza si:
+**Un plan aprobado se reutiliza.** Cuando `plan` termina con un plan Spec Kit, su fila en `harnessTasks` queda en `stage: "ready"` con el `planId` de su directorio `specs/<feature>/`. Si la persona aprueba ese mismo objetivo ("Ejecutar automáticamente" o "Aprobar fase por fase"), `CoordinatorManager.findReadyPlan` busca la fila más reciente con ese `title` y esa etapa, y la ejecución llama a `ProfileHarness.run({ resumeTaskId })`: **no vuelve a planificar** y va directo a la ejecución, o a la puerta `specification` en `approval`. No se guarda nada aparte: es la misma tarea del harness, en HiveDB, así que sobrevive a cerrar y reabrir la TUI. Reanudarla la saca de `ready`, por lo que un plan se usa una sola vez. No se reutiliza si:
 
 - el objetivo cambió (por ejemplo "Agregar contexto" añade texto);
-- pasaron más de 30 minutos, o se aprobó ya una vez (el plan se consume);
+- la tarea del plan tiene más de 30 minutos, o ya se ejecutó;
 - los artefactos `specs/<feature>/` ya no están en el workspace de la ejecución.
 
 En cualquiera de esos casos se planifica de nuevo, como antes. Antes de este cambio, aprobar el plan lo planificaba dos veces: el segundo plan sustituía al que la persona acababa de revisar y costaba varios minutos y tokens más.
@@ -97,4 +97,4 @@ Cada comando se analiza por segmentos (`&&`, `||`, `;`, `|`, subshells). Un argu
 - `Shift+Tab` envía `mode_change` por IPC; el REPL guarda el modo (`onModeChange` → `saveMode`).
 - **Cambiar de modo durante una tarea no afecta a esa tarea.** `run.ts` fija el modo de la tarea (`setExecutionMode`) mientras dura y lo restaura al terminar, y el bucle lee ese valor; `Shift+Tab` solo cambia la etiqueta y el modo de la **siguiente** tarea (comprobado: durante una tarea en `auto`, `execution_mode` sigue en `auto` aunque la cabecera muestre `PLAN`).
 - Una tarea lanzada con `/approve review` desde `plan` se ejecuta con política `approval`, aunque la cabecera siga mostrando `PLAN` hasta que cambies de modo.
-- `/halt` (o `/stop`) cancela la tarea activa: aborta a los workers, restaura el modo y **no integra nada**. Si la tarea tenía worktree, queda sin borrar y el mensaje indica su ruta y su rama (`hivecode/task-*`) para que puedas inspeccionarlo o eliminarlo con `git worktree remove`.
+- `/halt` (o `/stop`) cancela la tarea activa: aborta a los workers, restaura el modo y **no integra nada**. Si la tarea tenía worktree, queda sin borrar y el mensaje indica su ruta y su rama (`hivecode/task-*`) para que puedas inspeccionarlo; `/task cleanup` los borra después (ver [harness.md](./harness.md#workspaces-aislados)).

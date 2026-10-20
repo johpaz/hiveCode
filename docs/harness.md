@@ -110,4 +110,4 @@ Los prompts del Builder y del Quality Gate les piden dejar sus archivos temporal
 
 **Si la integración falla** (`conflict`/`failed`), la tarea **no** se da por completada: queda en pausa, el worktree se conserva y la respuesta final añade "⚠ El trabajo terminó pero NO se pudo aplicar a tu proyecto" con la ruta y la rama. Antes, ese caso solo dejaba una alerta en la barra de estado y la tarea figuraba como "listo".
 
-**Cancelar.** `/halt` no integra ni borra el worktree: queda en `/tmp/hivecode-worktrees/<tarea>` con su rama y el mensaje de cancelación da la ruta. Se elimina a mano con `git worktree remove --force <ruta>` y `git branch -D <rama>`; no hay limpieza automática de worktrees cancelados.
+**Cancelar.** `/halt` no integra ni borra el worktree: queda en `/tmp/hivecode-worktrees/<tarea>` con su rama y el mensaje de cancelación da la ruta. `/task cleanup` borra los worktrees de tareas terminadas que ya no tienen nada que conservar; los que guardan trabajo sin integrar se listan como "CONSERVADO", y `/task cleanup --force` los borra también. Los de tareas en curso nunca se tocan. No hay limpieza automática.

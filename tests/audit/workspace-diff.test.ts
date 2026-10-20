@@ -103,3 +103,31 @@ test("integrating a task that edits a file the project has but git does not trac
     await manager.cleanup(assignment);
   }
 });
+
+test("listTaskWorktrees finds leftover worktrees and tells which ones hold unintegrated work", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "hive-ws-repo-"));
+  git(repo, "init", "-q", "-b", "main");
+  writeFileSync(join(repo, "a.ts"), "export const a = 1\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "init");
+
+  const manager = new WorkspaceManager({ rootDir: mkdtempSync(join(tmpdir(), "hive-ws-root-")) });
+  const empty = manager.createAssignment({ taskId: "left-empty", projectPath: repo, mutating: true });
+  const dirty = manager.createAssignment({ taskId: "left-dirty", projectPath: repo, mutating: true });
+  await manager.prepare(empty);
+  await manager.prepare(dirty);
+  try {
+    writeFileSync(join(dirty.worktreePath, "work.ts"), "export const w = 1\n");
+
+    const found = await manager.listTaskWorktrees(repo);
+
+    expect(found.map(w => w.taskSlug).sort()).toEqual(["left-dirty", "left-empty"]);
+    expect(found.find(w => w.taskSlug === "left-empty")?.hasChanges).toBe(false);
+    expect(found.find(w => w.taskSlug === "left-dirty")?.hasChanges).toBe(true);
+    // El worktree principal del proyecto no es una tarea.
+    expect(found.some(w => w.path === repo)).toBe(false);
+  } finally {
+    await manager.cleanup(empty);
+    await manager.cleanup(dirty);
+  }
+});

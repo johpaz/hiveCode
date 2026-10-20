@@ -15,6 +15,15 @@ const realRun = ProfileHarness.prototype.run
 const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, stdio: "pipe" })
 
+/** What the real harness leaves behind: a task row, which is all the approval looks for. */
+async function writeHarnessRow(taskId: string, patch: Record<string, unknown>) {
+  const { col } = await import("../../packages/core/src/storage/hive")
+  const rows = await col<any>("harnessTasks")
+  const existing = await rows.get(taskId)
+  const doc = { taskId, sessionId: "s", title: "", stage: "understanding", executionPolicy: "approval", priority: "interactive", contextRevision: 1, mutating: true, createdAt: Date.now(), updatedAt: Date.now(), ...(existing?.doc ?? {}), ...patch }
+  await rows.put(taskId, doc, { expectedVersion: existing?.version ?? 0 })
+}
+
 afterEach(() => {
   ProfileHarness.prototype.run = realRun
   registerToolApprovalRequester(null)
@@ -131,18 +140,23 @@ test("approving the plan that plan mode made resumes it instead of planning agai
   const seen: Array<{ policy: string; resumeTaskId?: string }> = []
   ProfileHarness.prototype.run = (async (options: any) => {
     seen.push({ policy: options.policy, resumeTaskId: options.resumeTaskId })
-    return options.policy === "plan"
-      ? { taskId: "harness:plan-1", complexity: "complex", status: "ready", response: "PLAN", featureDir: "specs/001-x", repairCycles: 0 }
-      : { taskId: options.resumeTaskId ?? "harness:new", complexity: "complex", status: "completed", response: "hecho", repairCycles: 0 }
+    if (options.policy === "plan") {
+      await writeHarnessRow("harness:plan-1", { title: options.objective, stage: "ready", planId: "specs/001-x" })
+      return { taskId: "harness:plan-1", complexity: "complex", status: "ready", response: "PLAN", featureDir: "specs/001-x", repairCycles: 0 }
+    }
+    // Reanudar un plan lo hace avanzar: ya no está "ready", así que se usa una sola vez.
+    if (options.resumeTaskId) await writeHarnessRow(options.resumeTaskId, { stage: "completed" })
+    return { taskId: options.resumeTaskId ?? "harness:new", complexity: "complex", status: "completed", response: "hecho", repairCycles: 0 }
   }) as unknown as typeof realRun
   try {
-    const manager = new CoordinatorManager()
     const task = "crea un proyecto con tests"
-    await manager.runTask(task, "plan")
-    await manager.runTask(task, "auto")
+    await new CoordinatorManager().runTask(task, "plan")
+    // Otra instancia, como tras cerrar y reabrir la TUI: el plan está en HiveDB, no en memoria.
+    const reopened = new CoordinatorManager()
+    await reopened.runTask(task, "auto")
     // Una tarea distinta, o la misma otra vez, no arrastra el plan viejo.
-    await manager.runTask(task, "auto")
-    await manager.runTask("otra cosa distinta que crear en un proyecto", "auto")
+    await reopened.runTask(task, "auto")
+    await reopened.runTask("otra cosa distinta que crear en un proyecto", "auto")
 
     expect(seen[0]).toEqual({ policy: "plan", resumeTaskId: undefined })
     expect(seen[1]).toEqual({ policy: "auto", resumeTaskId: "harness:plan-1" })
@@ -175,6 +189,45 @@ test("cancelling at a gate leaves no worktree or branch behind", async () => {
 
     expect(git(repo, "worktree", "list").toString().trim().split("\n")).toHaveLength(1)
     expect(git(repo, "branch", "--list", "hivecode/*").toString().trim()).toBe("")
+  } finally {
+    process.chdir(previousCwd)
+    closeHiveDb()
+    if (previousDb === undefined) delete process.env.HIVE_DB_PATH
+    else process.env.HIVE_DB_PATH = previousDb
+  }
+})
+
+test("a plan older than the reuse window is not resumed", async () => {
+  const previousDb = process.env.HIVE_DB_PATH
+  const previousCwd = process.cwd()
+  closeHiveDb()
+  process.env.HIVE_DB_PATH = mkdtempSync(join(tmpdir(), "hive-stale-"))
+  const repo = mkdtempSync(join(tmpdir(), "hive-stale-repo-"))
+  git(repo, "init", "-q", "-b", "main")
+  writeFileSync(join(repo, "a.txt"), "a\n")
+  git(repo, "add", "-A")
+  git(repo, "commit", "-q", "-m", "init")
+  process.chdir(repo)
+
+  const seen: Array<string | undefined> = []
+  ProfileHarness.prototype.run = (async (options: any) => {
+    seen.push(options.resumeTaskId)
+    if (options.policy === "plan") {
+      await writeHarnessRow("harness:plan-old", { title: options.objective, stage: "ready", planId: "specs/001-x" })
+      return { taskId: "harness:plan-old", complexity: "complex", status: "ready", response: "PLAN", featureDir: "specs/001-x", repairCycles: 0 }
+    }
+    return { taskId: "harness:x", complexity: "complex", status: "completed", response: "hecho", repairCycles: 0 }
+  }) as unknown as typeof realRun
+  try {
+    const manager = new CoordinatorManager()
+    const task = "crea un proyecto con tests"
+    await manager.runTask(task, "plan")
+
+    // Envejece la tarea del plan más allá de la ventana de reutilización.
+    await writeHarnessRow("harness:plan-old", { updatedAt: Date.now() - 31 * 60_000 })
+
+    await manager.runTask(task, "auto")
+    expect(seen).toEqual([undefined, undefined])
   } finally {
     process.chdir(previousCwd)
     closeHiveDb()

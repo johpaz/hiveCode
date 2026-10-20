@@ -25,6 +25,15 @@ export interface CreateWorkspaceInput {
   baseRef?: string
 }
 
+export interface TaskWorktree {
+  path: string
+  branch: string
+  /** The task id, lowercased and sanitised, as it appears in the branch name. */
+  taskSlug: string
+  /** Work that was never integrated into the project. */
+  hasChanges: boolean
+}
+
 export interface WorkspaceIntegrationResult {
   status: "integrated" | "noop" | "conflict" | "failed"
   diff?: string
@@ -186,6 +195,30 @@ export class WorkspaceManager {
         // best effort
       }
     }
+  }
+
+  /**
+   * The task worktrees (`hivecode/task-*`) git knows about for this project. A cancelled or
+   * failed task leaves its worktree behind on purpose, so the work can be inspected; over time
+   * they pile up, and this is how they are found again.
+   */
+  async listTaskWorktrees(projectPath: string): Promise<TaskWorktree[]> {
+    const listed = await this.runCommand(["git", "worktree", "list", "--porcelain"], projectPath)
+    if (!listed.ok) return []
+    const found: TaskWorktree[] = []
+    for (const block of (listed.stdout ?? "").split(/\n\n+/)) {
+      const path = /^worktree (.+)$/m.exec(block)?.[1]
+      const branch = /^branch refs\/heads\/(hivecode\/task-.+)$/m.exec(block)?.[1]
+      if (!path || !branch) continue
+      const taskSlug = branch.replace("hivecode/task-", "")
+      let changed = false
+      try {
+        const assignment = this.createAssignment({ taskId: taskSlug, projectPath, mutating: true })
+        changed = (await this.diff({ ...assignment, worktreePath: path })).trim().length > 0
+      } catch { changed = true } // unreadable: keep it rather than delete it
+      found.push({ path, branch, taskSlug, hasChanges: changed })
+    }
+    return found
   }
 
   async cleanup(assignment: WorkspaceAssignment): Promise<void> {

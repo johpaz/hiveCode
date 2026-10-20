@@ -344,6 +344,7 @@ export const COMMAND_CATALOG = [
   { command: "/task status", category: "task", description: "estado detallado de tarea" },
   { command: "/task cancel", category: "task", description: "cancelar tarea en curso" },
   { command: "/task delegations", category: "task", description: "quién delegó qué a quién, y cómo terminó" },
+  { command: "/task cleanup", category: "task", description: "borrar worktrees de tareas canceladas (--force: también con trabajo sin integrar)" },
   { command: "/task rollback", category: "task", description: "revertir cambios de tarea" },
   { command: "/session list", category: "session", description: "listar sesiones recientes" },
   { command: "/session resume", category: "session", description: "reanudar sesion por id" },
@@ -520,7 +521,7 @@ const HELP_CATEGORIES: Record<string, { desc: string; commands: string[] }> = {
   mcp:       { desc: "Integrar servidores MCP", commands: ["/mcp list", "/mcp add", "/mcp enable", "/mcp disable", "/mcp test"] },
   skill:     { desc: "Cargar y activar skills", commands: ["/skill list", "/skill enable", "/skill disable", "/skill info", "/skill add"] },
   mode:      { desc: "Cambiar modo Plan/Approval/Auto", commands: ["/mode get", "/mode set", "/mode history"] },
-  task:      { desc: "Gestionar tareas", commands: ["/task list", "/task status", "/task delegations", "/task cancel", "/task rollback"] },
+  task:      { desc: "Gestionar tareas", commands: ["/task list", "/task status", "/task delegations", "/task cleanup", "/task cancel", "/task rollback"] },
   narrative: { desc: "Buscar en el historial", commands: ["/narrative show", "/narrative search", "/narrative export"] },
   ace:       { desc: "Aprendizaje adaptativo", commands: ["/ace status", "/ace playbook list", "/ace playbook reset", "/ace reflector run"] },
   github:    { desc: "Integraci\u00f3n con GitHub", commands: ["/github status", "/github whoami", "/github set-repo", "/github connect", "/github disconnect"] },
@@ -1623,6 +1624,35 @@ async function handleTaskCommand(
           `  Creada: ${row.created_at}`,
           "",
         ].join("\n"))
+    }
+    case "cleanup": {
+      const { WorkspaceManager } = await import("../workspace/manager")
+      const force = rest.includes("--force")
+      const projectPath = process.cwd() // the TUI is launched from the project
+      const workspaces = new WorkspaceManager()
+      const stillRunning = new Set(
+        (await scanDocs<CodeTaskDoc>("codeTasks"))
+          .filter(task => !["completed", "failed", "cancelled", "rolled_back", "paused"].includes(task.status))
+          .map(task => workspaces.createAssignment({ taskId: task.id, projectPath, mutating: true }).branchName),
+      )
+      const found = await workspaces.listTaskWorktrees(projectPath)
+      if (found.length === 0) return display("\n  No hay worktrees de tareas.\n")
+
+      const lines: string[] = []
+      let removed = 0
+      for (const worktree of found) {
+        const label = `${worktree.branch.replace("hivecode/task-", "").slice(0, 13)}  ${worktree.path}`
+        if (stillRunning.has(worktree.branch)) { lines.push(`  \u25b8 en uso        ${label}`); continue }
+        if (worktree.hasChanges && !force) { lines.push(`  \u25b8 CONSERVADO    ${label}  (trabajo sin integrar; --force lo borra)`); continue }
+        try {
+          await workspaces.cleanup({ ...workspaces.createAssignment({ taskId: worktree.taskSlug, projectPath, mutating: true }), worktreePath: worktree.path })
+          removed++
+          lines.push(`  \u2713 borrado       ${label}${worktree.hasChanges ? "  (tenía trabajo sin integrar)" : ""}`)
+        } catch (err) {
+          lines.push(`  \u2717 error         ${label}  ${(err as Error).message.slice(0, 80)}`)
+        }
+      }
+      return display(["", ...lines, "", `  ${removed} de ${found.length} worktrees borrados.`, ""].join("\n"))
     }
     case "delegations": {
       const { listDelegations, formatDelegations } = await import("@johpaz/hivecode-core/agent/delegation-log")

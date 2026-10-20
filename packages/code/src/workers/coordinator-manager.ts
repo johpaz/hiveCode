@@ -63,6 +63,7 @@ async function getCodeConfig(key: string): Promise<string> {
   return (await (await col<CodeConfigDoc>("codeConfig")).get(key))?.doc.value ?? ""
 }
 
+
 // BEE is index 0 in the bitmask; coordinators follow in the pool
 // librarian and forensic are on-demand workers — not in the persistent pool
 const COORDINATOR_NAMES: PhaseName[] = [
@@ -118,12 +119,31 @@ export class CoordinatorManager extends CoordinatorBase {
   private cancellations = new Map<string, Promise<void>>()
   private workerTasks = new Map<PhaseName, string>()
   private toolTasks = new Map<string, { taskId: string; worker: Bun.Worker }>()
-  /**
-   * Plans made in `plan` mode, by the objective they answer. When the person approves that
-   * same objective, the harness continues from the plan instead of planning a second time.
-   */
-  private plannedTasks = new Map<string, { harnessTaskId: string; at: number }>()
   private static readonly PLAN_REUSE_MS = 30 * 60_000
+
+  /**
+   * The harness task of a plan that `plan` mode made for this objective and nobody has executed
+   * yet. Nothing is stored for this: a plan run leaves its `harnessTasks` row at `stage: "ready"`
+   * with the `planId` of its Spec Kit directory, and executing it moves the row on, so a plan is
+   * used once. It survives closing the TUI because it is in HiveDB like everything else.
+   */
+  private async findReadyPlan(description: string): Promise<string | undefined> {
+    // Reusing a plan is an optimisation: whatever goes wrong here, the task runs and plans again.
+    try {
+      const tasks = await col<HarnessTaskDoc>("harnessTasks")
+      const ready = await tasks.findBy("stage", "ready").catch(async () =>
+        (await tasks.scan()).filter(entry => entry.doc.stage === "ready"))
+      const wanted = description.trim()
+      return ready
+        .map(entry => entry.doc)
+        .filter(task => task.planId && task.title.trim() === wanted && Date.now() - task.updatedAt < CoordinatorManager.PLAN_REUSE_MS)
+        .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.taskId
+    } catch (err) {
+      log.warn(`[coordinator-manager] could not look for a ready plan: ${(err as Error).message}`)
+      return undefined
+    }
+  }
+
   private taskAborts = new Map<string, AbortController>()
   private taskExecutions = new Map<string, Promise<unknown>>()
   private trackExecution<T>(taskId: string, action: Promise<T>): Promise<T> {
@@ -685,11 +705,8 @@ export class CoordinatorManager extends CoordinatorBase {
     // retained below only to resume legacy plans when explicitly requested.
     if (process.env.HIVECODE_LEGACY_HARNESS !== "1") {
       const harness = new ProfileHarness()
-      const planned = this.plannedTasks.get(description)
-      this.plannedTasks.delete(description)
-      const reusePlan = mode !== "plan" && planned && Date.now() - planned.at < CoordinatorManager.PLAN_REUSE_MS
-        ? planned.harnessTaskId
-        : undefined
+      // A plan run starts from scratch; any other mode picks up the plan made for this objective.
+      const reusePlan = mode !== "plan" ? await this.findReadyPlan(description) : undefined
       const result = await this.trackExecution(this.activeTaskId, harness.run({
         resumeTaskId: reusePlan,
         signal: this.taskAborts.get(this.activeTaskId)?.signal,
@@ -793,11 +810,6 @@ export class CoordinatorManager extends CoordinatorBase {
         })
       }
 
-      // Remember the plan so approving it later executes it instead of planning again.
-      if (mode === "plan" && result.status === "ready" && result.featureDir) {
-        this.plannedTasks.set(description, { harnessTaskId: result.taskId, at: Date.now() })
-        if (this.plannedTasks.size > 20) this.plannedTasks.delete(this.plannedTasks.keys().next().value as string)
-      }
 
       let finalResponse = result.response
       let integrationHeld = false

@@ -304,7 +304,7 @@ hivecode exit                          # Detener el sistema
 /mode     get|set|history             Cambiar modo Plan/Approval/Auto
 /mcp      list|add|connect|load|enable|disable|test  Integrar servidores MCP
 /skill    list|enable|disable|info|add Cargar y activar skills
-/task     list|status|delegations|cancel|rollback Gestionar tareas
+/task     list|status|delegations|cleanup|cancel|rollback Gestionar tareas
 /narrative show|search|export         Buscar en el historial
 /ace      status|playbook|reflector   Aprendizaje adaptativo
 /github   status|whoami|set-repo|connect|disconnect  Vincular GitHub
