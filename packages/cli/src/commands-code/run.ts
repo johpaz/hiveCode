@@ -109,6 +109,10 @@ export async function run(description?: string, flags: string[] = [], options?: 
     const hiveErr = classifyError(err)
     if (!quiet) hiveNote(`Fallo (${hiveErr.errorClass})`, [hiveErr.message])
 
+    // Quien llama (la TUI) se queda con el proceso: el planificador de reintentos
+    // duerme, crea otros managers y termina con process.exit(1), lo que cerraría la TUI.
+    if (!exitOnError) throw hiveErr
+
     const recovery = FailureRecoveryScheduler.getInstance()
     const taskId = manager.getActiveTaskId() ?? "unknown"
 

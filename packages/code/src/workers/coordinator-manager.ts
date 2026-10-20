@@ -627,13 +627,13 @@ export class CoordinatorManager extends CoordinatorBase {
     mode = mode ?? getMode()
 
     // No session exists until the user actually says something.
-    this.ensureSession()
+    const sessionId = this.ensureSession()
 
     // Create a turn for this user message — closed after we have the agent response
-    const turnId = this.scribe.createTurn(this.activeSessionId, description)
+    const turnId = this.scribe.createTurn(sessionId, description)
 
     // Gather recent conversation history to give BEE context
-    const recentTurns = await this.scribe.getRecentTurns(this.activeSessionId, 10, {
+    const recentTurns = await this.scribe.getRecentTurns(sessionId, 10, {
       includeIncomplete: true,
       excludeTurnId: turnId,
     })
@@ -649,18 +649,19 @@ export class CoordinatorManager extends CoordinatorBase {
     ])).flat()
 
     setCancelled(false)
-    this.activeTaskId = this.scribe.createTask(this.activeSessionId, description, mode)
+    this.activeTaskId = this.scribe.createTask(sessionId, description, mode)
     this.taskAborts.set(this.activeTaskId, new AbortController())
     this.taskSupervisor.createTask({
       taskId: this.activeTaskId,
-      sessionId: this.activeSessionId,
+      sessionId: sessionId,
       title: description,
       stage: mode === "plan" ? "planning" : "understanding",
       executionPolicy: mode === "approval" ? "approval" : "auto",
     })
     const initialWorkspace = await this.ensureTaskWorkspace(
       this.activeTaskId,
-      classifyTask(description) !== "conversation",
+      // El modo plan es de solo lectura: no necesita worktree (ni repo git).
+      mode !== "plan" && classifyTask(description) !== "conversation",
     )
     this.emitTaskUpdate("running", { title: description, mode })
     const taskStartTime = performance.now()
@@ -680,7 +681,7 @@ export class CoordinatorManager extends CoordinatorBase {
       const result = await this.trackExecution(this.activeTaskId, harness.run({
         signal: this.taskAborts.get(this.activeTaskId)?.signal,
         objective: description,
-        sessionId: this.activeSessionId,
+        sessionId: sessionId,
         workspace: initialWorkspace.worktreePath,
         policy: mode,
         provider: configuredProvider || undefined,
@@ -723,7 +724,7 @@ export class CoordinatorManager extends CoordinatorBase {
 
       this.scribe.appendNarrative({
         taskId: this.activeTaskId,
-        sessionId: this.activeSessionId,
+        sessionId: sessionId,
         coordinator: "bee",
         phase: result.status,
         entry: result.response,
@@ -732,8 +733,40 @@ export class CoordinatorManager extends CoordinatorBase {
       })
 
       if (this.activeTaskId && this.cancelledTasks.has(this.activeTaskId)) return
+
+      // El ProfileHarness no pasa por Architecture: sin esto el REPL nunca recibe
+      // `plan_update` y no ofrece aprobar el plan, ni queda el arnés en la narrativa.
+      if (mode === "plan" && result.response && result.complexity !== "conversation"
+        && (result.status === "completed" || result.status === "ready" || result.status === "waiting_user")) {
+        this.scribe.appendNarrative({
+          taskId: this.activeTaskId,
+          sessionId: sessionId,
+          coordinator: "bee",
+          phase: "harness",
+          entry: result.response,
+          isDraft: false,
+          isOverride: false,
+        })
+        this.onIpcEvent?.("plan_update", {
+          task_id: this.activeTaskId,
+          adr_title: description.slice(0, 80),
+          adr_content: result.response,
+          status: "pending",
+          // La TUI descarta planes sin fases; el ProfileHarness entrega un plan en prosa, sin DAG.
+          phases: [{
+            name: "Ejecutar plan",
+            coordinator: "bee",
+            description: "BEE delega y verifica las tareas del plan",
+            depends_on: [],
+            level: 0,
+            status: "pending",
+          }],
+          risks: [],
+        })
+      }
+
       if (result.status === "completed") {
-        if (result.complexity !== "conversation") {
+        if (result.complexity !== "conversation" && mode !== "plan") {
           await this.integrateTaskWorkspace(this.activeTaskId, "auto")
         }
         this.scribe.updateTaskStatus(this.activeTaskId, "completed")
@@ -1780,8 +1813,8 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
     const phases = JSON.parse(plan.phases_json) as ParsedPhase[]
 
     this.activeTaskId = taskId
-    this.ensureSession()
-    const turnId = this.scribe.createTurn(this.activeSessionId, `Resume task ${taskId}`)
+    const sessionId = this.ensureSession()
+    const turnId = this.scribe.createTurn(sessionId, `Resume task ${taskId}`)
     this.scribe.updateTaskStatus(taskId, "running")
     log.info(`[coordinator-manager] ▶️  Resuming task ${taskId} at level ${startLevel} (${phases.length} phase(s) in plan)`)
 

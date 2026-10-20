@@ -5,7 +5,7 @@ import path from "node:path"
 import { closeHiveDb } from "../storage/hivedb.ts"
 import { ensureHiveDb } from "../storage/bootstrap.ts"
 import { col } from "../storage/hive.ts"
-import type { CodeGraphDoc } from "../storage/collections.ts"
+import type { CodeGraphDoc, CodeSessionDoc } from "../storage/collections.ts"
 import { buildContextPacket } from "./project-context.ts"
 import { codeFileId } from "./source-index.ts"
 
@@ -46,5 +46,24 @@ describe("buildContextPacket", () => {
 
     expect(packet.context).toContain("Mandatory project instructions")
     expect(packet.context).toContain("Indexed areas: packages/core")
+  })
+})
+
+describe("resolveProjectScope with an isolated worktree", () => {
+  test("accepts the session's own git worktree and rejects a foreign directory", async () => {
+    const { execFileSync } = await import("node:child_process")
+    const { resolveProjectScope } = await import("./project-context")
+    const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, stdio: "pipe" })
+    const repo = mkdtempSync(path.join(tmpdir(), "hivecode-wt-repo-"))
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "init")
+    const wt = path.join(mkdtempSync(path.join(tmpdir(), "hivecode-wt-")), "task")
+    git(repo, "worktree", "add", "-q", "-B", "hivecode/task-x", wt)
+    const sessions = await col<CodeSessionDoc>("codeSessions")
+    await sessions.put("wt-session", { id: "wt-session", status: "active", project_path: repo } as CodeSessionDoc)
+
+    expect((await resolveProjectScope({ sessionId: "wt-session", workspace: repo }))?.workspace).toBe(path.resolve(repo))
+    expect((await resolveProjectScope({ sessionId: "wt-session", workspace: wt }))?.workspace).toBe(path.resolve(wt))
+    await expect(resolveProjectScope({ sessionId: "wt-session", workspace: workspace })).rejects.toThrow("Session and workspace do not match")
   })
 })

@@ -56,7 +56,7 @@ export async function handleCreateCronJob(
   addCorsHeaders: (r: Response, req: Request) => Response
 ): Promise<Response> {
   try {
-    const body = await req.json().catch(() => ({}))
+    const body = await req.json().catch(() => ({})) as Record<string, any>
     const { name, task, task_type, cron_expression, fire_at, payload, agent_id, tool_name, max_runs, channel, start_at, stop_at, dom_and_dow, protect, interval_sec } = body
     if (!name || !task_type || !task) {
       return addCorsHeaders(Response.json({ error: "Missing required fields: name, task, task_type" }, { status: 400 }), req)
@@ -129,7 +129,7 @@ export async function handleUpdateCronJob(
   taskId: string
 ): Promise<Response> {
   try {
-    const body = await req.json().catch(() => ({}))
+    const body = await req.json().catch(() => ({})) as Record<string, any>
     if (_scheduler) {
       const success = await _scheduler.update(taskId, body)
       return success

@@ -76,7 +76,7 @@ export async function handleGetChannelConfig(req: Request, addCorsHeaders: (r: R
 }
 
 export async function handleActivateChannel(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { channel, config, accountId } = body
   if (!channel) return addCorsHeaders(Response.json({ success: false, error: "channel required" }), req)
 
@@ -105,7 +105,7 @@ export async function handleCreateChannel(
   addCorsHeaders: (r: Response, req: Request) => Response,
   channelManager?: any
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { type, config: channelConfig } = body
   if (!type) return addCorsHeaders(new Response("Missing type", { status: 400 }), req)
 
@@ -130,7 +130,7 @@ export async function handleReconnectChannel(
   channelId: string,
   channelManager?: any
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { config: newConfig } = body
   const channels = await col<ChannelDoc>("channels")
   const row = await channels.get(channelId)
@@ -181,7 +181,7 @@ export async function handleUpdateChannelAccount(
   accountId: string,
   channelManager?: any
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   if (!body.config) return new Response("Missing config", { status: 400 })
   await putUserChannel("default", name, accountId, body.config, true)
   if (channelManager) {
@@ -252,7 +252,7 @@ export async function handleToggleChannel(
   addCorsHeaders: (r: Response, req: Request) => Response,
   channelId: string
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { active } = body
   if (active === undefined) {
     return addCorsHeaders(Response.json({ success: false, error: "Missing active field", message: "Falta el campo 'active'" }, { status: 400 }), req)
@@ -281,7 +281,7 @@ export async function handleDisconnectWhatsApp(
   channelId: string,
   channelManager?: any
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { clearSession } = body
   if (!channelManager) return addCorsHeaders(Response.json({ success: false, error: "Channel manager not available", status: 500 }), req)
   const channel = channelManager.channels?.get?.(`whatsapp:${channelId}`)
@@ -301,7 +301,7 @@ export async function handleUpdateWhatsAppConfig(
   channelId: string,
   channelManager?: any
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const currentConfig = await getStoredChannelConfig("whatsapp", channelId)
   const merged: Record<string, unknown> = { ...currentConfig }
   for (const key of ["acceptGroups", "reconnectMaxAttempts", "reconnectBaseDelayMs", "dmPolicy", "selfMessagesOnly", "allowFrom"]) {

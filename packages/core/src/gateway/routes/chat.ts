@@ -214,7 +214,7 @@ export async function handleGetNotes(req: Request, addCorsHeaders: (r: Response,
 }
 
 export async function handleUpdateNote(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { threadId, content } = body
   
   if (!threadId || !content) {

@@ -951,7 +951,7 @@ export async function startGateway(config: Config): Promise<void> {
             return await handleGetChannelAccount(req, addCorsHeaders, name, accountId);
           }
           if (req.method === "PUT") {
-            const body = await req.json().catch(() => ({}));
+            const body = await req.json().catch(() => ({})) as Record<string, any>;
             if (!body.config) return new Response("Missing config", { status: 400 });
 
             config.channels = config.channels || {};
@@ -1206,7 +1206,7 @@ export async function startGateway(config: Config): Promise<void> {
         }
 
         if (url.pathname === "/api/ethics" && req.method === "POST") {
-          const body = await req.json().catch(() => ({}))
+          const body = await req.json().catch(() => ({})) as Record<string, any>
           const { name, description, content, is_default } = body
           if (!name || !content) return addCorsHeaders(Response.json({ success: false, error: "Missing name or content" }, { status: 400 }), req)
           const id = crypto.randomUUID()
@@ -1268,7 +1268,7 @@ export async function startGateway(config: Config): Promise<void> {
         if (url.pathname.match(/^\/api\/mcp\/servers\/([^/]+)\/toggle$/)) {
           const mcpName = url.pathname.split("/")[4];
           if (req.method === "POST") {
-            const body = await req.json().catch(() => ({}))
+            const body = await req.json().catch(() => ({})) as Record<string, any>
             // Support both { active: boolean } and { action: "connect"|"disconnect" }
             let active = body.active
             if (active === undefined && body.action !== undefined) {
@@ -1326,7 +1326,7 @@ export async function startGateway(config: Config): Promise<void> {
         if (url.pathname.match(/^\/api\/mcp\/servers\/([^/]+)$/)) {
           const mcpName = url.pathname.split("/")[4];
           if (req.method === "POST") {
-            const body = await req.json().catch(() => ({}))
+            const body = await req.json().catch(() => ({})) as Record<string, any>
             // Support both { active: boolean } and { action: "connect"|"disconnect" }
             let active = body.active
             if (active === undefined && body.action !== undefined) {

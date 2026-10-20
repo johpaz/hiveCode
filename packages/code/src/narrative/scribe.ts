@@ -71,7 +71,7 @@ function mapEntry(r: CodeNarrativeDoc): NarrativeEntry {
     taskId: r.task_id,
     sessionId: r.session_id,
     coordinator: r.coordinator,
-    phase: r.phase,
+    phase: r.phase ?? undefined,
     entry: r.entry,
     isDraft: r.is_draft,
     isOverride: r.is_override,

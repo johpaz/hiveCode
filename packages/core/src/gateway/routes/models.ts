@@ -16,7 +16,7 @@ export async function handleGetModels(req: Request, addCorsHeaders: (r: Response
 }
 
 export async function handleCreateModel(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const providerId = body.provider_id || body.providerId
   const name = body.name
   const modelType = body.model_type || body.modelType || "llm"
@@ -58,7 +58,7 @@ export async function handleToggleModel(req: Request, addCorsHeaders: (r: Respon
   const url = new URL(req.url)
   const pathMatch = url.pathname.match(/^\/api\/models\/([^/]+)\/toggle$/)
   const modelId = pathMatch ? decodeURIComponent(pathMatch[1]) : null
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { active } = body
 
   if (!modelId || active === undefined) {
@@ -144,7 +144,7 @@ export async function handleUpdateModel(req: Request, addCorsHeaders: (r: Respon
     }, { status: 400 }), req)
   }
 
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const newId: string | undefined = body.id
   const newName: string | undefined = body.name
 
@@ -175,7 +175,7 @@ export async function handleUpdateModelsConfig(
   config: Config,
   agent?: any
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { defaultProvider, defaults, providers } = body
 
   config.models = config.models || {}

@@ -227,7 +227,7 @@ export async function reconcileCodeIndex(sessionId: string, workspace: string): 
   for (const row of staleRows) {
     try {
       const stat = fs.statSync(row.file_path)
-      const dbTime = new Date(row.last_modified).getTime()
+      const dbTime = new Date(row.last_modified ?? 0).getTime()
       const fsTime = stat.mtime.getTime()
       // lastModified is stored as the file's mtime, so a match means unchanged.
       // Hashing every file here read the whole repo on each reconcile.

@@ -126,7 +126,8 @@ export function buildBwrapCommand(
   // ── Environment ──────────────────────────────────────────────────
   args.push(
     "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin",
-    "--setenv", "HOME", workspace,
+    // Fuera del workspace: los cachés de bun/npm no deben acabar en el proyecto del usuario.
+    "--setenv", "HOME", "/tmp",
     "--setenv", "TMPDIR", "/tmp",
     "--setenv", "LANG", "en_US.UTF-8",
     "--setenv", "TERM", "xterm-256color",

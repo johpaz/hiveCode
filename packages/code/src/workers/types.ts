@@ -135,8 +135,8 @@ export interface ControlMessage {
 
 export interface NarrativeEntry {
   id?: number
-  taskId: string
-  sessionId: string
+  taskId: string | null
+  sessionId: string | null
   coordinator: string
   phase?: string
   entry: string
@@ -147,7 +147,7 @@ export interface NarrativeEntry {
 
 export interface ADR {
   id: string
-  taskId: string
+  taskId: string | null
   title: string
   context: string
   options: string

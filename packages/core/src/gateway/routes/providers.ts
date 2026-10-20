@@ -50,7 +50,7 @@ export async function handleGetProviders(req: Request, addCorsHeaders: (r: Respo
 }
 
 export async function handleCreateProvider(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const id = body.id
   if (!id) return addCorsHeaders(Response.json({ ok: false, error: "id is required" }, { status: 400 }), req)
 
@@ -92,7 +92,7 @@ export async function handleCreateProvider(req: Request, addCorsHeaders: (r: Res
 export async function handleToggleProvider(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
   const url = new URL(req.url)
   const providerId = url.pathname.split("/")[3]
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { active } = body
 
   if (active === undefined) {
@@ -116,7 +116,7 @@ export async function handleUpdateProvider(req: Request, addCorsHeaders: (r: Res
   }
 
   const id = providerIdMatch[1]
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const patch: Partial<ProviderDoc> = {}
 
   if (id === "hiveagents") {

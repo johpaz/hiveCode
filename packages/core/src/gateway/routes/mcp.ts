@@ -51,7 +51,7 @@ export async function handleGetMcpServers(
 }
 
 export async function handleCreateMcpServer(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   if (!body.name || !body.config) {
     return addCorsHeaders(new Response("Missing name or config", { status: 400 }), req)
   }
@@ -122,7 +122,7 @@ export async function handleUpdateMcpServer(req: Request, addCorsHeaders: (r: Re
   const url = new URL(req.url)
   const parts = url.pathname.split("/").filter(Boolean)
   const serverName = parts[parts.length - 1]
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
 
   if (!serverName || serverName === "servers") {
     return addCorsHeaders(new Response("Missing server name", { status: 400 }), req)
@@ -176,7 +176,7 @@ export async function handleToggleMcpServer(
   addCorsHeaders: (r: Response, req: Request) => Response,
   mcpId: string
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { active } = body
   if (active === undefined) {
     return addCorsHeaders(Response.json({ success: false, error: "Missing active field", message: "Falta el campo 'active'" }, { status: 400 }), req)

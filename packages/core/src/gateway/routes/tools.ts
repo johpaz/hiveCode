@@ -21,7 +21,7 @@ export async function handleGetTools(req: Request, addCorsHeaders: (r: Response,
 export async function handleActivateTool(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
   const url = new URL(req.url)
   const toolId = url.pathname.split("/")[3]
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { active } = body
 
   if (!toolId) {
@@ -40,7 +40,7 @@ export async function handleActivateTool(req: Request, addCorsHeaders: (r: Respo
 export async function handleUpdateTool(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
   const url = new URL(req.url)
   const toolId = url.pathname.split("/")[3]
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
 
   if (!toolId) {
     return addCorsHeaders(Response.json({ success: false, error: "toolId required" }), req)

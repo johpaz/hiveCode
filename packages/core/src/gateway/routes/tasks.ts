@@ -15,7 +15,7 @@ export async function handleGetTasks(req: Request, addCorsHeaders: (r: Response,
 export async function handleUpdateTask(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
   const url = new URL(req.url)
   const taskId = url.pathname.split("/").pop()
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
 
   if (!taskId) {
     return addCorsHeaders(new Response("Missing ID", { status: 400 }), req)

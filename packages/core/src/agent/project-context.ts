@@ -32,6 +32,22 @@ export interface ContextPacket {
 }
 export const fingerprint = (text: string): string => createHash("sha256").update(text).digest("hex")
 
+/**
+ * A task that mutates files runs in an isolated `git worktree` of the session's
+ * project. Its `.git` is a file ("gitdir: <project>/.git/worktrees/<name>"), which
+ * is what proves the directory belongs to that project and not to another one.
+ */
+async function isWorktreeOf(workspace: string, projectPath: string): Promise<boolean> {
+  try {
+    const link = (await fs.readFile(path.join(workspace, ".git"), "utf8")).match(/^gitdir:\s*(.+)$/m)?.[1]?.trim()
+    if (!link) return false
+    const worktrees = path.join(path.resolve(projectPath), ".git", "worktrees") + path.sep
+    return path.resolve(workspace, link).startsWith(worktrees)
+  } catch {
+    return false
+  }
+}
+
 /** Legacy unscoped calls are safe only when exactly one session is active. */
 export async function resolveProjectScope(options: ProjectScopeOptions): Promise<ProjectScope | null> {
   await ensureIndexes([["codeSessions", "status"]])
@@ -41,7 +57,9 @@ export async function resolveProjectScope(options: ProjectScopeOptions): Promise
   if (options.sessionId) {
     session = (await sessions.get(options.sessionId))?.doc
     if (!session) throw new Error(`Unknown project session: ${options.sessionId}`)
-    if (workspace && path.resolve(session.project_path) !== workspace) throw new Error("Session and workspace do not match")
+    if (workspace && path.resolve(session.project_path) !== workspace && !(await isWorktreeOf(workspace, session.project_path))) {
+      throw new Error("Session and workspace do not match")
+    }
   } else {
     const candidates = (await sessions.findBy("status", "active")).map(row => row.doc)
       .filter(row => !workspace || path.resolve(row.project_path) === workspace)
@@ -53,7 +71,11 @@ export async function resolveProjectScope(options: ProjectScopeOptions): Promise
     const task = (await (await col<CodeTaskDoc>("codeTasks")).get(options.taskId))?.doc
     if (task && task.session_id !== session.id) throw new Error("Task belongs to another project session")
   }
-  return { sessionId: session.id, workspace: path.resolve(session.project_path), taskId: options.taskId }
+  // Inside an isolated worktree the files to read are the worktree's, not the original project's.
+  const root = workspace && workspace !== path.resolve(session.project_path) && await isWorktreeOf(workspace, session.project_path)
+    ? workspace
+    : path.resolve(session.project_path)
+  return { sessionId: session.id, workspace: root, taskId: options.taskId }
 }
 
 export function scopeFromConfig(params: Record<string, unknown>, config?: any): ProjectScopeOptions {

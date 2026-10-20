@@ -13,6 +13,7 @@ import { resolveInWorkspace, getWorkspace, expandPath } from "../filesystem/work
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import {
   buildSandboxCommand,
   isSandboxAvailable,
@@ -55,8 +56,18 @@ const BLOCKED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10MB
 
-function buildSandboxEnv(workspace: string): Record<string, string | undefined> {
-  const isolatedTaskDir = workspace || path.join(os.tmpdir(), `hive-sandbox-${Date.now()}`);
+/**
+ * HOME and TMPDIR of a sandboxed command live OUTSIDE the workspace: bun, npm and
+ * node drop their caches (.bun, .npm, node-compile-cache) under $HOME, and when
+ * that was the workspace they were integrated into the user's project.
+ */
+export function buildSandboxEnv(workspace: string): Record<string, string | undefined> {
+  const isolatedTaskDir = path.join(
+    os.tmpdir(),
+    "hivecode-home",
+    workspace ? createHash("sha256").update(path.resolve(workspace)).digest("hex").slice(0, 16) : `sandbox-${Date.now()}`,
+  );
+  fs.mkdirSync(isolatedTaskDir, { recursive: true });
   return {
     PATH: "/usr/local/bin:/usr/bin:/bin",
     HOME: isolatedTaskDir,

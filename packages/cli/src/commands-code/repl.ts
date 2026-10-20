@@ -202,7 +202,7 @@ async function ensureProvider(
 async function executeTask(
   task: string,
   mode: ReplMode,
-  options?: { suspend?: () => Promise<void>; resume?: () => void; manager?: CoordinatorManager; quiet?: boolean },
+  options?: { suspend?: () => Promise<void>; resume?: () => void; manager?: CoordinatorManager; quiet?: boolean; execute?: boolean },
 ): Promise<string> {
   const quiet = options?.quiet ?? false
   const manager = options?.manager
@@ -219,6 +219,9 @@ async function executeTask(
         await runPlan(task, { keyboard: false, exitOnError: false, manager, quiet })
       } else if (mode === "auto") {
         await runTask(task, [], { keyboard: false, exitOnError: false, manager, quiet })
+      } else if (options?.execute) {
+        // approval ya aprobado por el usuario (/approve review): ejecutar, no volver a planificar.
+        await runTask(task, ["--approval"], { keyboard: false, exitOnError: false, manager, quiet })
       } else {
         // approval: plan → mostrar al usuario → implementar si aprueba
         await runPlan(task, { keyboard: false, exitOnError: false, manager, quiet })
@@ -802,7 +805,7 @@ export async function repl(): Promise<void> {
             if (guardResult) { currentProvider = provider; currentModel = model; await manager.reloadSecrets() }
             if (!provider) return { output: "(×ᴗ×) Sin provider — ejecución cancelada." }
             const out = await executeTask(originalTask, "approval", {
-              suspend: tuiControl.suspend ?? undefined, resume: tuiControl.resume ?? undefined, manager, quiet: true,
+              suspend: tuiControl.suspend ?? undefined, resume: tuiControl.resume ?? undefined, manager, quiet: true, execute: true,
             })
             return { output: out, newTokenCount: (await loadInitialState()).tokenCount, ...(guardResult && { newProvider: provider, newModel: model }) }
           }
@@ -918,7 +921,8 @@ export async function repl(): Promise<void> {
 
         // Only show the approval modal if Architecture actually produced a plan.
         // BEE "respond" actions skip Architecture entirely — no modal needed.
-        if (currentMode === "plan" && planGeneratedThisTask) {
+        // En approval, executeTask también se detiene tras el plan: sin esto no quedaba nada que aprobar.
+        if ((currentMode === "plan" || currentMode === "approval") && planGeneratedThisTask) {
           pendingPlanTask = input
           _tuiIpcSend?.({ type: "plan_approval_request" })
         }

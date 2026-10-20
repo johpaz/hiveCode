@@ -5,7 +5,6 @@ import { col, toIndexable } from "@johpaz/hivecode-core/storage/hive"
 import type {
   AgentDoc,
   CodeConfigDoc,
-  CodeSessionDoc,
   CodeTaskDoc,
   CodeTraceDoc,
   ModelDoc,
@@ -166,12 +165,6 @@ export async function loadCodeCliState(): Promise<{
   const provider = await getDefaultProvider()
   const model = provider ? await getProviderModel(provider) : ""
 
-  const sessions = await col<CodeSessionDoc>("codeSessions")
-  const sessionRows = await sessions.scan()
-  const latestSession = sessionRows
-    .map((entry) => entry.doc)
-    .sort((a, b) => b.id.localeCompare(a.id))[0]
-
   const tasks = await col<CodeTaskDoc>("codeTasks")
   const taskRows = await tasks.scan()
   const taskCount = taskRows
@@ -189,7 +182,8 @@ export async function loadCodeCliState(): Promise<{
     mode,
     provider,
     model,
-    projectPath: latestSession?.project_path ?? process.cwd(),
+    // El proyecto es donde se lanzó hivecode, no el de la última sesión (de otro proyecto).
+    projectPath: process.cwd(),
     taskCount,
     tokenCount: Math.max(traceTokens, taskTokens),
   }

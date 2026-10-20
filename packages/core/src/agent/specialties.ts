@@ -21,8 +21,13 @@ export const FACTORY_SPECIALTIES: Specialty[] = [
 ]
 export function selectSpecialty(owner: string | undefined, task: string, requested?: string): Specialty | undefined {
   if (requested) {
-    const specialty = FACTORY_SPECIALTIES.find(item => item.id === requested && item.owner === owner)
-    if (!specialty) throw new Error(`Specialty ${requested} is not available to ${owner ?? "this agent"}`)
+    // Los modelos suelen escribir "worker/especialidad" (p. ej. "scout/repository"): se acepta el prefijo.
+    const id = requested.trim().toLowerCase().split(/[/:]/).pop()
+    const specialty = FACTORY_SPECIALTIES.find(item => item.id === id && item.owner === owner)
+    if (!specialty) {
+      const valid = FACTORY_SPECIALTIES.filter(item => item.owner === owner).map(item => item.id).join(", ")
+      throw new Error(`Specialty ${requested} is not available to ${owner ?? "this agent"}. Valid specialties: ${valid || "none"}`)
+    }
     return specialty
   }
   const specialty = FACTORY_SPECIALTIES.find(item => item.owner === owner && item.match.test(task))

@@ -22,7 +22,7 @@ export async function handleGetUsers(req: Request, addCorsHeaders: (r: Response,
 }
 
 export async function handleCreateUser(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const id = body.id || crypto.randomUUID()
   const user: UserDoc = {
     id,
@@ -44,7 +44,7 @@ export async function handleCreateUser(req: Request, addCorsHeaders: (r: Respons
 export async function handleUpdateUserSettings(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
   const url = new URL(req.url)
   const userId = url.searchParams.get("userId") || "default"
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const users = await col<UserDoc>("users")
   const existing = await users.get(userId)
   if (!existing) return addCorsHeaders(Response.json({ ok: false, error: "User not found" }, { status: 404 }), req)
@@ -73,7 +73,7 @@ export async function handleLinkUserChannel(
   config?: any,
   logger?: any
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { channel, channelUserId } = body
 
   if (!channel || !channelUserId) {

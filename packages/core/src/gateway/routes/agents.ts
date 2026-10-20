@@ -53,7 +53,7 @@ export async function handleGetAgents(req: Request, addCorsHeaders: (r: Response
 }
 
 export async function handleCreateAgent(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const agentId = body.id || crypto.randomUUID().replace(/-/g, "").slice(0, 16)
   const providerId = body.providerId || body.provider_id || "hiveagents"
   const modelId = providerId === "hiveagents"
@@ -115,7 +115,7 @@ export async function handleUpdateAgent(req: Request, addCorsHeaders: (r: Respon
   const existing = await agents.get(agentId)
   if (!existing) return addCorsHeaders(Response.json({ ok: false, error: "Agent not found" }, { status: 404 }), req)
 
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const patch: Partial<AgentDoc> = {}
   const map: Record<keyof AgentDoc, string[]> = {
     id: [],

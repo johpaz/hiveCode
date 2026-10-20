@@ -111,7 +111,8 @@ export class WorkspaceManager {
       assignment.worktreePath,
     )
     if (untracked.ok && untracked.stdout) {
-      const files = untracked.stdout.split("\0").filter(Boolean)
+      // Los respaldos de fs_write/fs_edit (`<archivo>.hive-bak.<ts>`) son del agente, no del proyecto.
+      const files = untracked.stdout.split("\0").filter(file => file && !/\.hive-bak\.\d+$/.test(file))
       if (files.length > 0) {
         await this.runCommand(["git", "add", "-N", "--", ...files], assignment.worktreePath)
       }

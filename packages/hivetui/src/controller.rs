@@ -502,9 +502,16 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
 
     match (key.modifiers, key.code) {
         // F2 o Ctrl+Shift+S → abre el hub de settings
-        (KeyModifiers::NONE, KeyCode::F(2))
-        | (KeyModifiers::CONTROL | KeyModifiers::SHIFT, KeyCode::Char('s'))
-        | (KeyModifiers::CONTROL | KeyModifiers::SHIFT, KeyCode::Char('S')) => {
+        (KeyModifiers::NONE, KeyCode::F(2)) => {
+            state.modal = ModalState::Settings(SettingsHubState {
+                loading: true,
+                ..Default::default()
+            });
+            state.pending_ipc.push(TuiMessage::RequestSettings);
+        }
+        // `CONTROL | SHIFT` en un patrón es una alternativa, no una combinación:
+        // sin la guarda, una `S` mayúscula escrita en el input abría Settings.
+        (mods, KeyCode::Char('s' | 'S')) if mods.contains(KeyModifiers::CONTROL) => {
             state.modal = ModalState::Settings(SettingsHubState {
                 loading: true,
                 ..Default::default()
@@ -696,6 +703,14 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 state.adrs.scroll = 0;
             }
         }
+        // Ctrl+U borra la línea del input (convención readline).
+        (m, KeyCode::Char('u')) if m.contains(KeyModifiers::CONTROL) => {
+            state.history_nav_mode = false;
+            state.input.clear();
+        }
+        // Un atajo Ctrl+letra sin asignar no es texto: no se inserta en el input.
+        // (AltGr llega como CONTROL|ALT en algunos layouts y sí escribe.)
+        (m, KeyCode::Char(_)) if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) => {}
         // Tipear un carácter siempre sale del modo nav y escribe en el input
         (_, KeyCode::Char(c)) => {
             state.history_nav_mode = false;
@@ -1641,6 +1656,35 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_capital_s_is_typed_and_does_not_open_settings() {
+        let mut state = AppState::default();
+        for c in "TypeScript".chars() {
+            let mods = if c.is_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE };
+            handle_key_event(&mut state, KeyEvent::new(KeyCode::Char(c), mods));
+        }
+        assert_eq!(state.input.value(), "TypeScript");
+        assert!(matches!(state.modal, ModalState::None));
+        assert!(state.pending_ipc.is_empty());
+    }
+
+    #[test]
+    fn ctrl_shift_s_still_opens_settings() {
+        let mut state = AppState::default();
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('S'), KeyModifiers::CONTROL | KeyModifiers::SHIFT));
+        assert!(matches!(state.modal, ModalState::Settings(_)));
+    }
+
+    #[test]
+    fn ctrl_u_clears_the_input_and_unbound_ctrl_keys_are_not_typed() {
+        let mut state = AppState::default();
+        state.input.set("texto");
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert_eq!(state.input.value(), "texto");
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(state.input.value(), "");
+    }
 
     #[test]
     fn skills_settings_use_database_ids_for_details_and_toggle() {

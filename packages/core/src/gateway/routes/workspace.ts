@@ -11,7 +11,7 @@ export async function handleValidateWorkspace(
   addCorsHeaders: (r: Response, req: Request) => Response
 ): Promise<Response> {
   try {
-    const body = await req.json().catch(() => ({}));
+    const body = await req.json().catch(() => ({})) as Record<string, any>;
     const { path: workspacePath } = body;
 
     if (!workspacePath || typeof workspacePath !== "string") {
@@ -106,7 +106,7 @@ export async function handleCreateWorkspace(
   addCorsHeaders: (r: Response, req: Request) => Response
 ): Promise<Response> {
   try {
-    const body = await req.json().catch(() => ({}));
+    const body = await req.json().catch(() => ({})) as Record<string, any>;
     const { path: workspacePath } = body;
 
     if (!workspacePath || typeof workspacePath !== "string") {

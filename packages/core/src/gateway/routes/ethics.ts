@@ -19,7 +19,7 @@ export async function handleGetEthics(req: Request, addCorsHeaders: (r: Response
 }
 
 export async function handleActivateEthics(req: Request, addCorsHeaders: (r: Response, req: Request) => Response): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { ethicsId, active } = body
 
   if (!ethicsId) {

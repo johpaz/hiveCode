@@ -27,7 +27,7 @@ export async function handleActivateSkill(req: Request, addCorsHeaders: (r: Resp
   const url = new URL(req.url)
   const parts = url.pathname.split("/").filter(Boolean)
   const skillId = parts[2]
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { active } = body
 
   if (!skillId) {
@@ -47,7 +47,7 @@ export async function handleUpdateSkill(req: Request, addCorsHeaders: (r: Respon
   const url = new URL(req.url)
   const parts = url.pathname.split("/").filter(Boolean)
   const skillId = parts[2]
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
 
   if (!skillId) {
     return addCorsHeaders(Response.json({ success: false, error: "skillId required" }), req)
@@ -88,7 +88,7 @@ export async function handleCreateSkill(
   req: Request,
   addCorsHeaders: (r: Response, req: Request) => Response
 ): Promise<Response> {
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({})) as Record<string, any>
   const { name, description, category, tools, triggers, preferred_agents, body: bodyContent } = body
 
   if (!name) {
