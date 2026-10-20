@@ -1,3 +1,4 @@
+import { appendFileSync } from "node:fs"
 import { logger } from "../../utils/logger"
 import {
   sanitizeMessages, requiresTemperature1, OPENAI_COMPAT_BASE_URLS,
@@ -251,6 +252,7 @@ export abstract class OpenAICompatBase implements LLMProvider {
     }))
 
     let final_content = msg.content ?? ""
+    const rawContent = final_content
 
     if (sendTools && (!final_tool_calls || final_tool_calls.length === 0) && final_content) {
       const extracted = extractToolCallsFromText(final_content, toolNameMap, knownToolNames)
@@ -261,8 +263,14 @@ export abstract class OpenAICompatBase implements LLMProvider {
     }
     // Without tools on offer (a synthesis pass) the model may still write a call; there is
     // nothing to run, and the user should not be shown the markup as if it were the answer.
-    if (!final_tool_calls?.length) final_content = stripDsmlBlocks(final_content)
+    let droppedToolMarkup = false
+    if (!final_tool_calls?.length) {
+      const stripped = stripDsmlBlocks(final_content)
+      droppedToolMarkup = stripped !== final_content
+      final_content = stripped
+    }
 
+    logToolMarkup(this.providerName, body.model, rawContent, final_tool_calls?.length ?? 0, sendTools)
     final_tool_calls = ensureToolCallIds(final_tool_calls)
 
     const result: LLMResponse = {
@@ -273,6 +281,7 @@ export abstract class OpenAICompatBase implements LLMProvider {
       // that report "stop" alongside native tool_calls, as llama.cpp and LM Studio do
       // for several templates — would otherwise have their calls dropped by the caller.
       stop_reason: resolveStopReason(choice.finish_reason, final_tool_calls),
+      ...(droppedToolMarkup ? { droppedToolMarkup } : {}),
       usage: response.usage ? {
         input_tokens: response.usage.prompt_tokens,
         output_tokens: response.usage.completion_tokens,
@@ -383,6 +392,7 @@ export abstract class OpenAICompatBase implements LLMProvider {
 
     let final_tool_calls: LLMToolCall[] | undefined = tool_calls.length ? tool_calls : undefined
     let final_content = content
+    const rawContent = final_content
 
     if (sendTools && !final_tool_calls && final_content) {
       const extracted = extractToolCallsFromText(final_content, toolNameMap, knownToolNames)
@@ -393,8 +403,14 @@ export abstract class OpenAICompatBase implements LLMProvider {
     }
     // Without tools on offer (a synthesis pass) the model may still write a call; there is
     // nothing to run, and the user should not be shown the markup as if it were the answer.
-    if (!final_tool_calls?.length) final_content = stripDsmlBlocks(final_content)
+    let droppedToolMarkup = false
+    if (!final_tool_calls?.length) {
+      const stripped = stripDsmlBlocks(final_content)
+      droppedToolMarkup = stripped !== final_content
+      final_content = stripped
+    }
 
+    logToolMarkup(this.providerName, body.model, rawContent, final_tool_calls?.length ?? 0, sendTools)
     final_tool_calls = ensureToolCallIds(final_tool_calls)
 
     const result: LLMResponse = {
@@ -402,6 +418,7 @@ export abstract class OpenAICompatBase implements LLMProvider {
       tool_calls: final_tool_calls,
       reasoning_content: reasoning_content || undefined,
       stop_reason: resolveStopReason(finish_reason, final_tool_calls),
+      ...(droppedToolMarkup ? { droppedToolMarkup } : {}),
       usage: input_tokens > 0 || output_tokens > 0
         ? { input_tokens, output_tokens }
         : undefined,
@@ -540,6 +557,22 @@ const DSML_TAG = (name: string) => `${DSML_BAR}DSML${DSML_BAR}\\s*${name}`
 const DSML_BLOCK = new RegExp(`<${DSML_TAG("(?:function_|tool_)?calls")}\\s*>([\\s\\S]*?)(?:</${DSML_TAG("(?:function_|tool_)?calls")}\\s*>|$)`, "g")
 const DSML_INVOKE = new RegExp(`<${DSML_TAG("invoke")}\\s+name\\s*=\\s*"([\\w.-]+)"\\s*>([\\s\\S]*?)</${DSML_TAG("invoke")}\\s*>`, "g")
 const DSML_PARAM = new RegExp(`<${DSML_TAG("parameter")}\\s+name\\s*=\\s*"([\\w.-]+)"(?:\\s+string\\s*=\\s*"(true|false)")?\\s*>([\\s\\S]*?)</${DSML_TAG("parameter")}\\s*>`, "g")
+
+/**
+ * Diagnostic: with `HIVE_LLM_RAW_LOG=<file>`, every response whose text looks like a tool call is
+ * appended there as one JSON line, with how many calls were recovered from it. A line with
+ * `parsed: 0` with `toolsOffered: true` is markup the parsers did not understand, which is how a new
+ * model variant shows up; with `toolsOffered: false` there was nothing to run it with.
+ */
+const TOOL_MARKUP = /DSML|<tool_call|<function_calls|<invoke\b|\[TOOL_CALLS\]|<\|tool_call/i
+
+export function logToolMarkup(provider: string, model: string, raw: string, parsed: number, toolsOffered?: boolean): void {
+  const file = process.env.HIVE_LLM_RAW_LOG
+  if (!file || !raw || !TOOL_MARKUP.test(raw)) return
+  try {
+    appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), provider, model, parsed, toolsOffered, raw: raw.slice(0, 6000) }) + "\n")
+  } catch { /* a diagnostic must never break a call */ }
+}
 
 /** Removes DSML tool-call markup from text that has no tools to run it with. */
 export function stripDsmlBlocks(content: string): string {

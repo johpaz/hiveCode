@@ -38,7 +38,7 @@ import { emitJevDecision } from "./jev-decisions"
 import { formatToolResult } from "../utils/toon"
 import { getAverageTokenCost } from "../storage/usage"
 import type { ContentPart } from "./llm-client"
-import { getExecutionMode, canExecuteTool, callRequiresConfirmation, canPromptForConfirmation, getBlockReason } from "./execution-mode"
+import { getExecutionMode, canExecuteTool, callRequiresConfirmation, canPromptForConfirmation, getBlockReason, shellCommandMutates } from "./execution-mode"
 import { canRequestToolApproval, requestToolApproval, toolApprovalDetail } from "./tool-approval"
 import { planJevIteration } from "./jev-planner"
 import { createStuckLoopDetector, getInterventionMessage } from "./stuck-loop"
@@ -107,6 +107,8 @@ const SINGLE_TOOL_DOMINANCE_LIMIT = 5
 const DOMINANCE_EXEMPT_TOOLS = new Set(["task_delegate", "task_revise", "task_status"])
 /** Sampling temperature for the tool-calling loop. Matches the worker loop's 0.3. */
 const TOOL_CALLING_TEMPERATURE = 0.3
+/** Times a turn is re-asked after a tool call written as text failed to run. */
+const MAX_MARKUP_RETRIES = 2
 /** Steps left at which the model is told to wrap up. */
 const WRAP_UP_STEPS_REMAINING = 3
 const WORKSPACE_MUTATION_TOOLS = new Set([
@@ -186,6 +188,22 @@ function canonicalJSON(value: unknown): string {
   return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJSON(v)}`).join(",")}}`
 }
 
+const FILE_WRITING_TOOLS = new Set(["fs_write", "fs_edit", "fs_delete", "speckit_artifact_write"])
+
+/** Whether a finished call actually changed files, which is what makes repeating a command fair. */
+export function changedWorkspace(toolName: string, argsJson: unknown, result: string): boolean {
+  if (result.startsWith("[Tool Error]") || /(^|[\s{,"])ok"?:\s*false/.test(result.slice(0, 160))) return false
+  if (FILE_WRITING_TOOLS.has(toolName)) return true
+  if (toolName !== "shell_executor") return false
+  let args: unknown = argsJson
+  if (typeof argsJson === "string") {
+    try { args = JSON.parse(argsJson) } catch { return false }
+  }
+  const fields = args as { cmd?: unknown; command?: unknown } | null
+  const command = fields?.cmd ?? fields?.command
+  return typeof command === "string" && shellCommandMutates(command)
+}
+
 /**
  * Tracks tool-call repetition across a whole run.
  *
@@ -243,6 +261,17 @@ export class RepeatTracker {
     // Oscillation: the window holds only a couple of distinct calls, all repeated.
     if (this.window.length === REPEAT_WINDOW && new Set(this.window).size <= 2) return "nudge"
     return "ok"
+  }
+
+  /**
+   * The workspace changed, so the same call can now mean something else. Running `bun test`
+   * again after fixing a file is progress, not a loop: the counts and the streak start over.
+   * What stays a stall is the same call repeated with nothing changing in between.
+   */
+  noteProgress(): void {
+    this.counts.clear()
+    this.window = []
+    this.sameToolStreak = 0
   }
 
   countFor(signature: string): number {
@@ -712,6 +741,7 @@ export async function* runAgent(
   let repeats = new RepeatTracker()
   let loopDetected = false
   let wrapUpAnnounced = false
+  let markupRetries = 0
 
   // ── Resume from checkpoint ────────────────────────────────────────────────
   // The restored messages are already the pruned set from the run that wrote
@@ -917,6 +947,23 @@ export async function* runAgent(
     // Notify onStep for narration text
     if (opts.onStep && response.content) {
       await opts.onStep({ type: "text", message: response.content })
+    }
+
+    // ── A call written as text that never ran ───────────────────────────
+    // The model meant to call a tool, but the call could not be run (markup the parser could not
+    // read, or a request that went out without tools). Ending the turn here would hand the
+    // caller an empty answer and a half-done job, so ask once or twice for the call to be repeated.
+    if (!response.tool_calls?.length && response.droppedToolMarkup && ctx.tools.length > 0
+      && !opts.signal?.aborted && markupRetries < MAX_MARKUP_RETRIES) {
+      markupRetries++
+      log.warn(`[agent-loop] Tool call written as text did not run — asking to repeat it (${markupRetries}/${MAX_MARKUP_RETRIES}) run=${runId}`)
+      messages.push({ role: "assistant", content: response.content || "(llamada a herramienta no ejecutada)" })
+      messages.push({
+        role: "user",
+        content: "Tu última respuesta escribió una llamada a herramienta como texto y NO se ejecutó. "
+          + "Vuelve a hacerla como llamada a herramienta normal (con sus parámetros), o responde en texto si ya no la necesitas.",
+      })
+      continue
     }
 
     // ── No tool calls → final response ──────────────────────────────────
@@ -1284,6 +1331,7 @@ export async function* runAgent(
       // Loop detection runs before the result is handed back, so a corrective note can
       // ride along inside the tool result the model is about to read.
       const verdict = repeats.record(r.name, r.sig)
+      if (changedWorkspace(r.name, r.argsJson, r.toolResultLLM)) repeats.noteProgress()
       let resultContent = r.toolResultLLM
       if (verdict === "nudge") {
         const repeatCount = repeats.countFor(r.sig)

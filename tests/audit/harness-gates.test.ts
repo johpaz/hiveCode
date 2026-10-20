@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeHiveDb } from "../../packages/core/src/storage/hivedb";
@@ -24,7 +24,25 @@ async function writeHarnessRow(taskId: string, patch: Record<string, unknown>) {
   await rows.put(taskId, doc, { expectedVersion: existing?.version ?? 0 })
 }
 
+/**
+ * These tests run real tasks, and a task that mutates files gets a worktree in the shared
+ * `<tmp>/hivecode-worktrees`. Only the ones that belong to this file's throwaway repos are removed:
+ * anyone else's worktrees there are not ours to touch.
+ */
+function removeOwnWorktrees() {
+  const root = join(tmpdir(), "hivecode-worktrees")
+  let names: string[] = []
+  try { names = readdirSync(root) } catch { return }
+  for (const name of names) {
+    try {
+      const pointer = readFileSync(join(root, name, ".git"), "utf-8")
+      if (/hive-(gates|integ|reuse|stale|cancel)-repo-/.test(pointer)) rmSync(join(root, name), { recursive: true, force: true })
+    } catch { /* not a worktree of ours */ }
+  }
+}
+
 afterEach(() => {
+  removeOwnWorktrees()
   ProfileHarness.prototype.run = realRun
   registerToolApprovalRequester(null)
 })

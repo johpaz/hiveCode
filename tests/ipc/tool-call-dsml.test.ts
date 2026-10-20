@@ -70,3 +70,34 @@ describe("formato DSML de DeepSeek", () => {
     expect(out).toEqual({ content: "Hola, ¿en qué te ayudo?", tool_calls: [] })
   })
 })
+
+describe("HIVE_LLM_RAW_LOG", () => {
+  const { mkdtempSync, readFileSync, existsSync } = require("node:fs") as typeof import("node:fs")
+  const { tmpdir } = require("node:os") as typeof import("node:os")
+  const { join } = require("node:path") as typeof import("node:path")
+
+  it("records tool markup with how many calls were recovered, and nothing else", async () => {
+    const { logToolMarkup } = await import("@johpaz/hivecode-core/agent/llm-providers/openai-compat-base")
+    const file = join(mkdtempSync(join(tmpdir(), "hive-rawlog-")), "raw.jsonl")
+    process.env.HIVE_LLM_RAW_LOG = file
+    try {
+      logToolMarkup("deepseek", "m", block(), 2)
+      logToolMarkup("deepseek", "m", "una respuesta normal sin herramientas", 0)
+      logToolMarkup("deepseek", "m", `<${B}${B}DSML${B}${B} algo nuevo>`, 0, true)
+
+      const lines = readFileSync(file, "utf-8").trim().split("\n").map(l => JSON.parse(l))
+      expect(lines).toHaveLength(2)
+      expect(lines.map(l => l.parsed)).toEqual([2, 0])
+      expect(lines[1].raw).toContain("algo nuevo")
+      expect(lines[1].toolsOffered).toBe(true)
+    } finally {
+      delete process.env.HIVE_LLM_RAW_LOG
+    }
+  })
+
+  it("does nothing without the variable", async () => {
+    const { logToolMarkup } = await import("@johpaz/hivecode-core/agent/llm-providers/openai-compat-base")
+    delete process.env.HIVE_LLM_RAW_LOG
+    expect(() => logToolMarkup("deepseek", "m", block(), 2)).not.toThrow()
+  })
+})

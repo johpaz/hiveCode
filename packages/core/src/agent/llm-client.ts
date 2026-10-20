@@ -106,6 +106,11 @@ export interface LLMResponse {
   content: string
   tool_calls?: LLMToolCall[]
   stop_reason: "stop" | "tool_calls" | "max_tokens" | "error"
+  /**
+   * The model wrote a tool call as text that could not be turned into a real call (or that had
+   * nothing to run it with), and the markup was removed from `content`. The call did not happen.
+   */
+  droppedToolMarkup?: boolean
   usage?: { input_tokens: number; output_tokens: number; thinking_tokens?: number }
   /** Kimi K2 / DeepSeek thinking mode — must be round-tripped in assistant messages. */
   reasoning_content?: string

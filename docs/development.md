@@ -39,6 +39,7 @@ El proyecto de prueba debe ser un repo git con al menos un commit si vas a usar 
 | `HIVETUI_HEADLESS=1` | La TUI emite NDJSON en vez de pintar. |
 | `HIVE_SANDBOX=1`, `HIVE_SANDBOX_MODE` | Activa y configura el sandbox del shell. |
 | `HIVE_SKILL_DIRS` | Directorios extra de skills (separador de `PATH`). |
+| `HIVE_LLM_RAW_LOG=<archivo>` | Guarda (una línea JSON por respuesta) todo texto del modelo que parezca una llamada a herramienta, con cuántas se pudieron interpretar. Una línea con `parsed: 0` es marcado que ningún parser entendió: así se detecta una variante nueva de un modelo. |
 | `HIVE_CAUSAL_LOG=1` | Activa el registro causal del bucle (coste: una escritura por llamada). |
 | `HIVE_COORDINATOR_PROVIDER`, `HIVE_COORDINATOR_MODEL` | Provider y modelo del coordinador. |
 | `HIVE_FREE_API_URL` | API de `hivecode-free`. |

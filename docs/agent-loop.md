@@ -54,7 +54,12 @@ El *loadout* inicial lo fija `minimal-loadout.ts`: `search_knowledge`, `notify`,
 Dos niveles:
 
 - **`RepeatTracker`** (en `agent-loop.ts`): misma herramienta con los mismos argumentos. `REPEAT_TOOL_CALL_NUDGE = 2` añade una corrección al resultado; `REPEAT_TOOL_CALL_LIMIT = 4` termina el run como atascado. Se vigilan las últimas `REPEAT_WINDOW = 8` firmas para ver oscilaciones A-B-A-B. Una sola herramienta sin otra intercalada avisa a las 3 (`SINGLE_TOOL_DOMINANCE_NUDGE`) y se considera girando a las 5. Las herramientas de orquestación (`task_delegate`, `task_revise`, `task_status`) están exentas: llamarlas seguidas es el trabajo.
+  **Progreso reinicia la cuenta.** Repetir una llamada es un bucle solo si nada cambió entre medias. Cuando una llamada termina con éxito y modifica archivos (`fs_write`, `fs_edit`, `fs_delete`, `speckit_artifact_write`, o un comando de shell que escribe, ver `shellCommandMutates`), `RepeatTracker.noteProgress()` borra las cuentas, la ventana y la racha. Así un builder puede correr `bun test` tras cada corrección sin que lo detengan a la cuarta; en una sesión real, 12 de 31 runs de workers terminaban `blocked` por `repeated_tool_call` antes de este cambio. La misma llamada repetida sin ningún cambio sigue deteniéndose.
 - **`stuck-loop.ts`**: *loop* (misma herramienta y argumentos fallando) y *stall* (nada se repite, nada falla y nada avanza; mide con una huella del progreso). Es observacional: genera un mensaje de intervención para el modelo y un estado, no termina el run por sí mismo.
+
+## Una llamada escrita como texto que no se ejecutó
+
+Si el modelo escribe una llamada como texto que no se puede convertir en una llamada real (marcado ilegible, o una petición que salió sin herramientas), el proveedor quita ese marcado del texto y marca la respuesta con `droppedToolMarkup`. El bucle no la toma por respuesta final: pide hasta `MAX_MARKUP_RETRIES = 2` veces que repita la llamada como llamada normal ("Tu última respuesta escribió una llamada a herramienta como texto y NO se ejecutó…"). Después sigue como siempre (pasada de síntesis). Antes, esos turnos terminaban con un resultado vacío (`model_returned_no_tool_calls_and_no_content`) y el worker quedaba a medias.
 
 ## Checkpoints y reanudación
 

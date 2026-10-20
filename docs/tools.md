@@ -61,7 +61,7 @@ Algunos modelos no usan el canal estructurado de llamadas y escriben las llamada
 - **Mistral** y derivados: formato nativo con marcadores.
 - **XML** y **JSON** en el texto, como respaldo.
 
-Si el parser DSML encuentra llamadas, se usan y no se prueban los demás.
+Si el parser DSML encuentra llamadas, se usan y no se prueban los demás. Si el marcado no se puede interpretar, la respuesta se marca como `droppedToolMarkup` y el bucle pide repetir la llamada ([agent-loop.md](./agent-loop.md#una-llamada-escrita-como-texto-que-no-se-ejecutó)). Con `HIVE_LLM_RAW_LOG=<archivo>` se guardan las respuestas con este marcado (y si se interpretaron), para detectar variantes nuevas ([development.md](./development.md#variables-de-entorno)).
 
 ## Añadir una herramienta
 
