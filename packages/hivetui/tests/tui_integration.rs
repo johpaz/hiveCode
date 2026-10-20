@@ -1018,3 +1018,25 @@ fn factory_office_shows_six_profiles_without_duplicate_or_generic_seats() {
     assert!(!frame.contains("@AGENT"));
     assert!(!frame.contains("@0"));
 }
+
+/// Con la pantalla de bienvenida visible, F2 abría el hub pero el renderer volvía antes de
+/// dibujar modales: la pantalla parecía congelada y la siguiente tecla (Esc) cerraba algo
+/// invisible.
+#[test]
+fn settings_opened_from_the_welcome_screen_is_drawn() {
+    let mut state = base_state();
+    state.show_welcome = true;
+    state.modal = ModalState::Settings(SettingsHubState::default());
+
+    let mut canvas = make_canvas(140, 40);
+    renderer::render(&mut canvas, &mut state);
+
+    let mut text = String::new();
+    for y in 0..canvas.h {
+        for x in 0..canvas.w {
+            if let Some(c) = canvas.cell_at(x, y) { text.push(c.ch); }
+        }
+        text.push('\n');
+    }
+    assert!(text.contains("Providers"), "el hub debe verse sobre la bienvenida");
+}

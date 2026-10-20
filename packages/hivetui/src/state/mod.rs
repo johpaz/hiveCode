@@ -1093,9 +1093,10 @@ impl AppState {
                             .unwrap_or(0).saturating_sub(5)
                     } else { 0 }
                 }).collect();
-                let return_to = if command.starts_with("agent-config:") {
-                    match &self.modal { ModalState::Settings(hub) => Some(hub.clone()), _ => None }
-                } else { None };
+                // Un formulario abierto desde el hub vuelve al hub al cerrarlo (Esc o enviar), sea cual
+                // sea su comando: antes sólo `agent-config:` lo hacía y "Agregar Provider" cerraba la
+                // configuración entera. Bun refresca el hub tras cada `modal_submit`.
+                let return_to = match &self.modal { ModalState::Settings(hub) => Some(hub.clone()), _ => None };
                 self.modal = ModalState::Config(ConfigModalState {
                     command,
                     title,

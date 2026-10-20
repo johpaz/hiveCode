@@ -54,6 +54,8 @@ Una `Ctrl+<letra>` sin atajo se ignora (no escribe la letra), salvo que también
 
 ## Configuración (`F2`)
 
+Se abre también desde la pantalla de bienvenida (los modales se dibujan sobre ella). Un formulario abierto desde el hub, como "Agregar Provider" (`A`), vuelve al hub al cerrarlo con `Esc` o al enviarlo; el hub se refresca tras cada envío.
+
 Pestañas: **Providers**, **Models**, **Agents**, **MCP**, **Skills**, **GitHub**, **Telegram**. `Tab`/`Shift+Tab` cambian de pestaña, `↑/↓` de fila, `Enter` actúa sobre la fila, `Espacio` activa/desactiva (Skills, MCP), `A` añade, `D` borra, `E` edita (Providers), `L` carga y `T` prueba (MCP).
 
 En **Providers**, cada fila muestra el estado de la clave: `✓` guardada, `?` falta, `~` login de navegador (`hivecode-free`). `Enter` sobre una fila sin clave abre un formulario con un único campo enmascarado; el id del provider elegido viaja en `provider_activate`, que guarda la clave en `Bun.secrets` y activa el provider sin volver a preguntarlo. Si ya tiene clave, se activa directamente. El hub queda abierto y la tabla se refresca sola.

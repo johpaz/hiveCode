@@ -75,6 +75,8 @@ En cualquiera de esos casos se planifica de nuevo, como antes. Antes de este cam
   "hint": "No reintentes. Informa al usuario que esta acción espera su aprobación (o que cambie a modo auto)." }
 ```
 
+**Límite: el shell no pide confirmación.** `shell_executor` no está en `CONFIRM_REQUIRED_TOOLS`, así que un agente puede borrar o escribir con `rm`, `sed` o redirecciones sin pasar por el modal. En las pruebas con deepseek, el builder y BEE se negaron a usarlo para esquivar un rechazo y propusieron al usuario hacerlo a mano o cambiar de modo; es una conducta del modelo, no una garantía. Además, `git_commit`, `cron.delete` y `agent_archive` están en la lista pero ningún perfil las tiene hoy en su catálogo, por lo que solo `fs_write`, `fs_edit` y `fs_delete` se pueden ejercitar.
+
 **Rechazos.** Un rechazo vuelve al modelo como `[CANCELADO] Usuario canceló '<tool>'` con la indicación de no repetirla ni buscar otra vía. Si dentro de la misma tarea se vuelve a pedir **la misma herramienta con los mismos argumentos**, se rechaza sin preguntar otra vez. Abortar la tarea o cerrar la TUI deniega lo que estuviera pendiente. En una prueba real con deepseek, el builder no intentó escribir por shell tras el rechazo y BEE cerró informando "no completado — aprobación denegada", sin tocar el proyecto.
 
 ## Transiciones

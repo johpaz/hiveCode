@@ -166,6 +166,17 @@ export function classifyTask(objective: string): TaskComplexity {
   ]
   if (complexSignals.some(pattern => pattern.test(text)) || text.length > 600) return "complex"
 
-  const mutationSignals = /\b(implement|implementa|fix|corrige|cambia|change|add|agrega|crea(?:r|s)?|create|remove|elimina|refactor)\b/
+  // Imperative and infinitive, Spanish and English. "borra" was missing, so "borra old.txt" was
+  // read as conversation and answered by BEE, which has no delete tool, instead of the builder.
+  // Only verb forms, never nouns: "el cambio" or "la modificación" in a question is not an order.
+  const mutationSignals = new RegExp(`\\b(?:${[
+    "implement", "implementa", "implementar", "fix", "corrige", "corregir", "arregla", "arreglar",
+    "cambia", "cambiar", "change", "add", "agrega", "agregar", "añade", "añadir",
+    "crea", "creas", "crear", "create", "remove", "elimina", "eliminar",
+    "borra", "borrar", "delete", "quita", "quitar", "renombra", "renombrar", "rename",
+    "mueve", "mover", "move", "modifica", "modificar", "edita", "editar", "escribe", "escribir", "write",
+    "actualiza", "actualizar", "update", "reemplaza", "reemplazar", "replace",
+    "refactor", "refactoriza", "refactorizar", "instala", "instalar", "install",
+  ].join("|")})\\b`)
   return mutationSignals.test(text) ? "simple_change" : "conversation"
 }

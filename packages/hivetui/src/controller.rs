@@ -1806,6 +1806,53 @@ mod tests {
     }
 
     #[test]
+    fn esc_on_a_form_opened_from_settings_returns_to_settings() {
+        let mut state = AppState::default();
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert!(matches!(state.modal, ModalState::Settings(_)));
+        // "Agregar Provider": lo manda Bun con un comando que no es `agent-config:`.
+        state.apply_message(crate::ipc::BunMessage::ShowConfigModal {
+            command: "provider-add".to_string(),
+            title: "Agregar Provider".to_string(),
+            fields: vec![crate::ipc::IpcModalField {
+                key: "id".to_string(),
+                label: "ID del Provider".to_string(),
+                placeholder: None,
+                required: Some(true),
+                secret: None,
+                field_type: None,
+                options: None,
+                default_value: None,
+            }],
+        });
+        assert!(matches!(state.modal, ModalState::Config(_)));
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(state.modal, ModalState::Settings(_)), "debía volver al hub");
+        assert!(state.pending_ipc.iter().any(|m| matches!(m, TuiMessage::ModalCancel { .. })));
+    }
+
+    #[test]
+    fn a_form_opened_without_settings_closes_completely() {
+        let mut state = AppState::default();
+        state.apply_message(crate::ipc::BunMessage::ShowConfigModal {
+            command: "provider-add".to_string(),
+            title: "Agregar Provider".to_string(),
+            fields: vec![crate::ipc::IpcModalField {
+                key: "id".to_string(),
+                label: "ID".to_string(),
+                placeholder: None,
+                required: None,
+                secret: None,
+                field_type: None,
+                options: None,
+                default_value: None,
+            }],
+        });
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(state.modal, ModalState::None));
+    }
+
+    #[test]
     fn a_request_waits_while_settings_is_open() {
         let mut state = AppState::default();
         handle_key_event(&mut state, KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));

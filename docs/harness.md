@@ -20,8 +20,8 @@ new ProfileHarness().run({
 
 | Clase | Criterio | Ruta |
 |-------|----------|------|
-| `conversation` | Sin verbos de mutación. | BEE responde directo. |
-| `simple_change` | Verbo de mutación (`implementa`, `fix`, `agrega`, `crea`, `refactor`…). | BEE delega en `builder`, sin Spec Kit. |
+| `conversation` | Sin verbos de mutación. BEE responde directo, y **no tiene herramientas de escritura**: un pedido de cambio mal clasificado como conversación termina en "no puedo hacerlo". | BEE responde directo. |
+| `simple_change` | Verbo de mutación, en imperativo o infinitivo, en español o inglés (`implementa`, `fix`, `corrige`, `agrega`, `crea`, `borra`, `elimina`, `quita`, `renombra`, `mueve`, `edita`, `escribe`, `actualiza`, `refactor`…). Solo formas verbales: "el cambio" o "la modificación" en una pregunta no cuentan. | BEE delega en `builder`, sin Spec Kit. |
 | `complex` | Arquitectura, migración, feature nueva, refactor amplio, sitio/app web, "crear un proyecto/app…" o más de 600 caracteres. | Spec Kit completo. |
 
 ### Etapas de una tarea compleja

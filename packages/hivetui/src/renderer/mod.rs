@@ -129,6 +129,9 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
         if state.ficha_agent.is_some() {
             agent_card::render_overlay(canvas, area, state);
         }
+        // Un modal abierto desde la bienvenida (F2, Ctrl+S) recibe las teclas: si no se dibuja,
+        // la pantalla parece congelada y la siguiente tecla cierra algo que nadie ve.
+        render_modal(canvas, area, state);
         return (0, 0);
     }
 
@@ -140,18 +143,7 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
     }
 
     // Modales: overlays sobre todo
-    match &state.modal {
-        ModalState::Config(_)    => config_modal::render(canvas, area, state),
-        ModalState::Info(_)      => info_modal::render(canvas, area, state),
-        ModalState::Settings(_)  => settings_hub::render(canvas, area, state, true),
-        // PlanApproval se integra como strip dentro de plan_layout cuando estamos en Plan tab.
-        // Para otros tabs se muestra como overlay centrado (caso raro pero posible).
-        ModalState::PlanApproval(_) if state.active_tab == TabId::Plan => {}
-        ModalState::PlanApproval(_) => plan_approval_modal::render(canvas, area, state),
-        ModalState::ReviewConfirm(_) => {}
-        ModalState::ToolApproval(_) => tool_approval_modal::render(canvas, area, state),
-        ModalState::None         => {}
-    }
+    render_modal(canvas, area, state);
 
     // `/logs` — overlay sobre el área de contenido. Antes las entradas se
     // acumulaban en `state.logs` sin que ningún widget las leyera.
@@ -236,6 +228,22 @@ fn render_main(canvas: &mut Canvas, area: Rect, state: &AppState) -> Rect {
     canvas.with_clip(areas.status, |canvas| statusbar::render(canvas, areas.status, state));
 
     areas.input
+}
+
+/// Dibuja el modal activo, si lo hay, encima de lo que haya debajo.
+fn render_modal(canvas: &mut Canvas, area: Rect, state: &mut AppState) {
+    match &state.modal {
+        ModalState::Config(_)    => config_modal::render(canvas, area, state),
+        ModalState::Info(_)      => info_modal::render(canvas, area, state),
+        ModalState::Settings(_)  => settings_hub::render(canvas, area, state, true),
+        // PlanApproval se integra como strip dentro de plan_layout cuando estamos en Plan tab.
+        // Para otros tabs se muestra como overlay centrado (caso raro pero posible).
+        ModalState::PlanApproval(_) if state.active_tab == TabId::Plan => {}
+        ModalState::PlanApproval(_) => plan_approval_modal::render(canvas, area, state),
+        ModalState::ReviewConfirm(_) => {}
+        ModalState::ToolApproval(_) => tool_approval_modal::render(canvas, area, state),
+        ModalState::None         => {}
+    }
 }
 
 fn register_hit_regions(state: &mut AppState, area: Rect) {
