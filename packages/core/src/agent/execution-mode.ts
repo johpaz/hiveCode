@@ -125,21 +125,33 @@ export function shellCommandMutates(command: string): boolean {
   return !!inner && shellCommandMutates(inner[2])
 }
 
+/**
+ * Tools that run a command line the model writes. `code_build`, `code_test` and `code_lint` take
+ * an optional `command` override, so `code_build({ command: "cat > report.md <<EOF …" })` writes a
+ * file as surely as the shell does; a verifier did exactly that after `fs_write` was refused.
+ */
+const COMMAND_TOOLS = new Set(["shell_executor", "code_build", "code_test", "code_lint", "check_types"])
+
+function commandOf(toolName: string, parsed: unknown): string | undefined {
+  const fields = parsed as { cmd?: unknown; command?: unknown } | null
+  const command = toolName === "shell_executor" ? fields?.cmd ?? fields?.command : fields?.command
+  return typeof command === "string" ? command : undefined
+}
+
 /** Whether this particular call needs the person's yes in `approval` mode. */
 export function callRequiresConfirmation(toolName: string, args: unknown): boolean {
   if (requiresConfirmation(toolName)) return true
-  if (toolName !== "shell_executor") return false
+  if (!COMMAND_TOOLS.has(toolName)) return false
   let parsed: unknown = args
   if (typeof args === "string") {
     // Arguments that do not even parse cannot be judged: ask rather than guess.
     try { parsed = JSON.parse(args) } catch { return true }
   }
-  // The tool's own parameter is `cmd`; `command` is accepted too (see tools/cli/index.ts).
-  const fields = parsed as { cmd?: unknown; command?: unknown } | null
-  const command = fields?.cmd ?? fields?.command
-  if (typeof command === "string") return shellCommandMutates(command)
-  // A call with no readable command cannot be judged: ask rather than guess.
-  return true
+  const command = commandOf(toolName, parsed)
+  if (command !== undefined) return shellCommandMutates(command)
+  // No command given: build/test/lint then run the project's own script, which is their normal
+  // use. The shell has nothing to run without one, so a call with none is odd: ask.
+  return toolName === "shell_executor"
 }
 
 export function filterToolsByMode<T extends { name: string }>(

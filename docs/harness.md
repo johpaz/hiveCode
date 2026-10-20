@@ -104,6 +104,8 @@ Si no se pide una, `selectSpecialty` elige por expresiones regulares sobre la ta
 
 El worktree de la sesión se acepta como alcance válido de `get_project_context` (`isWorktreeOf` en `agent/project-context.ts`); sin eso, los builders fallaban con "Session and workspace do not match".
 
+Las herramientas de código (`code_build`, `code_test`, `git_*`…) trabajan dentro de ese worktree y no en `process.cwd()` ([tools.md](./tools.md#dónde-trabajan-las-herramientas-de-código)): sin eso, la tarea no estaba realmente aislada.
+
 Los comandos del shell del sandbox usan un `HOME` y `TMPDIR` fuera del workspace (`os.tmpdir()/hivecode-home/<hash>`), para que cachés como `.bun`, `.npm` o `.tools` no acaben dentro del proyecto.
 
 Los prompts del Builder y del Quality Gate les piden dejar sus archivos temporales en `$TMPDIR`. Como red de seguridad, el diff descarta además el scratch que dejaron corridas reales: `.qg/`, `.smoke/`, `.scratch/`, `.tmp/`, `.cache/`, `.verify-*` y cualquier `*.log` **sin versionar** (`WORKSPACE_NOISE` en `workspace/manager.ts`). Dotfiles legítimos como `.gitignore` o `.github/` sí se integran. Un scratch con otro nombre sí se integraría: no hay forma de saber qué archivos son "del proyecto".

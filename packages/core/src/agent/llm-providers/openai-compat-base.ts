@@ -271,6 +271,7 @@ export abstract class OpenAICompatBase implements LLMProvider {
     }
 
     logToolMarkup(this.providerName, body.model, rawContent, final_tool_calls?.length ?? 0, sendTools)
+    if (!final_content.trim() && !final_tool_calls?.length) logEmptyResponse(this.providerName, body.model, choice.finish_reason, String((msg as any).reasoning_content ?? "").length)
     final_tool_calls = ensureToolCallIds(final_tool_calls)
 
     const result: LLMResponse = {
@@ -411,6 +412,7 @@ export abstract class OpenAICompatBase implements LLMProvider {
     }
 
     logToolMarkup(this.providerName, body.model, rawContent, final_tool_calls?.length ?? 0, sendTools)
+    if (!final_content.trim() && !final_tool_calls?.length) logEmptyResponse(this.providerName, body.model, finish_reason, reasoning_content.length)
     final_tool_calls = ensureToolCallIds(final_tool_calls)
 
     const result: LLMResponse = {
@@ -567,10 +569,20 @@ const DSML_PARAM = new RegExp(`<${DSML_TAG("parameter")}\\s+name\\s*=\\s*"([\\w.
 const TOOL_MARKUP = /DSML|<tool_call|<function_calls|<invoke\b|\[TOOL_CALLS\]|<\|tool_call/i
 
 export function logToolMarkup(provider: string, model: string, raw: string, parsed: number, toolsOffered?: boolean): void {
+  if (!raw || !TOOL_MARKUP.test(raw)) return
+  appendRawLog({ provider, model, parsed, toolsOffered, raw: raw.slice(0, 6000) })
+}
+
+/** A response with no text and no call: what a model produces when it spends its turn thinking. */
+export function logEmptyResponse(provider: string, model: string, finishReason: string | null | undefined, reasoningChars: number): void {
+  appendRawLog({ provider, model, empty: true, finishReason: finishReason ?? null, reasoningChars })
+}
+
+function appendRawLog(record: Record<string, unknown>): void {
   const file = process.env.HIVE_LLM_RAW_LOG
-  if (!file || !raw || !TOOL_MARKUP.test(raw)) return
+  if (!file) return
   try {
-    appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), provider, model, parsed, toolsOffered, raw: raw.slice(0, 6000) }) + "\n")
+    appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), ...record }) + "\n")
   } catch { /* a diagnostic must never break a call */ }
 }
 

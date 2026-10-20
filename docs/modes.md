@@ -75,7 +75,7 @@ En cualquiera de esos casos se planifica de nuevo, como antes. Antes de este cam
   "hint": "No reintentes. Informa al usuario que esta acción espera su aprobación (o que cambie a modo auto)." }
 ```
 
-**El shell también pide, pero solo si modifica.** El shell es la vía para escribir esquivando un `fs_write` rechazado, así que `shell_executor` pide autorización cuando el comando cambia archivos o el historial de git (`shellCommandMutates` en `execution-mode.ts`):
+**El shell, y las herramientas que aceptan un comando, también piden, pero solo si modifican.** `code_build`, `code_test`, `code_lint` y `check_types` aceptan un `command` libre, así que se juzgan igual que `shell_executor`; sin `command` ejecutan el script del proyecto y no piden. El shell es la vía para escribir esquivando un `fs_write` rechazado, así que `shell_executor` pide autorización cuando el comando cambia archivos o el historial de git (`shellCommandMutates` en `execution-mode.ts`):
 
 | Piden | No piden |
 |-------|----------|

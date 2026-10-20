@@ -69,3 +69,24 @@ describe("shell commands that need confirmation in approval mode", () => {
     expect(callRequiresConfirmation("fs_read", "{}")).toBe(false)
   })
 })
+
+describe("command-taking tools are judged like the shell", () => {
+  test("code_build / code_test / code_lint with a writing command ask", () => {
+    for (const tool of ["code_build", "code_test", "code_lint", "check_types"]) {
+      expect(callRequiresConfirmation(tool, JSON.stringify({ command: "cat > informe.md <<'EOF'\nhola\nEOF" })), tool).toBe(true)
+      expect(callRequiresConfirmation(tool, JSON.stringify({ command: "rm -rf dist" })), tool).toBe(true)
+    }
+  })
+
+  test("their ordinary use does not", () => {
+    expect(callRequiresConfirmation("code_build", JSON.stringify({}))).toBe(false)
+    expect(callRequiresConfirmation("code_test", JSON.stringify({ path: "." }))).toBe(false)
+    expect(callRequiresConfirmation("code_test", JSON.stringify({ command: "bun test tests/" }))).toBe(false)
+    expect(callRequiresConfirmation("code_build", JSON.stringify({ command: "bun run build" }))).toBe(false)
+    expect(callRequiresConfirmation("check_types", JSON.stringify({ command: "bunx tsc --noEmit" }))).toBe(false)
+  })
+
+  test("unreadable arguments ask", () => {
+    expect(callRequiresConfirmation("code_build", "no es json")).toBe(true)
+  })
+})

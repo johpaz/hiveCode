@@ -172,3 +172,56 @@ describe("a call written as text that cannot run", () => {
     expect(summary?.status).toBe("completed")
   })
 })
+
+describe("an empty turn (no text, no call)", () => {
+  test("is not the end of the run: the model is asked to continue, and does", async () => {
+    model = startFakeModel((turn, req) => {
+      if (turn === 1) return { content: "", toolCalls: [{ name: "fs_read", args: { path: "notas.txt" } }] }
+      if (turn === 2) return { content: "" } // empty after a tool result
+      if (turn === 3) {
+        expect(String((req.messages.at(-1) as { content?: unknown }).content ?? "")).toContain("llegó vacía")
+        return { content: "Las notas dicen lo esperado." }
+      }
+      return { content: "" }
+    })
+    await seedFixture({ baseUrl: model.baseUrl })
+
+    const { texts, run: summary } = await run("builder", "t-empty-recovers")
+
+    expect(model.turnCount()).toBe(3)
+    expect(texts.join("\n")).toContain("Las notas dicen lo esperado.")
+    expect(summary?.status).toBe("completed")
+    expect(summary?.blocker).toBeNull()
+  })
+
+  test("gives up after two re-asks instead of looping", async () => {
+    model = startFakeModel(() => ({ content: "" }))
+    await seedFixture({ baseUrl: model.baseUrl })
+
+    const { run: summary } = await run("builder", "t-empty-hopeless")
+
+    // 1 original + 2 re-asks; then the loop's usual closing summary pass (also empty) is the 4th.
+    expect(model.turnCount()).toBe(4)
+    expect(summary?.status).toBe("blocked")
+    expect(summary?.blocker).toBe("model_returned_no_tool_calls_and_no_content")
+  })
+})
+
+describe("HIVE_LLM_RAW_LOG records empty responses too", () => {
+  const { mkdtempSync, readFileSync } = require("node:fs") as typeof import("node:fs")
+  const { tmpdir } = require("node:os") as typeof import("node:os")
+  const { join } = require("node:path") as typeof import("node:path")
+
+  test("with the reason it stopped and how much it thought", async () => {
+    const { logEmptyResponse } = await import("@johpaz/hivecode-core/agent/llm-providers/openai-compat-base")
+    const file = join(mkdtempSync(join(tmpdir(), "hive-rawlog-")), "raw.jsonl")
+    process.env.HIVE_LLM_RAW_LOG = file
+    try {
+      logEmptyResponse("deepseek", "m", "stop", 5400)
+      const line = JSON.parse(readFileSync(file, "utf-8").trim())
+      expect(line).toMatchObject({ empty: true, finishReason: "stop", reasoningChars: 5400, provider: "deepseek" })
+    } finally {
+      delete process.env.HIVE_LLM_RAW_LOG
+    }
+  })
+})

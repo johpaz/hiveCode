@@ -61,6 +61,10 @@ Dos niveles:
 
 Si el modelo escribe una llamada como texto que no se puede convertir en una llamada real (marcado ilegible, o una petición que salió sin herramientas), el proveedor quita ese marcado del texto y marca la respuesta con `droppedToolMarkup`. El bucle no la toma por respuesta final: pide hasta `MAX_MARKUP_RETRIES = 2` veces que repita la llamada como llamada normal ("Tu última respuesta escribió una llamada a herramienta como texto y NO se ejecutó…"). Después sigue como siempre (pasada de síntesis). Antes, esos turnos terminaban con un resultado vacío (`model_returned_no_tool_calls_and_no_content`) y el worker quedaba a medias.
 
+## Un turno vacío
+
+Un turno sin texto ni llamada a herramienta no es una respuesta. Los modelos lo producen después de un tramo largo con muchas herramientas (el turno se va en pensar, o la respuesta se corta), y terminar ahí tiraba todo el trabajo hecho: en una corrida real, el run de ejecución de BEE se perdió así tras 25 minutos, y otros tres workers con él (4 de los 7 bloqueos de esa corrida). El bucle pide hasta `MAX_EMPTY_RETRIES = 2` veces que continúe ("Tu última respuesta llegó vacía…"); si sigue vacío, termina como antes (`model_returned_no_tool_calls_and_no_content`). No se aplica a `error` ni a `max_tokens`, que tienen su propio camino. Con `HIVE_LLM_RAW_LOG` se registran estas respuestas (`empty: true`, motivo de parada y cuánto pensó) para ver qué las provoca.
+
 ## Checkpoints y reanudación
 
 `agent/run-store.ts` guarda un snapshot completo y reanudable de cada run (`writeCheckpoint`, `readCheckpoint`, `reclaimRun`) con un *lease* renovado (`startLeaseRenewal`, `LEASE_SECONDS`), de modo que otro proceso no pise un run vivo. `resumeRunId` retoma un run desde su checkpoint: los mensajes restaurados ya están podados y se omite la pasada Jev. Un run que se quedó corto y dejó checkpoint queda marcado como reanudable. `resumable: false` desactiva el snapshot (evals, reproducciones masivas).

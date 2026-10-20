@@ -5,6 +5,20 @@ import { validateCommand } from "./command-validator.ts"
 import * as nodePath from "node:path"
 import { col } from "../../storage/hive.ts"
 import type { CodeFileDoc, CodeFileSnapshotDoc, CodeTaskDoc } from "../../storage/collections.ts"
+import { getWorkspace, resolveInWorkspace } from "../filesystem/workspace-guard.ts"
+
+/**
+ * The directory a code tool works in. These tools used to run in `process.cwd()`, which is the
+ * real project even when the task lives in an isolated worktree: tests ran against the wrong
+ * tree, `git` commands touched the user's repository, and a command like `cat > file` wrote
+ * outside the worktree. With a workspace configured (as for every task), the path is resolved
+ * inside it and anything pointing outside is refused, exactly as the file tools do.
+ */
+export function workingDirectory(requested: unknown, config?: unknown): string {
+  const raw = typeof requested === "string" && requested ? requested : "."
+  const workspace = getWorkspace(config)
+  return workspace ? resolveInWorkspace(raw, workspace) : raw
+}
 
 // ─── Git Status ──────────────────────────────────────────────────────────────
 
@@ -20,8 +34,8 @@ const gitStatusTool: Tool = {
       },
     },
   },
-  async execute(params) {
-    const path = (params.path as string) || "."
+  async execute(params, config) {
+    const path = workingDirectory(params.path, config)
     try {
       const proc = spawnTaskProcess(["git", "status", "--porcelain"], { cwd: path })
       const output = await new Response(proc.stdout).text()
@@ -74,8 +88,8 @@ const gitDiffTool: Tool = {
       },
     },
   },
-  async execute(params) {
-    const path = (params.path as string) || "."
+  async execute(params, config) {
+    const path = workingDirectory(params.path, config)
     const args = ["diff"]
     if (params.staged) args.push("--cached")
     if (params.target) args.push(params.target as string)
@@ -112,8 +126,8 @@ const gitLogTool: Tool = {
       },
     },
   },
-  async execute(params) {
-    const path = (params.path as string) || "."
+  async execute(params, config) {
+    const path = workingDirectory(params.path, config)
     const count = (params.count as number) || 10
     const args = ["log", `--max-count=${count}`, "--format=%h %ai %an: %s"]
     if (params.branch) args.unshift(params.branch as string)
@@ -158,8 +172,8 @@ const gitBranchTool: Tool = {
       },
     },
   },
-  async execute(params) {
-    const path = (params.path as string) || "."
+  async execute(params, config) {
+    const path = workingDirectory(params.path, config)
     const action = (params.action as string) || "list"
     try {
       if (action === "list") {
@@ -218,8 +232,8 @@ const gitCommitTool: Tool = {
       },
     },
   },
-  async execute(params) {
-    const path = (params.path as string) || "."
+  async execute(params, config) {
+    const path = workingDirectory(params.path, config)
     const message = params.message as string
     if (!message) return { ok: false, error: "Commit message is required" }
     try {
@@ -276,8 +290,8 @@ const codeSearchTool: Tool = {
       },
     },
   },
-  async execute(params) {
-    const path = (params.path as string) || "."
+  async execute(params, config) {
+    const path = workingDirectory(params.path, config)
     const pattern = params.pattern as string
     if (!pattern) return { ok: false, error: "Search pattern is required" }
     const maxResults = (params.maxResults as number) || 30
@@ -335,8 +349,8 @@ const codeBuildTool: Tool = {
       },
     },
   },
-  async execute(params) {
-    const path = (params.path as string) || "."
+  async execute(params, config) {
+    const path = workingDirectory(params.path, config)
     let cmd = params.command as string
     if (!cmd) {
       const pkg = Bun.file(`${path}/package.json`)
@@ -417,8 +431,8 @@ const codeTestTool: Tool = {
       },
     },
   },
-  async execute(params) {
-    const path = (params.path as string) || "."
+  async execute(params, config) {
+    const path = workingDirectory(params.path, config)
     let cmd = params.command as string
     if (!cmd) {
       const pkg = Bun.file(`${path}/package.json`)
@@ -486,8 +500,8 @@ const codeLintTool: Tool = {
       },
     },
   },
-  async execute(params) {
-    const path = (params.path as string) || "."
+  async execute(params, config) {
+    const path = workingDirectory(params.path, config)
     let cmd = params.command as string
     if (!cmd) {
       const pkg = Bun.file(`${path}/package.json`)
@@ -544,12 +558,13 @@ const codeDiffCreateTool: Tool = {
       },
     },
   },
-  async execute(params) {
+  async execute(params, config) {
     const file1 = params.file1 as string
     const file2 = params.file2 as string
     if (!file1 || !file2) return { ok: false, error: "Both file1 and file2 are required" }
     try {
-      const proc = spawnTaskProcess(["diff", "-u", file1, file2])
+      // Both files are named relative to the task's workspace, like every other path a worker gives.
+      const proc = spawnTaskProcess(["diff", "-u", workingDirectory(file1, config), workingDirectory(file2, config)])
       const stdout = await new Response(proc.stdout).text()
       return {
         ok: true,
@@ -579,9 +594,10 @@ const parseAstTool: Tool = {
     },
     required: ["path"],
   },
-  async execute(params) {
-    const filePath = params.path as string
-    if (!filePath) return { ok: false, error: "File path is required" }
+  async execute(params, config) {
+    const requested = params.path as string
+    if (!requested) return { ok: false, error: "File path is required" }
+    const filePath = workingDirectory(requested, config)
     try {
       const file = Bun.file(filePath)
       if (!(await file.exists())) return { ok: false, error: `File not found: ${filePath}` }
@@ -744,8 +760,8 @@ const checkTypesTool: Tool = {
       },
     },
   },
-  async execute(params) {
-    const path = (params.path as string) || "."
+  async execute(params, config) {
+    const path = workingDirectory(params.path, config)
     try {
       const start = Bun.nanoseconds()
       const proc = spawnTaskProcess(["bun", "tsc", "--noEmit"], {
@@ -808,9 +824,10 @@ const runScriptTool: Tool = {
     },
     required: ["path"],
   },
-  async execute(params) {
-    const filePath = params.path as string
-    if (!filePath) return { ok: false, error: "Script path is required" }
+  async execute(params, config) {
+    const requested = params.path as string
+    if (!requested) return { ok: false, error: "Script path is required" }
+    const filePath = workingDirectory(requested, config)
     try {
       const file = Bun.file(filePath)
       if (!(await file.exists())) return { ok: false, error: `Script not found: ${filePath}` }
@@ -818,7 +835,7 @@ const runScriptTool: Tool = {
       if (params.args) args.push(...(params.args as string).split(" "))
       const start = Bun.nanoseconds()
       const proc = spawnTaskProcess(["bun", ...args], {
-        cwd: process.cwd(),
+        cwd: workingDirectory(".", config),
         timeout: 60_000,
         // Sandbox: minimal env — no host secrets, no API keys
         env: {
@@ -875,8 +892,8 @@ const gitBlameTool: Tool = {
     },
     required: ["file"],
   },
-  async execute(params) {
-    const repoPath = (params.path as string) || "."
+  async execute(params, config) {
+    const repoPath = workingDirectory(params.path, config)
     const file = params.file as string
     if (!file) return { ok: false, error: "File path is required" }
     try {
@@ -960,8 +977,8 @@ const gitCreatePrTool: Tool = {
     },
     required: ["title"],
   },
-  async execute(params) {
-    const repoPath = (params.path as string) || "."
+  async execute(params, config) {
+    const repoPath = workingDirectory(params.path, config)
     const title = params.title as string
     if (!title) return { ok: false, error: "PR title is required" }
 
@@ -1062,9 +1079,9 @@ const gitRollbackTool: Tool = {
     },
     required: ["taskId"],
   },
-  async execute(params) {
+  async execute(params, config) {
     const taskId = params.taskId as string
-    const repoPath = (params.path as string) || "."
+    const repoPath = workingDirectory(params.path, config)
     const dryRun = params.dryRun !== false
     const confirmed = params.confirmed === true
 
@@ -1212,7 +1229,7 @@ const codeTestParallelTool: Tool = {
     },
     required: ["suites"],
   },
-  async execute(params) {
+  async execute(params, config) {
     const suites = params.suites as TestSuiteConfig[]
     if (!Array.isArray(suites) || suites.length === 0) {
       return { ok: false, error: "suites must be a non-empty array" }
@@ -1222,6 +1239,8 @@ const codeTestParallelTool: Tool = {
     const runSuite = async (suite: TestSuiteConfig): Promise<SuiteResult> => {
       const label = suite.label || suite.path
       const start = Bun.nanoseconds()
+      // Suites are named relative to the workspace; commands run from its root.
+      const suiteDir = workingDirectory(suite.path, config)
 
       let baseCmd: string
       let isBunTest = true
@@ -1229,7 +1248,7 @@ const codeTestParallelTool: Tool = {
         baseCmd = suite.command
         isBunTest = suite.command.startsWith("bun test")
       } else {
-        const pkgFile = Bun.file(`${suite.path}/package.json`)
+        const pkgFile = Bun.file(`${suiteDir}/package.json`)
         if (await pkgFile.exists()) {
           const pkg = await pkgFile.json()
           if (pkg.scripts?.test) {
@@ -1245,7 +1264,7 @@ const codeTestParallelTool: Tool = {
 
       if (suite.filter) baseCmd += ` -t "${suite.filter}"`
 
-      const validation = validateCommand(baseCmd, { workspace: suite.path })
+      const validation = validateCommand(baseCmd, { workspace: suiteDir })
       if (!validation.ok) {
         return {
           label,
@@ -1268,7 +1287,7 @@ const codeTestParallelTool: Tool = {
 
       try {
         const proc = spawnTaskProcess(["/bin/sh", "-c", cmd], {
-          cwd: ".",
+          cwd: workingDirectory(".", config),
           timeout: timeoutMs,
           stdout: "pipe",
           stderr: "pipe",

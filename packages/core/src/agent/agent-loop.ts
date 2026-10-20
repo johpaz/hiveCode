@@ -109,6 +109,8 @@ const DOMINANCE_EXEMPT_TOOLS = new Set(["task_delegate", "task_revise", "task_st
 const TOOL_CALLING_TEMPERATURE = 0.3
 /** Times a turn is re-asked after a tool call written as text failed to run. */
 const MAX_MARKUP_RETRIES = 2
+/** Times an empty turn (no text, no call) is re-asked before the run is given up. */
+const MAX_EMPTY_RETRIES = 2
 /** Steps left at which the model is told to wrap up. */
 const WRAP_UP_STEPS_REMAINING = 3
 const WORKSPACE_MUTATION_TOOLS = new Set([
@@ -742,6 +744,7 @@ export async function* runAgent(
   let loopDetected = false
   let wrapUpAnnounced = false
   let markupRetries = 0
+  let emptyRetries = 0
 
   // ── Resume from checkpoint ────────────────────────────────────────────────
   // The restored messages are already the pruned set from the run that wrote
@@ -962,6 +965,24 @@ export async function* runAgent(
         role: "user",
         content: "Tu última respuesta escribió una llamada a herramienta como texto y NO se ejecutó. "
           + "Vuelve a hacerla como llamada a herramienta normal (con sus parámetros), o responde en texto si ya no la necesitas.",
+      })
+      continue
+    }
+
+    // ── An empty turn ───────────────────────────────────────────────────
+    // No text and no call is not an answer. Models do this after a long tool-heavy stretch (the
+    // turn goes to thinking, or the reply is cut), and ending the run here threw away all the work
+    // so far: BEE's own execution run was lost this way after 25 minutes. Ask it to go on instead.
+    if (!response.tool_calls?.length && !response.content?.trim() && !response.droppedToolMarkup
+      && response.stop_reason !== "error" && response.stop_reason !== "max_tokens"
+      && !opts.signal?.aborted && emptyRetries < MAX_EMPTY_RETRIES) {
+      emptyRetries++
+      log.warn(`[agent-loop] Empty model turn — asking it to continue (${emptyRetries}/${MAX_EMPTY_RETRIES}) run=${runId}`)
+      messages.push({ role: "assistant", content: "(sin respuesta)" })
+      messages.push({
+        role: "user",
+        content: "Tu última respuesta llegó vacía: ni texto ni llamada a herramienta. Continúa: haz la siguiente "
+          + "llamada a herramienta que necesites o, si ya terminaste, da tu respuesta final en texto.",
       })
       continue
     }

@@ -19,6 +19,10 @@ Código en `packages/core/src/tools/`. Cada herramienta tiene `name`, `descripti
 
 Además, los servidores MCP configurados aportan herramientas propias; `mcp/tool-sync.ts` las sincroniza al índice de herramientas.
 
+## Dónde trabajan las herramientas de código
+
+Las herramientas de `code/` (`code_build`, `code_test`, `code_lint`, `check_types`, `run_script`, `code_test_parallel`, `code_diff_create`, `parse_ast` y los `git_*`) resuelven su `path` **dentro del workspace de la tarea** (`workingDirectory`, igual que las de archivos): un `path` relativo cuenta desde la raíz del worktree y uno que apunte fuera se rechaza. Antes ejecutaban en `process.cwd()`, que es el proyecto real aunque la tarea viviera en un worktree aislado: los tests de un builder corrían contra el árbol equivocado, `git commit` tocaba el repositorio del usuario y un `code_build({ command: "cat > informe.md <<EOF…" })` escribía fuera del aislamiento (lo hizo un verifier en una corrida real, y luego copió el archivo a mano al worktree). Sin workspace configurado (un chat sin tarea) se conserva el comportamiento anterior.
+
 ## Permisos por perfil
 
 Cada perfil declara su lista de herramientas (`agent-profiles.ts`); fuera de ella no se le ofrecen. La tabla está en [harness.md](./harness.md#perfiles). Encima actúa el modo de ejecución: en `plan` se retiran las de escritura aunque el perfil las tenga ([modes.md](./modes.md)).
