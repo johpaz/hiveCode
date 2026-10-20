@@ -72,6 +72,8 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 Si macOS bloquea el binario por haberlo descargado con el navegador, quita la marca de cuarentena: `xattr -d com.apple.quarantine hivecode`.
 
+> **Verificación de los binarios:** los de Linux x64, Linux arm64, macOS Apple Silicon y Windows x64 se compilan en su propia plataforma y pasan un *smoke test* (`--version` y `doctor`) antes de publicarse. Los de macOS Intel, Linux musl y Windows arm64 se compilan en un runner de otra arquitectura o libc y no se prueban: si fallan al arrancar, usa la instalación con npm. Detalle en [`docs/development.md`](./docs/development.md#binarios-independientes).
+
 > **Windows:** el binario de Windows es el menos probado de los siete. Además, la herramienta `shell_executor` no está soportada fuera de WSL2 (no hay `/bin/sh`): para el flujo completo usa hivecode dentro de una distro WSL2 con el binario de Linux. Ver [Sandbox del shell](#sandbox-del-shell-por-sistema-operativo).
 
 ### Desde el código fuente

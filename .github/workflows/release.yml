@@ -56,10 +56,12 @@ jobs:
             target: bun-linux-x64
             rust: x86_64-unknown-linux-gnu
             artifact: hive-code-linux-x64
+            smoke: true
           - os: ubuntu-24.04-arm
             target: bun-linux-arm64
             rust: aarch64-unknown-linux-gnu
             artifact: hive-code-linux-arm64
+            smoke: true
           - os: ubuntu-latest
             target: bun-linux-x64-musl
             rust: x86_64-unknown-linux-musl
@@ -72,10 +74,12 @@ jobs:
             target: bun-darwin-arm64
             rust: aarch64-apple-darwin
             artifact: hive-code-macos-arm64
+            smoke: true
           - os: windows-latest
             target: bun-windows-x64
             rust: x86_64-pc-windows-msvc
             artifact: hive-code-windows-x64.exe
+            smoke: true
           - os: windows-latest
             target: bun-windows-x64-arm64
             rust: aarch64-pc-windows-msvc
@@ -121,11 +125,21 @@ jobs:
       - name: Build CLI binary
         shell: bash
         run: |
-          bun build packages/cli/src/index.ts \
-            --compile \
-            --bytecode \
+          bun scripts/build-binary.ts \
             --target ${{ matrix.target }} \
             --outfile ${{ matrix.artifact }}
+
+      # Un binario que compila pero no arranca (le pasó: sin el módulo nativo de HiveDB) no debe
+      # publicarse. Sólo se puede ejecutar el de la plataforma del runner.
+      - name: Smoke test
+        if: matrix.smoke
+        shell: bash
+        env:
+          HIVE_HOME: ${{ runner.temp }}/hive-smoke
+        run: |
+          chmod +x "${{ matrix.artifact }}"
+          "./${{ matrix.artifact }}" --version
+          "./${{ matrix.artifact }}" doctor
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -109,4 +109,10 @@ scripts/release.sh patch --dry-run   # verifica (tipos, tests Bun y Rust) sin ca
 scripts/release.sh patch --push      # sube versión, crea el tag vX.Y.Z y lo empuja
 ```
 
+### Binarios independientes
+
+`bun run build:binary` (y `:mac`, `:mac-intel`, `:win`, `:all`) usa `scripts/build-binary.ts`, no `bun build --compile` a secas. `@johpaz/hive-db` carga su módulo nativo con `createRequire(import.meta.url)`, que el empaquetador no sigue: el binario compilaba pero **no arrancaba** (`Cannot find module '../native.cjs'`) porque el `.node` nunca se incluía. El script aplica un parche en memoria a ese cargador (`exposeNativeRequire`), y `tests/audit/build-binary.test.ts` falla si una versión nueva de hive-db cambia la forma del cargador. El paquete npm no tenía este problema: `packages/cli/scripts/build.ts` copia el módulo nativo a `dist/node_modules`.
+
+El addon que se embebe es el del paquete de plataforma que `bun install` bajó en la máquina que compila, así que **cada binario debe compilarse en su plataforma**. En `release.yml` eso se cumple para `linux-x64`, `linux-arm64`, `macos-arm64` y `windows-x64`, que además ejecutan un *smoke test* (`--version` y `doctor`) antes de subir el artefacto. No se cumple para `macos-x64` (se compila en un runner arm64), `linux-x64-musl` (runner glibc) ni `windows-arm64` (runner x64): esos tres pueden salir sin su addon y no se prueban.
+
 El tag dispara `release.yml`: verifica, compila los binarios por plataforma, crea la release con `SHA256SUMS` y publica `@johpaz/hivecode` en npm. `bun run build` genera el bundle de skills, compila la TUI en release y empaqueta el CLI; `bun run build:binary[:mac|:win|:all]` produce los ejecutables independientes.

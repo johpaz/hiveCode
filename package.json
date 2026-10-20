@@ -122,7 +122,7 @@
     "prestart": "bun packages/cli/scripts/setup-obscura.ts",
     "start": "bun run packages/cli/src/index.ts start",
     "build": "bun packages/skills/scripts/generate-bundle.ts && cargo build --release --manifest-path packages/hivetui/Cargo.toml && bun packages/cli/scripts/build.ts",
-    "build:binary": "mkdir -p dist && (cd packages/hivetui && cargo build --release && cp target/release/hivetui hivetui.bin) && bun build packages/cli/src/index.ts --compile --bytecode --target=bun-linux-x64   --outfile dist/hivecode-linux-x64 && truncate -s 0 packages/hivetui/hivetui.bin",
+    "build:binary": "mkdir -p dist && (cd packages/hivetui && cargo build --release && cp target/release/hivetui hivetui.bin) && bun scripts/build-binary.ts --target bun-linux-x64 --outfile dist/hivecode-linux-x64 && truncate -s 0 packages/hivetui/hivetui.bin",
     "prepublishOnly": "bun run build",
     "test": "bun test --preload ./tests/setup/db-isolated.ts",
     "test:integration": "bun test --preload ./tests/setup/db-isolated.ts --tsconfig-override tests/tsconfig.json tests/",
@@ -132,9 +132,9 @@
     "bench": "bun run scripts/bench-context.ts",
     "bench:context": "bun run scripts/bench-context.ts",
     "reload-tools": "bun run scripts/reload-tools.ts",
-    "build:binary:mac": "mkdir -p dist && (cd packages/hivetui && cargo build --release && cp target/release/hivetui hivetui.bin) && bun build packages/cli/src/index.ts --compile --bytecode --target=bun-darwin-arm64 --outfile dist/hivecode-macos-arm64",
-    "build:binary:mac-intel": "mkdir -p dist && (cd packages/hivetui && cargo build --release && cp target/release/hivetui hivetui.bin) && bun build packages/cli/src/index.ts --compile --bytecode --target=bun-darwin-x64   --outfile dist/hivecode-macos-x64",
-    "build:binary:win": "mkdir -p dist && (cd packages/hivetui && cargo build --release && (cp target/release/hivetui.exe hivetui.bin 2>/dev/null || cp target/release/hivetui hivetui.bin)) && bun build packages/cli/src/index.ts --compile --bytecode --target=bun-windows-x64  --outfile dist/hivecode-windows.exe",
+    "build:binary:mac": "mkdir -p dist && (cd packages/hivetui && cargo build --release && cp target/release/hivetui hivetui.bin) && bun scripts/build-binary.ts --target bun-darwin-arm64 --outfile dist/hivecode-macos-arm64",
+    "build:binary:mac-intel": "mkdir -p dist && (cd packages/hivetui && cargo build --release && cp target/release/hivetui hivetui.bin) && bun scripts/build-binary.ts --target bun-darwin-x64 --outfile dist/hivecode-macos-x64",
+    "build:binary:win": "mkdir -p dist && (cd packages/hivetui && cargo build --release && (cp target/release/hivetui.exe hivetui.bin 2>/dev/null || cp target/release/hivetui hivetui.bin)) && bun scripts/build-binary.ts --target bun-windows-x64 --outfile dist/hivecode-windows.exe",
     "build:binary:all": "bun run build:binary && bun run build:binary:mac && bun run build:binary:win"
   },
   "dependencies": {
