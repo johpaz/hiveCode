@@ -59,7 +59,7 @@ Reglas aprendidas:
 - **No uses `mock.module` en tests nuevos**: en Bun se filtra entre archivos y rompe pruebas ajenas. Parchea el prototipo o inyecta la dependencia (ver `tests/audit/plan-mode-harness.test.ts`, que parchea `ProfileHarness.prototype.run`).
 - Los tests con LLM real (`tests/agents/*.real.test.ts`) están excluidos en `bunfig.toml`, porque dentro de un worktree causaban caídas del JIT. Se ejecutan a mano con `--tsconfig-override tests/tsconfig.json`.
 - `tsc` por paquete (`-p packages/code`) da más errores que el `tsc` de la raíz; el criterio es la raíz.
-- Hay cuatro tests de `packages/core/src/agent/jev-decisions.test.ts` ("oracle resolution: Jev, then Kev, then classic") que fallan en la suite completa y pasan solos: contaminación por `mock.module` en `tests/jev/`.
+- `jev-decisions.test.ts` importa el módulo con `?actual` porque `tests/jev/` lo reemplaza con `mock.module` (global al proceso): sin eso, cuatro de sus tests fallaban en la suite completa y pasaban solos.
 
 Directorios de `tests/`: `agent-loop`, `agents`, `audit` (regresiones de bugs reales), `checkpoint`, `context`, `context-compiler`, `coordinator`, `database`, `e2e`, `harness-recovery`, `ipc`, `jev`, `recovery`, `security`, `tools`…
 

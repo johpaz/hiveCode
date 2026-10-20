@@ -199,7 +199,7 @@ Teclas principales: `Shift+Tab` cambia de modo, `1`–`5` de vista, `/` abre los
 
 Tras un plan, la TUI abre un modal: **ejecutar automáticamente**, **aprobar fase por fase**, **agregar contexto** o **cancelar** (equivalentes a `/approve auto`, `/approve review`, texto libre y `/reject`). `/halt` detiene la tarea activa.
 
-En `approval`, cada escritura (`fs_write`, `fs_edit`, `fs_delete`, `git_commit`) abre un modal **AUTORIZAR HERRAMIENTA** con los argumentos exactos: `Enter`/`y` autoriza, `Esc`/`n` rechaza. Un rechazo no se reintenta por otra vía. Cambiar de modo con `Shift+Tab` durante una tarea solo afecta a la siguiente.
+En `approval`, cada escritura (`fs_write`, `fs_edit`, `fs_delete`) y cada comando de shell que modifica archivos o el historial de git (`rm`, `mv`, `>`, `sed -i`, `git commit`…) abre un modal **AUTORIZAR HERRAMIENTA** con los argumentos exactos: `Enter`/`y` autoriza, `Esc`/`n` rechaza. Un rechazo no se reintenta por otra vía. Cambiar de modo con `Shift+Tab` durante una tarea solo afecta a la siguiente.
 
 En `approval`, las tareas complejas tienen además dos puertas: **aprobar especificación y plan** (con `spec.md`, `plan.md` y `tasks.md` a la vista) antes de implementar, y **aprobar resultado** antes de cerrar. Detalle en [`docs/modes.md`](./docs/modes.md).
 

@@ -38,7 +38,7 @@ import { emitJevDecision } from "./jev-decisions"
 import { formatToolResult } from "../utils/toon"
 import { getAverageTokenCost } from "../storage/usage"
 import type { ContentPart } from "./llm-client"
-import { getExecutionMode, canExecuteTool, requiresConfirmation, canPromptForConfirmation, getBlockReason } from "./execution-mode"
+import { getExecutionMode, canExecuteTool, callRequiresConfirmation, canPromptForConfirmation, getBlockReason } from "./execution-mode"
 import { canRequestToolApproval, requestToolApproval, toolApprovalDetail } from "./tool-approval"
 import { planJevIteration } from "./jev-planner"
 import { createStuckLoopDetector, getInterventionMessage } from "./stuck-loop"
@@ -997,7 +997,7 @@ export async function* runAgent(
       }
 
       // The TUI cannot share stdin, so it is asked over IPC instead.
-      if (currentMode === "approval" && !opts.approvedExecution && requiresConfirmation(toolName) && canRequestToolApproval()) {
+      if (currentMode === "approval" && !opts.approvedExecution && callRequiresConfirmation(toolName, tc.function.arguments) && canRequestToolApproval()) {
         const approved = await requestToolApproval({
           agent: opts.agentId,
           tool: toolName,
@@ -1016,7 +1016,7 @@ export async function* runAgent(
         continue
       }
 
-      if (currentMode === "approval" && !opts.approvedExecution && requiresConfirmation(toolName) && !canPromptForConfirmation()) {
+      if (currentMode === "approval" && !opts.approvedExecution && callRequiresConfirmation(toolName, tc.function.arguments) && !canPromptForConfirmation()) {
         const toolResultJS = {
           ok: false,
           error: `[APPROVAL REQUIRED] '${toolName}' necesita confirmación del usuario y aquí no hay forma de pedirla.`,
@@ -1029,7 +1029,7 @@ export async function* runAgent(
         continue
       }
 
-      if (currentMode === "approval" && !opts.approvedExecution && requiresConfirmation(toolName)) {
+      if (currentMode === "approval" && !opts.approvedExecution && callRequiresConfirmation(toolName, tc.function.arguments)) {
         const paramsStr = typeof tc.function.arguments === "string" ? tc.function.arguments : JSON.stringify(tc.function.arguments, null, 2)
         process.stdout.write(`\n[CONFIRMAR] ¿Ejecutar \`${toolName}\`?\n${paramsStr}\n(y/N): `)
         const confirmed = await new Promise<string>(r => process.stdin.once("data", d => r(d.toString().trim().toLowerCase())))

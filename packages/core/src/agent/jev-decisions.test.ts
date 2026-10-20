@@ -11,7 +11,10 @@ mock.module("../storage/crypto", () => ({
 const { closeHiveDb } = await import("../storage/hivedb.ts")
 const { col } = await import("../storage/hive.ts")
 const { ensureHiveDb } = await import("../storage/bootstrap.ts")
-const { askJev, resolveOracles, resetJevStatus, getJevStatus } = await import("./jev-decisions.ts")
+// tests/jev/ reemplaza este módulo con `mock.module`, que en Bun es global al proceso y se
+// filtraba aquí. La query hace que se cargue el módulo real, aparte de ese reemplazo.
+const specifier = "./jev-decisions.ts?actual"
+const { askJev, resolveOracles, resetJevStatus, getJevStatus } = await import(specifier) as typeof import("./jev-decisions.ts")
 type ProviderDoc = import("../storage/collections.ts").ProviderDoc
 
 const previousHiveDbPath = process.env.HIVE_DB_PATH

@@ -63,7 +63,7 @@ En cualquiera de esos casos se planifica de nuevo, como antes. Antes de este cam
 
 ## Confirmación por herramienta
 
-`CONFIRM_REQUIRED_TOOLS` = `fs_write`, `fs_edit`, `fs_delete`, `git_commit`, `cron.delete`, `agent_archive`. En modo `approval`, antes de ejecutar una de ellas el bucle pide autorización, salvo que la ejecución ya esté aprobada (`approvedExecution`, que el harness pone en la fase de ejecución de una tarea compleja tras su puerta). Hay tres caminos, por orden:
+`CONFIRM_REQUIRED_TOOLS` = `fs_write`, `fs_edit`, `fs_delete`, `git_commit`, `cron.delete`, `agent_archive`, más los comandos de `shell_executor` que modifican archivos (ver abajo). En modo `approval`, antes de ejecutar una de ellas el bucle pide autorización, salvo que la ejecución ya esté aprobada (`approvedExecution`, que el harness pone en la fase de ejecución de una tarea compleja tras su puerta). Hay tres caminos, por orden:
 
 1. **TUI (modal).** Si el lanzador registró un solicitante (`registerToolApprovalRequester`), el bucle envía `tool_approval_request` y espera `tool_approval_response`. La TUI abre el modal **AUTORIZAR HERRAMIENTA** con el agente, la herramienta y sus argumentos: `↩`/`y` autoriza, `Esc`/`n` rechaza, `↑↓` desplaza un detalle largo. Solicitudes simultáneas se muestran de una en una, y si hay un formulario o Configuración abiertos esperan en cola a que se cierren. Código: `agent/tool-approval.ts` y `widgets/tool_approval_modal.rs`.
 2. **Consola con TTY.** `¿Ejecutar <tool>? (y/N)` por stdin.
@@ -75,7 +75,19 @@ En cualquiera de esos casos se planifica de nuevo, como antes. Antes de este cam
   "hint": "No reintentes. Informa al usuario que esta acción espera su aprobación (o que cambie a modo auto)." }
 ```
 
-**Límite: el shell no pide confirmación.** `shell_executor` no está en `CONFIRM_REQUIRED_TOOLS`, así que un agente puede borrar o escribir con `rm`, `sed` o redirecciones sin pasar por el modal. En las pruebas con deepseek, el builder y BEE se negaron a usarlo para esquivar un rechazo y propusieron al usuario hacerlo a mano o cambiar de modo; es una conducta del modelo, no una garantía. Además, `git_commit`, `cron.delete` y `agent_archive` están en la lista pero ningún perfil las tiene hoy en su catálogo, por lo que solo `fs_write`, `fs_edit` y `fs_delete` se pueden ejercitar.
+**El shell también pide, pero solo si modifica.** El shell es la vía para escribir esquivando un `fs_write` rechazado, así que `shell_executor` pide autorización cuando el comando cambia archivos o el historial de git (`shellCommandMutates` en `execution-mode.ts`):
+
+| Piden | No piden |
+|-------|----------|
+| `rm`, `mv`, `cp`, `touch`, `ln`, `chmod`, `chown`, `tee`, `dd`, `truncate`… | `ls`, `cat`, `grep`, `head`, `wc`, `od`, `pwd`, `echo` sin redirección |
+| Redirecciones `>` y `>>` (no `2>&1`, `>&2` ni `> /dev/null`) | `git status`, `diff`, `log`, `branch`, `show` |
+| `sed -i`, `perl -i`, `find … -delete/-exec` | `bun test`, `bun run build`, `bunx tsc`, `npm test`, `bun install` |
+| `git commit`, `push`, `reset`, `clean`, `checkout`, `stash`, `rebase`, `merge`, `branch -D`… | `sed -n`, `find` sin `-delete` |
+| `npm publish` y similares; `bash -c "…"`, `sudo`, `xargs` con alguno de los anteriores | |
+
+Cada comando se analiza por segmentos (`&&`, `||`, `;`, `|`, subshells). Un argumento ilegible, o una llamada sin comando, también pregunta. El modal muestra el comando completo. El analizador es una heurística, no una caja de arena: un comando construido de forma opaca (por ejemplo, un script que escribe archivos y se lanza con `bun run`) no se detecta. Para aislamiento real está el sandbox del shell ([tools.md](./tools.md#shell_executor-y-sandbox)).
+
+`git_commit`, `cron.delete` y `agent_archive` están en la lista de confirmación, pero ningún perfil las tiene hoy en su catálogo.
 
 **Rechazos.** Un rechazo vuelve al modelo como `[CANCELADO] Usuario canceló '<tool>'` con la indicación de no repetirla ni buscar otra vía. Si dentro de la misma tarea se vuelve a pedir **la misma herramienta con los mismos argumentos**, se rechaza sin preguntar otra vez. Abortar la tarea o cerrar la TUI deniega lo que estuviera pendiente. En una prueba real con deepseek, el builder no intentó escribir por shell tras el rechazo y BEE cerró informando "no completado — aprobación denegada", sin tocar el proyecto.
 
