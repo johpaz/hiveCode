@@ -58,7 +58,6 @@ Cada [release de GitHub](https://github.com/johpaz/hiveCode/releases) publica un
 | macOS Apple Silicon | `hive-code-macos-arm64` |
 | macOS Intel | `hive-code-macos-x64` |
 | Windows x64 | `hive-code-windows-x64.exe` |
-| Windows arm64 | `hive-code-windows-arm64.exe` |
 
 ```bash
 # Linux / macOS
@@ -72,9 +71,9 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 Si macOS bloquea el binario por haberlo descargado con el navegador, quita la marca de cuarentena: `xattr -d com.apple.quarantine hivecode`.
 
-> **Verificación de los binarios:** los de Linux x64, Linux arm64, macOS Apple Silicon y Windows x64 se compilan en su propia plataforma y pasan un *smoke test* (`--version` y `doctor`) antes de publicarse. Los de macOS Intel, Linux musl y Windows arm64 se compilan en un runner de otra arquitectura o libc y no se prueban: si fallan al arrancar, usa la instalación con npm. Detalle en [`docs/development.md`](./docs/development.md#binarios-independientes).
+> **Verificación de los binarios:** cada binario embebe el módulo nativo de HiveDB de **su** plataforma (se descarga con `npm pack` si el equipo que compila no lo tiene). Los de Linux x64, Linux arm64, macOS Apple Silicon y Windows x64 se compilan en su propia plataforma y pasan un *smoke test* (`--version` y `doctor`) antes de publicarse. Los de macOS Intel y Linux musl se compilan en un runner de otra arquitectura o libc, así que no se pueden ejecutar en CI: sabemos que llevan su addon (se comprueba el ejecutable), pero no que arranquen. Si alguno falla, usa la instalación con npm. Detalle en [`docs/development.md`](./docs/development.md#binarios-independientes).
 
-> **Windows:** el binario de Windows es el menos probado de los siete. Además, la herramienta `shell_executor` no está soportada fuera de WSL2 (no hay `/bin/sh`): para el flujo completo usa hivecode dentro de una distro WSL2 con el binario de Linux. Ver [Sandbox del shell](#sandbox-del-shell-por-sistema-operativo).
+> **Windows:** el binario de Windows es el menos probado de los seis. Windows arm64 no tiene binario: `@johpaz/hive-db` no publica su módulo nativo para esa plataforma (en un equipo Windows arm64, usa WSL2). Además, la herramienta `shell_executor` no está soportada fuera de WSL2 (no hay `/bin/sh`): para el flujo completo usa hivecode dentro de una distro WSL2 con el binario de Linux. Ver [Sandbox del shell](#sandbox-del-shell-por-sistema-operativo).
 
 ### Desde el código fuente
 

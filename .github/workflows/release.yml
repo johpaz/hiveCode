@@ -80,10 +80,6 @@ jobs:
             rust: x86_64-pc-windows-msvc
             artifact: hive-code-windows-x64.exe
             smoke: true
-          - os: windows-latest
-            target: bun-windows-x64-arm64
-            rust: aarch64-pc-windows-msvc
-            artifact: hive-code-windows-arm64.exe
 
     steps:
       - uses: actions/checkout@v4
