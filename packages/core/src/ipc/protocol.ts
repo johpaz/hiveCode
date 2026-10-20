@@ -124,6 +124,11 @@ export type BunMessage =
   | { type: "librarian_progress"; status: "running" | "done"; records_written: number }
   | { type: "plan_update"; task_id: string; adr_title: string; adr_content: string; status: string; phases: { name: string; coordinator: string; description: string; depends_on: string[]; level: number; status: string }[]; risks: { severity: string; description: string }[] }
   | { type: "plan_approval_request" }
+  /**
+   * A tool in `approval` mode waits for a person. The TUI shows the call and
+   * answers with `tool_approval_response` carrying the same `request_id`.
+   */
+  | { type: "tool_approval_request"; request_id: string; agent: string; tool: string; summary: string; detail: string; kind?: "tool" | "gate"; title?: string }
   | { type: "task_update"; task_id: string; title?: string; status: string; mode?: string; active_workers?: string[]; workspace_id?: string; workspace_path?: string; branch_name?: string; isolated?: boolean; integration_status?: string }
   | {
       // Field shape matches the pre-existing Rust ReviewVerdictUpdate contract
@@ -333,6 +338,7 @@ export type TuiMessage =
    */
   | { type: "task_resume"; task_id: string }
   | { type: "request_settings" }
+  | { type: "tool_approval_response"; request_id: string; approve: boolean }
   /**
    * Activar el provider que el usuario ya eligió en el hub de settings de la TUI,
    * guardando su API key si viene.
@@ -352,6 +358,8 @@ const CRITICAL_TYPES = new Set<BunMessage["type"]>([
   // Drives a full transcript+panel reset, so it must not sit behind a backlog of
   // normal-priority history_append frames.
   "session_changed",
+  // The agent is blocked until the person answers.
+  "tool_approval_request",
 ])
 const LOW_TYPES = new Set<BunMessage["type"]>([
   "log_entry", "checkpoint_created", "checkpoint_rollback", "context_update",

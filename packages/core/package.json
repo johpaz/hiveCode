@@ -49,6 +49,7 @@
     "./agent/prompt-builder": "./src/agent/prompt-builder.ts",
     "./agent/conversation-store": "./src/agent/conversation-store.ts",
     "./agent/execution-mode": "./src/agent/execution-mode.ts",
+    "./agent/tool-approval": "./src/agent/tool-approval.ts",
     "./agent/tool-selector": "./src/agent/tool-selector.ts",
     "./agent/skill-selector": "./src/agent/skill-selector.ts",
     "./agent/playbook-selector": "./src/agent/playbook-selector.ts",

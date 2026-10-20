@@ -101,6 +101,18 @@ Sin clave:   hivecode login        # habilita los modelos de hivecode-free
 
 Las claves se guardan en el llavero del sistema (`Bun.secrets`), nunca en texto plano. Si falla algo, `hivecode doctor` hace un diagnóstico completo.
 
+## Tu primera tarea
+
+```text
+1. Entra en un repositorio git (con al menos un commit):  cd mi-proyecto && hivecode
+2. Arranca en modo PLAN. Escribe:  crea una CLI de notas con add, list y delete
+3. BEE y el Planner investigan y proponen un plan; no se toca ningún archivo.
+4. Aparece el modal de aprobación: "Ejecutar automáticamente" o "Aprobar fase por fase".
+5. El Builder trabaja en un worktree aislado, el Quality Gate verifica y el resultado se integra en tu proyecto.
+```
+
+`Shift+Tab` cambia de modo en cualquier momento y `/halt` detiene la tarea activa. Cómo se reparte el trabajo está en [`docs/harness.md`](./docs/harness.md).
+
 ---
 
 ## Interfaz: TUI
@@ -157,13 +169,13 @@ Un provider nuevo que aún no está en la tabla se da de alta con `A`
 
 ### IPC con Bun
 
-El TUI es un binario Rust que se conecta al proceso Bun vía IPC local (Unix socket o TCP loopback en Windows). El gateway HTTP/WebSocket arranca dentro del mismo proceso Bun que el REPL/TUI. Los mensajes entrantes se procesan por prioridad:
+La TUI es un binario Rust que se conecta al proceso Bun vía IPC local (socket Unix, o TCP loopback en Windows). El gateway HTTP/WebSocket arranca dentro del mismo proceso Bun que el REPL. Los mensajes de Bun a la TUI llevan prioridad:
 
-- **CRITICAL** — `forensic_alert`, `approval_required`: se procesan antes que cualquier otra cosa
-- **NORMAL** — `worker_update`, `history_append`, `diff_update`, `task_status`, `status`
-- **LOW** — `memory_update`, `librarian_progress`, `thinking_chunk`
+- **critical** — `init`, `conflict_alert`, `forensic_alert`, `halt_state`: se envían de inmediato.
+- **normal** — `history_append`, `assistant_chunk`, `plan_update`, `task_update`, `worker_update`, `tool_call`/`tool_done`, `status`.
+- **low** — `log_entry`, `file_diff`, `memory_update`, `checkpoint_created`: pueden ir con retraso.
 
-El TUI también funciona en modo headless (`HIVETUI_HEADLESS=1`) para testing: emite frames como NDJSON a stdout en lugar de pintar la terminal.
+Con `HIVETUI_HEADLESS=1` la TUI emite fotogramas NDJSON por stdout en vez de pintar la terminal (lo usan las pruebas). El protocolo completo está en [`docs/tui.md`](./docs/tui.md#protocolo-ipc).
 
 ### Compilar el TUI
 
@@ -187,7 +199,9 @@ Teclas principales: `Shift+Tab` cambia de modo, `1`–`5` de vista, `/` abre los
 
 Tras un plan, la TUI abre un modal: **ejecutar automáticamente**, **aprobar fase por fase**, **agregar contexto** o **cancelar** (equivalentes a `/approve auto`, `/approve review`, texto libre y `/reject`). `/halt` detiene la tarea activa.
 
-> **Limitación conocida:** en la TUI no hay todavía un modal propio para las puertas `specification` y `convergence` del harness, ni confirmación herramienta por herramienta: sin teclado disponible, una herramienta que pide confirmación devuelve `[APPROVAL REQUIRED]` en vez de bloquearse. Detalle en [`docs/modes.md`](./docs/modes.md).
+En `approval`, cada escritura (`fs_write`, `fs_edit`, `fs_delete`, `git_commit`) abre un modal **AUTORIZAR HERRAMIENTA** con los argumentos exactos: `Enter`/`y` autoriza, `Esc`/`n` rechaza. Un rechazo no se reintenta por otra vía. Cambiar de modo con `Shift+Tab` durante una tarea solo afecta a la siguiente.
+
+> **Limitación conocida:** las puertas `specification` y `convergence` del harness aún no tienen modal propio en la TUI (se usa el modal del plan y la autorización por herramienta). Detalle en [`docs/modes.md`](./docs/modes.md).
 
 ---
 
@@ -420,7 +434,10 @@ bun run build:binary:all  # Binarios Linux, macOS y Windows
 bun run lint              # Type check
 bun run test              # Tests (aísla la DB y el llavero)
 bun run test:integration  # Tests de integración
+(cd packages/hivetui && cargo test)   # Tests de la TUI
 ```
+
+Variables de entorno, depuración con tmux y reglas para escribir pruebas: [`docs/development.md`](./docs/development.md).
 
 ### Publicar una versión
 

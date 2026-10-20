@@ -39,6 +39,7 @@ import { formatToolResult } from "../utils/toon"
 import { getAverageTokenCost } from "../storage/usage"
 import type { ContentPart } from "./llm-client"
 import { getExecutionMode, canExecuteTool, requiresConfirmation, canPromptForConfirmation, getBlockReason } from "./execution-mode"
+import { canRequestToolApproval, requestToolApproval, toolApprovalDetail } from "./tool-approval"
 import { planJevIteration } from "./jev-planner"
 import { createStuckLoopDetector, getInterventionMessage } from "./stuck-loop"
 import { buildRunEpoch, formatEpochKey } from "./run-epoch"
@@ -992,6 +993,26 @@ export async function* runAgent(
           toolResultLLM, id: tc.id, name: toolName, ms: 0,
           sig: toolCallSignature(toolName, tc.function.arguments),
         })
+        continue
+      }
+
+      // The TUI cannot share stdin, so it is asked over IPC instead.
+      if (currentMode === "approval" && !opts.approvedExecution && requiresConfirmation(toolName) && canRequestToolApproval()) {
+        const approved = await requestToolApproval({
+          agent: opts.agentId,
+          tool: toolName,
+          summary: summarizeArgs(tc.function.arguments),
+          detail: toolApprovalDetail(tc.function.arguments),
+        }, opts.signal, opts.codeTaskId ?? opts.threadId)
+        if (!approved) {
+          const toolResultJS = { ok: false, error: `[CANCELADO] Usuario canceló '${toolName}'`, hint: "El usuario rechazó esta acción. No la repitas ni busques otra vía para hacer lo mismo; pregunta qué prefiere." }
+          results.push({
+            toolResultLLM: formatToolResult(toolResultJS, cleanModel), id: tc.id, name: toolName, ms: 0,
+            sig: toolCallSignature(toolName, tc.function.arguments),
+          })
+          continue
+        }
+        approvedTools.push(tc)
         continue
       }
 

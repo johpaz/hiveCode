@@ -21,6 +21,7 @@ import { logger, onLogEntry, removeLogListener, type LogEntry } from "@johpaz/hi
 import { createIpcServer } from "@johpaz/hivecode-core/ipc/server"
 import type { BunMessage as CoreBunMessage, TuiMessage as CoreTuiMessage } from "@johpaz/hivecode-core/ipc/protocol"
 import { broadcastUiMessage, registerUiMessageHandler } from "@johpaz/hivecode-core/ipc/ui-broadcast"
+import { registerToolApprovalRequester, resolveToolApproval } from "@johpaz/hivecode-core/agent/tool-approval"
 import { agentAlias } from "@johpaz/hivecode-core/agent/agent-identity"
 import { parseSkillTools, isMinimalSkill } from "@johpaz/hivecode-core/agent/minimal-loadout"
 import { col } from "@johpaz/hivecode-core/storage/hive"
@@ -221,6 +222,9 @@ export async function launchTui(callbacks: TuiCallbacks, stdio?: TuiStdio): Prom
       broadcastUiMessage(msg)
     }
 
+    // Per-tool confirmations in `approval` mode travel to the TUI instead of stdin.
+    registerToolApprovalRequester((request) => send({ type: "tool_approval_request", ...request }))
+
     const stopCatalogUpdates = eventBus.on("catalog:updated", () => {
       void sendSettingsSnapshot(send).catch(error => logger.warn(`Catalog snapshot: ${error.message}`))
     })
@@ -354,6 +358,7 @@ export async function launchTui(callbacks: TuiCallbacks, stdio?: TuiStdio): Prom
     }).catch(error => { logger.error(`Skill reload initialization failed: ${error.message}`); return null })
     const stopCatalogScheduler = startProviderCatalogScheduler()
     proc.exited.then(async (code) => {
+      registerToolApprovalRequester(null)
       stopCatalogUpdates()
       await stopCatalogScheduler()
       await (await skillStartup)?.stopSkillCatalogReload()
@@ -618,6 +623,10 @@ async function handleTuiMessage(
 
     case "mode_change":
       callbacks.onModeChange?.(msg.mode)
+      break
+
+    case "tool_approval_response":
+      resolveToolApproval(msg.request_id, msg.approve)
       break
 
     case "exit":

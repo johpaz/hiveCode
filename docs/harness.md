@@ -96,7 +96,7 @@ Si no se pide una, `selectSpecialty` elige por expresiones regulares sobre la ta
 
 - **No mutante** (modo `plan`, conversación): usa el directorio del proyecto, sin worktree.
 - **Mutante**: `git worktree add -B hivecode/task-<slug> /tmp/hivecode-worktrees/<slug>` más una referencia base `refs/hivecode/baselines/<slug>`. Requiere un repo git con al menos un commit.
-- **`diff`**: marca los archivos nuevos con `git add -N` y compara con la referencia base. Excluye siempre los respaldos `*.hive-bak.<ts>` que dejan `fs_write`/`fs_edit` y todo `node_modules/`, aunque el builder no haya escrito `.gitignore`.
+- **`diff`**: marca los archivos nuevos con `git add -N` y compara con la referencia base. Excluye siempre los respaldos `*.hive-bak.<ts>` que dejan `fs_write`/`fs_edit`, `node_modules/` y el scratch de verificación (ver abajo), aunque el builder no haya escrito `.gitignore`.
 - **`integrate`**: aplica el diff al proyecto con `git apply --3way`. Resultados: `integrated`, `noop`, `conflict`, `failed`. En `approval` se muestra el diff para aprobarlo antes de integrar.
 - **`cleanup`**: borra worktree y rama.
 
@@ -104,4 +104,6 @@ El worktree de la sesión se acepta como alcance válido de `get_project_context
 
 Los comandos del shell del sandbox usan un `HOME` y `TMPDIR` fuera del workspace (`os.tmpdir()/hivecode-home/<hash>`), para que cachés como `.bun`, `.npm` o `.tools` no acaben dentro del proyecto.
 
-> **Limitación conocida.** Los archivos temporales que el builder deje a propósito (`.qg/registry.txt`, `.smoke/`, `.verify-*.log` en pruebas reales) se integran como cualquier otro archivo: no hay regla general para excluirlos.
+Los prompts del Builder y del Quality Gate les piden dejar sus archivos temporales en `$TMPDIR`. Como red de seguridad, el diff descarta además el scratch que dejaron corridas reales: `.qg/`, `.smoke/`, `.scratch/`, `.tmp/`, `.cache/`, `.verify-*` y cualquier `*.log` **sin versionar** (`WORKSPACE_NOISE` en `workspace/manager.ts`). Dotfiles legítimos como `.gitignore` o `.github/` sí se integran. Un scratch con otro nombre sí se integraría: no hay forma de saber qué archivos son "del proyecto".
+
+**Cancelar.** `/halt` no integra ni borra el worktree: queda en `/tmp/hivecode-worktrees/<tarea>` con su rama y el mensaje de cancelación da la ruta. Se elimina a mano con `git worktree remove --force <ruta>` y `git branch -D <rama>`; no hay limpieza automática de worktrees cancelados.

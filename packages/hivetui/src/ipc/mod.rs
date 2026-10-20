@@ -371,6 +371,23 @@ pub enum BunMessage {
         api_contracts: Vec<ApiContractIpc>,
     },
     PlanApprovalRequest,
+    /// Una herramienta en modo `approval` espera autorización. Se contesta con
+    /// `TuiMessage::ToolApprovalResponse` y el mismo `request_id`.
+    ToolApprovalRequest {
+        request_id: String,
+        #[serde(default)]
+        agent: String,
+        tool: String,
+        #[serde(default)]
+        summary: String,
+        #[serde(default)]
+        detail: String,
+        /// `gate`: puerta del harness (especificación, cierre), no una herramienta.
+        #[serde(default)]
+        kind: String,
+        #[serde(default)]
+        title: String,
+    },
 
     ReviewVerdictUpdate {
         reviewer: Option<String>,
@@ -905,6 +922,8 @@ pub enum TuiMessage {
     Suspended,
     /// Solicita a Bun que envíe un SettingsData con el estado actual de la configuración.
     RequestSettings,
+    /// Respuesta a `BunMessage::ToolApprovalRequest`.
+    ToolApprovalResponse { request_id: String, approve: bool },
     Exit,
 }
 
@@ -1048,6 +1067,32 @@ mod tests {
         let flat = flatten_envelope(env).unwrap_or_else(|| panic!("envelope aplanable: {line}"));
         sonic_rs::from_str::<BunMessage>(&flat)
             .unwrap_or_else(|e| panic!("payload inválido: {e}\n{flat}"))
+    }
+
+    #[test]
+    fn tool_approval_request_matches_what_bun_emits() {
+        // Sobre tal como lo produce `wrap()` en packages/core/src/ipc/envelope.ts.
+        let line = r#"{"protocol_version":1,"priority":"critical","seq":3,"session_id":"s1","type":"tool_approval_request","payload":{"request_id":"tool-approval-x-1","agent":"builder","tool":"fs_write","summary":"{\"path\":\"a.txt\"}","detail":"{}"}}"#;
+        match parse(line) {
+            BunMessage::ToolApprovalRequest { request_id, agent, tool, .. } => {
+                assert_eq!(request_id, "tool-approval-x-1");
+                assert_eq!(agent, "builder");
+                assert_eq!(tool, "fs_write");
+            }
+            other => panic!("no se reconoció: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_approval_response_serializes_as_bun_expects() {
+        let json = sonic_rs::to_string(&TuiMessage::ToolApprovalResponse {
+            request_id: "r1".to_string(),
+            approve: true,
+        })
+        .unwrap();
+        assert!(json.contains(r#""type":"tool_approval_response""#), "{json}");
+        assert!(json.contains(r#""request_id":"r1""#), "{json}");
+        assert!(json.contains(r#""approve":true"#), "{json}");
     }
 
     // ── Telemetría del enjambre ────────────────────────────────────────────

@@ -35,3 +35,43 @@ test("integrating a task leaves out .hive-bak backups and node_modules", async (
     await manager.cleanup(assignment);
   }
 });
+
+test("integrating a task leaves out agent scratch but keeps legitimate dotfiles", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "hive-ws-repo-"));
+  git(repo, "init", "-q", "-b", "main");
+  writeFileSync(join(repo, "a.ts"), "export const a = 1\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "init");
+
+  const manager = new WorkspaceManager({ rootDir: mkdtempSync(join(tmpdir(), "hive-ws-root-")) });
+  const assignment = manager.createAssignment({ taskId: "scratch-demo", projectPath: repo, mutating: true });
+  await manager.prepare(assignment);
+  try {
+    const wt = assignment.worktreePath;
+    writeFileSync(join(wt, "b.ts"), "export const b = 2\n");
+    writeFileSync(join(wt, ".gitignore"), "node_modules\n");
+    mkdirSync(join(wt, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(wt, ".github", "workflows", "ci.yml"), "name: ci\n");
+    // El scratch que dejaron corridas reales del builder.
+    mkdirSync(join(wt, ".qg"), { recursive: true });
+    writeFileSync(join(wt, ".qg", "registry.txt"), "x\n");
+    mkdirSync(join(wt, ".smoke"), { recursive: true });
+    writeFileSync(join(wt, ".smoke", "out.txt"), "x\n");
+    writeFileSync(join(wt, ".verify-add.log"), "x\n");
+    writeFileSync(join(wt, "run.log"), "x\n");
+
+    const result = await manager.integrate(assignment);
+
+    expect(result.status).toBe("integrated");
+    const status = git(repo, "status", "--short", "-uall").toString();
+    expect(status).toContain("b.ts");
+    expect(status).toContain(".gitignore");
+    expect(status).toContain(".github/workflows/ci.yml");
+    expect(status).not.toContain(".qg");
+    expect(status).not.toContain(".smoke");
+    expect(status).not.toContain(".verify-");
+    expect(status).not.toContain("run.log");
+  } finally {
+    await manager.cleanup(assignment);
+  }
+});

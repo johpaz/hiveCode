@@ -17,6 +17,7 @@ pub mod info_modal;
 pub mod input;
 pub mod logs_panel;
 pub mod plan_approval_modal;
+pub mod tool_approval_modal;
 pub mod plan_layout;
 pub mod review_layout;
 pub mod settings_hub;

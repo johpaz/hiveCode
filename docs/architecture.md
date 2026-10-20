@@ -19,7 +19,7 @@ El paquete raíz re-exporta subrutas (`exports` en `package.json`), por ejemplo 
 
 `hivecode` arranca **un proceso Bun** que contiene el gateway HTTP/WebSocket, el REPL y el `CoordinatorManager`. La TUI es un **segundo proceso** (el binario Rust `hivetui`) que se conecta al primero por IPC local (socket Unix; TCP loopback en Windows). Los dos se comunican con mensajes JSON delimitados por línea (ver [tui.md](./tui.md#protocolo-ipc)).
 
-`tui-launcher.ts` marca `HIVECODE_TUI=1` en el entorno antes de lanzar la TUI. Con esa marca, las herramientas que piden confirmación por stdin no pueden hacerlo (el teclado es de la TUI) y devuelven un error `[APPROVAL REQUIRED]` en vez de colgarse (ver [modes.md](./modes.md#confirmación-por-herramienta)).
+`tui-launcher.ts` marca `HIVECODE_TUI=1` en el entorno antes de lanzar la TUI. Con esa marca, las herramientas que piden confirmación no pueden usar stdin (el teclado es de la TUI): el lanzador registra un solicitante y la confirmación viaja por IPC al modal **AUTORIZAR HERRAMIENTA**; si no hay solicitante, devuelven `[APPROVAL REQUIRED]` en vez de colgarse (ver [modes.md](./modes.md#confirmación-por-herramienta)).
 
 ## Flujo de una tarea
 

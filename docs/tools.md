@@ -27,6 +27,7 @@ Cada perfil declara su lista de herramientas (`agent-profiles.ts`); fuera de ell
 
 - `workspace-guard.ts` y `fs-bounds.test.ts`: las rutas deben quedar dentro del workspace de la tarea.
 - `fs_write` y `fs_edit` dejan un respaldo `<archivo>.hive-bak.<timestamp>` (`backup.ts`). El `WorkspaceManager` los excluye del diff.
+- `fs_write`, `fs_edit` y `fs_delete` requieren autorización en `approval` ([modes.md](./modes.md#confirmación-por-herramienta)).
 
 ## `shell_executor` y sandbox
 
@@ -56,7 +57,7 @@ Los resultados de las herramientas se acotan (`capToolResult`) y se formatean en
 
 Algunos modelos no usan el canal estructurado de llamadas y escriben las llamadas en el contenido. `extractToolCallsFromText` (`agent/llm-providers/openai-compat-base.ts`) las recupera y las quita del texto que ve el usuario:
 
-- **DSML** (DeepSeek): bloques `<｜DSML｜function_calls>` con `<｜DSML｜invoke name="…">` y `<｜DSML｜parameter name="…" string="true|false">`. `string="true"` es texto literal (se conserva el código de los archivos tal cual); `string="false"` se interpreta como JSON. La etiqueta de cierre de `function_calls` es opcional. La barra puede ser `｜` (ancho completo) o `|`.
+- **DSML** (DeepSeek): bloques `<｜DSML｜function_calls>` con `<｜DSML｜invoke name="…">` y `<｜DSML｜parameter name="…" string="true|false">`. `string="true"` es texto literal (se conserva el código de los archivos tal cual); `string="false"` se interpreta como JSON. La etiqueta de cierre del bloque es opcional. La salida real de deepseek-flash se aparta de esa forma, y el parser lo tolera: barra `｜` o `|` repetida (`<｜｜DSML｜｜ invoke>`), espacio tras la barra, y envoltorio `function_calls`, `tool_calls` o solo `calls`.
 - **Mistral** y derivados: formato nativo con marcadores.
 - **XML** y **JSON** en el texto, como respaldo.
 

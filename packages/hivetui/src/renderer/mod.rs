@@ -6,7 +6,7 @@ use crate::{
         activity_toast, agent_card, checkpoint_bar, code_layout, command_popup, config_modal,
         conflict_bar,
         dashboard_layout, focus_layout, header, info_modal, input, logs_panel,
-        plan_approval_modal, plan_layout, review_layout, settings_hub, statusbar, tabbar,
+        plan_approval_modal, plan_layout, review_layout, settings_hub, statusbar, tabbar, tool_approval_modal,
         welcome,
     },
 };
@@ -134,7 +134,7 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
 
     // Popup de comandos: flota justo encima del input
     if state.input.value().starts_with('/')
-        && !matches!(state.modal, ModalState::Config(_) | ModalState::Info(_) | ModalState::PlanApproval(_) | ModalState::ReviewConfirm(_) | ModalState::Settings(_)) {
+        && !matches!(state.modal, ModalState::Config(_) | ModalState::Info(_) | ModalState::PlanApproval(_) | ModalState::ReviewConfirm(_) | ModalState::Settings(_) | ModalState::ToolApproval(_)) {
         let history_area = content_area_for_popup(area, state);
         command_popup::render(canvas, history_area, state);
     }
@@ -149,6 +149,7 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
         ModalState::PlanApproval(_) if state.active_tab == TabId::Plan => {}
         ModalState::PlanApproval(_) => plan_approval_modal::render(canvas, area, state),
         ModalState::ReviewConfirm(_) => {}
+        ModalState::ToolApproval(_) => tool_approval_modal::render(canvas, area, state),
         ModalState::None         => {}
     }
 

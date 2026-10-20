@@ -39,6 +39,26 @@ describe("formato DSML de DeepSeek", () => {
     expect(extractToolCallsFromText(cut, new Map()).tool_calls).toHaveLength(2)
   })
 
+  it("acepta la variante real de DeepSeek: barra doble, espacio tras la barra y envoltorio `calls`", () => {
+    // Texto copiado de una corrida real con deepseek-flash.
+    const drift =
+      `<${B}${B}DSML${B}${B} calls>\n` +
+      `<${B}${B}DSML${B}${B} invoke name="fs_read">\n` +
+      `<${B}${B}DSML${B}${B} parameter name="path" string="true">hola.txt</${B}${B}DSML${B}${B} parameter>\n` +
+      `</${B}${B}DSML${B}${B} invoke>\n` +
+      `</${B}${B}DSML${B}${B} calls>`
+    const { content, tool_calls } = extractToolCallsFromText(drift, new Map())
+    expect(content).toBe("")
+    expect(tool_calls).toHaveLength(1)
+    expect(tool_calls[0].function.name).toBe("fs_read")
+    expect(JSON.parse(tool_calls[0].function.arguments)).toEqual({ path: "hola.txt" })
+  })
+
+  it("acepta `tool_calls` como envoltorio", () => {
+    const wrapped = block().replaceAll("function_calls", "tool_calls")
+    expect(extractToolCallsFromText(wrapped, new Map()).tool_calls).toHaveLength(2)
+  })
+
   it("no toca un texto sin DSML", () => {
     const out = extractToolCallsFromText("Hola, ¿en qué te ayudo?", new Map())
     expect(out).toEqual({ content: "Hola, ¿en qué te ayudo?", tool_calls: [] })

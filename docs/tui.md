@@ -68,6 +68,7 @@ En **Providers**, cada fila muestra el estado de la clave: `✓` guardada, `?` f
 | `info_modal` | `?` o `show_info_modal`; `↑/↓` desplaza, `Esc` cierra. |
 | `plan_approval_modal` | Tras un plan en `plan`/`approval`: ejecutar automáticamente, fase por fase, agregar contexto, cancelar. Ver [modes.md](./modes.md#aprobación-del-plan-modal). |
 | `ReviewConfirm` | Confirmación de `Alt+A/R/M`. |
+| `tool_approval_modal` | **AUTORIZAR HERRAMIENTA**: una herramienta de `approval` pide permiso. `↩`/`y` autoriza, `Esc`/`n` rechaza, `↑↓` desplaza. Se ajusta al tamaño de los argumentos. |
 | `resume_badge` | `▶ RESUME` en el enjambre: `Enter` arma, `Enter` otra vez reanuda una tarea interrumpida. |
 
 ## Protocolo IPC
@@ -78,7 +79,7 @@ Transporte: socket Unix (o TCP loopback en Windows), mensajes JSON de una línea
 
 | Prioridad | Mensajes |
 |-----------|----------|
-| **critical** | `init`, `conflict_alert`, `conflict_resolved`, `file_risk_update`, `forensic_alert`, `security_status_update`, `halt_state` |
+| **critical** | `init`, `conflict_alert`, `conflict_resolved`, `file_risk_update`, `forensic_alert`, `security_status_update`, `halt_state`, `tool_approval_request` |
 | **normal** | `history_append`, `assistant_chunk`/`assistant_done`, `thought_chunk`, `plan_draft_update`, `plan_update`, `plan_approval_request`, `task_update`, `worker_update`, `activity_update`, `narrative_chunk`, `tool_call`/`tool_done`, `esperando`, `status`, `state_update`, `session_changed`, `error`, `dashboard_snapshot`, `show_config_modal`, `show_info_modal`, `suspend`/`resume`… |
 | **low** | `log_entry`, `checkpoint_created`, `checkpoint_rollback`, `context_update`, `adr_update`, `file_diff`, `workers_snapshot`, `files_snapshot`, `memory_update`, `librarian_progress`, `review_verdict_update`, `resume_available`, `phase_retry` |
 
@@ -86,11 +87,11 @@ Los `critical` se envían de inmediato; los `low` pueden ir con retraso. `tool_c
 
 ### TUI → Bun (`TuiMessage`)
 
-`ready`, `submit` (texto del input, incluye `/approve …`, `/reject`, `/halt`), `mode_change`, `modal_submit`, `modal_cancel`, `info_modal_close`, `suspended`, `exit`, `rollback`, `task_resume`, `request_settings`, `provider_activate`, entre otros definidos en `protocol.ts`.
+`ready`, `submit` (texto del input, incluye `/approve …`, `/reject`, `/halt`), `mode_change`, `modal_submit`, `modal_cancel`, `info_modal_close`, `suspended`, `exit`, `rollback`, `task_resume`, `request_settings`, `provider_activate`, `tool_approval_response` (`{ request_id, approve }`), entre otros definidos en `protocol.ts`.
 
 ## Revisión de cambios (`Alt+A/R/M`)
 
-Estas teclas aprueban, rechazan o piden modificar **cambios de archivos** en modo `approval`. No son las puertas `specification`/`convergence` del harness (ver la limitación en [modes.md](./modes.md#puertas-de-aprobación-del-harness)).
+Estas teclas aprueban, rechazan o piden modificar **cambios de archivos** en modo `approval`. No son las puertas `specification`/`convergence` del harness (ver la limitación en [modes.md](./modes.md#puertas-de-aprobación-del-harness)) ni la autorización por herramienta, que tiene su propio modal.
 
 ## Modo headless
 

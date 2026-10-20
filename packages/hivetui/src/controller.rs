@@ -214,6 +214,30 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
         return false;
     }
 
+    // ── Autorización de una herramienta ────────────────────────────────────────
+    if let ModalState::ToolApproval(approval) = &mut state.modal {
+        let answer = match key.code {
+            KeyCode::Enter | KeyCode::Char('y' | 'Y' | 's' | 'S') => Some(true),
+            KeyCode::Esc | KeyCode::Char('n' | 'N') => Some(false),
+            KeyCode::Up => {
+                approval.scroll = approval.scroll.saturating_sub(1);
+                None
+            }
+            KeyCode::Down => {
+                approval.scroll += 1;
+                None
+            }
+            _ => None,
+        };
+        if let Some(approve) = answer {
+            let request_id = approval.request_id.clone();
+            state.modal = ModalState::None;
+            state.pending_ipc.push(TuiMessage::ToolApprovalResponse { request_id, approve });
+            state.promote_tool_approval();
+        }
+        return false;
+    }
+
     // ── Modal de aprobación del plan ───────────────────────────────────────────
     if let ModalState::PlanApproval(approval) = &mut state.modal {
         match key.code {
@@ -1656,6 +1680,95 @@ mod tests {
     }
 
     use super::*;
+
+    fn ask_tool(state: &mut AppState, id: &str, tool: &str) {
+        state.apply_message(crate::ipc::BunMessage::ToolApprovalRequest {
+            request_id: id.to_string(),
+            agent: "builder".to_string(),
+            tool: tool.to_string(),
+            summary: "{\"path\":\"a.txt\"}".to_string(),
+            detail: "{\n  \"path\": \"a.txt\"\n}".to_string(),
+        });
+    }
+
+    fn last_tool_answer(state: &AppState) -> Option<(String, bool)> {
+        state.pending_ipc.iter().rev().find_map(|m| match m {
+            TuiMessage::ToolApprovalResponse { request_id, approve } => Some((request_id.clone(), *approve)),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_tool_approval_request_opens_the_modal() {
+        let mut state = AppState::default();
+        ask_tool(&mut state, "r1", "fs_write");
+        match &state.modal {
+            ModalState::ToolApproval(a) => {
+                assert_eq!(a.request_id, "r1");
+                assert_eq!(a.tool, "fs_write");
+                assert_eq!(a.agent, "builder");
+            }
+            other => panic!("modal inesperado: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_authorizes_the_tool_with_the_same_request_id() {
+        let mut state = AppState::default();
+        ask_tool(&mut state, "r1", "fs_write");
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(state.modal, ModalState::None));
+        assert_eq!(last_tool_answer(&state), Some(("r1".to_string(), true)));
+    }
+
+    #[test]
+    fn esc_and_n_reject_the_tool() {
+        for code in [KeyCode::Esc, KeyCode::Char('n')] {
+            let mut state = AppState::default();
+            ask_tool(&mut state, "r2", "fs_delete");
+            handle_key_event(&mut state, KeyEvent::new(code, KeyModifiers::NONE));
+            assert!(matches!(state.modal, ModalState::None));
+            assert_eq!(last_tool_answer(&state), Some(("r2".to_string(), false)));
+        }
+    }
+
+    #[test]
+    fn typing_does_not_leak_into_the_input_while_the_modal_is_open() {
+        let mut state = AppState::default();
+        ask_tool(&mut state, "r1", "fs_write");
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(state.input.value().is_empty());
+        assert!(matches!(state.modal, ModalState::ToolApproval(_)));
+        assert!(last_tool_answer(&state).is_none());
+    }
+
+    #[test]
+    fn simultaneous_requests_are_answered_one_at_a_time_in_order() {
+        let mut state = AppState::default();
+        ask_tool(&mut state, "r1", "fs_write");
+        ask_tool(&mut state, "r2", "fs_edit");
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(last_tool_answer(&state), Some(("r1".to_string(), true)));
+        match &state.modal {
+            ModalState::ToolApproval(a) => assert_eq!(a.request_id, "r2"),
+            other => panic!("debía mostrarse la segunda: {other:?}"),
+        }
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(last_tool_answer(&state), Some(("r2".to_string(), false)));
+        assert!(matches!(state.modal, ModalState::None));
+    }
+
+    #[test]
+    fn a_request_waits_while_settings_is_open() {
+        let mut state = AppState::default();
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert!(matches!(state.modal, ModalState::Settings(_)));
+        ask_tool(&mut state, "r1", "fs_write");
+        assert!(matches!(state.modal, ModalState::Settings(_)), "no debe pisar la configuración");
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        state.promote_tool_approval();
+        assert!(matches!(state.modal, ModalState::ToolApproval(_)));
+    }
 
     #[test]
     fn a_capital_s_is_typed_and_does_not_open_settings() {

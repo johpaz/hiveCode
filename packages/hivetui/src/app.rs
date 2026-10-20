@@ -426,6 +426,7 @@ pub async fn run() -> Result<()> {
                 state.anim_tick = (state.anim_tick + 1) % 8;
                 state.slow_tick = (state.slow_tick + 1) % 30;
                 state.tick_layout_transition();
+                state.promote_tool_approval();
                 crate::widgets::office::tick(&mut state);
                 state.clock = Local::now().format("%H:%M:%S").to_string();
                 draw_pending = true;

@@ -39,6 +39,25 @@ function slug(value: string): string {
     .slice(0, 80) || "task"
 }
 
+/**
+ * Untracked files that no task should leave in the project: tool backups
+ * (`<file>.hive-bak.<ts>`), installed dependencies, and the scratch that agents
+ * create to check their own work (`.qg/`, `.smoke/`, `.verify-*`, `*.log`).
+ * Only untracked files are filtered, so a log the project already versions is
+ * never dropped.
+ */
+export const WORKSPACE_NOISE: RegExp[] = [
+  /\.hive-bak\.\d+$/,
+  /(^|\/)node_modules\//,
+  /(^|\/)\.(qg|smoke|scratch|tmp|cache)(\/|$)/,
+  /(^|\/)\.verify-[^/]*$/,
+  /\.log$/,
+]
+
+export function isWorkspaceNoise(file: string): boolean {
+  return WORKSPACE_NOISE.some(pattern => pattern.test(file))
+}
+
 async function defaultRunCommand(cmd: string[], cwd: string): Promise<{ ok: boolean; stdout?: string; stderr?: string }> {
   const proc = Bun.spawn({
     cmd,
@@ -111,9 +130,9 @@ export class WorkspaceManager {
       assignment.worktreePath,
     )
     if (untracked.ok && untracked.stdout) {
-      // Ni los respaldos de fs_write/fs_edit (`<archivo>.hive-bak.<ts>`) ni las dependencias
-      // instaladas son del proyecto, aunque el builder no haya escrito un .gitignore.
-      const files = untracked.stdout.split("\0").filter(file => file && !/\.hive-bak\.\d+$/.test(file) && !/(^|\/)node_modules\//.test(file))
+      // Ni los respaldos de fs_write/fs_edit, ni las dependencias instaladas, ni el scratch de
+      // verificación son del proyecto, aunque el builder no haya escrito un .gitignore.
+      const files = untracked.stdout.split("\0").filter(file => file && !isWorkspaceNoise(file))
       if (files.length > 0) {
         await this.runCommand(["git", "add", "-N", "--", ...files], assignment.worktreePath)
       }

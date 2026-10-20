@@ -774,8 +774,14 @@ export async function repl(): Promise<void> {
       async onSubmit(input) {
         if (["/halt", "/stop"].includes(input.trim())) {
           const taskId = manager.getActiveTaskId()
+          const workspace = taskId ? manager.getTaskWorkspaceInfo(taskId) : null
           if (taskId) await manager.cancelTask(taskId)
-          return { output: taskId ? "Tarea detenida; archivos parciales conservados." : "No hay tarea activa." }
+          if (!taskId) return { output: "No hay tarea activa." }
+          return {
+            output: workspace
+              ? `Tarea detenida. El trabajo parcial quedó sin integrar en ${workspace.path} (rama ${workspace.branch}); no se aplicó a tu proyecto.`
+              : "Tarea detenida; archivos parciales conservados.",
+          }
         }
         if (input.trim().toLowerCase() === "/auto") {
           return { output: "Navegación automática de layouts reactivada." }

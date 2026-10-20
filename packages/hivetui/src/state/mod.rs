@@ -41,7 +41,7 @@ pub use jev::{JevAvailability, JevDecision, JevState, JevTotals};
 pub use logs::{LogEntry, LogState};
 pub use modal::{
     ConfigModalState, InfoModalState, ModalAction, ModalField, ModalFieldKind, ModalState,
-    PlanApprovalState, ProviderKeyState, ReviewAction, ReviewConfirmState, SettingsHubState,
+    PlanApprovalState, ProviderKeyState, ReviewAction, ReviewConfirmState, SettingsHubState, ToolApprovalState,
     SettingsMcp, ModelRows, SettingsAgent, SettingsProvider, SettingsSkill, SettingsTab,
 };
 pub use panels::PanelLayoutState;
@@ -130,6 +130,8 @@ pub struct AppState {
     pub modal_focused: usize,
     /// Mensajes IPC pendientes de enviar (escritos por controller, drenados por app.rs).
     pub pending_ipc: Vec<crate::ipc::TuiMessage>,
+    /// Autorizaciones de herramientas que llegaron mientras otro modal estaba abierto.
+    pub tool_approval_queue: std::collections::VecDeque<ToolApprovalState>,
     /// Controla si el panel derecho de workers está visible (toggle con /timeline).
     pub show_workers: bool,
     /// Tab activo en el layout principal (1-5).
@@ -188,6 +190,7 @@ fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
         BunMessage::PlanUpdate { .. } => "plan_update",
         BunMessage::PlanDraftUpdate { .. } => "plan_draft_update",
         BunMessage::PlanApprovalRequest => "plan_approval_request",
+        BunMessage::ToolApprovalRequest { .. } => "tool_approval_request",
         BunMessage::ReviewVerdictUpdate { .. } => "review_verdict_update",
         BunMessage::ResumeAvailable { .. } => "resume_available",
         BunMessage::PhaseRetry { .. } => "phase_retry",
@@ -400,6 +403,21 @@ impl AppState {
         self.active_tab = self.routing.recommended_tab;
         self.history_nav_mode = false;
         self.history_hscroll = 0;
+    }
+
+    /// Muestra la siguiente autorización pendiente en cuanto no haya un modal
+    /// que la persona esté usando. Un formulario o el hub de configuración no se
+    /// pisan: la herramienta espera en la cola hasta que se cierren.
+    pub fn promote_tool_approval(&mut self) {
+        if self.tool_approval_queue.is_empty() {
+            return;
+        }
+        if matches!(self.modal, ModalState::Config(_) | ModalState::Settings(_) | ModalState::ToolApproval(_)) {
+            return;
+        }
+        if let Some(next) = self.tool_approval_queue.pop_front() {
+            self.modal = ModalState::ToolApproval(next);
+        }
     }
 
     pub fn tick_layout_transition(&mut self) {
@@ -1541,6 +1559,14 @@ impl AppState {
                         self.recommend_layout(TabId::Code, LayoutStage::Executing, "1 worker activo -> Code");
                     }
                 }
+            }
+
+            // ── Autorización de una herramienta (modo approval) ─────────────────
+            BunMessage::ToolApprovalRequest { request_id, agent, tool, summary, detail, kind, title } => {
+                self.tool_approval_queue.push_back(ToolApprovalState {
+                    request_id, agent, tool, summary, detail, kind, title, scroll: 0,
+                });
+                self.promote_tool_approval();
             }
 
             // ── Aprobación del plan ─────────────────────────────────────────────

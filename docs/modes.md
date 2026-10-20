@@ -44,13 +44,15 @@ Detalles de implementación:
 
 La decisión llega por `options.approve`. Si no hay `approve` cableado, la tarea queda en `waiting_user` (con `nextAction` persistido) y es retomable.
 
-> **Limitación conocida.** `CoordinatorManager` solo cablea `approve` cuando le llega `onApprovalCheckpoint`, y el REPL lo pasa únicamente fuera de la TUI (`!quiet`). Dentro de la TUI, `approval` se usa a través del modal ("Aprobar fase por fase"); las puertas `specification` y `convergence` no abren hoy un modal propio. Añadirlo exige dos mensajes nuevos en el protocolo IPC (solicitud y respuesta).
+> **Limitación conocida.** `CoordinatorManager` solo cablea `approve` cuando le llega `onApprovalCheckpoint`, y el REPL lo pasa únicamente fuera de la TUI (`!quiet`). Dentro de la TUI, `approval` se usa a través del modal ("Aprobar fase por fase"); las puertas `specification` y `convergence` no abren hoy un modal propio. La confirmación por herramienta (siguiente sección) sí tiene su modal; falta conectar estas dos puertas al mismo mecanismo.
 
 ## Confirmación por herramienta
 
-`CONFIRM_REQUIRED_TOOLS` = `fs_write`, `fs_edit`, `fs_delete`, `git_commit`, `cron.delete`, `agent_archive`. En modo `approval`, el bucle pide `¿Ejecutar <tool>? (y/N)` por stdin, salvo que la ejecución ya esté aprobada (`approvedExecution`, que el harness pone en la fase de ejecución tras su puerta).
+`CONFIRM_REQUIRED_TOOLS` = `fs_write`, `fs_edit`, `fs_delete`, `git_commit`, `cron.delete`, `agent_archive`. En modo `approval`, antes de ejecutar una de ellas el bucle pide autorización, salvo que la ejecución ya esté aprobada (`approvedExecution`, que el harness pone en la fase de ejecución de una tarea compleja tras su puerta). Hay tres caminos, por orden:
 
-Si no hay quién pueda contestar (`canPromptForConfirmation()` es `false`: dentro de la TUI, `HIVECODE_TUI=1`, o stdin sin TTY), la herramienta devuelve:
+1. **TUI (modal).** Si el lanzador registró un solicitante (`registerToolApprovalRequester`), el bucle envía `tool_approval_request` y espera `tool_approval_response`. La TUI abre el modal **AUTORIZAR HERRAMIENTA** con el agente, la herramienta y sus argumentos: `↩`/`y` autoriza, `Esc`/`n` rechaza, `↑↓` desplaza un detalle largo. Solicitudes simultáneas se muestran de una en una, y si hay un formulario o Configuración abiertos esperan en cola a que se cierren. Código: `agent/tool-approval.ts` y `widgets/tool_approval_modal.rs`.
+2. **Consola con TTY.** `¿Ejecutar <tool>? (y/N)` por stdin.
+3. **Sin nadie que pueda contestar** (`canPromptForConfirmation()` es `false`: `HIVECODE_TUI=1` sin solicitante, o stdin sin TTY): la herramienta devuelve un error y no espera.
 
 ```json
 { "ok": false,
@@ -58,10 +60,12 @@ Si no hay quién pueda contestar (`canPromptForConfirmation()` es `false`: dentr
   "hint": "No reintentes. Informa al usuario que esta acción espera su aprobación (o que cambie a modo auto)." }
 ```
 
-Antes de esto, la tarea se quedaba colgada esperando un `y` que nadie podía teclear.
+**Rechazos.** Un rechazo vuelve al modelo como `[CANCELADO] Usuario canceló '<tool>'` con la indicación de no repetirla ni buscar otra vía. Si dentro de la misma tarea se vuelve a pedir **la misma herramienta con los mismos argumentos**, se rechaza sin preguntar otra vez. Abortar la tarea o cerrar la TUI deniega lo que estuviera pendiente. En una prueba real con deepseek, el builder no intentó escribir por shell tras el rechazo y BEE cerró informando "no completado — aprobación denegada", sin tocar el proyecto.
 
 ## Transiciones
 
 - `plan → auto` / `plan → approval`: por el modal o con `/approve auto` / `/approve review`.
 - `Shift+Tab` envía `mode_change` por IPC; el REPL guarda el modo (`onModeChange` → `saveMode`).
-- El bucle de agente lee `getExecutionMode()` en cada llamada de herramienta, así que un cambio durante una tarea puede afectar a las llamadas siguientes de esa misma tarea. Esta transición no tiene cobertura de pruebas todavía; no dependas de ella.
+- **Cambiar de modo durante una tarea no afecta a esa tarea.** `run.ts` fija el modo de la tarea (`setExecutionMode`) mientras dura y lo restaura al terminar, y el bucle lee ese valor; `Shift+Tab` solo cambia la etiqueta y el modo de la **siguiente** tarea (comprobado: durante una tarea en `auto`, `execution_mode` sigue en `auto` aunque la cabecera muestre `PLAN`).
+- Una tarea lanzada con `/approve review` desde `plan` se ejecuta con política `approval`, aunque la cabecera siga mostrando `PLAN` hasta que cambies de modo.
+- `/halt` (o `/stop`) cancela la tarea activa: aborta a los workers, restaura el modo y **no integra nada**. Si la tarea tenía worktree, queda sin borrar y el mensaje indica su ruta y su rama (`hivecode/task-*`) para que puedas inspeccionarlo o eliminarlo con `git worktree remove`.

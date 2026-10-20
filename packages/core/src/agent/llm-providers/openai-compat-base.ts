@@ -526,10 +526,14 @@ const MISTRAL_PARAM = /<parameter(?:\s*=\s*"?([\w.-]+)"?)?\s*>([\s\S]*?)(?:<\/pa
  * se acepta también `|` porque algunos servidores la normalizan. El bloque puede llegar
  * cortado, así que el cierre de `function_calls` es opcional.
  */
-const DSML_BAR = "[\uFF5C|]"
-const DSML_BLOCK = new RegExp(`<${DSML_BAR}DSML${DSML_BAR}function_calls>([\\s\\S]*?)(?:</${DSML_BAR}DSML${DSML_BAR}function_calls>|$)`, "g")
-const DSML_INVOKE = new RegExp(`<${DSML_BAR}DSML${DSML_BAR}invoke\\s+name\\s*=\\s*"([\\w.-]+)"\\s*>([\\s\\S]*?)</${DSML_BAR}DSML${DSML_BAR}invoke>`, "g")
-const DSML_PARAM = new RegExp(`<${DSML_BAR}DSML${DSML_BAR}parameter\\s+name\\s*=\\s*"([\\w.-]+)"(?:\\s+string\\s*=\\s*"(true|false)")?\\s*>([\\s\\S]*?)</${DSML_BAR}DSML${DSML_BAR}parameter>`, "g")
+// Real DeepSeek output drifts from the documented form: the bar is sometimes doubled
+// (`<｜｜DSML｜｜ invoke>`), a space can follow it, and the wrapper arrives as `function_calls`,
+// `tool_calls` or just `calls`. Accept all of them.
+const DSML_BAR = "[\uFF5C|]+"
+const DSML_TAG = (name: string) => `${DSML_BAR}DSML${DSML_BAR}\\s*${name}`
+const DSML_BLOCK = new RegExp(`<${DSML_TAG("(?:function_|tool_)?calls")}\\s*>([\\s\\S]*?)(?:</${DSML_TAG("(?:function_|tool_)?calls")}\\s*>|$)`, "g")
+const DSML_INVOKE = new RegExp(`<${DSML_TAG("invoke")}\\s+name\\s*=\\s*"([\\w.-]+)"\\s*>([\\s\\S]*?)</${DSML_TAG("invoke")}\\s*>`, "g")
+const DSML_PARAM = new RegExp(`<${DSML_TAG("parameter")}\\s+name\\s*=\\s*"([\\w.-]+)"(?:\\s+string\\s*=\\s*"(true|false)")?\\s*>([\\s\\S]*?)</${DSML_TAG("parameter")}\\s*>`, "g")
 
 function extractDsmlToolCalls(content: string, toolNameMap: Map<string, string>): { content: string; tool_calls: LLMToolCall[] } {
   const tool_calls: LLMToolCall[] = []

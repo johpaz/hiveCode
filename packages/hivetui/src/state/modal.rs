@@ -61,6 +61,27 @@ pub struct PlanApprovalState {
     pub selected: usize,  // 0=auto, 1=approval, 2=suggest, 3=cancel
 }
 
+/// Una herramienta en modo `approval` espera que la persona la autorice.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolApprovalState {
+    pub request_id: String,
+    pub agent: String,
+    pub tool: String,
+    pub summary: String,
+    pub detail: String,
+    /// `gate` para las puertas del harness; vacío o `tool` para una herramienta.
+    pub kind: String,
+    /// Título propio del modal; vacío usa el de herramienta.
+    pub title: String,
+    pub scroll: usize,
+}
+
+impl ToolApprovalState {
+    pub fn is_gate(&self) -> bool {
+        self.kind == "gate"
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewAction {
     Approve,
@@ -344,6 +365,7 @@ pub enum ModalState {
     PlanApproval(PlanApprovalState),
     ReviewConfirm(ReviewConfirmState),
     Settings(SettingsHubState),
+    ToolApproval(ToolApprovalState),
 }
 
 #[cfg(test)]

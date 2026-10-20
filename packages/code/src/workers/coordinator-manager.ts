@@ -4,6 +4,7 @@ import { logger } from "@johpaz/hivecode-core/utils/logger"
 import { computeBackoffDelay } from "@johpaz/hivecode-core/utils/retry"
 import { createAllTools } from "@johpaz/hivecode-core/tools"
 import { ProfileHarness } from "@johpaz/hivecode-core/harness/profile-harness"
+import { canRequestToolApproval, requestToolApproval, toolApprovalDetail } from "@johpaz/hivecode-core/agent/tool-approval"
 import { classifyTask } from "@johpaz/hivecode-core/harness/adaptive-scheduler"
 import type { Config } from "@johpaz/hivecode-core/config"
 import { loadConfig } from "@johpaz/hivecode-core/config"
@@ -688,7 +689,22 @@ export class CoordinatorManager extends CoordinatorBase {
         model: configuredModel || undefined,
         parentTaskId: this.activeTaskId,
         history: conversationHistory.map(({ role, content }) => ({ role, content })),
-        approve: onApprovalCheckpoint
+        // Dentro de la TUI no hay `onApprovalCheckpoint` (lo pasa solo la consola): las puertas
+        // del harness se preguntan por el mismo canal IPC que la autorización de herramientas.
+        approve: !onApprovalCheckpoint && mode === "approval" && canRequestToolApproval()
+          ? async (gate, evidence) => {
+              const title = gate === "specification" ? "APROBAR ESPECIFICACIÓN Y PLAN" : "APROBAR RESULTADO"
+              const approved = await requestToolApproval({
+                agent: "bee",
+                tool: gate === "specification" ? "Implementar el plan" : "Cerrar la tarea",
+                summary: title,
+                detail: toolApprovalDetail(evidence, 8_000),
+                kind: "gate",
+                title,
+              }, this.taskAborts.get(this.activeTaskId!)?.signal)
+              return approved ? "approve" : "cancel"
+            }
+          : onApprovalCheckpoint
           ? async (gate, evidence) => {
               const decision = await onApprovalCheckpoint({
                 phase: gate,
@@ -2737,6 +2753,12 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
         this.stopAll()
         break
     }
+  }
+
+  /** Where a task's work lives while it is isolated, so a cancelled one can be found again. */
+  getTaskWorkspaceInfo(taskId: string): { path: string; branch: string } | null {
+    const assignment = this.taskWorkspaces.get(taskId)
+    return assignment?.isolated ? { path: assignment.worktreePath, branch: assignment.branchName } : null
   }
 
   getActiveTaskId(): string | null {
