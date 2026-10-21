@@ -131,11 +131,25 @@ export const ROUTE_TOKEN_BUDGETS: Record<TaskTier, TaskBudgetLimit> = {
   feature: { maxInputTokens: 24_000_000, maxOutputTokens: 3_000_000 },
 }
 
+/**
+ * Investigar o auditar el código no muta nada, pero cuesta turnos de lectura: cada turno reenvía
+ * el contexto, así que 100 K se agotan en una decena de turnos de un solo scout. Tope propio, por
+ * encima de `conversation` y por debajo de `scoped`; no es un objetivo, es la red de seguridad.
+ */
+export const READING_TOKEN_BUDGET: TaskBudgetLimit = { maxInputTokens: 1_500_000, maxOutputTokens: 150_000 }
+
+/** Cómo se lee el proyecto sin recorrerlo: el índice en HiveDB ya tiene la estructura y el código. */
+export const DB_FIRST_READING = `Lee con el índice de HiveDB, no recorriendo el disco:
+1. get_project_context da el mapa del proyecto (módulos, archivos clave, ADRs); no uses fs_list/fs_glob recursivos para averiguarlo.
+2. search_knowledge con el símbolo o tema trae los fragmentos de código ya indexados; fs_read solo con rango (offset/limit) sobre lo que ese resultado señale.
+3. Reparte por módulo: un scout por área, con rutas concretas, no "todo el repo". Cada scout entrega hallazgos con ruta:línea, no listados.
+El presupuesto de tokens es de la tarea entera y se comparte entre todos los workers.`
+
 /** `HIVECODE_BUDGET_SCALE`: multiplica los topes (2 = el doble) o los quita (0). Para bancos y depuración. */
-export function routeBudget(tier: TaskTier, env: Record<string, string | undefined> = process.env): TaskBudgetLimit {
+export function routeBudget(tier: TaskTier, env: Record<string, string | undefined> = process.env, reading = false): TaskBudgetLimit {
   const raw = env.HIVECODE_BUDGET_SCALE
   const scale = raw === undefined || raw.trim() === "" ? 1 : Number(raw)
-  const base = ROUTE_TOKEN_BUDGETS[tier]
+  const base = reading && tier === "conversation" ? READING_TOKEN_BUDGET : ROUTE_TOKEN_BUDGETS[tier]
   if (!Number.isFinite(scale) || scale < 0) return base
   if (scale === 0) return { maxInputTokens: 0, maxOutputTokens: 0 }
   return { maxInputTokens: Math.round(base.maxInputTokens * scale), maxOutputTokens: Math.round(base.maxOutputTokens * scale) }
@@ -338,10 +352,13 @@ export class ProfileHarness {
     }
 
     // The budget belongs to the task: BEE and every worker it launches spend from the same one.
-    setTaskBudget(taskId, routeBudget(weight.tier))
+    setTaskBudget(taskId, routeBudget(weight.tier, process.env, weight.statement.reading))
     try {
       if (complexity === "conversation") {
-        const response = await invoke("bee", objective, "harness")
+        const reading = weight.statement.reading
+        const projectFacts = reading ? describeProjectFacts(weight.project) : ""
+        const task = reading ? `${DB_FIRST_READING}\n${projectFacts ? `\n${projectFacts}\n` : ""}\nObjetivo:\n${objective}` : objective
+        const response = await invoke("bee", task, "harness")
         await updateStage("completed")
         return { taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "completed", response, repairCycles: 0 }
       }

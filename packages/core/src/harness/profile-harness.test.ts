@@ -7,7 +7,7 @@ import { col } from "../storage/hive.ts"
 import { ensureHiveDb } from "../storage/bootstrap.ts"
 import type { AgentDoc } from "../storage/collections.ts"
 import { HIVEAGENTS_MODEL_ID } from "../agent/llm-providers/hiveagents.ts"
-import { DEFAULT_MAX_HARNESS_STEPS, ProfileHarness, ROUTE_TOKEN_BUDGETS, SCOPED_REASONING, routeBudget, type ProfileRunner } from "./profile-harness.ts"
+import { DEFAULT_MAX_HARNESS_STEPS, ProfileHarness, READING_TOKEN_BUDGET, ROUTE_TOKEN_BUDGETS, SCOPED_REASONING, routeBudget, type ProfileRunner } from "./profile-harness.ts"
 import { recordTaskUsage, taskBudgetUsage } from "../agent/task-budget.ts"
 
 const previousHiveDbPath = process.env.HIVE_DB_PATH
@@ -243,6 +243,20 @@ describe("task token budget", () => {
     const result = await new ProfileHarness(runner).run({ objective: "hola", sessionId: "session-release", workspace: "/workspace/test" })
     expect(result.budgetExceeded).toBeUndefined()
     expect(taskBudgetUsage(result.taskId)).toBeUndefined()
+  })
+
+  test("auditing code without mutating gets the reading budget and DB-first guidance", async () => {
+    const tasks: string[] = []
+    const runner: ProfileRunner = async options => { tasks.push(options.taskDescription); return "informe" }
+    const objective = "Audita packages/code/src y packages/cli/src: mapea workspaces, workers y checkpoints"
+    const result = await new ProfileHarness(runner).run({ objective, sessionId: "session-read", workspace: "/workspace/test" })
+    expect(result.route).toBe("conversation")
+    expect(result.routeSignals).toContain("pide leer o auditar el código")
+    expect(tasks[0]).toContain("get_project_context")
+    expect(tasks[0]).toContain(objective)
+    expect(routeBudget("conversation", {}, true)).toEqual(READING_TOKEN_BUDGET)
+    expect(routeBudget("conversation", {}, false)).toEqual(ROUTE_TOKEN_BUDGETS.conversation)
+    expect(routeBudget("scoped", {}, true)).toEqual(ROUTE_TOKEN_BUDGETS.scoped)
   })
 
   test("routeBudget scales the caps, and 0 removes them", () => {

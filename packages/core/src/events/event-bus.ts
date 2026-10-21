@@ -166,6 +166,8 @@ export interface EventMap {
     taskId: string | null;
     at: number;
   };
+  "agent:output": { agentId: string; taskId?: string; sessionId?: string; kind: "reasoning" | "narrative"; content: string };
+  "swarm:collaboration": import("../ipc/protocol").SwarmCollaboration;
   "agent:lifecycle": {
     agentId: string;
     parentId: string;

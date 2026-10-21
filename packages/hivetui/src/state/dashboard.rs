@@ -88,14 +88,13 @@ pub struct DashboardState {
     pub halt_confirm: bool,
 }
 
-/// Local cell coordinates and paths for the animated office scene.
+/// Selection, viewport and inspector navigation for the live colony.
 #[derive(Debug, Clone, Default)]
 pub struct OfficeState {
     pub selected: Option<String>,
-    pub positions: std::collections::HashMap<String, (u16, u16)>,
-    pub homes: std::collections::HashMap<String, (u16, u16)>,
-    pub targets: std::collections::HashMap<String, (u16, u16)>,
-    pub routes: std::collections::HashMap<String, std::collections::VecDeque<(u16, u16)>>,
+    pub inspector_offset: usize,
+    pub expanded: bool,
+    pub paused: bool,
     pub viewport: (u16, u16),
 }
 

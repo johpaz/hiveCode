@@ -29,6 +29,8 @@ export interface StatementSignals {
   deliverables: number
   /** El enunciado pide algo nuevo desde cero: no hay nada que acoplar ni que romper. */
   greenfield: boolean
+  /** Pide leer, auditar o investigar el código sin cambiarlo: no muta, pero puede costar muchos turnos de lectura. */
+  reading: boolean
 }
 
 export interface ProjectFacts {
@@ -97,6 +99,14 @@ const MUTATION_VERBS = [
   "optimiza", "optimizar", "mejora", "mejorar", "documenta", "documentar", "estructura", "estructurar",
 ]
 
+/** Verbos de lectura/auditoría: sin orden de mutar, son la diferencia entre una pregunta y una investigación. */
+const READING_VERBS = [
+  "audita", "auditar", "audit", "revisa", "revisar", "review", "inspecciona", "inspeccionar", "inspect",
+  "investiga", "investigar", "investigate", "analiza", "analizar", "analyze", "analyse",
+  "mapea", "mapear", "map", "explora", "explorar", "explore", "compara", "comparar", "compare",
+  "diagnostica", "diagnosticar", "diagnose", "levanta", "relevamiento", "inventario", "evalúa", "evalua", "evaluar", "evaluate",
+]
+
 /**
  * Señales de acoplamiento. Cada una significa que el cambio cruza fronteras del código y
  * por eso necesita más de un worker o un plan antes de tocar nada.
@@ -137,6 +147,7 @@ export function analyzeStatement(objective: string): StatementSignals {
   const text = objective.trim().toLowerCase()
   const mutationRe = new RegExp(`\\b(?:${MUTATION_VERBS.join("|")})\\b`)
   const mutating = mutationRe.test(text)
+  const reading = new RegExp(`\\b(?:${READING_VERBS.join("|")})\\b`).test(text)
 
   const coupled = COUPLED_SIGNALS.filter(([, re]) => re.test(text)).map(([name]) => name)
   const areas = AREA_SIGNALS.filter(([, re]) => re.test(text)).map(([name]) => name)
@@ -155,6 +166,7 @@ export function analyzeStatement(objective: string): StatementSignals {
     areas,
     deliverables,
     greenfield: GREENFIELD.test(text),
+    reading,
   }
 }
 
@@ -220,7 +232,11 @@ export function decideTier(statement: StatementSignals, project?: ProjectFacts):
   let score = 0
 
   if (!statement.mutating) {
-    return { tier: "conversation", score: 0, signals: ["no hay orden de mutar"] }
+    return {
+      tier: "conversation",
+      score: 0,
+      signals: statement.reading ? ["no hay orden de mutar", "pide leer o auditar el código"] : ["no hay orden de mutar"],
+    }
   }
   signals.push("hay una orden de mutar")
 

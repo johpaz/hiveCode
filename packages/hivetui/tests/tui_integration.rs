@@ -108,7 +108,7 @@ fn focus_shows_user_question_while_running_plan_mode() {
 fn focus_shows_workers_while_running_auto_mode() {
     let mut state = base_state();
     // Activar workers en estado Running
-    state.apply_message(BunMessage::WorkerUpdate {
+    state.apply_message(BunMessage::WorkerUpdate { parent_id: None,
         task_id: Some("task-1".into()),
         worker: "backend".into(),
         phase: "escribiendo src/auth/jwt.ts".into(),
@@ -123,7 +123,7 @@ fn focus_shows_workers_while_running_auto_mode() {
         iteration_total: None,
         transversal: None,
     });
-    state.apply_message(BunMessage::WorkerUpdate {
+    state.apply_message(BunMessage::WorkerUpdate { parent_id: None,
         task_id: None,
         worker: "frontend".into(),
         phase: "escribiendo src/components/Login.tsx".into(),
@@ -607,7 +607,7 @@ fn code_layout_renders_focused_worker_detail() {
         ("frontend", "escribiendo Login.tsx"),
         ("security", "auditando middleware"),
     ] {
-        state.apply_message(BunMessage::WorkerUpdate {
+        state.apply_message(BunMessage::WorkerUpdate { parent_id: None,
             task_id: None,
             worker: name.into(),
             phase: phase.into(),
@@ -835,6 +835,7 @@ fn state_with_workers(running: usize, waiting: usize) -> AppState {
     ];
     for (idx, name) in names.iter().take(running + waiting).enumerate() {
         state.apply_message(BunMessage::WorkerUpdate {
+            parent_id: None,
             task_id: None,
             worker: (*name).into(),
             phase: "impl".into(),
@@ -863,11 +864,11 @@ fn office_keeps_readable_seats_and_paginates_idle_agents() {
     let frame = canvas.to_text_rows().join("\n");
 
     assert!(
-        frame.contains("OFICINA") && frame.contains("puestos") && frame.contains("PgUp/PgDn"),
+        frame.contains("COLMENA VIVA") && frame.contains("instancias") && frame.contains("PgUp/PgDn"),
         "falta la oficina con navegación de puestos:\n{frame}"
     );
 
-    assert!(frame.contains('▀') || frame.contains('▄'), "debe dibujar sprites de la colmena");
+    assert!(frame.contains("@BACKEND"), "debe dibujar celdas de agentes");
     state.dashboard.office.selected = Some("backend".into());
     renderer::render(&mut canvas, &mut state);
     assert!(canvas.to_text_rows().join("\n").contains("iter"), "el inspector debe conservar las métricas");
@@ -883,11 +884,11 @@ fn office_scroll_reaches_workers_that_did_not_fit() {
     renderer::render(&mut canvas, &mut state);
     let frame = canvas.to_text_rows().join("\n");
 
-    assert!(frame.contains("puestos"), "{frame}");
+    assert!(frame.contains("instancias"), "{frame}");
     state.dashboard_scroll = 100;
     renderer::render(&mut canvas, &mut state);
     let last_page = canvas.to_text_rows().join("\n");
-    assert!(last_page.contains("puestos"));
+    assert!(last_page.contains("instancias"));
     assert_ne!(frame, last_page, "scroll debe mostrar otros puestos");
 }
 
@@ -1012,10 +1013,10 @@ fn factory_office_shows_six_profiles_without_duplicate_or_generic_seats() {
     let mut canvas = make_canvas(150, 35);
     renderer::render(&mut canvas, &mut state);
     let frame = canvas.to_text_rows().join("\n");
-    for name in ["@BEE", "@PLANNER", "@SCOUT", "@BUILDER", "@QUALITY GATE", "@SPIDER"] {
+    for name in ["@BEE", "@PLANNER", "@SCOUT", "@BUILDER", "@VERIFIER", "@SPIDER"] {
         assert!(frame.contains(name), "missing {name}: {frame}");
     }
-    assert!(frame.contains("1–6/6"), "all six seats must fit: {frame}");
+    assert!(frame.contains("6/6 instancias"), "all six seats must fit: {frame}");
     assert!(!frame.contains("@AGENT"));
     assert!(!frame.contains("@0"));
 }

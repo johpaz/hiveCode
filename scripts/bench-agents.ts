@@ -356,6 +356,19 @@ function looksAtAnswers(logDir: string): boolean {
   return false
 }
 
+/**
+ * Which code a run measured: HEAD plus a hash of what is uncommitted in the packages and scripts. A run of
+ * hivecode uses the working tree, and somebody may be editing it; two runs with different fingerprints did
+ * not measure the same program, and one whose fingerprint changed while it ran measured neither.
+ */
+function sourceFingerprint(): string {
+  const git = (...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: ROOT }).stdout.toString()
+  const head = git("rev-parse", "--short", "HEAD").trim()
+  const changed = git("diff", "HEAD", "--name-only", "--", "packages", "scripts").trim().split("\n").filter(Boolean).length
+  const hash = Bun.hash(git("diff", "HEAD", "--", "packages", "scripts")).toString(16).slice(0, 8)
+  return `${head} +${changed} archivos sin commitear #${hash}`
+}
+
 // ── A clean slate between runs ──────────────────────────────────────────────────────────────
 
 const WORKTREES = "/tmp/hivecode-worktrees"
@@ -410,6 +423,8 @@ interface RunResult {
   files: number
   /** Measurable properties of the code it left (see bench-code-quality.ts). */
   quality: CodeQuality
+  /** The code this run measured, before and after (see `sourceFingerprint`). */
+  source?: { before: string; after: string; changedDuring: boolean }
   /** The agent's own transcript mentions the benchmark's hidden material: the run does not count. */
   contaminated: boolean
   note?: string
@@ -430,6 +445,7 @@ async function runCell(task: string, agentName: string, rep: number, prompt: str
 
   say(`▶ ${task} · ${agentName} · rep ${rep}`)
   const repoBefore = repoState()
+  const sourceBefore = sourceFingerprint()
   const startedAt = Date.now()
   const run = await adapter.run({ dir: projectDir, prompt, logDir, maxMs })
   // The repository can change for reasons that are not the agent's (somebody is working in it), so a change in
@@ -442,9 +458,11 @@ async function runCell(task: string, agentName: string, rep: number, prompt: str
   const evaluation = await evaluate(task, projectDir, runDir)
   const result: RunResult = {
     task, agent: agentName, rep, model: run.usage.model ?? (await adapter.describe()), minutes, timedOut: run.timedOut, exitCode: run.exitCode,
-    usage: run.usage, hidden: { ...evaluation.hidden }, ownTests: evaluation.ownTests, files: evaluation.files, quality: evaluation.quality, contaminated, note: [run.note, repoChanged ? "el repositorio cambió durante la corrida (no necesariamente por el agente)" : ""].filter(Boolean).join(" · ") || undefined,
+    usage: run.usage, hidden: { ...evaluation.hidden }, ownTests: evaluation.ownTests, files: evaluation.files, quality: evaluation.quality, source: { before: sourceBefore, after: sourceFingerprint(), changedDuring: sourceBefore !== sourceFingerprint() }, contaminated, note: [run.note, repoChanged ? "el repositorio cambió durante la corrida (no necesariamente por el agente)" : ""].filter(Boolean).join(" · ") || undefined,
   }
   writeFileSync(join(logDir, "result.json"), JSON.stringify(result, null, 2))
+  say(`  código medido: ${result.source!.before}`)
+  if (result.source!.changedDuring) say("  ⚠ el código fuente cambió durante esta corrida")
   if (contaminated) say("  ⚠ CONTAMINADA: el registro del agente menciona el material oculto del benchmark; no cuenta")
   say(`  ocultas ${result.hidden.pass}/${result.hidden.total} · propias ${result.ownTests.green ? "verdes" : "NO verdes"} · ${(result.usage.promptTokens / 1e6).toFixed(2)} M prompt / ${(result.usage.outputTokens / 1e3).toFixed(0)} K salida${result.usage.costUsd != null ? ` · $${result.usage.costUsd.toFixed(2)}` : ""}`)
   const q = result.quality

@@ -245,6 +245,8 @@ fn next_key(buf: &str) -> Option<(KeyEvent, String)> {
                             Some('1') | Some('7') => KeyCode::Home,
                             Some('4') | Some('8') => KeyCode::End,
                             Some('3') => KeyCode::Delete,
+                            Some('5') => KeyCode::PageUp,
+                            Some('6') => KeyCode::PageDown,
                             _ => return None,
                         },
                         _ => return None,
@@ -427,7 +429,6 @@ pub async fn run() -> Result<()> {
                 state.slow_tick = (state.slow_tick + 1) % 30;
                 state.tick_layout_transition();
                 state.promote_tool_approval();
-                crate::widgets::office::tick(&mut state);
                 state.clock = Local::now().format("%H:%M:%S").to_string();
                 draw_pending = true;
             }

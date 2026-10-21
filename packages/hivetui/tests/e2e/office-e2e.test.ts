@@ -31,7 +31,7 @@ test("office selects an agent, shows live tools and opens Código", async () => 
     session.ipc.send({ type: "worker_update", worker: "backend", phase: "editando", status: "running", current_file: "src/office.ts" })
     session.ipc.send({ type: "tool_call", agent: "backend", tool: "fs_read", call_id: "office-read", args_summary: '{"path":"src/office.ts"}', bee_state: "reading", at: 1 })
     session.type("1")
-    await waitForFrame(session.iter, f => f.tab === "enjambre" && frameContains(f, "OFICINA") && frameContains(f, "fs_read"))
+    await waitForFrame(session.iter, f => f.tab === "enjambre" && frameContains(f, "COLMENA VIVA") && frameContains(f, "fs_read"))
     // Alt+Down recorre los puestos en orden: el primero es @BEE y el segundo
     // @TOPO (backend), que es quien tiene la tool y el archivo activos.
     session.type("\x1b[1;3B")

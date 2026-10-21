@@ -416,6 +416,14 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                         });
                         return false;
                     }
+                    "/lupa" => {
+                        state.dashboard.office.expanded = !state.dashboard.office.expanded;
+                        return false;
+                    }
+                    "/directo" => {
+                        state.dashboard.office.paused = false;
+                        return false;
+                    }
                     "/logs" if arg.is_empty() => {
                         state.logs.visible = !state.logs.visible;
                         return false;
@@ -649,10 +657,10 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
             state.plan.scroll = state.plan.scroll.saturating_add(5);
         }
         (_, KeyCode::PageUp) if state.active_tab == TabId::Swarm => {
-            state.dashboard_scroll = state.dashboard_scroll.saturating_sub(8);
+            crate::widgets::office::scroll(state, -8);
         }
         (_, KeyCode::PageDown) if state.active_tab == TabId::Swarm => {
-            state.dashboard_scroll = state.dashboard_scroll.saturating_add(8);
+            crate::widgets::office::scroll(state, 8);
         }
         (_, KeyCode::PageUp) => {
             move_history_selection(state, -5);
@@ -903,11 +911,24 @@ fn handle_dashboard_key(
         state.selection = None;
         return true;
     }
+    if typing && modifiers.contains(KeyModifiers::ALT)
+        && state.dashboard.office.selected.is_some()
+        && matches!(code, KeyCode::Char('e' | 'E') | KeyCode::End) {
+        return true;
+    }
     if typing {
         return false;
     }
     let alt = modifiers.contains(KeyModifiers::ALT);
     match code {
+        KeyCode::Char('e') | KeyCode::Char('E') if alt && state.dashboard.office.selected.is_some() => {
+            state.dashboard.office.expanded = !state.dashboard.office.expanded;
+            true
+        }
+        KeyCode::End if alt && state.dashboard.office.selected.is_some() => {
+            state.dashboard.office.paused = false;
+            true
+        }
         KeyCode::Up | KeyCode::Down if alt => {
             crate::widgets::office::select_next(state, if code == KeyCode::Up { -1 } else { 1 });
             true
@@ -1239,10 +1260,10 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
             state.adrs.scroll = state.adrs.scroll.saturating_add(3);
         }
         MouseEventKind::ScrollUp if state.active_tab == TabId::Swarm => {
-            state.dashboard_scroll = state.dashboard_scroll.saturating_sub(3);
+            crate::widgets::office::scroll(state, -3);
         }
         MouseEventKind::ScrollDown if state.active_tab == TabId::Swarm => {
-            state.dashboard_scroll = state.dashboard_scroll.saturating_add(3);
+            crate::widgets::office::scroll(state, 3);
         }
         MouseEventKind::ScrollUp => {
             state.history_nav_mode = true;
@@ -1269,7 +1290,7 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                         return;
                     }
                     if let Some(worker) = dashboard_layout::worker_at(state, area, mouse.column, mouse.row) {
-                        state.dashboard.office.selected = Some(worker);
+                        crate::widgets::office::select(state, worker);
                         state.selection = None;
                         return;
                     }
@@ -1364,10 +1385,18 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
 
 fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
     match action {
+        HitAction::Custom(ref id) if id == "colony:expand" => {
+            state.dashboard.office.expanded = !state.dashboard.office.expanded;
+            true
+        }
+        HitAction::Custom(ref id) if id == "colony:live" => {
+            state.dashboard.office.paused = false;
+            true
+        }
         HitAction::Custom(ref id) if id.starts_with("office:select:") => {
             let name = id.trim_start_matches("office:select:");
             if crate::widgets::office::agents(state).iter().any(|a| a.worker.name == name) {
-                state.dashboard.office.selected = Some(name.to_string());
+                crate::widgets::office::select(state, name.to_string());
             }
             true
         }
@@ -3230,6 +3259,10 @@ Vistas (tabs)
 /welcome               Volver a la pantalla de bienvenida
 /habilidades           Habilidades en Configuración (F2)
 /ficha <agente>        Ficha del especialista: qué puede y qué le falta
+/lupa                 Expandir/contraer detalle de la lupa (Alt+e)
+/directo              Volver al directo de la lupa (Alt+End)
+Alt+↑/↓               Enjambre: seleccionar instancia
+PgUp/PgDn             Desplazar escena o cronología de la lupa
 
 Atajos
 ══════

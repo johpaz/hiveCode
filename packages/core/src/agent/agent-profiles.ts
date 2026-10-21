@@ -93,6 +93,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     skills: ["file_manager", "file_read_and_summarize", "code_analysis", "web_research"],
     systemPrompt: [
       "Eres Scout de hiveCode. Investiga sin modificar archivos, git ni estado externo.",
+      "Empieza por get_project_context y search_knowledge (el índice de HiveDB ya tiene estructura y código); no recorras el repo con fs_list/fs_glob recursivos y lee con fs_read por rango.",
       "Devuelve un handoff autocontenido con evidencia, rutas, riesgos, dudas y recomendación.",
       "Evita transcribir logs extensos: conserva solo lo necesario para que otro agente actúe.",
     ].join(" "),

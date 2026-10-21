@@ -1,8 +1,9 @@
 //! Export an illustrative scene using the production renderer:
 //! cargo run --example office_preview > /tmp/hivecode-office.svg
 use hivetui::{
+    ipc::BunMessage,
     renderer,
-    state::{AppState, BeeState, TabId, ToolCall, Worker, WorkerStatus},
+    state::{AppState, BeeState, TabId, Worker, WorkerStatus},
     term::{Canvas, Color},
     widgets::office,
 };
@@ -37,14 +38,7 @@ fn main() {
             "spider",
         ]
     } else {
-        &[
-            "BEE",
-            "Builder",
-            "Planner",
-            "Quality Gate",
-            "Scout",
-            "Spider",
-        ]
+        &["bee", "planner", "scout", "builder", "verifier", "spider"]
     };
     for &role in roles {
         let mut worker = Worker::new(role);
@@ -62,11 +56,11 @@ fn main() {
         ]
     } else {
         vec![
-            ("BEE", "plan", BeeState::Thinking),
-            ("Builder", "fs_write", BeeState::Writing),
-            ("Quality Gate", "code_test", BeeState::Executing),
-            ("Scout", "fs_read", BeeState::Reading),
-            ("Spider", "web_search", BeeState::Searching),
+            ("bee", "task_delegate", BeeState::Executing),
+            ("builder", "fs_write", BeeState::Writing),
+            ("verifier", "code_test", BeeState::Executing),
+            ("scout", "fs_read", BeeState::Reading),
+            ("spider", "web_search", BeeState::Searching),
         ]
     };
     for (role, tool, activity) in calls
@@ -80,32 +74,54 @@ fn main() {
             .find(|worker| worker.name == role)
             .unwrap()
             .status = WorkerStatus::Running;
-        state.swarm.start_call(ToolCall {
+        let at = chrono::Utc::now().timestamp_millis() as u64;
+        state.apply_message(BunMessage::ToolCall {
             call_id: role.into(),
             agent: role.into(),
             tool: tool.into(),
-            args_summary: String::new(),
-            bee_state: activity,
-            started_at: 1,
-            settled: false,
-            ok: None,
-            duration_ms: None,
+            args_summary: "src/auth.ts".into(),
+            bee_state: match activity {
+                BeeState::Writing => "writing",
+                BeeState::Reading => "reading",
+                BeeState::Executing => "executing",
+                BeeState::Searching => "searching",
+                _ => "thinking",
+            }
+            .into(),
+            task_id: None,
+            at: at.saturating_sub(3200),
         });
+        if role != "bee" {
+            state.apply_message(BunMessage::SwarmCollaboration {
+                event_id: role.into(),
+                delegation_id: role.into(),
+                task_id: None,
+                session_id: None,
+                from: "bee".into(),
+                to: role.into(),
+                kind: "delegation".into(),
+                summary: "Implementar autenticación".into(),
+                at,
+            });
+        }
     }
-    let mut canvas = Canvas::new(160, 40);
-    renderer::render(&mut canvas, &mut state);
-    let ticks = std::env::var("HIVE_OFFICE_PREVIEW_TICKS")
+    if let Ok(agent) = std::env::var("HIVE_COLONY_PREVIEW_AGENT") {
+        office::select(&mut state, agent);
+    }
+    let cols = std::env::var("HIVE_COLONY_PREVIEW_COLS")
         .ok()
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(180);
-    for frame in 0..ticks {
-        state.anim_tick = (frame % 8) as u8;
-        office::tick(&mut state);
-    }
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(160);
+    let rows = std::env::var("HIVE_COLONY_PREVIEW_ROWS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(40);
+    let mut canvas = Canvas::new(cols, rows);
     renderer::render(&mut canvas, &mut state);
     let (cw, ch) = (8, 16);
+    let (width, height) = (canvas.w as usize * cw, canvas.h as usize * ch);
     println!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640"><rect width="100%" height="100%" fill="#0d0b07"/><g font-family="DejaVu Sans Mono,monospace" font-size="13">"##
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><rect width="100%" height="100%" fill="#0d0b07"/><g font-family="DejaVu Sans Mono,monospace" font-size="13">"##
     );
     for y in 0..canvas.h {
         for x in 0..canvas.w {

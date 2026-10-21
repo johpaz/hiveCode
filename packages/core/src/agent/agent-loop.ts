@@ -57,7 +57,7 @@ import { commandPreview, traceStep } from "./step-trace"
 import { chooseReasoningEffort, resolveReasoningPolicy, type ReasoningPolicy } from "./reasoning-effort"
 import { CORE_AGENT_DEFINITIONS, type CoreAgentType } from "./agent-profiles"
 import { broadcastThinking } from "../gateway/task-streaming"
-import { emitLoadout, emitToolCall, emitToolDone, emitWaiting, summarizeArgs } from "./tool-telemetry"
+import { createOutputTelemetry, emitLoadout, emitToolCall, emitToolDone, emitWaiting, summarizeArgs } from "./tool-telemetry"
 
 /**
  * Execute a tool by name from the available tools list
@@ -935,6 +935,8 @@ export async function* runAgent(
     estimatedInputTokens += budgetTokens(JSON.stringify(prepareMessages(messages, ctx.tools))) + budgetTokens(JSON.stringify(ctx.tools))
     const stepStartedAt = Date.now()
     const turnReasoning = chooseReasoningEffort(reasoningPolicy, previousTurnFailed)
+    // Observing a worker must not change whether its provider uses streaming transport.
+    const output = opts.isolated ? createOutputTelemetry({ agentId: opts.agentId, taskId: opts.codeTaskId, sessionId: opts.codeSessionId }) : undefined
     const response = await withExecutionSlot(opts.codeSessionId ?? opts.threadId, opts.signal, () => callProfileLLM({
       ...providerCfg,
       ...profileCallOptions,
@@ -942,9 +944,9 @@ export async function* runAgent(
       messages: prepareMessages(messages, ctx.tools),
       tools: ctx.tools.length > 0 ? ctx.tools : undefined,
       signal: opts.signal,
-      onToken: opts.onToken,
-      onReasoningToken: opts.onReasoningToken,
-    }))
+      onToken: output && opts.onToken ? token => { output.narrative(token); opts.onToken!(token) } : opts.onToken,
+      onReasoningToken: output && opts.onReasoningToken ? token => { output.reasoning(token); opts.onReasoningToken!(token) } : opts.onReasoningToken,
+    })).then(response => { output?.finish(response); return response }, error => { output?.finish({}); throw error })
 
     // Accumulate usage
     if (response.usage) {
@@ -1000,7 +1002,7 @@ export async function* runAgent(
     if (response.reasoning_content) {
       broadcastThinking(opts.agentId, {
         content: response.reasoning_content,
-        taskId: opts.threadId,
+        taskId: opts.codeTaskId ?? opts.threadId,
       })
     }
 
@@ -1240,7 +1242,7 @@ export async function* runAgent(
         tool: toolName,
         callId: tc.id,
         argsSummary: summarizeArgs(tc.function.arguments),
-        taskId: opts.threadId,
+        taskId: opts.codeTaskId ?? opts.threadId,
       })
 
       opts.signal?.throwIfAborted()
@@ -1294,7 +1296,7 @@ export async function* runAgent(
         ok: !toolError,
         durationMs: toolMs,
         resultSummary: summarizeArgs(toolResultLLM),
-        taskId: opts.threadId,
+        taskId: opts.codeTaskId ?? opts.threadId,
       })
 
       // G9: the tool call and its outcome, chained to the decision that asked

@@ -1,3 +1,4 @@
+import { trackCollaboration } from "../../agent/collaboration-telemetry";
 import { getSwarmUsage } from "../../agent/swarm-usage";
 import { runEphemeralAgent } from "../../agent/ephemeral-agents";
 import { resolveProjectScope, scopeFromConfig, resolveContextReferences, type ContextReference } from "../../agent/project-context";
@@ -639,7 +640,7 @@ export const taskDelegateTool: Tool = {
     let dependencyBrief = "";
     if (after.length) {
       const { emitWaiting } = await import("../../agent/tool-telemetry.ts");
-      emitWaiting({ agentId: workerId, waitingFor: after, reason: "dependencia" });
+      emitWaiting({ agentId: workerId, waitingFor: after, reason: "dependencia", taskId: scope?.taskId });
       const handoffs: string[] = [];
       for (const dep of after) {
         const found = board.delegationOutcome(dep) ?? await outcomeFromDb(dep);
@@ -709,6 +710,8 @@ export const taskDelegateTool: Tool = {
       }
     }
 
+    const finishCollaboration = trackCollaboration({ from: config?.configurable?.agent_id ?? "bee", to: workerId,
+      taskId: scope?.taskId, sessionId: scope?.sessionId, summary: taskDescription });
     let partial = false;
     try {
       // Dynamic import to avoid circular dependency (agent-loop → tools → agent-loop)
@@ -743,6 +746,7 @@ export const taskDelegateTool: Tool = {
       // A worker that stopped short (budget, stall) handed back a partial: whoever depends on it must not build on it.
       board.settleDelegation({ ref, taskId, status: partial && status === "completed" ? "blocked" : status, result }, ref, taskId);
       if (resolvedProjectId) await updateProjectProgress(resolvedProjectId);
+      finishCollaboration(status === "completed" && !partial, result);
       agentBus.notifyTaskCompleted(workerId, worker.name, Number(taskId) || 0, taskName, resolvedProjectId, result);
 
       return {
@@ -762,6 +766,7 @@ export const taskDelegateTool: Tool = {
         } : {}),
       };
     } catch (err) {
+      finishCollaboration(false, (err as Error).message);
       await updateTask(taskId, { status: "failed", result: (err as Error).message, error: (err as Error).message });
       board.settleDelegation({ ref, taskId, status: "failed", result: (err as Error).message }, ref, taskId);
       agentBus.notifyTaskFailed(workerId, worker.name, Number(taskId) || 0, taskName, resolvedProjectId, (err as Error).message);
@@ -791,7 +796,7 @@ export const waitForTool: Tool = {
     const timeoutMs = Math.max(1, Number(params.timeout_s) || 1200) * 1000;
     const done = board.delegationOutcome(ref) ?? await outcomeFromDb(ref);
     if (done) return { ok: done.status === "completed", ref, status: done.status, handoff: done.result.slice(0, 6000) };
-    emitWaiting({ agentId: String(config?.configurable?.agent_id ?? "worker"), waitingFor: [ref], reason: "dependencia", taskId: config?.configurable?.thread_id });
+    emitWaiting({ agentId: String(config?.configurable?.agent_id ?? "worker"), waitingFor: [ref], reason: "dependencia", taskId: config?.configurable?.code_task_id ?? config?.configurable?.thread_id });
     const settled = await board.awaitDelegation(ref, { signal: config?.signal, timeoutMs });
     if (settled.ok === false) {
       return { ok: false, ref, status: settled.reason, error: settled.reason === "unknown" ? `${ref} has not been delegated (yet). Tell the coordinator, do not poll.` : `${ref} did not finish within ${Math.round(timeoutMs / 1000)}s.` };
@@ -875,6 +880,8 @@ export const taskReviseTool: Tool = {
       }
     }
 
+    const finishCollaboration = trackCollaboration({ from: config?.configurable?.agent_id ?? "bee", to: worker.id,
+      taskId: meta.code_task_id, sessionId: meta.code_session_id, summary: feedback });
     try {
       const { runAgentIsolated } = await import("../../agent/agent-loop.ts");
       const result = await runAgentIsolated({
@@ -912,11 +919,13 @@ export const taskReviseTool: Tool = {
       });
       board.settleDelegation({ ref: meta_ref(task), taskId: resolvedId, status, result }, meta_ref(task), resolvedId);
       await recordOutcome(resolvedId, { acceptance_met: met, revisions: revisions + 1 });
+      finishCollaboration(status === "completed", result);
       return {
         ok: true, task_id: resolvedId, worker_id: worker.id, result, acceptance: checks, acceptance_met: met,
         ...(merge ? { merge: merge.status, merged_files: merge.files, ...(merged ? {} : { merge_error: merge.error?.slice(0, 600) }) } : {}),
       };
     } catch (err) {
+      finishCollaboration(false, (err as Error).message);
       await updateTask(resolvedId, { status: "failed", error: (err as Error).message });
       board.settleDelegation({ taskId: resolvedId, status: "failed", result: (err as Error).message }, meta_ref(task), resolvedId);
       return { ok: false, task_id: resolvedId, error: (err as Error).message };

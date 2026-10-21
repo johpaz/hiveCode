@@ -459,10 +459,21 @@ export async function repl(): Promise<void> {
     // pulso del enjambre: si se pierden en un embudo lento, la UI miente.
     // El recorte por columna lo hace el consumidor, no el transporte.
     const swarmUnsub = [
+      eventBus.on("agent:output", (event) => {
+        if (event.sessionId && event.sessionId !== manager.getSessionId()) return
+        _tuiIpcSend?.({ type: event.kind === "reasoning" ? "thought_chunk" : "narrative_chunk",
+          coordinator: event.agentId, phase: event.kind === "reasoning" ? "thinking" : "narrative",
+          task_id: event.taskId, content: event.content })
+      }),
+      eventBus.on("swarm:collaboration", (event) => {
+        if (event.session_id && event.session_id !== manager.getSessionId()) return
+        _tuiIpcSend?.({ type: "swarm_collaboration", ...event })
+      }),
       eventBus.on("agent:lifecycle", (agent) => {
         if (agent.sessionId && agent.sessionId !== manager.getSessionId()) return
         _tuiIpcSend?.({ type: "worker_update", worker: agent.agentId, phase: agent.specialty,
-          status: agent.status, display_name: agent.name, current_action: agent.activity,
+          status: agent.status, display_name: agent.name, current_action: agent.activity, parent_id: agent.parentId,
+          task_id: manager.getActiveTaskId() ?? undefined,
           activity: `Padre: ${agent.parentId} · especialidad: ${agent.specialty}` })
       }),
       eventBus.on("tool:call", (c) => {

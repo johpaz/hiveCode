@@ -9,8 +9,8 @@
 | `src/main.rs`, `app.rs` | Arranque, bucle principal, modo headless. |
 | `src/controller.rs` | Entrada de teclado y ratón; convierte teclas en cambios de estado y mensajes IPC. |
 | `src/ipc/mod.rs` | Cliente IPC y tipos serde de los mensajes. |
-| `src/state/` | Estado de la aplicación: `session`, `history`, `input`, `modal`, `plan`, `review`, `diff`, `workers`, `swarm`, `roster`, `thought`, `logs`, `checkpoint`, `conflicts`, `harness`… |
-| `src/widgets/` | Pantallas y componentes: `focus_layout` (Mesa), `plan_layout`, `code_layout`, `review_layout`, `office` y `office_scene` (Enjambre), `header`, `statusbar`, `tabbar`, `input`, `command_popup`, `settings_hub`, `config_modal`, `info_modal`, `plan_approval_modal`, `agent_card`, `activity_toast`. |
+| `src/state/` | Estado de la aplicación: `session`, `history`, `input`, `modal`, `plan`, `review`, `diff`, `workers`, `swarm`, `colony`, `roster`, `thought`, `logs`, `checkpoint`, `conflicts`, `harness`… |
+| `src/widgets/` | Pantallas y componentes: `focus_layout` (Mesa), `plan_layout`, `code_layout`, `review_layout`, `office` (Colmena viva y lupa de Enjambre), `header`, `statusbar`, `tabbar`, `input`, `command_popup`, `settings_hub`, `config_modal`, `info_modal`, `plan_approval_modal`, `agent_card`, `activity_toast`. |
 | `src/term/`, `src/ui/` | Canvas de celdas, estilos, tema, Markdown, tablas, listas virtuales, hit-testing. |
 
 ## Vistas
@@ -19,7 +19,7 @@ La tecla `1`–`5` (con el input vacío) fija la vista y desactiva el enrutado a
 
 | # | Vista | Contenido |
 |---|-------|-----------|
-| 1 | **ENJAMBRE** | La oficina: un puesto por perfil, su herramienta en vuelo, esperas y agentes bloqueados por un MCP apagado. `Alt+↑/↓` selecciona, `Enter` abre CÓDIGO. |
+| 1 | **ENJAMBRE** | Colmena viva: una celda por instancia, herramientas simultáneas, estados y relaciones reales de delegación, entrega y dependencia. `Alt+↑/↓` selecciona, `Enter` abre CÓDIGO. |
 | 2 | **PLAN** | Spec, plan y fases. En modo `plan`, `Enter` aprueba (`/approve auto`). |
 | 3 | **MESA** | Conversación con BEE y, a la derecha, su razonamiento en vivo. Con trabajo en curso, un cargador con agentes y herramientas activas. |
 | 4 | **CÓDIGO** | Diff activo o mapa de archivos y panel lateral de workers. |
@@ -50,9 +50,22 @@ La vista se enruta sola según el estado de la tarea (`state.tab_locked` lo impi
 | `Alt+A / Alt+R / Alt+M` | En modo `approval`: aprobar, rechazar o modificar (pide confirmación). |
 | `Alt+H` | En modo `auto`: detener la tarea (pide confirmación). |
 | `[` / `]` | En Revisión: hallazgo anterior / siguiente. |
-| `Alt+↑/↓`, `←/→` | Enjambre: selecciona puesto y cambia la ficha. |
+| `Alt+↑/↓` | Enjambre: selecciona instancia y abre su lupa; clic sobre una celda hace lo mismo. |
+| `Alt+E`, `/lupa` | Expande/contrae herramientas y razonamiento de la lupa. |
+| `Alt+End`, `/directo` | Vuelve al seguimiento de eventos nuevos. Rueda y `PgUp/PgDn` desplazan la lupa y pausan el seguimiento. |
+| `←/→` | Enjambre: selecciona checkpoint. |
 
 Una `Ctrl+<letra>` sin atajo se ignora (no escribe la letra), salvo que también lleve `Alt`. Las mayúsculas se escriben con normalidad: `Shift+S` no abre Configuración.
+
+## Colmena viva y lupa
+
+BEE ocupa un alvéolo central destacado, rodeado por hasta seis alvéolos hexagonales. Cada agente conserva su personaje de fauna; los personajes sólo se animan cuando hay actividad real. Cada instancia conserva su identidad completa (`builder`, `builder#2`, `builder#3`); no se agrupa por perfil. Las posiciones permanecen estables mientras cambia la actividad. Las herramientas muestran duración transcurrida y un contador de llamadas simultáneas.
+
+Las conexiones salen de eventos estructurados de delegación/entrega, del padre conocido y de dependencias verificables del plan. Una referencia de tarea sin correspondencia con un agente se muestra como espera textual. El pulso de una conexión dura 1,8 segundos después del evento; no simula mensajes entre agentes.
+
+La lupa separa herramientas, resultados, narración, razonamiento disponible y colaboración. El razonamiento empieza colapsado y sólo se muestra si el proveedor lo emite. Los workers aislados también publican su salida disponible, sin cambiar el modo de transporte de su proveedor. El replay sólo alimenta el historial. La escena filtra eventos por tarea, ignora eventos tardíos de otra tarea y se limpia al cambiar de sesión.
+
+Con un área de escena de al menos 120×18, la lupa aparece a la derecha; en áreas menores ocupa la escena. Por debajo de 80 columnas o 15 filas de escena, los alvéolos pasan a lista compacta. El pipeline ocupa dos filas y el registro inferior vacío se sustituye por una leyenda de estados, manteniendo la geometría estable cuando llega narración. `Esc` cierra la lupa y `Enter` conserva el acceso a Código. Esta versión permite observar y explorar; los controles de aprobación, HALT y reanudación siguen disponibles.
 
 ## Configuración (`F2`)
 
@@ -84,8 +97,10 @@ Transporte: socket Unix (o TCP loopback en Windows), mensajes JSON de una línea
 | Prioridad | Mensajes |
 |-----------|----------|
 | **critical** | `init`, `conflict_alert`, `conflict_resolved`, `file_risk_update`, `forensic_alert`, `security_status_update`, `halt_state`, `tool_approval_request` |
-| **normal** | `history_append`, `assistant_chunk`/`assistant_done`, `thought_chunk`, `plan_draft_update`, `plan_update`, `plan_approval_request`, `task_update`, `worker_update`, `activity_update`, `narrative_chunk`, `tool_call`/`tool_done`, `esperando`, `status`, `state_update`, `session_changed`, `error`, `dashboard_snapshot`, `show_config_modal`, `show_info_modal`, `suspend`/`resume`… |
+| **normal** | `history_append`, `assistant_chunk`/`assistant_done`, `thought_chunk`, `plan_draft_update`, `plan_update`, `plan_approval_request`, `task_update`, `worker_update`, `activity_update`, `swarm_collaboration`, `narrative_chunk`, `tool_call`/`tool_done`, `esperando`, `status`, `state_update`, `session_changed`, `error`, `dashboard_snapshot`, `show_config_modal`, `show_info_modal`, `suspend`/`resume`… |
 | **low** | `log_entry`, `checkpoint_created`, `checkpoint_rollback`, `context_update`, `adr_update`, `file_diff`, `workers_snapshot`, `files_snapshot`, `memory_update`, `librarian_progress`, `review_verdict_update`, `resume_available`, `phase_retry` |
+
+`swarm_collaboration` incluye `event_id`, `delegation_id`, `from`, `to`, `kind` (`delegation`, `handoff`, `failed`), `summary`, `at` y contexto opcional de tarea/sesión. `worker_update` acepta `parent_id`; los snapshots de workers aceptan `parent_id` y `task_id` opcionales, manteniendo compatibilidad con emisores anteriores.
 
 Los `critical` se envían de inmediato; los `low` pueden ir con retraso. `tool_call` y `tool_done` siempre vienen en pareja con el mismo `call_id`.
 

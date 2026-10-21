@@ -400,10 +400,11 @@ async function sendSessionSnapshot(
              agent: cp.created_by ?? "system" })
     }
 
+    // Establish the active task before replaying task-scoped scene history.
+    await sendCodeTaskSnapshot(send, sessionId)
     await sendNarrativeSnapshot(send, sessionId)
     await sendFileSnapshots(send, sessionId)
     await sendAdrSnapshot(send)
-    await sendCodeTaskSnapshot(send, sessionId)
 
     await sendDashboardSnapshot(send, sessionId, cps)
   } catch (e) {
@@ -976,6 +977,7 @@ async function sendDashboardSnapshot(
       for (const row of latestBy(rows, (phase) => phase.coordinator, (phase) => ms(phase.started_at ?? phase.completed_at))) {
         workers.push({
           name: row.coordinator,
+          task_id: row.task_id,
           status: phaseStatusForTui(row.status),
           detail: row.phase_name,
           display_name: displayNameForAgent(row.coordinator),

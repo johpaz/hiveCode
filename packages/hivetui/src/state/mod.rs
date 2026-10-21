@@ -2,6 +2,7 @@
 mod adr;
 mod agent_graph;
 mod checkpoint;
+mod colony;
 mod conflicts;
 mod dashboard;
 mod diff;
@@ -25,6 +26,7 @@ mod workers;
 
 pub use adr::{AdrEntry, AdrState};
 pub use agent_graph::{AgentTier, all_edges, display_name as agent_display_name, edges_from, edges_to, tier_for};
+pub use colony::ColonyState;
 pub use checkpoint::{Checkpoint, CheckpointState};
 pub use conflicts::{AgentConflict, ConflictState};
 pub use dashboard::{
@@ -93,6 +95,7 @@ pub struct AppState {
     pub logs: LogState,
     /// Telemetría del enjambre: tool calls en vuelo y agentes en espera.
     pub swarm: SwarmState,
+    pub colony: ColonyState,
     /// El enjambre: alias, rol, función, tools y estado de MCP por especialista.
     pub roster: RosterState,
     /// La carga efectiva por agente del último turno, indexada por id.
@@ -166,6 +169,7 @@ fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
         BunMessage::StateUpdate { .. } => "state_update",
         BunMessage::SessionChanged { .. } => "session_changed",
         BunMessage::WorkerUpdate { .. } => "worker_update",
+        BunMessage::SwarmCollaboration { .. } => "swarm_collaboration",
         BunMessage::ActivityUpdate { .. } => "activity_update",
         BunMessage::DashboardSnapshot { .. } => "dashboard_snapshot",
         BunMessage::BlackboardEvent { .. } => "blackboard_event",
@@ -554,9 +558,27 @@ impl AppState {
         }
     }
 
+    fn capture_colony_worker(&mut self, id: &str, task_id: &Option<String>) {
+        if self.colony.accepts(task_id) {
+            if let Some(worker) = self.workers.workers.iter().find(|w| w.name == id) {
+                self.colony.workers.insert(id.to_string(), worker.clone());
+            }
+        }
+    }
+
     pub fn apply_message(&mut self, msg: crate::ipc::BunMessage) {
         use crate::ipc::BunMessage;
         self.harness.record_event(bun_event_name(&msg));
+        if let BunMessage::TaskUpdate { task_id, status, .. } = &msg {
+            if matches!(status.as_str(), "running" | "planning" | "approval" | "paused")
+                && self.colony.task_id.as_ref().is_some_and(|old| old != task_id) {
+                self.workers = Default::default();
+                self.swarm = Default::default();
+                self.dashboard.office = Default::default();
+                self.dashboard_scroll = 0;
+            }
+        }
+        self.colony.observe(&msg);
 
         match msg {
             // ── Inicialización ─────────────────────────────────────────────────
@@ -689,6 +711,9 @@ impl AppState {
                 self.tasks = Default::default();
                 self.conflicts = Default::default();
                 self.thought = Default::default();
+                self.swarm = Default::default();
+                self.workers = Default::default();
+                self.dashboard.office = Default::default();
                 self.diff = Default::default();
                 self.plan = Default::default();
                 self.dashboard.resume = None;
@@ -697,7 +722,8 @@ impl AppState {
             }
 
             // ── Workers ────────────────────────────────────────────────────────
-            BunMessage::WorkerUpdate {
+            BunMessage::SwarmCollaboration { .. } => {}
+            BunMessage::WorkerUpdate { parent_id: _,
                 task_id,
                 worker,
                 phase,
@@ -742,6 +768,7 @@ impl AppState {
                     transversal,
                     None,
                 );
+                self.capture_colony_worker(&worker, &task_id);
                 self.note_task_worker(task_id, &worker, &status);
                 self.route_after_worker_activity(&worker, &phase, &status, activity.as_deref());
             }
@@ -791,6 +818,7 @@ impl AppState {
                         transversal,
                         None,
                     );
+                    self.capture_colony_worker(&coordinator, &task_id);
                     self.note_task_worker(task_id, &coordinator, &status);
                     self.route_after_worker_activity(&coordinator, &phase, &status, activity.as_deref());
                 }
@@ -823,6 +851,7 @@ impl AppState {
                         w.transversal,
                         w.replaces_worker,
                     );
+                    self.capture_colony_worker(&w.name, &w.task_id);
                 }
                 self.dashboard.blackboard_events =
                     blackboard_events.into_iter().map(map_blackboard_event).collect();
@@ -1568,6 +1597,7 @@ impl AppState {
                         w.transversal,
                         w.replaces_worker,
                     );
+                    self.capture_colony_worker(&w.name, &w.task_id);
                 }
                 // Igual que DashboardSnapshot: hidratar sin cambiar de layout.
             }
@@ -1718,7 +1748,7 @@ mod tests {
     fn routed_worker_update_marks_task_projection() {
         let mut state = AppState::default();
 
-        state.apply_message(BunMessage::WorkerUpdate {
+        state.apply_message(BunMessage::WorkerUpdate { parent_id: None,
             task_id: Some("task-1".to_string()),
             worker: "backend".to_string(),
             phase: "editing".to_string(),
@@ -1738,7 +1768,7 @@ mod tests {
         assert_eq!(state.tasks.tasks[0].active_workers, vec!["backend".to_string()]);
         assert_eq!(state.session.task_count, 1);
 
-        state.apply_message(BunMessage::WorkerUpdate {
+        state.apply_message(BunMessage::WorkerUpdate { parent_id: None,
             task_id: Some("task-1".to_string()),
             worker: "backend".to_string(),
             phase: "done".to_string(),
@@ -1871,7 +1901,7 @@ mod tests {
         let mut state = AppState::default();
 
         for worker in ["backend", "frontend"] {
-            state.apply_message(BunMessage::WorkerUpdate {
+            state.apply_message(BunMessage::WorkerUpdate { parent_id: None,
                 task_id: Some("task-1".to_string()),
                 worker: worker.to_string(),
                 phase: "editing".to_string(),
@@ -1896,7 +1926,7 @@ mod tests {
         let mut state = AppState::default();
         state.active_tab = TabId::Code;
 
-        state.apply_message(BunMessage::WorkerUpdate {
+        state.apply_message(BunMessage::WorkerUpdate { parent_id: None,
             task_id: Some("task-1".to_string()),
             worker: "bee".to_string(),
             phase: "respond".to_string(),
@@ -1961,7 +1991,7 @@ mod tests {
         state.tab_locked = true;
 
         for worker in ["backend", "frontend"] {
-            state.apply_message(BunMessage::WorkerUpdate {
+            state.apply_message(BunMessage::WorkerUpdate { parent_id: None,
                 task_id: Some("task-1".to_string()),
                 worker: worker.to_string(),
                 phase: "editing".to_string(),

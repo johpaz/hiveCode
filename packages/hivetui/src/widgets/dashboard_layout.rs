@@ -1,7 +1,10 @@
+#[cfg(test)]
+use crate::state::Worker;
+
 use crate::{
     state::{
         tier_for, AgentTier, AppState, BlackboardEvent,
-        DashboardLevelStatus, ModalState, ReplMode, Worker, WorkerStatus,
+        DashboardLevelStatus, ModalState, ReplMode, WorkerStatus,
     },
     term::{
         Canvas, Color, Rect, Style, AMBER, AMBER_BRIGHT, AMBER_DIM, BG_CONFLICT,
@@ -84,15 +87,12 @@ fn dashboard_areas(area: Rect) -> DashboardAreas {
         };
     }
     let header_h = area.h.min(1);
-    let pipeline_h = area.h.saturating_sub(header_h).min(3);
+    let pipeline_h = area.h.saturating_sub(header_h).min(2);
     let footer_h = area.h.saturating_sub(header_h + pipeline_h).min(if area.h < 18 { 1 } else { 2 });
     let body_h = area.h.saturating_sub(header_h + pipeline_h + footer_h);
-    let grid_h = if body_h <= 1 {
-        body_h
-    } else {
-        body_h.saturating_sub((body_h / 5).clamp(if area.h < 18 { 1 } else { 2 }, 5))
-    };
-    let feed_h = body_h.saturating_sub(grid_h);
+    // Reserve a fixed activity strip so narration cannot move the colony's cells.
+    let feed_h=if body_h>=18 {2} else {0};
+    let grid_h=body_h-feed_h;
 
     DashboardAreas {
         header: Rect::new(area.x, area.y, area.w, header_h),
@@ -208,7 +208,9 @@ fn render_pipeline(canvas: &mut Canvas, area: Rect, state: &AppState) {
     }
     canvas.fill_rect(area, ' ', Style::new().bg(BG_MAIN));
     if area.h > 0 {
-        canvas.print(area.x + 1, area.y, "PIPELINE", Style::new().fg(AMBER_DIM).bold());
+        let active = pipeline_nodes(state).iter().find(|n| n.status == DashboardLevelStatus::Active)
+            .map(|n| n.label).unwrap_or("pendiente");
+        canvas.print(area.x + 1, area.y, &format!("PIPELINE · activo: {active}"), Style::new().fg(AMBER_DIM).bold());
     }
     if area.h < 2 {
         return;
@@ -264,7 +266,6 @@ fn render_blackboard_feed(canvas: &mut Canvas, area: Rect, state: &AppState) {
         return;
     }
     canvas.fill_rect(area, ' ', Style::new().bg(BG_MAIN));
-    canvas.print(area.x + 1, area.y, "BLACKBOARD", Style::new().fg(AMBER_DIM).bold());
     if area.h < 2 {
         return;
     }
@@ -276,10 +277,11 @@ fn render_blackboard_feed(canvas: &mut Canvas, area: Rect, state: &AppState) {
     };
 
     if events.is_empty() {
-        canvas.print(area.x + 2, area.y + 1, "sin eventos narrativos", Style::new().fg(DIM));
+        canvas.print(area.x + 2, area.y, &truncate_cells("◐ razonamiento   ▸ narración   ⚙ herramienta   … espera   ✓ entrega",area.w.saturating_sub(3) as usize), Style::new().fg(SECONDARY));
         return;
     }
 
+    canvas.print(area.x + 1, area.y, "BLACKBOARD", Style::new().fg(AMBER_DIM).bold());
     let max_rows = area.h.saturating_sub(1) as usize;
     let start = events.len().saturating_sub(max_rows);
     for (idx, event) in events.iter().skip(start).enumerate() {
@@ -419,19 +421,11 @@ fn render_blackboard_event(canvas: &mut Canvas, area: Rect, y: u16, event: &Blac
 }
 
 fn fallback_blackboard_events(state: &AppState) -> Vec<BlackboardEvent> {
-    let mut events: Vec<BlackboardEvent> = state
-        .thought
-        .chunks
-        .iter()
-        .rev()
-        .take(20)
-        .map(|chunk| BlackboardEvent {
-            timestamp: state.clock.clone(),
-            agent: chunk.coordinator.clone(),
-            event_type: "OBSERVATION".to_string(),
-            content: chunk.content.clone(),
-        })
-        .collect();
+    let mut events: Vec<_> = state.colony.entries.iter().rev().filter_map(|entry| {
+        if let crate::state::StreamEntry::Narracion { agent, texto, .. } = entry {
+            Some(BlackboardEvent { timestamp: state.clock.clone(), agent: agent.clone(), event_type: "OBSERVATION".into(), content: texto.clone() })
+        } else { None }
+    }).take(20).collect();
     events.reverse();
     events
 }
@@ -541,20 +535,13 @@ fn abbrev(agent: &str) -> String {
     }
 }
 
-pub(super) fn is_replaced_worker(worker: &Worker, state: &AppState) -> bool {
-    state
-        .workers
-        .workers
-        .iter()
-        .any(|candidate| candidate.replaces_worker.as_deref() == Some(worker.name.as_str()))
-}
-
 /// Qué está haciendo este agente **ahora**, según la telemetría.
 ///
 /// Antes esta tarjeta caía en `current_action`, que el backend llenaba con
 /// `"ejecutando <phase>"` — un texto que no decía qué herramienta corría. Ahora
 /// la fuente primaria es la llamada en vuelo real; `current_action` queda como
 /// último recurso para los agentes legacy que no emiten telemetría.
+#[cfg(test)]
 pub(super) fn agent_live_line(state: &AppState, worker: &Worker) -> (String, Color) {
     // 1. Una herramienta corriendo: lo único que de verdad significa "trabajando".
     if let Some(call) = state
@@ -729,7 +716,7 @@ mod tests {
         render(&mut canvas, Rect::new(0, 0, 100, 24), &state);
         let rows = canvas.to_text_rows().join("\n");
 
-        assert!(rows.contains("@TOPO"));
+        assert!(rows.contains("@Topo"));
         assert!(rows.contains("implementando"));
         assert!(rows.contains("src/auth.ts"));
         assert!(rows.contains("iter"));
@@ -765,7 +752,10 @@ mod tests {
     fn dashboard_worker_hit_testing_returns_clicked_worker() {
         let mut state = AppState::default();
         state.workers.workers.push(worker("backend", WorkerStatus::Running));
-        let hit = worker_at(&state, Rect::new(0, 0, 100, 24), 3, 6);
+        let area=Rect::new(0,0,100,24);
+        register_office_hits(&mut state,area);
+        let region=state.hit_map.regions().iter().find(|r|r.id=="office:select:backend").unwrap();
+        let hit = worker_at(&state,area,region.rect.x+region.rect.w/2,region.rect.y+region.rect.h/2);
         assert_eq!(hit.as_deref(), Some("backend"));
     }
 
@@ -958,7 +948,7 @@ mod swarm_tests {
     fn a_wait_chip_renders_on_the_card() {
         let mut state = AppState::default();
         state.workers.workers.push(worker("backend"));
-        state.swarm.set_waiting(WaitingAgent {
+        state.colony.telemetry.set_waiting(WaitingAgent {
             agent: "backend".to_string(),
             waiting_for: vec![],
             reason: "dependencia".to_string(),
@@ -1037,6 +1027,7 @@ mod swarm_tests {
         let mut canvas = Canvas::new(100, 30);
         render(&mut canvas, Rect::new(0, 0, 100, 30), &state);
         let frame = canvas.to_text_rows().join("\n");
-        assert!(frame.contains("fs_read"), "{frame}");
+        assert!(frame.contains("fallido"), "{frame}");
+        assert!(!frame.contains("leyendo"), "un agente terminado no sigue ejecutando: {frame}");
     }
 }

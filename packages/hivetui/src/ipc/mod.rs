@@ -135,8 +135,14 @@ pub enum BunMessage {
         fresh: bool,
     },
 
+    SwarmCollaboration {
+        event_id: String, delegation_id: String, task_id: Option<String>, session_id: Option<String>,
+        from: String, to: String, kind: String, summary: String, at: u64,
+    },
+
     // ── Workers y coordinador ──────────────────────────────────────────────────
     WorkerUpdate {
+        parent_id: Option<String>,
         task_id: Option<String>,
         worker: String,
         phase: String,
@@ -611,6 +617,8 @@ pub struct DiffLine {
 
 #[derive(Debug, Deserialize)]
 pub struct WorkerSnapshotEntry {
+    pub parent_id: Option<String>,
+    pub task_id: Option<String>,
     pub name:   String,
     pub status: String,
     pub detail: Option<String>,

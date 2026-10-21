@@ -168,3 +168,35 @@ export function emitWaiting(input: {
     // Telemetría nunca es una dependencia dura.
   }
 }
+/** Bounded batches for isolated worker streams; preserves reasoning/narrative channels. */
+export function createOutputTelemetry(scope: { agentId: string; taskId?: string; sessionId?: string }) {
+  const channels = {
+    reasoning: { buffer: "", seen: false, last: 0 },
+    narrative: { buffer: "", seen: false, last: 0 },
+  }
+  const flush = (kind: keyof typeof channels) => {
+    const channel = channels[kind]
+    if (!channel.buffer) return
+    const content = channel.buffer
+    channel.buffer = ""
+    channel.last = Date.now()
+    try { eventBus.emit("agent:output", { ...scope, kind, content }) } catch { /* observer only */ }
+  }
+  const append = (kind: keyof typeof channels, token: string) => {
+    if (!token) return
+    const channel = channels[kind]
+    channel.seen = true
+    channel.buffer += token
+    if (channel.buffer.length >= 256 || Date.now() - channel.last >= 80) flush(kind)
+  }
+  return {
+    reasoning: (token: string) => append("reasoning", token),
+    narrative: (token: string) => { flush("reasoning"); append("narrative", token) },
+    finish: (response: { reasoning_content?: string | null; content?: string | null }) => {
+      if (!channels.reasoning.seen && response.reasoning_content) append("reasoning", response.reasoning_content)
+      flush("reasoning")
+      if (!channels.narrative.seen && response.content) append("narrative", response.content)
+      flush("narrative")
+    },
+  }
+}

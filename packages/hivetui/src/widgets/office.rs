@@ -1,305 +1,232 @@
-//! A terminal office whose movement is driven by swarm telemetry, never random.
-use super::dashboard_layout::{agent_live_line, is_replaced_worker, short_arg};
+//! Colmena viva: stable instance cells, real relationships and a task-scoped inspector.
+use super::dashboard_layout::short_arg;
+use crate::ui::fmt_tokens;
 use crate::{
-    state::{AppState, BeeState, Worker, WorkerStatus},
+    state::{AppState, ModalState, StreamEntry, Worker, WorkerStatus},
     term::{
-        Canvas, Color, Rect, Style, AMBER_BRIGHT, BG_ELEVATED, BG_PANEL, DIM, GREEN, RED,
-        SECONDARY, WHITE, YELLOW,
+        Canvas, Color, Rect, Style, AMBER_BRIGHT, BG_ELEVATED, CYAN, DIM, GREEN, RED, SECONDARY,
+        WHITE, YELLOW,
     },
-    ui::fmt_tokens,
+    ui::{ellipsize_cells, wrap_cells, HitAction, MouseRegion, Overflow},
 };
-
-const DESK: u16 = 40;
-const CONSULT: u16 = 8;
-const EXECUTE: u16 = 70;
-const WAIT: u16 = 92;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Clone)]
 pub(crate) struct OfficeAgent {
     pub worker: Worker,
-    telemetry: String,
+    pub(crate) telemetry: String,
     blocked: Vec<String>,
 }
 
-/// Merge workers with roster identities, preferring live worker data over idle seats.
+fn base(id: &str) -> String {
+    super::office_art::profile_key(id.split('#').next().unwrap_or(id))
+}
+
+/// Only legacy profile aliases are merged; numbered and ephemeral instances keep their exact IDs.
+fn identity(id: &str) -> String {
+    if id.contains('#') {
+        id.to_string()
+    } else {
+        base(id)
+    }
+}
+
 pub(crate) fn agents(state: &AppState) -> Vec<OfficeAgent> {
-    let mut result = std::collections::BTreeMap::new();
+    let mut result = BTreeMap::new();
     for roster in state.roster.by_id.values() {
-        let mut worker = Worker::new(&roster.rol);
+        if roster.id.contains('#') {
+            continue;
+        }
+        let mut worker = Worker::new(&roster.id);
         worker.display_name = roster.alias.clone();
         worker.detail = Some(roster.funcion.clone());
-        let blocked = roster
-            .blocked_by()
-            .into_iter()
-            .map(str::to_string)
-            .collect();
         result.insert(
-            super::office_art::profile_key(&worker.name),
+            identity(&roster.id),
             OfficeAgent {
                 worker,
                 telemetry: roster.id.clone(),
-                blocked,
+                blocked: roster
+                    .blocked_by()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
             },
         );
     }
-    for worker in &state.workers.workers {
-        if is_replaced_worker(worker, state) {
+    let workers: Vec<&Worker> = if state.colony.task_id.is_some() {
+        state.colony.workers.values().collect()
+    } else {
+        state.workers.workers.iter().collect()
+    };
+    let replaced = |worker: &Worker| {
+        workers
+            .iter()
+            .any(|w| w.replaces_worker.as_deref() == Some(worker.name.as_str()))
+    };
+    for worker in &workers {
+        if replaced(worker) {
+            continue;
+        }
+        // Older task activity must not bleed into the current scene.
+        if state.colony.task_id.is_some() && !state.colony.members.contains(&worker.name) {
+            continue;
+        }
+        let key = identity(&worker.name);
+        if result
+            .get(&key)
+            .is_some_and(|a: &OfficeAgent| a.worker.status == WorkerStatus::Running)
+            && worker.status == WorkerStatus::Waiting
+        {
             continue;
         }
         let roster = state
             .roster
             .by_id
             .get(&worker.name)
-            .or_else(|| {
-                state
-                    .roster
-                    .by_role
-                    .get(&worker.name)
-                    .and_then(|id| state.roster.by_id.get(id))
-            })
-            .or_else(|| {
-                let key = super::office_art::profile_key(&worker.name);
-                state
-                    .roster
-                    .by_id
-                    .values()
-                    .find(|entry| super::office_art::profile_key(&entry.rol) == key)
-            });
-        let mut live = worker.clone();
-        let mut telemetry = worker.name.clone();
-        let mut blocked = Vec::new();
-        if let Some(roster) = roster {
-            live.name = roster.rol.clone();
-            live.display_name = roster.alias.clone();
-            telemetry = roster.id.clone();
-            blocked = roster
-                .blocked_by()
-                .into_iter()
-                .map(str::to_string)
-                .collect();
-        }
-        let key = super::office_art::profile_key(&live.name);
-        if result
-            .get(&key)
-            .is_some_and(|agent: &OfficeAgent| agent.worker.status == WorkerStatus::Running)
-            && live.status == WorkerStatus::Waiting
-        {
-            continue;
+            .or_else(|| state.roster.by_id.values().find(|r| identity(&r.id) == key));
+        let mut live = (*worker).clone();
+        if let Some(r) = roster {
+            live.display_name = r.alias.clone();
         }
         result.insert(
             key,
             OfficeAgent {
                 worker: live,
-                telemetry,
-                blocked,
+                telemetry: worker.name.clone(),
+                blocked: roster
+                    .map(|r| r.blocked_by().into_iter().map(str::to_string).collect())
+                    .unwrap_or_default(),
             },
         );
     }
-    // A forensic replacement removes the idle roster seat as well as the worker.
-    result.retain(|_, agent| {
-        !is_replaced_worker(&agent.worker, state)
-            && !state
-                .workers
-                .workers
+    // Delegations can precede worker_update (and temporary agents need no roster seat).
+    for id in &state.colony.members {
+        let a = result.entry(identity(id)).or_insert_with(|| OfficeAgent {
+            worker: Worker::new(id),
+            telemetry: id.clone(),
+            blocked: vec![],
+        });
+        a.telemetry = id.clone();
+        a.worker.name = id.clone();
+    }
+    let mut cast: Vec<_> = result.into_values().collect();
+    cast.retain(|a| {
+        !replaced(&a.worker)
+            && !workers
                 .iter()
-                .any(|w| w.replaces_worker.as_deref() == Some(&agent.telemetry))
+                .any(|w| w.replaces_worker.as_deref() == Some(&a.telemetry))
     });
-    let mut agents: Vec<_> = result.into_values().collect();
-    let order = ["bee", "planner", "scout", "builder", "verifier", "spider"];
-    agents.sort_by_key(|agent| order.iter().position(|role| *role == super::office_art::profile_key(&agent.worker.name)).unwrap_or(order.len()));
-    agents
+    cast.sort_by_key(|a| {
+        let role = base(&a.worker.name);
+        let order = ["bee", "planner", "scout", "builder", "verifier", "spider"];
+        (
+            order.iter().position(|r| *r == role).unwrap_or(order.len()),
+            a.worker.name.clone(),
+        )
+    });
+    cast
 }
 
-fn call<'a>(state: &'a AppState, agent: &OfficeAgent) -> Option<&'a crate::state::ToolCall> {
-    state
-        .swarm
-        .calls_for(&agent.telemetry)
-        .into_iter()
-        .chain(state.swarm.calls_for(&agent.worker.name))
-        .min_by_key(|call| (call.started_at, &call.call_id))
-}
-
-fn waiting<'a>(state: &'a AppState, agent: &OfficeAgent) -> Option<&'a crate::state::WaitingAgent> {
-    state
-        .swarm
-        .waiting
-        .get(&agent.telemetry)
-        .or_else(|| state.swarm.waiting.get(&agent.worker.name))
-}
-
-fn destination(state: &AppState, agent: &OfficeAgent) -> u16 {
-    if matches!(
-        agent.worker.status,
-        WorkerStatus::Failed | WorkerStatus::Done
-    ) {
-        return DESK;
+fn state_label(state: &AppState, agent: &OfficeAgent) -> (String, Color) {
+    let id = &agent.telemetry;
+    let status =
+        state
+            .colony
+            .statuses
+            .get(id)
+            .map(String::as_str)
+            .unwrap_or(match agent.worker.status {
+                WorkerStatus::Done => "done",
+                WorkerStatus::Failed => "failed",
+                WorkerStatus::Running => "running",
+                WorkerStatus::Warn => "warn",
+                _ => "idle",
+            });
+    if matches!(status, "failed" | "cancelled") {
+        return ("✗ fallido".into(), RED);
     }
-    if waiting(state, agent).is_some() || !agent.blocked.is_empty() {
-        return WAIT;
+    if matches!(status, "done" | "completed") {
+        return ("✓ terminado".into(), GREEN);
     }
-    match call(state, agent).map(|call| call.bee_state) {
-        Some(BeeState::Reading | BeeState::Searching) => CONSULT,
-        Some(BeeState::Executing) => EXECUTE,
-        _ => DESK,
+    if let ModalState::ToolApproval(approval) = &state.modal {
+        if approval.agent == *id {
+            return ("? pendiente de aprobación".into(), YELLOW);
+        }
     }
-}
-
-fn activity(state: &AppState, agent: &OfficeAgent) -> (String, Color) {
-    if let Some(wait) = waiting(state, agent) {
+    if let Some(wait) = state.colony.telemetry.waiting.get(id) {
         return (
-            format!("{} · {}", wait.reason_label(), wait.waiting_for.join(", ")),
+            format!(
+                "… {} · {}",
+                wait.reason_label(),
+                wait.waiting_for.join(", ")
+            ),
             YELLOW,
         );
     }
     if !agent.blocked.is_empty() {
-        return (format!("MCP apagado: {}", agent.blocked.join(", ")), YELLOW);
+        return (
+            format!("! MCP apagado: {}", agent.blocked.join(", ")),
+            YELLOW,
+        );
     }
-    if let Some(call) = call(state, agent) {
-        let arg = short_arg(&call.args_summary);
-        let line = if arg.is_empty() {
-            format!("{} · {}", call.bee_state.label(), call.tool)
-        } else {
-            format!("{} · {} · {}", call.bee_state.label(), call.tool, arg)
-        };
-        return (line, call.bee_state.color());
-    }
-    let mut worker = agent.worker.clone();
-    if state.swarm.last_tool.contains_key(&agent.telemetry) {
-        worker.name = agent.telemetry.clone();
-    }
-    let (line, color) = agent_live_line(state, &worker);
-    match worker.status {
-        WorkerStatus::Failed => (format!("falló · {line}"), RED),
-        WorkerStatus::Warn => (format!("alerta · {line}"), YELLOW),
-        WorkerStatus::Done if line.starts_with('✓') => (format!("listo · {line}"), GREEN),
-        WorkerStatus::Done => (format!("✓ listo · {line}"), GREEN),
-        WorkerStatus::Waiting if !state.swarm.last_tool.contains_key(&worker.name) => {
-            ("disponible".into(), DIM)
-        }
-        _ => (line, color),
-    }
-}
-
-pub fn tick(state: &mut AppState) {
-    let agents = agents(state);
-    let names: std::collections::HashSet<_> =
-        agents.iter().map(|a| a.worker.name.as_str()).collect();
-    state
-        .dashboard
-        .office
-        .positions
-        .retain(|name, _| names.contains(name.as_str()));
-    state
-        .dashboard
-        .office
-        .targets
-        .retain(|name, _| names.contains(name.as_str()));
-    state
-        .dashboard
-        .office
-        .routes
-        .retain(|name, _| names.contains(name.as_str()));
-    if state
-        .dashboard
-        .office
-        .selected
-        .as_ref()
-        .is_some_and(|name| !names.contains(name.as_str()))
-    {
-        state.dashboard.office.selected = None;
-    }
-    state
-        .dashboard
-        .office
-        .homes
-        .retain(|name, _| names.contains(name.as_str()));
-    let (w, h) = state.dashboard.office.viewport;
-    let (w, h) = if w == 0 || h == 0 { (120, 24) } else { (w, h) };
-    let scene = super::office_scene::Scene::new(
-        Rect::new(0, 0, w, h),
-        state,
-        agents.len(),
-        w < 60 || h < 10,
-    );
-    for (index, station) in &scene.stations {
-        let agent = &agents[*index];
-        let name = &agent.worker.name;
-        state
-            .dashboard
-            .office
-            .homes
-            .insert(name.clone(), super::office_scene::Scene::chair(*station));
-        let target = scene.target(*index, *station, destination(state, agent));
-        let position = *state
-            .dashboard
-            .office
-            .positions
-            .entry(name.clone())
-            .or_insert(super::office_scene::Scene::chair(*station));
-        if state.dashboard.office.targets.get(name) != Some(&target) {
-            state
-                .dashboard
-                .office
-                .routes
-                .insert(name.clone(), scene.route(position, target));
-            state.dashboard.office.targets.insert(name.clone(), target);
-        }
-        if !state.dashboard.halt.active {
-            for _ in 0..3 {
-                if let Some(next) = state
-                    .dashboard
-                    .office
-                    .routes
-                    .get_mut(name)
-                    .and_then(|route| route.pop_front())
-                {
-                    state.dashboard.office.positions.insert(name.clone(), next);
+    let mut calls = state.colony.telemetry.calls_for(id);
+    calls.sort_by_key(|c| (c.started_at, &c.call_id));
+    if let Some(call) = calls.first() {
+        let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        return (
+            format!(
+                "{} {} · {} · {}s{}",
+                call.bee_state.glyph(),
+                call.bee_state.label(),
+                call.tool,
+                now.saturating_sub(call.started_at) / 1000,
+                if calls.len() > 1 {
+                    format!(" (+{})", calls.len() - 1)
+                } else {
+                    String::new()
                 }
-            }
-        }
+            ),
+            call.bee_state.color(),
+        );
+    }
+    if let Some(activity) = state.colony.activity.get(id) {
+        return (format!("◐ {activity}"), CYAN);
+    }
+    match status {
+        "running" | "thinking" | "active" => ("◌ trabajando".into(), WHITE),
+        "waiting" | "blocked" => ("… esperando".into(), YELLOW),
+        "warn" => ("! atención".into(), YELLOW),
+        _ => ("○ disponible".into(), DIM),
     }
 }
 
-pub fn select_next(state: &mut AppState, direction: i32) {
-    let agents = agents(state);
-    if agents.is_empty() {
-        return;
-    }
-    let current = agents
-        .iter()
-        .position(|a| Some(&a.worker.name) == state.dashboard.office.selected.as_ref());
-    let index = match current {
-        Some(index) => (index as i32 + direction).rem_euclid(agents.len() as i32) as usize,
-        None if direction < 0 => agents.len() - 1,
-        None => 0,
-    };
-    state.dashboard.office.selected = Some(agents[index].worker.name.clone());
-    state.dashboard_scroll = index;
+fn task<'a>(state: &'a AppState, a: &'a OfficeAgent) -> &'a str {
+    state
+        .colony
+        .tasks
+        .get(&a.telemetry)
+        .map(String::as_str)
+        .or(a.worker.current_action.as_deref())
+        .or(a.worker.current_file.as_deref())
+        .or(a.worker.detail.as_deref())
+        .unwrap_or("sin tarea asignada")
 }
 
-pub(crate) fn code_worker(state: &AppState, role: &str) -> String {
+pub(crate) fn code_worker(state: &AppState, id: &str) -> String {
     state
         .workers
         .workers
         .iter()
-        .find(|worker| {
-            worker.name == role
-                || state
-                    .roster
-                    .by_id
-                    .get(&worker.name)
-                    .is_some_and(|agent| agent.rol == role)
-        })
+        .find(|w| w.name == id)
         .or_else(|| {
-            let key = super::office_art::profile_key(role);
             state
                 .workers
                 .workers
                 .iter()
-                .find(|worker| super::office_art::profile_key(&worker.name) == key)
+                .find(|w| identity(&w.name) == identity(id))
         })
-        .map(|worker| worker.name.clone())
-        .unwrap_or_else(|| role.to_string())
+        .map(|w| w.name.clone())
+        .unwrap_or_else(|| id.to_string())
 }
 
 struct Layout {
@@ -307,131 +234,173 @@ struct Layout {
     inspector: Rect,
     compact: bool,
 }
-
 fn layout(area: Rect, state: &AppState) -> Layout {
-    let compact = area.w < 60 || area.h < 10;
     let selected = state.dashboard.office.selected.is_some();
-    if selected && compact {
-        Layout {
-            floor: Rect::default(),
-            inspector: area,
-            compact,
-        }
-    } else if selected && area.w >= 100 && area.h >= 8 {
-        Layout {
-            floor: Rect::new(area.x, area.y, area.w - 33, area.h),
-            inspector: Rect::new(area.right() - 32, area.y, 32, area.h),
-            compact,
-        }
-    } else if selected && area.h >= 8 {
-        let h = 6.min(area.h / 2);
-        Layout {
-            floor: Rect::new(area.x, area.y, area.w, area.h - h),
-            inspector: Rect::new(area.x, area.bottom() - h, area.w, h),
-            compact: area.h - h < 10,
-        }
+    let side = selected && area.w >= 120 && area.h >= 18;
+    let floor = if side {
+        Rect::new(area.x, area.y, area.w * 2 / 3 - 1, area.h)
     } else {
-        Layout {
-            floor: area,
-            inspector: Rect::default(),
-            compact,
-        }
+        area
+    };
+    let inspector = if side {
+        Rect::new(
+            floor.right() + 1,
+            area.y,
+            area.right() - floor.right() - 1,
+            area.h,
+        )
+    } else if selected {
+        area
+    } else {
+        Rect::default()
+    };
+    Layout {
+        floor,
+        inspector,
+        compact: floor.w < 80 || floor.h < 15,
     }
 }
 
-fn seats(area: Rect, state: &AppState, count: usize, compact: bool) -> Vec<(usize, Rect)> {
-    super::office_scene::Scene::new(area, state, count, compact).stations
+fn seats(area: Rect, state: &AppState, cast: &[OfficeAgent], compact: bool) -> Vec<(usize, Rect)> {
+    if area.w < 2 || area.h < 3 || cast.is_empty() {
+        return vec![];
+    }
+    let bee = cast
+        .iter()
+        .position(|a| base(&a.worker.name) == "bee")
+        .unwrap_or(0);
+    let others: Vec<_> = (0..cast.len()).filter(|i| *i != bee).collect();
+    let mut placements = Vec::new();
+    if compact {
+        let capacity = (area.h.saturating_sub(2) / 2) as usize;
+        let start = state
+            .dashboard_scroll
+            .min(others.len().saturating_sub(capacity.saturating_sub(1)));
+        for (slot, index) in std::iter::once(bee)
+            .chain(others.into_iter().skip(start))
+            .take(capacity)
+            .enumerate()
+        {
+            placements.push((
+                index,
+                Rect::new(area.x, area.y + 1 + slot as u16 * 2, area.w, 2),
+            ));
+        }
+    } else {
+        // A six-cell crown around a fixed nucleus, rather than rows of cards.
+        let node_h = if area.h >= 23 { 7 } else { 5 };
+        let body = Rect::new(area.x + 1, area.y + 1, area.w - 2, area.h - 2);
+        let node_w = ((body.w - 6) / 3).min(40);
+        let core_h = if body.h >= node_h * 3 + 2 {
+            node_h + 2
+        } else {
+            node_h
+        };
+        let core_w = (node_w + 4).min(body.w);
+        let center = Rect::new(
+            body.x + (body.w - core_w) / 2,
+            body.y + (body.h - core_h) / 2,
+            core_w,
+            core_h,
+        );
+        placements.push((bee, center));
+        let left = body.x;
+        let right = body.right() - node_w;
+        let middle = body.x + (body.w - node_w) / 2;
+        let travel = body.h - node_h;
+        let lower = if others.len() <= 5 {
+            travel
+        } else {
+            travel * 3 / 4
+        };
+        let slots = [
+            (middle, body.y),
+            (left, body.y + travel / 4),
+            (right, body.y + travel / 4),
+            (left, body.y + lower),
+            (right, body.y + lower),
+            (middle, body.y + travel),
+        ];
+        let start = state.dashboard_scroll.min(others.len().saturating_sub(6));
+        for (index, (x, y)) in others.into_iter().skip(start).zip(slots) {
+            placements.push((index, Rect::new(x, y, node_w, node_h)));
+        }
+    }
+    placements
 }
 
-fn actor_position(state: &AppState, name: &str, station: Rect, floor: Rect) -> (u16, u16) {
-    let Some(&(x, y)) = state.dashboard.office.positions.get(name) else {
-        return super::office_scene::Scene::chair(station);
-    };
+pub fn select_next(state: &mut AppState, direction: i32) {
+    let cast = agents(state);
+    if cast.is_empty() {
+        return;
+    }
+    let current = cast
+        .iter()
+        .position(|a| state.dashboard.office.selected.as_ref() == Some(&a.worker.name));
+    let index = current
+        .map(|i| (i as i32 + direction).rem_euclid(cast.len() as i32) as usize)
+        .unwrap_or(if direction < 0 { cast.len() - 1 } else { 0 });
+    select(state, cast[index].worker.name.clone());
+}
+
+pub fn select(state: &mut AppState, id: String) {
+    state.dashboard.office.selected = Some(id.clone());
+    state.dashboard.office.inspector_offset = 0;
+    state.dashboard.office.paused = false;
+    let cast = agents(state);
     let (w, h) = state.dashboard.office.viewport;
-    let (w, h) = if w == 0 || h == 0 { (120, 24) } else { (w, h) };
-    let home = state
-        .dashboard
-        .office
-        .homes
-        .get(name)
-        .copied()
-        .unwrap_or((x, y));
-    let chair = super::office_scene::Scene::chair(station);
-    (
-        (chair.0 as i32 + (x as i32 - home.0 as i32) * floor.w as i32 / w as i32).clamp(
-            floor.x as i32 + 1,
-            (floor.right().saturating_sub(super::office_art::WIDTH + 1)).max(floor.x + 1) as i32,
-        ) as u16,
-        (chair.1 as i32 + (y as i32 - home.1 as i32) * floor.h as i32 / h as i32).clamp(
-            floor.y as i32 + 1,
-            (floor.bottom().saturating_sub(super::office_art::HEIGHT + 1)).max(floor.y + 1) as i32,
-        ) as u16,
-    )
+    let area = Rect::new(0, 0, w.max(40), h.max(4));
+    let l = layout(area, state);
+    if !seats(l.floor, state, &cast, l.compact)
+        .iter()
+        .any(|(i, _)| cast[*i].worker.name == id)
+    {
+        state.dashboard_scroll = cast
+            .iter()
+            .filter(|a| base(&a.worker.name) != "bee")
+            .position(|a| a.worker.name == id)
+            .unwrap_or(0);
+    }
 }
 
 pub fn worker_at(state: &AppState, area: Rect, x: u16, y: u16) -> Option<String> {
-    let agents = agents(state);
-    let layout = layout(area, state);
-    let seats = seats(layout.floor, state, agents.len(), layout.compact);
-    if !layout.compact {
-        for (index, station) in &seats {
-            let point = actor_position(state, &agents[*index].worker.name, *station, layout.floor);
-            if super::office_art::bounds(point.0, point.1).contains(x, y) {
-                return Some(agents[*index].worker.name.clone());
-            }
-        }
+    let l = layout(area, state);
+    if l.inspector == area && state.dashboard.office.selected.is_some() {
+        return None;
     }
-    seats
-        .into_iter()
-        .find(|(_, rect)| rect.contains(x, y))
-        .map(|(index, _)| agents[index].worker.name.clone())
+    let cast = agents(state);
+    seats(l.floor, state, &cast, l.compact)
+        .iter()
+        .find(|(_, r)| r.contains(x, y))
+        .map(|(i, _)| cast[*i].worker.name.clone())
 }
 
 pub fn register_hits(state: &mut AppState, area: Rect) {
-    let agents = agents(state);
-    let layout = layout(area, state);
-    let size = (layout.floor.w, layout.floor.h);
-    if size != state.dashboard.office.viewport && size.0 > 0 && size.1 > 0 {
-        let placements = seats(layout.floor, state, agents.len(), layout.compact);
-        let points: Vec<_> = placements
-            .iter()
-            .map(|(index, station)| {
-                let name = &agents[*index].worker.name;
-                let point = actor_position(state, name, *station, layout.floor);
-                let home = super::office_scene::Scene::chair(*station);
-                (
-                    name.clone(),
-                    (point.0 - layout.floor.x, point.1 - layout.floor.y),
-                    (home.0 - layout.floor.x, home.1 - layout.floor.y),
-                )
-            })
-            .collect();
-        state.dashboard.office.positions.clear();
-        state.dashboard.office.homes.clear();
-        for (name, point, home) in points {
-            state.dashboard.office.positions.insert(name.clone(), point);
-            state.dashboard.office.homes.insert(name, home);
+    state.dashboard.office.viewport = (area.w, area.h);
+    let l = layout(area, state);
+    let cast = agents(state);
+    if l.inspector != area || state.dashboard.office.selected.is_none() {
+        for (i, r) in seats(l.floor, state, &cast, l.compact) {
+            let id = format!("office:select:{}", cast[i].worker.name);
+            state
+                .hit_map
+                .push(MouseRegion::new(&id, r, 1, HitAction::Custom(id.clone())));
         }
-        state.dashboard.office.viewport = size;
-        state.dashboard.office.targets.clear();
-        state.dashboard.office.routes.clear();
     }
-    for (index, rect) in seats(layout.floor, state, agents.len(), layout.compact) {
-        let name = &agents[index].worker.name;
-        let id = format!("office:select:{name}");
-        state.hit_map.push(crate::ui::MouseRegion::new(
-            &id,
-            rect,
-            1,
-            crate::ui::HitAction::Custom(id.clone()),
-        ));
-        if !layout.compact {
-            let point = actor_position(state, name, rect, layout.floor);
-            state.hit_map.push(crate::ui::MouseRegion::new(
-                &id,
-                super::office_art::bounds(point.0, point.1),
+    if l.inspector.h > 0 {
+        for (id, x, w) in [
+            ("colony:expand", l.inspector.x, l.inspector.w / 2),
+            (
+                "colony:live",
+                l.inspector.x + l.inspector.w / 2,
+                l.inspector.w - l.inspector.w / 2,
+            ),
+        ] {
+            state.hit_map.push(MouseRegion::new(
+                id,
+                Rect::new(x, l.inspector.bottom() - 1, w, 1),
                 3,
-                crate::ui::HitAction::Custom(id.clone()),
+                HitAction::Custom(id.into()),
             ));
         }
     }
@@ -442,566 +411,940 @@ fn text(canvas: &mut Canvas, area: Rect, row: u16, value: &str, color: Color) {
         canvas.print(
             area.x,
             area.y + row,
-            &crate::ui::ellipsize_cells(value, area.w as usize),
+            &ellipsize_cells(value, area.w as usize),
             Style::new().fg(color),
         );
     }
+}
+
+struct Edge {
+    from: String,
+    to: String,
+    label: &'static str,
+    pulse: bool,
+}
+fn edges(state: &AppState, cast: &[OfficeAgent]) -> Vec<Edge> {
+    let mut edges = Vec::new();
+    let mut seen = HashSet::new();
+    // Only most recent state of each delegation is drawn.
+    for e in state.colony.relations.iter().rev() {
+        if !seen.insert(e.id.clone()) {
+            continue;
+        }
+        let (from, to, label) = match e.kind.as_str() {
+            "handoff" => (e.to.clone(), e.from.clone(), "entrega"),
+            "failed" => (e.to.clone(), e.from.clone(), "fallo"),
+            _ => (e.from.clone(), e.to.clone(), "delega"),
+        };
+        edges.push(Edge {
+            from,
+            to,
+            label,
+            pulse: e.received_at.elapsed().as_millis() < 1800,
+        });
+    }
+    for (to, parent) in &state.colony.parents {
+        if !edges
+            .iter()
+            .any(|e| (&e.from == parent && &e.to == to) || (&e.to == parent && &e.from == to))
+        {
+            edges.push(Edge {
+                from: parent.clone(),
+                to: to.clone(),
+                label: "delega",
+                pulse: false,
+            });
+        }
+    }
+    let resolve = |id: &str| -> Option<String> {
+        let candidates: Vec<_> = cast
+            .iter()
+            .filter(|a| {
+                if id.contains('#') {
+                    a.telemetry == id
+                } else {
+                    base(&a.telemetry) == base(id)
+                }
+            })
+            .collect();
+        if candidates.len() == 1 {
+            Some(candidates[0].telemetry.clone())
+        } else {
+            None
+        }
+    };
+    if let Some(plan) = &state.plan.current {
+        if state
+            .colony
+            .task_id
+            .as_ref()
+            .is_none_or(|id| id == &plan.task_id)
+        {
+            for phase in &plan.phases {
+                for dep in &phase.depends_on {
+                    if let Some(prerequisite) = plan.phases.iter().find(|p| &p.name == dep) {
+                        if let (Some(from), Some(to)) = (
+                            resolve(&prerequisite.coordinator),
+                            resolve(&phase.coordinator),
+                        ) {
+                            if from != to {
+                                edges.push(Edge {
+                                    from,
+                                    to,
+                                    label: "depende",
+                                    pulse: false,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for wait in state.colony.telemetry.waiting.values() {
+        for target in &wait.waiting_for {
+            // A task ref must never be mistaken for an agent ID.
+            if let Some(from) = cast.iter().find(|a| &a.telemetry == target) {
+                edges.push(Edge {
+                    from: from.telemetry.clone(),
+                    to: wait.agent.clone(),
+                    label: "espera",
+                    pulse: false,
+                });
+            }
+        }
+    }
+    edges
+}
+
+const SCENE_BG: Color = Color::Rgb {
+    r: 14,
+    g: 20,
+    b: 23,
+};
+const CELL_BG: Color = Color::Rgb {
+    r: 22,
+    g: 31,
+    b: 34,
+};
+const HONEY_BG: Color = Color::Rgb {
+    r: 43,
+    g: 34,
+    b: 19,
+};
+const WAX: Color = Color::Rgb {
+    r: 107,
+    g: 86,
+    b: 43,
+};
+const GRID: Color = Color::Rgb {
+    r: 30,
+    g: 43,
+    b: 46,
+};
+
+fn inset(row: u16, height: u16) -> u16 {
+    let edge = row.min(height - 1 - row);
+    match edge {
+        0 => 4,
+        1 => 2,
+        2 => 1,
+        _ => 0,
+    }
+}
+
+fn centered(canvas: &mut Canvas, area: Rect, row: u16, value: &str, color: Color) {
+    if row >= area.h {
+        return;
+    }
+    let value = ellipsize_cells(value, area.w as usize);
+    let width = unicode_width::UnicodeWidthStr::width(value.as_str()) as u16;
+    canvas.print(
+        area.x + (area.w - width) / 2,
+        area.y + row,
+        &value,
+        Style::new().fg(color),
+    );
+}
+
+fn draw_hex(canvas: &mut Canvas, area: Rect, color: Color, bg: Color, bold: bool) {
+    let style = Style::new().fg(color).bg(bg);
+    let style = if bold { style.bold() } else { style };
+    for row in 0..area.h {
+        let n = inset(row, area.h).min(area.w / 2);
+        let width = area.w.saturating_sub(n * 2);
+        canvas.fill_rect(
+            Rect::new(area.x + n, area.y + row, width, 1),
+            ' ',
+            Style::new().bg(bg),
+        );
+        if row == 0 || row == area.h - 1 {
+            for col in 0..width {
+                canvas.print(area.x + n + col, area.y + row, "─", style);
+            }
+        } else {
+            let (left, right) = if row < area.h / 2 {
+                ("╱", "╲")
+            } else if row > area.h / 2 {
+                ("╲", "╱")
+            } else {
+                ("│", "│")
+            };
+            canvas.print(area.x + n, area.y + row, left, style);
+            canvas.print(area.right() - n - 1, area.y + row, right, style);
+        }
+    }
+}
+
+fn route(a: (u16, u16), b: (u16, u16)) -> Vec<(u16, u16)> {
+    let steps = a.0.abs_diff(b.0).max(a.1.abs_diff(b.1)).max(1) as i32;
+    (0..=steps)
+        .map(|n| {
+            (
+                (a.0 as i32 + (b.0 as i32 - a.0 as i32) * n / steps) as u16,
+                (a.1 as i32 + (b.1 as i32 - a.1 as i32) * n / steps) as u16,
+            )
+        })
+        .collect()
+}
+
+fn draw_edges(
+    canvas: &mut Canvas,
+    state: &AppState,
+    cast: &[OfficeAgent],
+    placements: &[(usize, Rect)],
+    foreground: bool,
+) {
+    let rect = |id: &str| {
+        placements
+            .iter()
+            .find(|(i, _)| cast[*i].telemetry == id)
+            .map(|(_, r)| *r)
+    };
+    for edge in edges(state, cast) {
+        let selected = state.dashboard.office.selected.as_deref();
+        let emphasized = selected.is_some_and(|id| id == edge.from || id == edge.to);
+        let color = if edge.label == "fallo" {
+            RED
+        } else if edge.label == "entrega" {
+            GREEN
+        } else if emphasized || edge.pulse {
+            AMBER_BRIGHT
+        } else {
+            WAX
+        };
+        if let (Some(a), Some(b)) = (rect(&edge.from), rect(&edge.to)) {
+            let points = route(
+                (a.x + a.w / 2, a.y + a.h / 2),
+                (b.x + b.w / 2, b.y + b.h / 2),
+            );
+            if foreground {
+                // Event badges belong on the wax rim, leaving agent content intact.
+                if edge.pulse || emphasized {
+                    let label = format!(
+                        " {} {} ",
+                        if edge.label == "entrega" {
+                            "←"
+                        } else {
+                            "→"
+                        },
+                        edge.label
+                    );
+                    centered(canvas, b, b.h - 1, &label, color);
+                }
+            } else {
+                for (n, (x, y)) in points.iter().enumerate() {
+                    let glyph = if edge.pulse && n == state.anim_tick as usize * points.len() / 8 {
+                        "◆"
+                    } else if n % 3 == 0 {
+                        "·"
+                    } else {
+                        "─"
+                    };
+                    canvas.print(*x, *y, glyph, Style::new().fg(color));
+                }
+            }
+        }
+    }
+}
+
+fn draw_agent(canvas: &mut Canvas, state: &AppState, agent: &OfficeAgent, area: Rect) {
+    let selected = state.dashboard.office.selected.as_ref() == Some(&agent.worker.name);
+    let bee = base(&agent.worker.name) == "bee";
+    let (activity, color) = state_label(state, agent);
+    let color = if activity.contains("disponible") {
+        SECONDARY
+    } else {
+        color
+    };
+    let calls = state.colony.telemetry.calls_for(&agent.telemetry);
+    let stopped = activity.starts_with('✓')
+        || activity.starts_with('✗')
+        || activity.contains("aprobación")
+        || activity.contains("MCP apagado")
+        || state
+            .colony
+            .telemetry
+            .waiting
+            .contains_key(&agent.telemetry);
+    let active = !stopped
+        && (!calls.is_empty()
+            || state.colony.activity.contains_key(&agent.telemetry)
+            || state
+                .colony
+                .statuses
+                .get(&agent.telemetry)
+                .is_some_and(|s| s == "running")
+            || agent.worker.status == WorkerStatus::Running);
+    let edge = if selected {
+        CYAN
+    } else if bee {
+        AMBER_BRIGHT
+    } else if active {
+        color
+    } else {
+        WAX
+    };
+    let bg = if bee { HONEY_BG } else { CELL_BG };
+    canvas.with_clip(area, |canvas| {
+        draw_hex(canvas, area, edge, bg, bee || selected);
+        let tall = area.h >= 7;
+        let title_row = if tall { 1 } else { 0 };
+        let title = if bee {
+            "@BEE · NÚCLEO".to_string()
+        } else {
+            format!("@{}", agent.worker.name.to_uppercase())
+        };
+        centered(
+            canvas,
+            Rect::new(area.x + 4, area.y, area.w - 8, area.h),
+            title_row,
+            &title,
+            if bee || selected { AMBER_BRIGHT } else { WHITE },
+        );
+        let sprite_y = area.y + if tall { 2 } else { 1 };
+        super::office_art::draw(
+            canvas,
+            area.x + 3,
+            sprite_y,
+            &base(&agent.worker.name),
+            state.anim_tick,
+            active,
+            false,
+        );
+        let detail = Rect::new(area.x + 15, sprite_y, area.w.saturating_sub(18), 3);
+        text(
+            canvas,
+            detail,
+            0,
+            &format!("@{}", agent.worker.display_name.to_uppercase()),
+            if bee { AMBER_BRIGHT } else { SECONDARY },
+        );
+        let status = if activity.contains("disponible") {
+            "disponible"
+        } else if activity.contains("fallido") {
+            "✗ fallido"
+        } else if activity.contains("terminado") {
+            "✓ terminado"
+        } else if activity.contains("aprobación") {
+            "? aprobación"
+        } else if activity.contains("MCP apagado") {
+            "! MCP apagado"
+        } else if state
+            .colony
+            .telemetry
+            .waiting
+            .contains_key(&agent.telemetry)
+        {
+            "… en espera"
+        } else if bee
+            && calls.iter().any(|c| {
+                matches!(
+                    c.tool.as_str(),
+                    "task_delegate" | "task_revise" | "spawn_agent"
+                )
+            })
+        {
+            "→ coordinando"
+        } else if let Some(call) = calls.iter().min_by_key(|c| c.started_at) {
+            call.bee_state.label()
+        } else if state
+            .colony
+            .activity
+            .get(&agent.telemetry)
+            .is_some_and(|s| s == "narrando")
+        {
+            "▸ narrando"
+        } else if state
+            .colony
+            .activity
+            .get(&agent.telemetry)
+            .is_some_and(|s| s == "razonando")
+        {
+            "◐ razonando"
+        } else if active {
+            "◌ trabajando"
+        } else {
+            "○ en reposo"
+        };
+        text(canvas, detail, 1, status, color);
+        if let Some(call) = calls.iter().min_by_key(|c| c.started_at) {
+            let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+            text(
+                canvas,
+                detail,
+                2,
+                &if !tall {
+                    call.tool.clone()
+                } else {
+                    format!(
+                        "{}s{}",
+                        now.saturating_sub(call.started_at) / 1000,
+                        if calls.len() > 1 {
+                            format!(" (+{})", calls.len() - 1)
+                        } else {
+                            String::new()
+                        }
+                    )
+                },
+                color,
+            );
+        } else {
+            text(
+                canvas,
+                detail,
+                2,
+                if bee { "orquestador" } else { "especialista" },
+                DIM,
+            );
+        }
+        let caption = if let Some(wait) = state.colony.telemetry.waiting.get(&agent.telemetry) {
+            wait.reason_label().to_string()
+        } else if let Some(call) = calls.iter().min_by_key(|c| c.started_at) {
+            format!("{} · {}", call.tool, short_arg(&call.args_summary))
+        } else if activity.contains("MCP apagado") {
+            activity.clone()
+        } else if state
+            .colony
+            .activity
+            .get(&agent.telemetry)
+            .is_some_and(|a| a == "narrando")
+        {
+            state
+                .colony
+                .entries
+                .iter()
+                .rev()
+                .find_map(|e| match e {
+                    StreamEntry::Narracion {
+                        agent: a, texto, ..
+                    } if a == &agent.telemetry => Some(format!("▸ {texto}")),
+                    _ => None,
+                })
+                .unwrap_or_else(|| activity.clone())
+        } else if active {
+            activity.clone()
+        } else if bee {
+            "ESPERANDO TU TAREA".into()
+        } else {
+            String::new()
+        };
+        let caption_row = if tall { area.h - 2 } else { area.h - 1 };
+        if tall {
+            centered(
+                canvas,
+                Rect::new(area.x + 4, area.y, area.w - 8, area.h),
+                caption_row,
+                &caption,
+                color,
+            );
+        }
+        if selected {
+            canvas.print(
+                area.x + area.w / 2,
+                area.y + area.h - 1,
+                "▼",
+                Style::new().fg(CYAN).bg(bg),
+            );
+        }
+    });
 }
 
 pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     if area.w < 2 || area.h == 0 {
         return;
     }
-    let agents = agents(state);
-    let layout = layout(area, state);
-    let scene = super::office_scene::Scene::new(layout.floor, state, agents.len(), layout.compact);
-    canvas.with_clip(area, |canvas| {
-        canvas.fill_rect(area, ' ', Style::new().bg(BG_PANEL));
-        if !layout.compact {
-            scene.draw(canvas);
-        }
-        text(
-            canvas,
-            layout.floor,
-            0,
-            "OFICINA / COLMENA   ·   Alt+↑/↓ seleccionar   Enter Código",
-            AMBER_BRIGHT,
-        );
-        if agents.is_empty() {
-            text(
-                canvas,
-                layout.floor,
-                2,
-                "Sin agentes · esperando roster del enjambre",
-                DIM,
-            );
-        }
-        for (index, station) in &scene.stations {
-            let agent = &agents[*index];
-            let selected = state.dashboard.office.selected.as_deref() == Some(&agent.worker.name);
-            let (activity, color) = activity(state, agent);
-            let mark = if selected { ">" } else { " " };
-            let role = super::office_art::profile_key(&agent.worker.name);
-            let identity = match role.as_str() {
-                "bee" => "BEE",
-                "planner" => "Planner",
-                "scout" => "Scout",
-                "builder" => "Builder",
-                "verifier" => "Quality Gate",
-                "spider" => "Spider",
-                _ => agent.worker.display_name.as_str(),
-            };
-            let name = format!("{mark}@{}", identity.to_uppercase());
-            if layout.compact {
-                text(canvas, *station, 0, &format!("{name} · {activity}"), color);
-                text(canvas, *station, 1, &agent.worker.name, SECONDARY);
-            } else {
-                if selected {
-                    for row in 0..4 {
-                        canvas.print(
-                            station.x,
-                            station.y + row,
-                            "▎",
-                            Style::new().fg(AMBER_BRIGHT),
-                        );
+    let cast = agents(state);
+    let l = layout(area, state);
+    let placements = seats(l.floor, state, &cast, l.compact);
+    canvas.with_clip(area,|canvas| {
+        canvas.fill_rect(area,' ',Style::new().bg(SCENE_BG));
+        if l.inspector!=area || state.dashboard.office.selected.is_none() {
+            if !l.compact {
+                for y in l.floor.y+1..l.floor.bottom().saturating_sub(1) {
+                    for x in l.floor.x+1..l.floor.right().saturating_sub(1) {
+                        if (x-l.floor.x)%12==((y-l.floor.y)%4)*3 {canvas.print(x,y,"·",Style::new().fg(GRID));}
                     }
                 }
-                let label = Rect::new(station.x + 1, station.y + 4, station.w.saturating_sub(2), 2);
-                text(
-                    canvas,
-                    label,
-                    0,
-                    &name,
-                    if selected { AMBER_BRIGHT } else { WHITE },
-                );
-                text(canvas, label, 1, &activity, color);
-                if station.w >= 34 {
-                    let role = agent.worker.display_name.to_uppercase();
-                    let width = unicode_width::UnicodeWidthStr::width(role.as_str()) as u16;
-                    if role != identity.to_uppercase()
-                        && width + unicode_width::UnicodeWidthStr::width(name.as_str()) as u16 + 4
-                            < label.w
-                    {
-                        canvas.print(
-                            label.right() - width,
-                            label.y,
-                            &role,
-                            Style::new().fg(SECONDARY),
-                        );
-                    }
-                }
-                // A monitor lights up only when this agent actually has work.
-                let screen = if call(state, agent).is_some()
-                    || agent.worker.status == WorkerStatus::Running
-                {
-                    color
-                } else {
-                    DIM
-                };
-                canvas.print(
-                    station.x + 3,
-                    station.y + 1,
-                    if state.anim_tick % 2 == 0 {
-                        ">_  "
-                    } else {
-                        "> ▂ "
-                    },
-                    Style::new().fg(screen),
-                );
+                draw_edges(canvas,state,&cast,&placements,false);
+            }
+            text(canvas,l.floor,0,"⬡ COLMENA VIVA · Alt+↑/↓ lupa · Enter Código",AMBER_BRIGHT);
+            for (i,r) in &placements {
+                let a=&cast[*i];
+                if l.compact {
+                    let (activity,color)=state_label(state,a);
+                    let name=format!("@{} · @{}",a.worker.name.to_uppercase(),a.worker.display_name.to_uppercase());
+                    text(canvas,*r,0,&name,WHITE);
+                    text(canvas,*r,1,&activity,color);
+                } else {draw_agent(canvas,state,a,*r);}
+            }
+            if !l.compact {draw_edges(canvas,state,&cast,&placements,true);}
+            if area.h>2 {
+                let active=cast.iter().filter(|a|state.colony.telemetry.calls_for(&a.telemetry).len()>0 || state.colony.activity.contains_key(&a.telemetry)).count();
+                let summary=if active==0 {format!("{}/{} instancias · en reposo · PgUp/PgDn · envía una tarea para activar el flujo",placements.len(),cast.len())}
+                    else {format!("{}/{} instancias · {active} trabajando · rueda/PgUp/PgDn · clic para explorar",placements.len(),cast.len())};
+                text(canvas,l.floor,l.floor.h-1,&summary,SECONDARY);
             }
         }
-        // Furniture is painted first. Actors are composited by depth, with transparency.
-        let mut actors: Vec<_> = scene
-            .stations
-            .iter()
-            .map(|(index, station)| {
-                let agent = &agents[*index];
-                (
-                    actor_position(state, &agent.worker.name, *station, layout.floor),
-                    agent,
-                )
-            })
-            .collect();
-        actors.sort_by_key(|(point, _)| point.1);
-        if !layout.compact {
-            for (point, agent) in actors {
-                let moving = state
-                    .dashboard
-                    .office
-                    .routes
-                    .get(&agent.worker.name)
-                    .is_some_and(|route| !route.is_empty());
-                let active = moving
-                    || call(state, agent).is_some()
-                    || agent.worker.status == WorkerStatus::Running;
-                let selected =
-                    state.dashboard.office.selected.as_deref() == Some(&agent.worker.name);
-                super::office_art::draw(
-                    canvas,
-                    point.0,
-                    point.1,
-                    &agent.worker.name,
-                    state.anim_tick,
-                    active && !state.dashboard.halt.active,
-                    selected,
-                );
-                if let Some(call) = call(state, agent) {
-                    let prop = match call.bee_state {
-                        BeeState::Reading => "▤",
-                        BeeState::Writing => "✎",
-                        BeeState::Searching => "⌕",
-                        BeeState::Executing => ">",
-                        _ => "",
-                    };
-                    canvas.print(
-                        point.0 + super::office_art::WIDTH,
-                        point.1 + 2,
-                        prop,
-                        Style::new().fg(call.bee_state.color()),
-                    );
-                }
-                let (_, color) = activity(state, agent);
-                let badge = match agent.worker.status {
-                    WorkerStatus::Done => "✓",
-                    WorkerStatus::Failed => "!",
-                    _ if waiting(state, agent).is_some() => "…",
-                    _ => "",
-                };
-                canvas.print(
-                    point.0 + super::office_art::WIDTH,
-                    point.1,
-                    badge,
-                    Style::new().fg(color),
-                );
-            }
-        }
-        let start = scene
-            .stations
-            .first()
-            .map(|(index, _)| index + 1)
-            .unwrap_or(0);
-        let end = scene
-            .stations
-            .last()
-            .map(|(index, _)| index + 1)
-            .unwrap_or(0);
-        let summary = if state.dashboard.halt.active {
-            format!(
-                "HALT · {}",
-                state
-                    .dashboard
-                    .halt
-                    .reason
-                    .as_deref()
-                    .unwrap_or("enjambre detenido")
-            )
-        } else if let Some(conflict) = state.conflicts.entries.first() {
-            format!(
-                "CONFLICTO · {} / {} · {}",
-                conflict.agent_a, conflict.agent_b, conflict.path
-            )
-        } else if state.dashboard.security.status != "OFFLINE" {
-            format!(
-                "SEGURIDAD · {} · {} hallazgos",
-                state.dashboard.security.status, state.dashboard.security.findings
-            )
-        } else {
-            format!(
-                "puestos {start}–{end}/{}   ·   rueda / PgUp/PgDn   ·   pizarra compartida ↓",
-                agents.len()
-            )
-        };
-        if layout.floor.h >= 4 {
-            text(
-                canvas,
-                layout.floor,
-                layout.floor.h - 1,
-                &summary,
-                if state.dashboard.halt.active || !state.conflicts.entries.is_empty() {
-                    RED
-                } else {
-                    SECONDARY
-                },
-            );
-        }
-        if let Some(agent) = agents
-            .iter()
-            .find(|a| state.dashboard.office.selected.as_deref() == Some(&a.worker.name))
-        {
-            inspector(canvas, layout.inspector, state, agent);
-        }
+        if let Some(a)=cast.iter().find(|a|state.dashboard.office.selected.as_ref()==Some(&a.worker.name)) {inspector(canvas,l.inspector,state,a);}
     });
 }
 
-fn inspector(canvas: &mut Canvas, area: Rect, state: &AppState, agent: &OfficeAgent) {
-    if area.h == 0 {
+fn inspector_lines(state: &AppState, a: &OfficeAgent, width: usize) -> Vec<(String, Color)> {
+    let mut lines = vec![];
+    let expanded = state.dashboard.office.expanded;
+    let mut add = |label: &str, value: &str, color: Color, full: bool| {
+        let value = format!("{label}{value}");
+        if full {
+            for line in wrap_cells(&value, width, Overflow::Wrap) {
+                lines.push((line, color));
+            }
+        } else {
+            lines.push((ellipsize_cells(&value, width), color));
+        }
+    };
+    add("Instancia: ", &a.telemetry, WHITE, true);
+    if expanded {
+        add("Tarea: ", task(state, a), WHITE, true);
+    }
+    add(
+        "Métricas: ",
+        &format!(
+            "iter {}/{} · {} tok",
+            a.worker.iteration_current.unwrap_or(0),
+            a.worker.iteration_total.unwrap_or(0),
+            fmt_tokens(a.worker.token_count)
+        ),
+        SECONDARY,
+        true,
+    );
+    if let Some(parent) = state.colony.parents.get(&a.telemetry) {
+        add("Responsable: ", parent, SECONDARY, true);
+    }
+    if let Some(wait) = state.colony.telemetry.waiting.get(&a.telemetry) {
+        add(
+            "Espera: ",
+            &format!("{} · {}", wait.reason_label(), wait.waiting_for.join(", ")),
+            YELLOW,
+            true,
+        );
+    }
+    for edge in edges(state, &agents(state))
+        .into_iter()
+        .filter(|e| e.from == a.telemetry || e.to == a.telemetry)
+    {
+        add(
+            "↔ ",
+            &format!("{} → {} · {}", edge.from, edge.to, edge.label),
+            SECONDARY,
+            true,
+        );
+    }
+    let mut calls = state.colony.telemetry.calls_for(&a.telemetry);
+    calls.sort_by_key(|c| (c.started_at, &c.call_id));
+    for call in calls {
+        let elapsed = (chrono::Utc::now().timestamp_millis().max(0) as u64)
+            .saturating_sub(call.started_at)
+            / 1000;
+        add(
+            "⚙ Activa: ",
+            &format!(
+                "{} · {elapsed}s · {}",
+                call.tool,
+                short_arg(&call.args_summary)
+            ),
+            CYAN,
+            true,
+        );
+    }
+    add("", "CRONOLOGÍA", AMBER_BRIGHT, false);
+    let mut reasoning = false;
+    for entry in state
+        .colony
+        .entries
+        .iter()
+        .filter(|e| e.agent() == a.telemetry)
+    {
+        let (label, color, full) = match entry {
+            StreamEntry::Razonamiento { .. } => {
+                reasoning = true;
+                (
+                    if expanded {
+                        "◐ Razonamiento: "
+                    } else {
+                        "◐ Razonamiento · Alt+e para expandir"
+                    },
+                    DIM,
+                    expanded,
+                )
+            }
+            StreamEntry::Narracion { .. } => ("▸ Narración: ", WHITE, true),
+            StreamEntry::ToolStart { .. } => ("⚙ Herramienta: ", CYAN, expanded),
+            StreamEntry::ToolDone { ok: true, .. } => ("✓ Resultado: ", GREEN, expanded),
+            StreamEntry::ToolDone { ok: false, .. } | StreamEntry::Error { .. } => {
+                ("✗ Error: ", RED, true)
+            }
+            StreamEntry::Bloqueado { .. } => ("… Espera: ", YELLOW, true),
+            StreamEntry::Pregunta { .. } => ("? Pregunta: ", YELLOW, true),
+        };
+        let content = if entry.is_verbose() && !expanded {
+            String::new()
+        } else {
+            entry.summary()
+        };
+        add(label, &content, color, full);
+    }
+    if !reasoning {
+        add("", "Razonamiento: sin contenido disponible", DIM, true);
+    }
+    add("", "COLABORACIÓN", AMBER_BRIGHT, false);
+    for e in state
+        .colony
+        .relations
+        .iter()
+        .filter(|e| e.to == a.telemetry || e.from == a.telemetry)
+    {
+        let label = match e.kind.as_str() {
+            "handoff" => "✓ Entrega: ",
+            "failed" => "✗ Entrega fallida: ",
+            _ => "→ Delegación: ",
+        };
+        add(
+            label,
+            &format!("{} → {} · {}", e.from, e.to, e.summary),
+            SECONDARY,
+            expanded,
+        );
+    }
+    lines
+}
+
+fn inspector(canvas: &mut Canvas, area: Rect, state: &AppState, a: &OfficeAgent) {
+    if area.w < 2 || area.h == 0 {
         return;
     }
     canvas.with_clip(area, |canvas| {
         canvas.fill_rect(area, ' ', Style::new().bg(BG_ELEVATED));
-        let mut content = area;
-        if area.h >= 16 && area.w >= 28 {
-            canvas.draw_border(area, Style::new().fg(SECONDARY).bg(BG_ELEVATED));
-            canvas.print(
-                area.x + 2,
-                area.y,
-                " AGENTE ",
-                Style::new().fg(AMBER_BRIGHT).bg(BG_ELEVATED),
-            );
-            super::office_art::draw(
-                canvas,
-                area.x + 3,
-                area.y + 2,
-                &agent.worker.name,
-                state.anim_tick,
-                false,
-                false,
-            );
-            content = Rect::new(area.x + 2, area.y + 6, area.w - 4, area.h - 7);
+        let content = Rect::new(area.x + 1, area.y, area.w.saturating_sub(2), area.h);
+        let (activity, color) = state_label(state, a);
+        text(
+            canvas,
+            content,
+            0,
+            &format!("LUPA · @{} ({})", a.worker.display_name, a.worker.name),
+            AMBER_BRIGHT,
+        );
+        text(
+            canvas,
+            content,
+            1,
+            &format!("Tarea: {}", task(state, a)),
+            WHITE,
+        );
+        text(canvas, content, 2, &activity, color);
+        if let Some(path) = &a.worker.current_file {
+            text(canvas, content, 3, path, SECONDARY);
         }
-        let (activity, color) = activity(state, agent);
-        let lines = [
-            format!("@{} · {}", agent.worker.display_name, agent.worker.name),
-            activity,
-            format!(
-                "Tarea: {}",
-                agent
-                    .worker
-                    .current_action
-                    .as_deref()
-                    .or(agent.worker.detail.as_deref())
-                    .unwrap_or("sin tarea asignada")
-            ),
-            format!(
-                "Archivo: {}",
-                agent
-                    .worker
-                    .current_file
-                    .as_deref()
-                    .unwrap_or("sin archivo activo")
-            ),
-            format!(
-                "iter {}/{} · tokens {}",
-                agent.worker.iteration_current.unwrap_or(0),
-                agent.worker.iteration_total.unwrap_or(0),
-                fmt_tokens(agent.worker.token_count)
-            ),
-            "Enter: Código · Esc: cerrar".into(),
-        ];
-        let mut row = 0;
-        for (index, line) in lines.iter().enumerate() {
-            let color = if index == 0 {
-                AMBER_BRIGHT
-            } else if index == 1 {
-                color
-            } else {
-                SECONDARY
-            };
-            let mut part = String::new();
-            for word in line.split_whitespace() {
-                if !part.is_empty()
-                    && unicode_width::UnicodeWidthStr::width(part.as_str())
-                        + 1
-                        + unicode_width::UnicodeWidthStr::width(word)
-                        > content.w as usize
-                {
-                    text(canvas, content, row, &part, color);
-                    row += 1;
-                    part.clear();
-                }
-                for ch in word.chars() {
-                    if unicode_width::UnicodeWidthStr::width(part.as_str())
-                        + unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
-                        > content.w as usize
-                    {
-                        text(canvas, content, row, &part, color);
-                        row += 1;
-                        part.clear();
+        let lines = inspector_lines(state, a, content.w as usize);
+        let visible = content.h.saturating_sub(5) as usize;
+        let end = lines.len().saturating_sub(visible);
+        let start = if state.dashboard.office.paused {
+            state.dashboard.office.inspector_offset.min(end)
+        } else {
+            end
+        };
+        for (row, (value, color)) in lines.iter().skip(start).take(visible).enumerate() {
+            text(canvas, content, row as u16 + 4, value, *color);
+        }
+        if content.h > 0 {
+            text(
+                canvas,
+                content,
+                content.h - 1,
+                &format!(
+                    "Alt+e {} · Alt+End {} · Esc",
+                    if state.dashboard.office.expanded {
+                        "contraer"
+                    } else {
+                        "expandir"
+                    },
+                    if state.dashboard.office.paused {
+                        "volver al directo"
+                    } else {
+                        "EN VIVO"
                     }
-                    part.push(ch);
-                }
-                part.push(' ');
-            }
-            text(canvas, content, row, part.trim_end(), color);
-            row += 1;
+                ),
+                AMBER_BRIGHT,
+            );
         }
     });
+}
+
+pub fn scroll(state: &mut AppState, delta: i32) {
+    if let Some(a) = agents(state)
+        .iter()
+        .find(|a| state.dashboard.office.selected.as_ref() == Some(&a.worker.name))
+        .cloned()
+    {
+        let (w, h) = state.dashboard.office.viewport;
+        let area = layout(Rect::new(0, 0, w, h), state).inspector;
+        let total = inspector_lines(state, &a, area.w.saturating_sub(2) as usize).len();
+        let end = total.saturating_sub(area.h.saturating_sub(5) as usize);
+        let current = if state.dashboard.office.paused {
+            state.dashboard.office.inspector_offset.min(end)
+        } else {
+            end
+        };
+        let next = (current as i64 + delta as i64).clamp(0, end as i64) as usize;
+        state.dashboard.office.inspector_offset = next;
+        state.dashboard.office.paused = delta < 0 || next < end;
+    } else {
+        state.dashboard_scroll = (state.dashboard_scroll as i64 + delta as i64).max(0) as usize;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        ipc::IpcRosterAgent,
-        state::{ToolCall, WaitingAgent},
-    };
-
-    #[test]
-    fn live_ids_replace_idle_profile_seats_without_losing_transport_identity() {
-        let mut state = AppState::default();
-        state.workers.workers.push(Worker::new("BEE"));
-        assert_eq!(code_worker(&state, "bee"), "BEE");
-        state.workers.workers.clear();
-        for (profile, id) in [("BEE", "bee"), ("Quality Gate", "verifier")] {
-            state.workers.workers.push(Worker::new(profile));
-            let mut worker = Worker::new(id);
-            worker.status = WorkerStatus::Running;
-            state.workers.workers.push(worker);
-        }
-        let cast = agents(&state);
-        assert_eq!(cast.len(), 2);
-        for agent in &cast {
-            assert_eq!(agent.worker.status, WorkerStatus::Running);
-            assert_eq!(agent.telemetry, agent.worker.name);
-            assert!(matches!(agent.worker.name.as_str(), "bee" | "verifier"));
-            assert_eq!(code_worker(&state, &agent.worker.name), agent.worker.name);
-        }
-        state.workers.workers.reverse();
-        assert!(agents(&state)
-            .iter()
-            .all(|agent| agent.worker.status == WorkerStatus::Running));
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    fn send(state: &mut AppState, json: &str) {
+        state.apply_message(sonic_rs::from_str(json).unwrap());
     }
-
     fn state() -> AppState {
-        let mut state = AppState::default();
-        state.dashboard.office.viewport = (120, 24);
-        let mut worker = Worker::new("backend");
-        worker.status = WorkerStatus::Running;
-        state.workers.workers.push(worker);
-        state
-    }
-
-    fn target(state: &AppState, zone: u16) -> (u16, u16) {
-        let scene =
-            super::super::office_scene::Scene::new(Rect::new(0, 0, 120, 24), state, 1, false);
-        scene.target(0, scene.stations[0].1, zone)
-    }
-
-    fn start(state: &mut AppState, activity: BeeState) {
-        state.swarm.start_call(ToolCall {
-            call_id: "call".into(),
-            agent: "backend".into(),
-            tool: "fs_read".into(),
-            args_summary: r#"{"path":"src/main.rs"}"#.into(),
-            bee_state: activity,
-            started_at: 1,
-            settled: false,
-            ok: None,
-            duration_ms: None,
-        });
+        let mut s = AppState::default();
+        s.active_tab = crate::state::TabId::Swarm;
+        s.tab_locked = true;
+        for name in ["bee", "builder", "builder#2", "verifier"] {
+            s.workers.workers.push(Worker::new(name));
+        }
+        s
     }
 
     #[test]
-    fn activity_moves_to_real_destinations_and_returns_after_completion() {
-        for (activity, expected) in [
-            (BeeState::Reading, CONSULT),
-            (BeeState::Searching, CONSULT),
-            (BeeState::Executing, EXECUTE),
-            (BeeState::Writing, DESK),
-            (BeeState::Thinking, DESK),
-        ] {
-            let mut state = state();
-            start(&mut state, activity);
-            for _ in 0..200 {
-                tick(&mut state);
-            }
-            assert_eq!(
-                state.dashboard.office.positions["backend"],
-                target(&state, expected)
-            );
-            state.swarm.settle_call("call", true, 200);
-            for _ in 0..200 {
-                tick(&mut state);
-            }
-            assert_eq!(
-                state.dashboard.office.positions["backend"],
-                target(&state, DESK)
-            );
-        }
-    }
-
-    #[test]
-    fn halt_freezes_motion_and_waiting_shows_dependencies() {
-        let mut state = state();
-        start(&mut state, BeeState::Reading);
-        tick(&mut state);
-        let position = state.dashboard.office.positions["backend"];
-        state.dashboard.halt.active = true;
-        for _ in 0..200 {
-            tick(&mut state);
-        }
-        assert_eq!(state.dashboard.office.positions["backend"], position);
-        state.dashboard.halt.active = false;
-        state.swarm.settle_call("call", true, 100);
-        state.swarm.set_waiting(WaitingAgent {
-            agent: "backend".into(),
-            waiting_for: vec!["frontend".into()],
-            reason: "dependencia".into(),
-            since: 1,
-        });
-        for _ in 0..200 {
-            tick(&mut state);
-        }
-        assert_eq!(
-            state.dashboard.office.positions["backend"],
-            target(&state, WAIT)
+    fn live_instances_are_not_merged_with_profile_seats_and_positions_survive_activity() {
+        let mut s = state();
+        let before: Vec<_> = seats(Rect::new(0, 0, 160, 24), &s, &agents(&s), false)
+            .into_iter()
+            .map(|(i, r)| (agents(&s)[i].worker.name.clone(), r))
+            .collect();
+        send(
+            &mut s,
+            r##"{"type":"tool_call","agent":"builder#2","tool":"fs_write","call_id":"a","args_summary":"file","bee_state":"writing","at":1}"##,
         );
-        assert!(activity(&state, &agents(&state)[0]).0.contains("frontend"));
-    }
-
-    #[test]
-    fn roster_ids_and_worker_roles_share_one_seat_and_telemetry() {
-        let mut state = state();
-        state.roster.apply(vec![IpcRosterAgent {
-            id: "agent-topo".into(),
-            rol: "backend".into(),
-            alias: "Topo".into(),
-            funcion: "Servicios".into(),
-            nivel: 2,
-            tools: vec![],
-            mcp: vec![],
-        }]);
-        start(&mut state, BeeState::Executing);
-        let mut call = state.swarm.in_flight.remove("call").unwrap();
-        call.agent = "agent-topo".into();
-        state.swarm.start_call(call);
-        assert_eq!(agents(&state).len(), 1);
-        assert_eq!(destination(&state, &agents(&state)[0]), EXECUTE);
-        assert!(activity(&state, &agents(&state)[0])
-            .0
-            .contains("src/main.rs"));
-        state.workers.workers[0].name = "agent-topo".into();
-        assert_eq!(agents(&state).len(), 1);
-        assert_eq!(code_worker(&state, "backend"), "agent-topo");
-        let mut replacement = Worker::new("forensic:backend");
-        replacement.replaces_worker = Some("agent-topo".into());
-        state.workers.workers.push(replacement);
-        assert_eq!(agents(&state).len(), 1);
-        assert_eq!(agents(&state)[0].worker.name, "forensic:backend");
-    }
-
-    #[test]
-    fn removal_clears_selection_and_idle_agents_do_not_walk() {
-        let mut state = state();
-        select_next(&mut state, 1);
-        tick(&mut state);
+        let after: Vec<_> = seats(Rect::new(0, 0, 160, 24), &s, &agents(&s), false)
+            .into_iter()
+            .map(|(i, r)| (agents(&s)[i].worker.name.clone(), r))
+            .collect();
+        assert_eq!(before, after);
+        let cast = agents(&s);
         assert_eq!(
-            state.dashboard.office.positions["backend"],
-            target(&state, DESK)
+            cast.iter()
+                .filter(|a| a.worker.name.starts_with("builder"))
+                .count(),
+            2
         );
-        state.workers.workers.clear();
-        tick(&mut state);
-        assert!(state.dashboard.office.selected.is_none());
-        assert!(state.dashboard.office.positions.is_empty());
+        assert!(state_label(
+            &s,
+            cast.iter().find(|a| a.worker.name == "builder#2").unwrap()
+        )
+        .0
+        .contains("fs_write"));
+        assert!(!state_label(
+            &s,
+            cast.iter().find(|a| a.worker.name == "builder").unwrap()
+        )
+        .0
+        .contains("fs_write"));
     }
 
     #[test]
-    fn resize_preserves_selection_and_hits_match_every_visible_person() {
-        let mut state = state();
-        for index in 0..12 {
-            state
-                .workers
-                .workers
-                .push(Worker::new(format!("worker-{index}")));
-        }
-        start(&mut state, BeeState::Reading);
-        tick(&mut state);
-        let position = state.dashboard.office.positions["backend"];
-        for (w, h) in [(160, 40), (100, 24), (80, 24), (40, 12)] {
-            let area = Rect::new(2, 1, w - 4, h - 2);
+    fn inspector_selection_survives_resize_and_clips_without_touching_neighbors() {
+        let mut s = state();
+        select(&mut s, "builder#2".into());
+        send(
+            &mut s,
+            r##"{"type":"thought_chunk","coordinator":"builder#2","phase":"thinking","content":"REASON_DETAIL"}"##,
+        );
+        for (w, h) in [(160, 45), (120, 30), (80, 24), (40, 15)] {
             let mut canvas = Canvas::new(w, h);
-            render(&mut canvas, area, &state);
-            let agents = agents(&state);
-            let layout = layout(area, &state);
-            for (index, lane) in seats(layout.floor, &state, agents.len(), layout.compact) {
-                assert_eq!(
-                    worker_at(&state, area, lane.x, lane.y).as_deref(),
-                    Some(agents[index].worker.name.as_str())
-                );
-                if !layout.compact {
-                    assert_eq!(
-                        worker_at(
-                            &state,
-                            area,
-                            actor_position(&state, &agents[index].worker.name, lane, layout.floor)
-                                .0,
-                            actor_position(&state, &agents[index].worker.name, lane, layout.floor)
-                                .1
-                        )
-                        .as_deref(),
-                        Some(agents[index].worker.name.as_str())
-                    );
-                }
-            }
-            assert!(
-                canvas.to_text_rows()[0].trim().is_empty(),
-                "drawing escaped its area"
-            );
-            state.dashboard.office.selected = Some("backend".into());
-            render(&mut canvas, area, &state);
-            assert!(canvas.to_text_rows().join("\n").contains("fs_read"));
-            assert_eq!(state.dashboard.office.positions["backend"], position);
-            assert_eq!(state.dashboard.office.selected.as_deref(), Some("backend"));
-            state.dashboard.office.selected = None;
+            canvas.fill_rect(canvas.area(), 'X', Style::new().fg(RED));
+            let area = Rect::new(1, 1, w - 2, h - 2);
+            render(&mut canvas, area, &s);
+            assert_eq!(s.dashboard.office.selected.as_deref(), Some("builder#2"));
+            let rows = canvas.to_text_rows();
+            assert!(rows
+                .iter()
+                .all(|row| row.starts_with('X') && row.ends_with('X')));
+            assert!(rows.iter().any(|row| row.contains("Tarea:")));
+            assert!(!rows.iter().any(|row| row.contains("REASON_DETAIL")));
         }
     }
 
     #[test]
-    fn selecting_overflow_agent_brings_it_into_view() {
-        let mut state = state();
-        for index in 0..20 {
-            state
-                .workers
-                .workers
-                .push(Worker::new(format!("worker-{index:02}")));
+    fn detail_shortcuts_preserve_prompt_and_return_to_live() {
+        let mut s = state();
+        select(&mut s, "builder#2".into());
+        crate::controller::handle_key_event(
+            &mut s,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT),
+        );
+        assert!(s.dashboard.office.expanded);
+        s.dashboard.office.paused = true;
+        crate::controller::handle_key_event(&mut s, KeyEvent::new(KeyCode::End, KeyModifiers::ALT));
+        assert!(!s.dashboard.office.paused);
+        s.input.set("keep typing");
+        crate::controller::handle_key_event(
+            &mut s,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT),
+        );
+        assert_eq!(s.input.value(), "keep typing");
+        assert!(s.dashboard.office.expanded);
+    }
+
+    #[test]
+    fn topology_uses_real_delegations_and_resolved_dependencies_only() {
+        let mut s = state();
+        assert!(edges(&s, &agents(&s)).is_empty());
+        send(
+            &mut s,
+            r#"{"type":"swarm_collaboration","event_id":"e","delegation_id":"d","from":"bee","to":"builder","kind":"delegation","summary":"work","at":1}"#,
+        );
+        assert_eq!(edges(&s, &agents(&s)).len(), 1);
+        send(
+            &mut s,
+            r#"{"type":"esperando","agent":"verifier","esperando_a":["TASK_REF_UNRESOLVED"],"razon":"dependencia","at":1}"#,
+        );
+        assert_eq!(edges(&s, &agents(&s)).len(), 1);
+        let verifier = agents(&s)
+            .into_iter()
+            .find(|a| a.worker.name == "verifier")
+            .unwrap();
+        assert!(state_label(&s, &verifier).0.contains("TASK_REF_UNRESOLVED"));
+    }
+    #[test]
+    fn late_worker_updates_cannot_replace_the_current_task_file_or_description() {
+        let mut s = state();
+        send(
+            &mut s,
+            r#"{"type":"task_update","task_id":"current","status":"running"}"#,
+        );
+        send(
+            &mut s,
+            r#"{"type":"worker_update","task_id":"current","worker":"builder","phase":"work","status":"running","current_action":"CURRENT_TASK","current_file":"current.rs"}"#,
+        );
+        send(
+            &mut s,
+            r#"{"type":"worker_update","task_id":"old","worker":"builder","phase":"old","status":"done","current_action":"OLD_TASK","current_file":"old.rs"}"#,
+        );
+        let a = agents(&s)
+            .into_iter()
+            .find(|a| a.telemetry == "builder")
+            .unwrap();
+        assert_eq!(task(&s, &a), "CURRENT_TASK");
+        assert_eq!(a.worker.current_file.as_deref(), Some("current.rs"));
+        assert!(state_label(&s, &a).0.contains("trabajando"));
+    }
+
+    #[test]
+    fn approval_is_visible_and_phase_roles_with_multiple_instances_are_ambiguous() {
+        let mut s = state();
+        send(
+            &mut s,
+            r#"{"type":"tool_approval_request","request_id":"a","agent":"builder","tool":"shell_executor","summary":"test","detail":"detail"}"#,
+        );
+        s.promote_tool_approval();
+        let a = agents(&s)
+            .into_iter()
+            .find(|a| a.telemetry == "builder")
+            .unwrap();
+        assert!(state_label(&s, &a).0.contains("aprobación"));
+        s.plan.current = Some(crate::state::PlanEntry {
+            phases: vec![
+                crate::state::PlanPhase {
+                    name: "build".into(),
+                    coordinator: "builder".into(),
+                    ..Default::default()
+                },
+                crate::state::PlanPhase {
+                    name: "verify".into(),
+                    coordinator: "verifier".into(),
+                    depends_on: vec!["build".into()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        assert!(edges(&s, &agents(&s)).is_empty());
+        s.plan.current.as_mut().unwrap().phases[0].coordinator = "builder#2".into();
+        assert_eq!(edges(&s, &agents(&s)).len(), 1);
+    }
+    #[test]
+    fn idle_scene_has_a_central_nucleus_six_hexagons_and_original_characters() {
+        let mut s = state();
+        for id in ["planner", "scout", "spider"] {
+            s.workers.workers.push(Worker::new(id));
         }
-        select_next(&mut state, -1);
-        let area = Rect::new(0, 0, 100, 24);
-        let layout = layout(area, &state);
-        let agents = agents(&state);
-        assert!(seats(layout.floor, &state, agents.len(), layout.compact)
+        let area = Rect::new(0, 0, 160, 27);
+        let cast = agents(&s);
+        let cells = seats(area, &s, &cast, false);
+        let bee = cells
             .iter()
-            .any(|(index, _)| Some(&agents[*index].worker.name)
-                == state.dashboard.office.selected.as_ref()));
+            .find(|(i, _)| base(&cast[*i].worker.name) == "bee")
+            .unwrap()
+            .1;
+        assert_eq!(bee.x + bee.w / 2, area.w / 2);
+        assert_eq!(cells.len(), 7);
+        assert!(cells.iter().any(|(_, r)| r.y < bee.y));
+        assert!(cells.iter().any(|(_, r)| r.y > bee.y));
+        assert!(cells.iter().any(|(_, r)| r.x < bee.x));
+        assert!(cells.iter().any(|(_, r)| r.x > bee.x));
+        let mut canvas = Canvas::new(area.w, area.h);
+        render(&mut canvas, area, &s);
+        let idle = canvas.to_text_rows().join("\n");
+        assert!(idle.contains("NÚCLEO"));
+        assert!(idle.contains('╱') && idle.contains('╲'));
+        assert!(idle.contains('▀') || idle.contains('▄'));
+        assert!(!idle.contains("sin tarea asignada"));
+        s.anim_tick = 1;
+        render(&mut canvas, area, &s);
+        assert_eq!(
+            idle,
+            canvas.to_text_rows().join("\n"),
+            "reposo no simula trabajo"
+        );
+        send(
+            &mut s,
+            r#"{"type":"tool_call","agent":"scout","tool":"fs_read","call_id":"read","args_summary":"src/a","bee_state":"reading","at":1}"#,
+        );
+        s.anim_tick = 0;
+        render(&mut canvas, area, &s);
+        let working = canvas.to_text_rows();
+        s.anim_tick = 1;
+        render(&mut canvas, area, &s);
+        assert_ne!(
+            working,
+            canvas.to_text_rows(),
+            "el personaje activo debe animarse"
+        );
     }
 }

@@ -17,6 +17,8 @@ export interface ModalField {
 }
 
 export interface WorkerDashboardFields {
+  parent_id?: string
+  task_id?: string
   level?: number
   current_action?: string
   current_file?: string
@@ -59,7 +61,20 @@ export interface DashboardCheckpointMessage {
   tests_total?: number
 }
 
+export interface SwarmCollaboration {
+  event_id: string
+  delegation_id: string
+  task_id?: string
+  session_id?: string
+  from: string
+  to: string
+  kind: "delegation" | "handoff" | "failed"
+  summary: string
+  at: number
+}
+
 export type BunMessage =
+  | ({ type: "swarm_collaboration" } & SwarmCollaboration)
   // critical priority — user must see before agents proceed
   | { type: "init";            mode: string; provider: string; model: string; project_name: string; project_path: string; session_id: string; version: string; task_count: number; token_count: number; workers: string[] }
   | { type: "conflict_alert";  agent_a: string; agent_b: string; file: string; reason: string; severity: string; detail?: string | null }

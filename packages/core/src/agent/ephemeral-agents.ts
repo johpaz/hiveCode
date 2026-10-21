@@ -1,4 +1,5 @@
 import crypto from "node:crypto"
+import { trackCollaboration } from "./collaboration-telemetry"
 import { col } from "../storage/hive"
 import type { AgentDoc, TaskDoc } from "../storage/collections"
 import { buildWorkerBrief, parseAcceptance, checkAcceptance, summarizeAcceptance } from "./delegation"
@@ -72,6 +73,7 @@ export async function runEphemeralAgent(params: Record<string, unknown>, config?
     const row = await tasks.get(taskId)
     if (row) await tasks.put(taskId, {...row.doc, ...patch, updated_at: Date.now()}, {expectedVersion: row.version})
   }
+  let finishCollaboration: ((ok: boolean, summary?: string) => void) | undefined
   const name = `Hormiga · ${String(params.specialty ?? purpose).slice(0, 40)}`
   try {
     const specialty = selectSpecialty(parent.agent_type, purpose, typeof params.specialty === "string" ? params.specialty : undefined)
@@ -83,6 +85,7 @@ export async function runEphemeralAgent(params: Record<string, unknown>, config?
       provider_id: typeof params.providerId === "string" ? params.providerId : parent.provider_id,
       model_id: typeof params.modelId === "string" ? params.modelId : parent.model_id,
       max_iterations: Math.min(parent.max_iterations || 12, 24), created_at: started, updated_at: started })
+    finishCollaboration = trackCollaboration({ from: parentId, to: id, taskId: scope?.taskId, sessionId: scope?.sessionId, summary: purpose })
     eventBus.emit("agent:lifecycle", {agentId: id, parentId, name, specialty: String(params.specialty ?? "especialista"), status: "running", activity: purpose, sessionId: scope?.sessionId, at: Date.now()})
     agentBus.notifyTaskStarted(id, name, 0, purpose.slice(0, 80), scope?.sessionId ?? "")
     const execute = runner ?? (await import("./agent-loop")).runAgentIsolated
@@ -96,6 +99,7 @@ export async function runEphemeralAgent(params: Record<string, unknown>, config?
     const met = summarizeAcceptance(checks)
     const ok = Boolean(result.trim()) && met !== false
     await update({ status: ok ? "completed" : "blocked", progress: ok ? 100 : 80, result, completed_at: Date.now() })
+    finishCollaboration?.(ok, result)
     eventBus.emit("agent:lifecycle", {agentId: id, parentId, name, specialty: String(params.specialty ?? "especialista"), status: ok ? "done" : "failed", activity: ok ? "Entrega guardada en HiveDB" : "Requiere revisión del responsable", sessionId: scope?.sessionId, at: Date.now()})
     agentBus.notifyTaskCompleted(id, name, 0, purpose.slice(0, 80), scope?.sessionId ?? "", result)
     return { ok, agentId: id, task_id: taskId, status: ok ? "completed" : "blocked", purpose,
@@ -103,6 +107,7 @@ export async function runEphemeralAgent(params: Record<string, unknown>, config?
       result_reference: { collection: "tasks", id: taskId }, acceptance: checks, acceptance_met: met,
       evalStructural: Boolean(result.trim()), evalSemantic: null, evalNotes: "El responsable debe revisar la evidencia", retries: 0, durationMs: Date.now() - started }
   } catch (error) {
+    finishCollaboration?.(false, (error as Error).message)
     const status = timer.signal.aborted ? "timeout" : signal.aborted ? "cancelled" : "failed"
     await update({status: "failed", metadata: JSON.stringify({...metadata, outcome: status}), error: (error as Error).message, completed_at: Date.now()})
     eventBus.emit("agent:lifecycle", {agentId: id, parentId, name, specialty: String(params.specialty ?? "especialista"), status: "failed", activity: status, sessionId: scope?.sessionId, at: Date.now()})

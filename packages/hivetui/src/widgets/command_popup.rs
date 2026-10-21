@@ -10,6 +10,8 @@ pub struct Command {
 }
 
 pub const COMMANDS: &[Command] = &[
+    Command { cmd: "/lupa", desc: "Expandir/contraer herramientas y razonamiento en la lupa" },
+    Command { cmd: "/directo", desc: "Volver al directo en la lupa del enjambre" },
     Command { cmd: "/help",            desc: "Mostrar atajos de teclado" },
     Command { cmd: "/exit",            desc: "Salir de hivecode" },
     Command { cmd: "/compact",         desc: "Compactar contexto de la sesión" },
