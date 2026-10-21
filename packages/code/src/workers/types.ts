@@ -99,7 +99,7 @@ export interface CoordinatorResult {
 
 /** Messages sent FROM workers TO the manager */
 export interface WorkerToManagerMessage {
-  type: "RESULT" | "TOOL_CALL" | "THINKING"
+  type: "RESULT" | "TOOL_CALL" | "THINKING" | "PLAN_DRAFT"
   taskId: string
   phaseId: number
   coordinator: string
@@ -107,7 +107,7 @@ export interface WorkerToManagerMessage {
   toolName?: string
   toolArgs?: Record<string, unknown>
   toolCallId?: string
-  /** Thinking message content (for THINKING type) */
+  /** Thinking message content (for THINKING type); JSON parcial del plan (for PLAN_DRAFT type) */
   content?: string
   /** Stream ID for grouping thinking chunks into a single display block.
    *  Same streamId = same streaming block (append), different streamId = new block. */

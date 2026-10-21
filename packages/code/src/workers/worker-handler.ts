@@ -556,6 +556,23 @@ while (this.iterations < MAX_ITERATIONS) {
           }
         }
 
+        // El plan viaja en los argumentos de create_architecture_plan; los reenviamos
+        // (con throttle) para que la pestaña Plan se llene mientras el modelo escribe.
+        let lastPlanDraftAt = 0
+        const onToolCallArgs = (toolName: string, argsSoFar: string) => {
+          if (toolName !== "create_architecture_plan") return
+          const now = Date.now()
+          if (now - lastPlanDraftAt < 400) return
+          lastPlanDraftAt = now
+          self.postMessage(JSON.stringify({
+            type: "PLAN_DRAFT",
+            taskId: this.task!.taskId,
+            phaseId: this.task!.phaseId,
+            coordinator: this.coordinatorName,
+            content: argsSoFar,
+          } as WorkerToManagerMessage))
+        }
+
         const response = await callLLM({
           provider,
           model,
@@ -566,6 +583,7 @@ while (this.iterations < MAX_ITERATIONS) {
           maxTokens: 8192,
           signal: AbortSignal.any([controller.signal, this.taskAbort.signal]),
           onToken,
+          onToolCallArgs,
         })
 
         clearTimeout(llmTimeout)

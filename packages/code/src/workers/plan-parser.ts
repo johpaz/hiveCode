@@ -8,6 +8,7 @@
  *   - Fallback to regex extraction if JSON is malformed
  */
 
+import { parsePartialJson } from "./partial-json"
 import type { PhaseName } from "./types"
 
 export interface ParsedPhase {
@@ -222,4 +223,50 @@ export function getDefaultPhases(): ParsedPhase[] {
     { name: "devops",   coordinator: "devops",    description: "Prepare deployment pipeline",       dependsOn: ["security", "test"] },
     { name: "quality", coordinator: "quality", description: "Quality gate: reproduce acceptance criteria against the running system, then review the code", dependsOn: ["devops"] },
   ]
+}
+
+export interface PlanDraftPayload {
+  adr_title?: string
+  adr_content?: string
+  phases: { name: string; coordinator: string; description: string; depends_on: string[]; level: number; status: string }[]
+  risks: { severity: string; description: string }[]
+}
+
+/**
+ * Convierte los argumentos parciales de `create_architecture_plan` en un borrador para la TUI.
+ * Devuelve undefined mientras no haya nada mostrable (p. ej. solo `{"adr":{`).
+ */
+export function draftFromPartialPlanArgs(argsSoFar: string): PlanDraftPayload | undefined {
+  const raw = parsePartialJson(argsSoFar) as any
+  if (!raw || typeof raw !== "object") return undefined
+
+  const str = (v: unknown) => (typeof v === "string" ? v : "")
+  const adr = raw.adr && typeof raw.adr === "object" ? raw.adr : {}
+  const adr_title = str(adr.title).trim() || undefined
+  const adr_content = [adr.context, adr.options, adr.decision, adr.consequences].map(str).filter(Boolean).join("\n\n") || undefined
+
+  const parsed: ParsedPhase[] = (Array.isArray(raw.phases) ? raw.phases : [])
+    .filter((p: any) => p && typeof p === "object" && str(p.name).trim())
+    .map((p: any) => ({
+      name: str(p.name),
+      coordinator: (str(p.coordinator) || "bee") as PhaseName,
+      description: str(p.description),
+      dependsOn: Array.isArray(p.dependsOn) ? p.dependsOn.filter((d: unknown) => typeof d === "string") : [],
+    }))
+  let groups: ParsedPhase[][] = []
+  try { groups = groupPhasesByLevel(parsed) } catch { /* dependencias a medias: nivel 0 */ }
+  const phases = parsed.map((p) => ({
+    name: p.name,
+    coordinator: p.coordinator,
+    description: p.description,
+    depends_on: p.dependsOn,
+    level: Math.max(0, groups.findIndex((g) => g.some((gp) => gp.name === p.name && gp.coordinator === p.coordinator))),
+    status: "pending",
+  }))
+  const risks = (Array.isArray(raw.risks) ? raw.risks : [])
+    .filter((r: any) => r && typeof r === "object" && str(r.description).trim())
+    .map((r: any) => ({ severity: str(r.severity) || "MEDIUM", description: str(r.description) }))
+
+  if (!adr_title && !adr_content && phases.length === 0 && risks.length === 0) return undefined
+  return { adr_title, adr_content, phases, risks }
 }

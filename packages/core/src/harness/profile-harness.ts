@@ -303,7 +303,7 @@ export class ProfileHarness {
         await updateStage("executing")
         let response = await invoke(
           "bee",
-`Cambio pequeño y localizado: no inicies Spec Kit. Hazlo tú directamente: busca y lee lo necesario
+          `Cambio pequeño y localizado: no inicies Spec Kit. Hazlo tú directamente: busca y lee lo necesario
 (agrupa en un mismo paso las lecturas independientes), edita (fs_edit admite varios cambios por llamada
 con edits[]) y comprueba tu cambio con la prueba o el chequeo que le toque. No lo delegues al worker
 "builder" salvo que el trabajo resulte ser grande o tenga bloques independientes que ganen en paralelo;

@@ -162,7 +162,7 @@ describe("BEE-led execution", () => {
     })).rejects.toThrow("did not converge")
   })
 
-  test("a small change is delegated to the builder by BEE, without Spec Kit", async () => {
+  test("a small change is done directly by BEE, without Spec Kit or a mandatory delegation", async () => {
     const { calls, runner } = scripted(["Cambio aplicado."])
     const result = await new ProfileHarness(runner).run({
       objective: "corrige el typo en el README",
@@ -172,7 +172,9 @@ describe("BEE-led execution", () => {
     expect(result.complexity).toBe("simple_change")
     expect(calls).toHaveLength(1)
     expect(calls[0]!.agentId).toBe("bee")
-    expect(calls[0]!.task).toContain('worker "builder"')
+    expect(calls[0]!.task).toContain("Hazlo tú directamente")
+    expect(calls[0]!.task).not.toContain("en el PRIMER paso")
+    expect(calls[0]!.task).toContain("no inicies Spec Kit")
   })
 })
 

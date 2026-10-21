@@ -86,6 +86,12 @@ export interface LLMCallOptions {
   extraBody?: Record<string, unknown>
   numGpu?: number
   onToken?: (token: string) => void
+  /**
+   * Argumentos JSON (incompletos) de una tool call mientras se generan. Solo emiten los
+   * proveedores con streaming de tool calls (Anthropic y los compatibles con OpenAI).
+   * Sirve para mostrar un plan a medida que el modelo lo escribe.
+   */
+  onToolCallArgs?: (toolName: string, argsSoFar: string) => void
   signal?: AbortSignal
   /** Enable extended thinking for supported models (Anthropic Claude 3.7+). */
   thinking?: { enabled: boolean; budget_tokens?: number }

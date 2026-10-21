@@ -371,6 +371,7 @@ export abstract class OpenAICompatBase implements LLMProvider {
             // Some builds re-emit the complete arguments string on the finalizing
             // chunk. Appending it verbatim would double the JSON.
             entry.arguments = appendToolCallArguments(entry.arguments, tc.function.arguments)
+            options.onToolCallArgs?.(toolNameMap.get(entry.name) ?? entry.name, entry.arguments)
           }
         }
       }

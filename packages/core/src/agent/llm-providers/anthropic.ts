@@ -158,6 +158,7 @@ export class AnthropicProvider implements LLMProvider {
           } else if (event.delta.type === "input_json_delta") {
             if (partialInputs[event.index] !== undefined) {
               partialInputs[event.index] += event.delta.partial_json
+              options.onToolCallArgs?.(toolMeta[event.index]?.name ?? "", partialInputs[event.index])
             }
           }
         }

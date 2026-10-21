@@ -19,7 +19,7 @@ import type { Turn, FileChange } from "../narrative/scribe"
 import { nameSessionFromFirstMessage } from "../narrative/session-titles"
 import { loadSecrets, distributeSecrets } from "./secrets"
 import { getToolsForCoordinator, executeToolByName } from "./tool-bridge"
-import { parsePlan, getDefaultPhases, groupPhasesByLevel } from "./plan-parser"
+import { parsePlan, getDefaultPhases, groupPhasesByLevel, draftFromPartialPlanArgs } from "./plan-parser"
 import type { ParsedPhase } from "./plan-parser"
 
 /** Shape of the `submit_review_verdict` structured decision (see worker-handler.ts). */
@@ -2616,6 +2616,15 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
       // Also broadcast thinking events to WebSocket subscribers (ThinkingPanel in UI)
       if (this.activeTaskId) {
         broadcastThinking(name, { content: msg.content, taskId: this.activeTaskId })
+      }
+      return
+    }
+
+    if (msg.type === "PLAN_DRAFT" && msg.content) {
+      // Argumentos parciales de create_architecture_plan: borrador progresivo en la pestaña Plan.
+      const draft = draftFromPartialPlanArgs(msg.content)
+      if (draft && this.activeTaskId && !this.cancelledTasks.has(this.activeTaskId)) {
+        this.onIpcEvent?.("plan_draft_update", { task_id: this.activeTaskId, ...draft })
       }
       return
     }
