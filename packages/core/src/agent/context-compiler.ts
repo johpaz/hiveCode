@@ -77,7 +77,7 @@ export interface ContextTool {
 export interface CompiledContext {
   systemPrompt: string
   projectScope?: ProjectScope | null
-  contextMetrics?: { system: number; skills: number; tools: number; history: number; project: number; total: number }
+  contextMetrics?: { system: number; skills: number; tools: number; history: number; project: number; total: number; loadout?: { tools: string[]; skills: string[] } }
   /**
    * The `# RESUMEN DE LA CONVERSACIÓN` block already folded into `systemPrompt`.
    * Exposed so a caller-supplied `systemPromptOverride` can compose it in instead
@@ -691,7 +691,9 @@ export async function compileContext(opts: {
       `Usa \`search_knowledge\` sólo para lo que de verdad no está en la lista: herramientas MCP externas, ` +
       `skills, playbook o código del proyecto.\n` +
       `\n# CÓMO SE USA CADA COSA\n` +
-      `- Leer un archivo: \`fs_read\` · listar: \`fs_list\` · buscar en el código: \`search_in_files\`\n` +
+      (inHand.some(n => n === "fs_write" || n === "fs_edit")
+        ? `- Entender el código: \`search_knowledge\` con type="code" (fragmento y líneas) y \`get_project_context\` primero; lo que vas a editar léelo con \`fs_read\` (por rango con offset/limit si el archivo es grande) · listar: \`fs_list\` · buscar texto exacto: \`search_in_files\`\n`
+        : `- Entender el código: \`search_knowledge\` con type="code" (fragmento y líneas) y \`get_project_context\` ANTES que el disco. Solo si el índice no responde, lee con \`fs_read\` por rango (offset/limit), no el archivo entero; \`fs_list\`/\`search_in_files\` son el último recurso\n`) +
       `- Escribir o cambiar un archivo: \`fs_write\` / \`fs_edit\` (no con redirecciones de shell)\n` +
       `- **Correr las pruebas: \`code_test\`. Revisar tipos: \`check_types\`. Compilar: \`code_build\`.**\n` +
       `  Estas tres herramientas ya hacen el trabajo: no reproduzcas \`bun test\`, \`tsc --noEmit\` ni \`bun build\` a mano con \`shell_executor\`.\n` +
@@ -790,7 +792,7 @@ export async function compileContext(opts: {
   return {
     systemPrompt,
     projectScope,
-    contextMetrics: {system: Math.max(0, systemTokens - projectTokens - Math.ceil(skillBodyChars / 3.5)), skills: Math.ceil(skillBodyChars / 3.5), tools: toolTokens, history: messageTokenTotal, project: projectTokens, total: estimatedTotal},
+    contextMetrics: {system: Math.max(0, systemTokens - projectTokens - Math.ceil(skillBodyChars / 3.5)), skills: Math.ceil(skillBodyChars / 3.5), tools: toolTokens, history: messageTokenTotal, project: projectTokens, total: estimatedTotal, loadout: {tools: finalTools.map(t => t.function.name).filter(Boolean), skills: allSkills.map(s => s.name ?? s.id)}},
     conversationSummarySection,
     messages,
     tools: finalTools,

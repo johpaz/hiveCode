@@ -624,7 +624,7 @@ export const taskDelegateTool: Tool = {
     };
 
     // Verify worker exists and is enabled; builder#2 is cloned from builder on first use.
-    const { ensureInstance, parseInstanceId } = await import("../../agent/swarm-instances.ts");
+    const { ensureInstance, parseInstanceId, canWriteWorkspace } = await import("../../agent/swarm-instances.ts");
     const worker = await ensureInstance(workerId);
     if (!worker) return failEarly(`Worker not found: ${workerId}`);
     if (!worker.enabled) return failEarly(`Worker is disabled: ${worker.name}`);
@@ -697,15 +697,24 @@ export const taskDelegateTool: Tool = {
     agentBus.notifyTaskStarted(workerId, worker.name, Number(taskId) || 0, taskName, resolvedProjectId);
     log.info(`[task_delegate] Delegating task ${taskId} to ${worker.name} (${workerId})`);
 
-    // A parallel instance writes in a private copy of the workspace and is merged back when it finishes.
-    const swarm = parseInstanceId(workerId).n >= 2 ? (await import("../../agent/swarm-runtime.ts")).getSwarmRuntime() : null;
+    // A parallel instance that writes does so in a private copy of the workspace, merged back when it finishes; a reader shares the task workspace.
+    const swarm = parseInstanceId(workerId).n >= 2 && canWriteWorkspace(worker) ? (await import("../../agent/swarm-runtime.ts")).getSwarmRuntime() : null;
     const groupKey = scope?.taskId ?? scope?.sessionId ?? config?.configurable?.thread_id ?? "swarm";
     let runWorkspace = scope?.workspace;
     const baseWorkspace = scope?.workspace ?? (typeof config?.configurable?.workspace === "string" ? config.configurable.workspace : undefined);
+    // Workers of one task run a few at a time; the rest wait here, before any worktree is made for them.
+    const { acquireWorkerSlot } = await import("../../agent/worker-slots.ts");
+    let releaseSlot: () => void;
+    try {
+      releaseSlot = await acquireWorkerSlot(groupKey, { readOnly: !canWriteWorkspace(worker), signal: config?.signal });
+    } catch (err) {
+      return failEarlyTask(taskId, workerId, worker.name, taskName, resolvedProjectId, `Cancelado mientras esperaba su turno: ${(err as Error).message}`, ref);
+    }
     if (swarm && baseWorkspace) {
       try {
         runWorkspace = await swarm.prepare({ taskId: groupKey, instanceId: workerId, baseWorkspace });
       } catch (err) {
+        releaseSlot();
         return failEarlyTask(taskId, workerId, worker.name, taskName, resolvedProjectId, `No pude preparar el workspace de ${workerId}: ${(err as Error).message}`, ref);
       }
     }
@@ -771,6 +780,8 @@ export const taskDelegateTool: Tool = {
       board.settleDelegation({ ref, taskId, status: "failed", result: (err as Error).message }, ref, taskId);
       agentBus.notifyTaskFailed(workerId, worker.name, Number(taskId) || 0, taskName, resolvedProjectId, (err as Error).message);
       return { ok: false, task_id: taskId, worker_id: workerId, error: (err as Error).message };
+    } finally {
+      releaseSlot();
     }
   },
 };
@@ -867,8 +878,8 @@ export const taskReviseTool: Tool = {
     board.announceDelegation(meta_ref(task), resolvedId);
 
     // A revised instance gets a fresh private copy of the (by now further along) shared workspace.
-    const { parseInstanceId } = await import("../../agent/swarm-instances.ts");
-    const swarm = parseInstanceId(worker.id).n >= 2 ? (await import("../../agent/swarm-runtime.ts")).getSwarmRuntime() : null;
+    const { parseInstanceId, canWriteWorkspace } = await import("../../agent/swarm-instances.ts");
+    const swarm = parseInstanceId(worker.id).n >= 2 && canWriteWorkspace(worker) ? (await import("../../agent/swarm-runtime.ts")).getSwarmRuntime() : null;
     const baseWorkspace = config?.configurable?.workspace ?? meta.workspace;
     const groupKey = (config?.configurable?.code_task_id ?? meta.code_task_id ?? config?.configurable?.code_session_id ?? meta.code_session_id ?? "swarm") as string;
     let runWorkspace = baseWorkspace;

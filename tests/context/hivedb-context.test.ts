@@ -105,7 +105,9 @@ test("excludes ignored directories, secrets and escaping symlinks", async () => 
 test("compact discovery returns references, without injecting skill bodies", async () => {
   const result = await searchKnowledgeTool.execute({query: "render_office", type: "code", mode: "compact", session_id: "a", limit: 2}) as any
   expect(result.code[0].reference.hash).toBeTruthy()
-  expect(result.code[0].snippet).toBeUndefined()
+  // A code hit without its snippet and lines only sends the reader to fs_read: compact keeps both, shorter.
+  expect(result.code[0].snippet).toContain("render_office")
+  expect(result.code[0].lines).toMatch(/^\d+-\d+$/)
 })
 
 test("compiler automatically supplies a task packet and a factory specialty", async () => {

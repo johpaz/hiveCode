@@ -23,7 +23,7 @@ const DEFAULT_MAX_ENTRIES = 200;
 
 export const fsListTool: Tool = {
   name: "fs_list",
-  description: "List files and directories in workspace. Spanish: listar archivos, ver carpeta, explorar directorio",
+  description: "List files and directories in workspace. To get the shape of the project use get_project_context (indexed modules) instead of walking the tree. Spanish: listar archivos, ver carpeta, explorar directorio",
   parameters: {
     type: "object",
     properties: {

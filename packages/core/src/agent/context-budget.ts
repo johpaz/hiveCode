@@ -35,7 +35,7 @@ export function resolveWindow(contextWindow?: number): number {
 // ── Project packet (preloaded in the first turn) ─────────────────────────────
 
 /** Packet size for a coordinator: a map, never source. */
-const COORDINATOR_PACKET_TOKENS = 700
+const COORDINATOR_PACKET_TOKENS = 1_000
 /** Packet size a worker always gets, window permitting. */
 const WORKER_PACKET_TOKENS = 2_600
 /** Hard ceiling; the preload must never crowd out history and the answer. */

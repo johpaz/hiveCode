@@ -7,6 +7,7 @@ import { resolveProjectScope, scopeFromConfig, resolveContextReferences, type Co
 import { selectSpecialty, REQUIRED_PROFILE_SKILLS } from "./specialties"
 import { eventBus } from "../events/event-bus"
 import { agentBus } from "../events/agent-bus"
+import { acquireWorkerSlot } from "./worker-slots"
 
 const NEVER_INHERIT = new Set(["spawn_agent", "task_delegate", "task_revise", "agent_create", "agent_archive"])
 export function stringList(value: unknown): string[] {
@@ -75,7 +76,10 @@ export async function runEphemeralAgent(params: Record<string, unknown>, config?
   }
   let finishCollaboration: ((ok: boolean, summary?: string) => void) | undefined
   const name = `Hormiga · ${String(params.specialty ?? purpose).slice(0, 40)}`
+  // Shares the count with task_delegate's instances: three scouts plus two spawned children are five workers, not two groups.
+  let releaseSlot: (() => void) | undefined
   try {
+    releaseSlot = await acquireWorkerSlot(scope?.taskId ?? scope?.sessionId ?? c.thread_id ?? "swarm", { signal })
     const specialty = selectSpecialty(parent.agent_type, purpose, typeof params.specialty === "string" ? params.specialty : undefined)
     await agents.put(id, {...parent, id, name, role: "worker", agent_type: undefined, ephemeral: true,
       spawn_depth: (parent.spawn_depth ?? 0) + 1, parent_id: parentId, status: "busy", enabled: true,
@@ -114,6 +118,7 @@ export async function runEphemeralAgent(params: Record<string, unknown>, config?
     agentBus.notifyTaskFailed(id, name, 0, purpose.slice(0, 80), scope?.sessionId ?? "", (error as Error).message)
     return { ok: false, agentId: id, task_id: taskId, status, error: (error as Error).message, result_reference: {collection: "tasks", id: taskId}, durationMs: Date.now() - started }
   } finally {
+    releaseSlot?.()
     clearTimeout(timerId)
     await agents.delete(id)
   }

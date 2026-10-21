@@ -1,5 +1,6 @@
 import { buildContextPacket, resolveProjectScope, scopeFromConfig, readProjectSource, fingerprint } from "../../agent/project-context";
-import { buildSnippet } from "../../utils/search-snippet";
+import { buildSnippetWithRange } from "../../utils/search-snippet";
+import { codeIndexTools } from "./code-index.ts";
 /**
  * Core Tools - 4 tools
  *
@@ -304,9 +305,12 @@ export const searchKnowledgeTool: Tool = {
         if (!c) return null;
         let content = c.content;
         try { if (scope) content = await readProjectSource(scope, c.file_path); } catch { return null; }
+        // Compact mode trims skill bodies; a code hit without its snippet and lines only sends the reader to fs_read.
+        const { snippet, startLine, endLine } = buildSnippetWithRange(content, normalizedQuery, compact ? 240 : 420);
         return {
           file_path: c.file_path,
-          snippet: compact ? undefined : buildSnippet(content, normalizedQuery),
+          snippet,
+          lines: `${startLine}-${endLine}`,
           reference: scope ? { kind: "code", sessionId: scope.sessionId, id: c.id, filePath: c.file_path, hash: fingerprint(content) } : undefined,
           rank: hit.score,
         };
@@ -581,5 +585,5 @@ export const reportProgressTool: Tool = {
 };
 
 export function createTools(): Tool[] {
-  return [searchKnowledgeTool, getProjectContextTool, notifyTool, saveNoteTool, reportProgressTool];
+  return [searchKnowledgeTool, getProjectContextTool, ...codeIndexTools, notifyTool, saveNoteTool, reportProgressTool];
 }

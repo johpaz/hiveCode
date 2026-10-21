@@ -62,6 +62,8 @@ interface Usage {
   steps: number | null
   toolCalls: number | null
   model: string | null
+  /** Llamadas de lectura del proyecto, al disco y al índice (solo hivecode las distingue). */
+  reads?: { disk: number; index: number; diskChars: number }
 }
 
 interface AgentRun {
@@ -238,6 +240,7 @@ const hivecode: Adapter = {
       usage.costUsd = data.costUsd || null
       usage.steps = data.swarm?.steps ?? data.runs?.total ?? null
       usage.toolCalls = data.swarm?.toolCalls ?? null
+      usage.reads = data.reads?.total
       usage.model = `${HIVECODE_PROVIDER}/${HIVECODE_MODEL}`
       note = data.error ?? undefined
       if (data.runs?.maxConcurrentWorkers) note = `${note ? note + " · " : ""}workers simultáneos máx. ${data.runs.maxConcurrentWorkers}`
@@ -517,6 +520,16 @@ function summarize(allResults: RunResult[]) {
       const hidden = rs.map(r => r.hidden.ratio)
       const costs = rs.map(r => r.usage.costUsd).filter((c): c is number => c != null)
       lines.push(`| ${agent} | ${rs.length} | ${fmt(median(times))} · ${fmt(Math.min(...times))}–${fmt(Math.max(...times))} | ${fmt((median(rs.map(r => r.usage.promptTokens)) ?? 0) / 1e6, 2)} | ${fmt((median(rs.map(r => r.usage.outputTokens)) ?? 0) / 1e3, 0)} | ${costs.length ? fmt(median(costs), 2) : "—"} | ${fmt(median(rs.map(r => r.usage.steps).filter((x): x is number => x != null)), 0)} | ${fmt(median(rs.map(r => r.usage.toolCalls).filter((x): x is number => x != null)), 0)} | ${fmt((median(hidden) ?? 0) * 100, 0)} % | ${rs.filter(r => r.ownTests.green).length}/${rs.length} | ${rs.filter(r => r.timedOut).length} |`)
+    }
+    const readers = [...new Set(results.filter(r => r.task === task && r.usage.reads).map(r => r.agent))]
+    if (readers.length) {
+      lines.push("", "| agente | n | lecturas a disco | lecturas al índice | disco / índice | caracteres leídos de disco (K) |", "|---|---|---|---|---|---|")
+      for (const agent of readers) {
+        const rr = results.filter(r => r.task === task && r.agent === agent).map(r => r.usage.reads).filter((x): x is NonNullable<Usage["reads"]> => !!x)
+        const disk = median(rr.map(x => x.disk)) ?? 0
+        const index = median(rr.map(x => x.index)) ?? 0
+        lines.push(`| ${agent} | ${rr.length} | ${fmt(disk, 0)} | ${fmt(index, 0)} | ${index ? fmt(disk / index, 1) : "—"} | ${fmt((median(rr.map(x => x.diskChars)) ?? 0) / 1e3, 0)} |`)
+      }
     }
     lines.push("", "| agente | n | tipos (errores strict) | líneas src | archivos | pruebas · aserciones | complejidad media · máx | funciones >10 | duplicación | any · ts-ignore | console | catch vacío | deps |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for (const agent of [...new Set(results.filter(r => r.task === task).map(r => r.agent))]) {

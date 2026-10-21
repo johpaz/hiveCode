@@ -45,6 +45,22 @@ export async function ensureInstance(id: string): Promise<AgentDoc | null> {
   return (await agents.get(id))?.doc ?? clone
 }
 
+const WRITING_TOOLS = ["fs_write", "fs_edit", "fs_delete", "shell_executor", "run_script", "git_commit", "git_rollback"]
+
+/**
+ * Whether a profile can change the workspace. A reader (scout, planner) shares the task workspace safely,
+ * so its duplicates need no private worktree. A profile with no tool list is assumed to write.
+ */
+export function canWriteWorkspace(doc: Pick<AgentDoc, "tools_json">): boolean {
+  if (!doc.tools_json) return true
+  try {
+    const tools = JSON.parse(doc.tools_json)
+    return !Array.isArray(tools) || tools.some((t: unknown) => typeof t === "string" && WRITING_TOOLS.includes(t))
+  } catch {
+    return true
+  }
+}
+
 /** Removes the instance docs a task created; the base profile is never touched. */
 export async function removeInstances(ids: Iterable<string>): Promise<void> {
   const agents = await col<AgentDoc>("agents")

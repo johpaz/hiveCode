@@ -4,6 +4,7 @@ import { col, fromIndexable, mutateDoc } from "../storage/hive.ts"
 import type { AgentDoc, HarnessTaskDoc } from "../storage/collections.ts"
 import { CORE_AGENT_DEFINITIONS, ensureCoreAgentProfiles, type CoreAgentType } from "../agent/agent-profiles.ts"
 import { runAgentIsolated } from "../agent/agent-loop.ts"
+import { purgeInstances } from "../agent/swarm-instances.ts"
 import type { StepEvent } from "../agent/agent-loop.ts"
 import {
   DEFAULT_MAX_REPAIR_CYCLES,
@@ -589,6 +590,8 @@ ${quality}`,
       throw error
     } finally {
       clearTaskBudget(taskId)
+      // The duplicates (scout#2, builder#2…) were cloned for this task; retire them now instead of at the next task's start.
+      await purgeInstances().catch(() => {})
     }
   }
 }

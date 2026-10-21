@@ -20,7 +20,7 @@ const LARGE_FILE_LINES = 500;
 
 export const fsReadTool: Tool = {
   name: "fs_read",
-  description: "Read file content from agent workspace. Spanish: leer archivo, ver contenido, abrir archivo",
+  description: "Read file content from agent workspace; for a large file pass offset/limit instead of reading it whole. To understand code you do not have to edit, search_knowledge(type=\"code\") returns the fragment and its lines from the index first. Spanish: leer archivo, ver contenido, abrir archivo",
   parameters: {
     type: "object",
     properties: {

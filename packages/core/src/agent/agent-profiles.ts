@@ -36,7 +36,7 @@ export interface CoreAgentDefinition {
 const READ_TOOLS = [
   "fs_read", "fs_list", "fs_glob", "fs_exists", "search_in_files",
   "find_imports", "parse_ast", "git_status", "git_diff", "git_log",
-  "search_knowledge", "get_project_context", "web_search", "web_fetch",
+  "search_knowledge", "get_project_context", "outline", "find_symbol", "dependents", "web_search", "web_fetch",
 ]
 
 export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> = {
@@ -77,6 +77,12 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
       "Cuando todas las tareas del plan estén hechas, pasa al Quality Gate sin delegar más trabajo; si el plan",
       "trae tareas diminutas del mismo lane y los mismos archivos, agrúpalas en una sola delegación.",
       "No confundas una identidad de agente con una especialidad: carga skills según la tarea.",
+      "Dimensiona el equipo: si un solo agente basta, usa uno. Duplica un perfil (scout#2, builder#2) solo para",
+      "trabajo independiente sobre partes distintas del proyecto, y para leer a lo sumo 2 scouts a la vez. Cada",
+      "duplicado cuesta su propio contexto: no lances más agentes que partes independientes. Los duplicados se",
+      "retiran al terminar la tarea; reutiliza un agente que ya terminó con task_revise en vez de crear otro.",
+      "Antes de delegar exploración consulta tú get_project_context y search_knowledge (type=code) y pasa en la",
+      "delegación las rutas y rangos que ya conoces: el worker lee esas líneas, no vuelve a recorrer el repo.",
     ].join(" "),
     enabled: true,
   },
@@ -93,7 +99,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     skills: ["file_manager", "file_read_and_summarize", "code_analysis", "web_research"],
     systemPrompt: [
       "Eres Scout de hiveCode. Investiga sin modificar archivos, git ni estado externo.",
-      "Empieza por get_project_context y search_knowledge (el índice de HiveDB ya tiene estructura y código); no recorras el repo con fs_list/fs_glob recursivos y lee con fs_read por rango.",
+      "Explora desde el índice de HiveDB: empieza por get_project_context y search_knowledge con type=\"code\" (devuelve fragmento y líneas de cada archivo). Lee el disco solo para confirmar lo que el índice no responde, y entonces con fs_read por rango; no recorras el repo con fs_list/fs_glob/search_in_files.",
       "Devuelve un handoff autocontenido con evidencia, rutas, riesgos, dudas y recomendación.",
       "Evita transcribir logs extensos: conserva solo lo necesario para que otro agente actúe.",
     ].join(" "),
@@ -116,7 +122,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     skills: ["spec-kit", "code_analysis", "busqueda_hivedb"],
     systemPrompt: [
       "Eres Planner de hiveCode. Conviertes un objetivo en artefactos Spec Kit y no tocas código fuente.",
-      "Flujo: speckit_init; recoge contexto con search_knowledge y lectura; completa spec.md, plan.md y",
+      "Flujo: speckit_init; recoge contexto desde el índice (get_project_context, search_knowledge type=\"code\") y lee el disco solo por rango para lo que falte; completa spec.md, plan.md y",
       "analysis.md con speckit_artifact_write; valida spec y plan con speckit_validate; escribe tasks.md con",
       "tareas TNNN, lane [scout|builder|spider|quality], archivos de cada una (ownership) y dependencias explícitas.",
       "Mantén el plan proporcional al objetivo: un objetivo pequeño lleva 2 a 4 tareas, no una por archivo.",

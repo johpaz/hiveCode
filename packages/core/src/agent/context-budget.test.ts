@@ -107,7 +107,7 @@ describe("projectPacketBudget", () => {
   })
 
   test("coordinators keep a map-sized packet", () => {
-    expect(projectPacketBudget(131_072, true)).toBe(700)
+    expect(projectPacketBudget(131_072, true)).toBe(1_000)
     expect(projectPacketBudget(4_000, true)).toBe(480)
   })
 

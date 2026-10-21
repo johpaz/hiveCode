@@ -6,6 +6,7 @@ import { col, ensureIndexes } from "../storage/hive"
 import type { CodeFileDoc, CodeGraphDoc } from "../storage/collections"
 import { upsertCapabilityDocs, deleteCapabilitiesByFilter } from "./capability-search"
 import { logger } from "../utils/logger"
+import { extractSymbols, type SourceSymbol } from "./source-symbols"
 const log = logger.child("source-index")
 export const CODE_EXTENSIONS = ["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs", "rs", "sql", "json", "toml", "md"]
 const JS_EXTENSIONS = new Set(["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"])
@@ -30,7 +31,7 @@ export interface FileIndex {
   lastModified: string
   content: string
   contentHash: string
-  symbols: Array<{ name: string; kind: string; startLine: number; endLine: number }>
+  symbols: SourceSymbol[]
   relationsComplete: boolean
 }
 
@@ -101,14 +102,7 @@ export async function indexFile(filePath: string, workspace: string): Promise<Fi
       (source.match(/\bcatch\s*\(/g) ?? []).length +
       (source.match(/\?\s+/g) ?? []).length
 
-    const lines = source.split("\n")
-    const symbols: FileIndex["symbols"] = []
-    const pattern = ext === "rs" ? /(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(fn|struct|enum|trait|impl|mod)\s+([\w]+)/ : /(?:export\s+)?(?:async\s+)?(function|class|interface|type|const)\s+(\w+)/
-    for (let i = 0; i < lines.length; i++) {
-      const match = lines[i].match(pattern)
-      if (match) symbols.push({ name: match[2], kind: match[1], startLine: i + 1, endLine: i + 1 })
-    }
-    for (let i = 0; i < symbols.length; i++) symbols[i].endLine = (symbols[i + 1]?.startLine ?? lines.length + 1) - 1
+    const symbols = extractSymbols(source, ext)
     if (ext === "rs") {
       functions.push(...symbols.filter(s => s.kind === "fn").map(s => s.name))
       classes.push(...symbols.filter(s => ["struct", "enum", "trait"].includes(s.kind)).map(s => s.name))

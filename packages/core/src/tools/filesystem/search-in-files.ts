@@ -23,7 +23,7 @@ type Match = { file: string; line: number; content: string; before?: string[]; a
 
 export const searchInFilesTool: Tool = {
   name: "search_in_files",
-  description: "Search for a string or regex pattern in a file or directory (like grep). Returns matching lines with line numbers; filter files with glob, add surrounding lines with context, or list only the matching files with output='files'. Spanish: buscar en archivos, grep, buscar patrón",
+  description: "Search for a string or regex pattern in a file or directory (like grep). For concepts, symbols and \"where is X\", search_knowledge(type=\"code\") is cheaper; use this for exact text the index may not hold. Returns matching lines with line numbers; filter files with glob, add surrounding lines with context, or list only the matching files with output='files'. Spanish: buscar en archivos, grep, buscar patrón",
   parameters: {
     type: "object",
     properties: {

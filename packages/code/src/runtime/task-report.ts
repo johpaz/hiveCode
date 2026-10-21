@@ -10,6 +10,7 @@
 import { execFileSync } from "node:child_process"
 import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { col } from "@johpaz/hivecode-core/storage/hive"
+import { readMix, type ReadMix } from "@johpaz/hivecode-core/agent/read-mix"
 
 export interface RunReport {
   minutes: number
@@ -43,6 +44,8 @@ export interface RunReport {
     stepsByAgent: Record<string, number>
     toolCallsPerStep: number
   }
+  /** Lectura del proyecto: cuántas llamadas fueron al disco y cuántas al índice, en total y por agente. */
+  reads: { total: ReadMix; byAgent: Record<string, ReadMix> }
   delegations: { delegate: number; revise: number }
   modelOddities: { markupDropped: number; emptyResponses: number }
 }
@@ -135,6 +138,7 @@ export async function collectRunReport(options: ReportOptions): Promise<RunRepor
       stepsByAgent: Object.fromEntries([...new Set(runs.map(r => r.agent_id))].map(a => [a, sum(runs.filter(r => r.agent_id === a), r => r.turn ?? 0)])),
       toolCallsPerStep: +(tools.length / Math.max(1, sum(runs, r => r.turn ?? 0))).toFixed(2),
     },
+    reads: readMix(tools, runs),
     delegations: {
       delegate: tools.filter(t => t.tool_name === "task_delegate").length,
       revise: tools.filter(t => t.tool_name === "task_revise").length,

@@ -16,7 +16,7 @@ const log = logger.child("fs-glob");
 
 export const fsGlobTool: Tool = {
   name: "fs_glob",
-  description: "Find files matching wildcard patterns. Spanish: buscar archivos, patrón, encontrar archivos",
+  description: "Find files matching wildcard patterns. To find where something lives, search_knowledge(type=\"code\") answers from the index without scanning the disk. Spanish: buscar archivos, patrón, encontrar archivos",
   parameters: {
     type: "object",
     properties: {

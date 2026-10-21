@@ -15,3 +15,13 @@ export function buildSnippet(content: string, query: string, maxLen = 420): stri
   const end = Math.min(content.length, start + maxLen);
   return `${start > 0 ? "..." : ""}${content.slice(start, end)}${end < content.length ? "..." : ""}`;
 }
+
+/** Same fragment as {@link buildSnippet}, plus the 1-based line range it covers, so a reader can ask for those lines instead of the whole file. */
+export function buildSnippetWithRange(content: string, query: string, maxLen = 420): { snippet: string; startLine: number; endLine: number } {
+  const snippet = buildSnippet(content, query, maxLen)
+  const body = snippet.replace(/^\.\.\./, "").replace(/\.\.\.$/, "")
+  const at = body ? content.indexOf(body) : 0
+  const from = at < 0 ? 0 : at
+  const startLine = content.slice(0, from).split("\n").length
+  return { snippet, startLine, endLine: startLine + body.split("\n").length - 1 }
+}

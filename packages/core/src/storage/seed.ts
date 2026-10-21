@@ -186,6 +186,9 @@ export const SEED_DATA: SeedData = {
     { id: "notify", name: "notify", category: "core", description: "Enviar notificación al usuario. Sinónimos: notificar, enviar notificación, alertar, aviso" },
     { id: "save_note", name: "save_note", category: "core", description: "Guardar nota persistente en el scratchpad. Sinónimos: guardar nota, escribir nota, recordatorio rápido, apuntar" },
     { id: "report_progress", name: "report_progress", category: "core", description: "Reportar progreso actual al usuario. Sinónimos: reportar progreso, informar estado, actualizar progreso, porcentaje" },
+    { id: "outline", name: "outline", category: "core", description: "Listar lo que declara un archivo (funciones, clases, métodos) con su rango de líneas, desde el índice. Decide qué líneas leer antes de fs_read. Sinónimos: esquema del archivo, símbolos de un archivo" },
+    { id: "find_symbol", name: "find_symbol", category: "core", description: "Encontrar dónde se define una función, clase, método o tipo, con archivo y rango de líneas, desde el índice. Sinónimos: dónde está definido, buscar símbolo, definición" },
+    { id: "dependents", name: "dependents", category: "core", description: "Qué archivos importan un archivo y cuáles importa él, desde el índice. Para ver qué puede romper un cambio. Sinónimos: quién usa este archivo, dependientes, impacto de un cambio" },
     { id: "get_project_context", name: "get_project_context", category: "core", description: "Obtener resumen cacheado de la estructura del proyecto: módulos clave, archivos críticos, ADRs activos. Más rápido que fs_list recursivo. Sinónimos: contexto del proyecto, estructura del proyecto, resumen del proyecto, qué hay en el proyecto" },
 
     // ─────────────────────────────────────────

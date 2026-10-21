@@ -136,13 +136,36 @@ export async function resolveContextReferences(scope: ProjectScope, refs: Contex
   return result
 }
 
+/** Default size of the project map when `get_project_context` is called without a budget. */
+const SUMMARY_PACKET_TOKENS = 1500
+
+/** The files the rest of the project leans on most, each with a few of its exports: a map the index can answer from. */
+export function keyModules(graphs: CodeGraphDoc[], workspace: string, limit = 10): string {
+  const importers = (graph: CodeGraphDoc): number => {
+    try { return (JSON.parse(graph.exported_by || "[]") as unknown[]).length } catch { return 0 }
+  }
+  const names = (raw: string | null | undefined): string[] => {
+    try { return JSON.parse(raw || "[]") as string[] } catch { return [] }
+  }
+  return graphs
+    .map(graph => ({ graph, count: importers(graph) }))
+    .filter(entry => entry.count > 0)
+    .sort((a, b) => b.count - a.count || a.graph.file_path.localeCompare(b.graph.file_path))
+    .slice(0, limit)
+    .map(({ graph, count }) => {
+      const symbols = [...new Set([...names(graph.exports), ...names(graph.functions), ...names(graph.classes)])].slice(0, 5)
+      return `- ${path.relative(workspace, graph.file_path)} (${count} importers)${symbols.length ? ` → ${symbols.join(", ")}` : ""}`
+    })
+    .join("\n")
+}
+
 export async function buildContextPacket(scope: ProjectScope, options: {
   query?: string; paths?: string[]; tokenBudget?: number; summaryOnly?: boolean; references?: ContextReference[]
   /** Source files fetched from the query; defaults to what the token budget affords. */
   maxHits?: number
 } = {}): Promise<ContextPacket> {
   await ensureIndexes([["codeGraph", "session_id"], ["codeTasks", "session_id"], ["codeDecisions", "status"]])
-  const tokenBudget = Math.max(200, Math.min(12_000, Math.floor(options.tokenBudget ?? (options.summaryOnly ? 700 : 2600))))
+  const tokenBudget = Math.max(200, Math.min(12_000, Math.floor(options.tokenBudget ?? (options.summaryOnly ? SUMMARY_PACKET_TOKENS : 2600))))
   // codeGraph rows are small and share codeFiles' ids and file_path. Scanning
   // codeFiles here loaded the full source of the whole repo on every turn just
   // to read paths.
@@ -180,6 +203,8 @@ export async function buildContextPacket(scope: ProjectScope, options: {
   }
   const packages = [...new Set(files.map(file => path.relative(scope.workspace, file.file_path).split(path.sep).slice(0, 2).join("/")))].slice(0, 12)
   append(`Indexed areas: ${packages.join(", ") || "index unavailable; use scoped filesystem search"}`)
+  const modules = keyModules(files, scope.workspace)
+  if (modules) append(`Key modules (most imported; read them through search_knowledge type="code" before the disk):\n${modules}`)
   if (scope.taskId) {
     const task = tasks.find(task => task.id === scope.taskId)
     if (task) append(`Task [${task.status}]: ${task.description}`, {kind: "task", sessionId: scope.sessionId, id: task.id, hash: fingerprint(JSON.stringify(task))})
