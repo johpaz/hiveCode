@@ -30,6 +30,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .npm/
 node-compile-cache/
 
+# datos del CLI de inventario (archivo por defecto)
+inventario.json
+inventario.json.tmp-*
+
 # IntelliJ based IDEs
 .idea
 

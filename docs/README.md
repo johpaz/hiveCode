@@ -12,6 +12,7 @@ Referencia técnica del proyecto, escrita contra el código. Cuando algo cambie 
 | [skills.md](./skills.md) | Skills empaquetadas, formato `SKILL.md`, carga y selección. |
 | [tui.md](./tui.md) | La TUI en Rust: vistas, teclas, modales, protocolo IPC con Bun y modo headless. |
 | [development.md](./development.md) | Ejecutar desde fuente, pruebas, variables de entorno, depuración con tmux, publicación. |
+| [inventario.md](./inventario.md) | CLI de inventario de productos: comandos, validaciones y archivo de datos. |
 
 ## Mapa rápido
 
