@@ -7,7 +7,7 @@ import { checksFor } from "./deterministic-checks.ts"
 
 const facts = (over: Partial<ProjectFacts> = {}): ProjectFacts => ({
   files: 18, modules: 3, hasTests: true, hasTypescript: true, hasDependencies: true, hasTypescriptCompiler: true,
-  hasPackageJson: true, scripts: ["test", "build"], packageManager: "bun", ...over,
+  hasJavaScript: true, hasJavaScriptTests: true, ecosystems: ["node"], hasPackageJson: true, scripts: ["test", "build"], packageManager: "bun", ...over,
 })
 
 describe("describeProjectFacts", () => {
@@ -31,7 +31,9 @@ describe("describeProjectFacts", () => {
 describe("checksFor", () => {
   test("only the checks that apply to the project", () => {
     expect(checksFor(facts()).map(c => c.label)).toEqual(["pruebas", "tipos", "build"])
-    expect(checksFor(facts({ hasTests: false, scripts: [] })).map(c => c.label)).toEqual(["tipos"])
+    expect(checksFor(facts({ hasTests: false, hasJavaScriptTests: false, scripts: [] })).map(c => c.label)).toEqual(["tipos"])
+    // bun, npm and tsc are JavaScript's: a project that is not one gets none of them.
+    expect(checksFor(facts({ hasJavaScript: false, ecosystems: ["python"] }))).toEqual([])
     // Without the compiler installed `bun tsc` finds no script: that measures the environment, not the code.
     expect(checksFor(facts({ hasTypescriptCompiler: false })).map(c => c.label)).toEqual(["pruebas", "build"])
     // `node_modules` alone is not enough (`bun add -d @types/bun` creates it without TypeScript).

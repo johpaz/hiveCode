@@ -1,3 +1,5 @@
+import { planVerification } from "./ecosystems.ts"
+import { readProjectFacts } from "../../harness/task-weight.ts"
 import { fetchTaskResource } from "../../runtime/task-execution";
 import { spawnTaskProcess } from "../../runtime/task-execution";
 import type { Tool } from "../types.ts"
@@ -246,8 +248,8 @@ const gitCommitTool: Tool = {
         await addProc.exited
       }
       const proc = spawnTaskProcess(["git", "commit", "-m", message], { cwd: path })
-      const stdout = await new Response(proc.stdout).text()
-      const stderr = await new Response(proc.stderr).text()
+      // Both streams at once: reading one to the end first stalls when the other fills its pipe.
+      const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
       const exitCode = await proc.exited
       return {
         ok: exitCode === 0,
@@ -358,7 +360,13 @@ const codeBuildTool: Tool = {
         const pkgJson = await pkg.json()
         cmd = pkgJson.scripts?.build ? "npm run build" : "bun run build"
       } else {
-        cmd = "make"
+        const plan = planVerification(path)
+        const chosen = plan.checks.find(k => k.label === "build" && !k.skip)
+        if (!chosen) {
+          const why = plan.checks.filter(k => k.label === "build" && k.skip).map(k => `${k.ecosystem}: ${k.skip}`)
+          return { ok: false, error: `No se reconoce cómo compilar este proyecto${why.length ? ` (${why.join("; ")})` : ""}. Pasa \`command\`, o declara los comandos en .hivecode/verify.json.` }
+        }
+        cmd = chosen.command
       }
     }
     // Pre-execution validation (TDD §14)
@@ -378,8 +386,8 @@ const codeBuildTool: Tool = {
         cwd: path,
         timeout: ((params.timeout as number) || 120) * 1000,
       })
-      const stdout = await new Response(proc.stdout).text()
-      const stderr = await new Response(proc.stderr).text()
+      // Both streams at once: reading one to the end first stalls when the other fills its pipe.
+      const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
       const exitCode = await proc.exited
       return {
         ok: exitCode === 0,
@@ -441,7 +449,16 @@ const codeTestTool: Tool = {
         if (pkgJson.scripts?.test) cmd = pkgJson.scripts.test
         else cmd = "bun test"
       } else {
-        cmd = "cargo test"
+        // No package.json: the ecosystem decides (pytest, mvn, go test…). There is no default to fall back on:
+        // `cargo test` here made every Python or Java project look broken.
+        const plan = planVerification(path)
+        const chosen = plan.checks.find(k => k.label === "pruebas" && !k.skip)
+        if (chosen) cmd = chosen.command
+        else if (readProjectFacts(path).hasJavaScriptTests) cmd = "bun test"
+        else {
+          const why = plan.checks.filter(k => k.label === "pruebas" && k.skip).map(k => `${k.ecosystem}: ${k.skip}`)
+          return { ok: false, error: `No se reconoce cómo probar este proyecto${why.length ? ` (${why.join("; ")})` : ""}. Pasa \`command\`, o declara los comandos en .hivecode/verify.json.` }
+        }
       }
     }
     if (params.filter) cmd += ` -t "${params.filter}"`
@@ -459,8 +476,8 @@ const codeTestTool: Tool = {
         cwd: path,
         timeout: ((params.timeout as number) || 180) * 1000,
       })
-      const stdout = await new Response(proc.stdout).text()
-      const stderr = await new Response(proc.stderr).text()
+      // Both streams at once: reading one to the end first stalls when the other fills its pipe.
+      const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
       const exitCode = await proc.exited
       return {
         ok: exitCode === 0,
@@ -523,8 +540,8 @@ const codeLintTool: Tool = {
         cwd: path,
         timeout: ((params.timeout as number) || 120) * 1000,
       })
-      const stdout = await new Response(proc.stdout).text()
-      const stderr = await new Response(proc.stderr).text()
+      // Both streams at once: reading one to the end first stalls when the other fills its pipe.
+      const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
       const exitCode = await proc.exited
       return {
         ok: true,
@@ -768,8 +785,8 @@ const checkTypesTool: Tool = {
         cwd: path,
         timeout: ((params.timeout as number) || 120) * 1000,
       })
-      const stdout = await new Response(proc.stdout).text()
-      const stderr = await new Response(proc.stderr).text()
+      // Both streams at once: reading one to the end first stalls when the other fills its pipe.
+      const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
       const exitCode = await proc.exited
       const durationNs = Bun.nanoseconds() - start
 
@@ -854,8 +871,8 @@ const runScriptTool: Tool = {
           NODE_ENV: "isolated",
         },
       })
-      const stdout = await new Response(proc.stdout).text()
-      const stderr = await new Response(proc.stderr).text()
+      // Both streams at once: reading one to the end first stalls when the other fills its pipe.
+      const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
       const exitCode = await proc.exited
       const durationNs = Bun.nanoseconds() - start
       return {
@@ -1301,8 +1318,8 @@ const codeTestParallelTool: Tool = {
           stdout: "pipe",
           stderr: "pipe",
         })
-        const stdout = await new Response(proc.stdout).text()
-        const stderr = await new Response(proc.stderr).text()
+        // Both streams at once: reading one to the end first stalls when the other fills its pipe.
+        const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
         const exitCode = await proc.exited
         const durationMs = Math.round((Bun.nanoseconds() - start) / 1_000_000)
 

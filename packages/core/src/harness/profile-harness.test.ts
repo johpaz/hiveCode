@@ -188,6 +188,15 @@ describe("BEE-led execution", () => {
     expect(SCOPED_REASONING).toEqual({ base: "low", onFailure: "medium" })
   })
 
+  test("a request to review and plan reaches BEE with the order of work: bounded scouts, then the planner", async () => {
+    const { calls, runner } = scripted(["ok"])
+    await new ProfileHarness(runner).run({ objective: "Hola revisa el proyecto y planea meejoras que encuentres", sessionId: "session-plan", workspace: "/workspace/test" })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.task).toContain("a lo sumo 3 scouts")
+    expect(calls[0]!.task).toContain('delega en el worker "planner"')
+    expect(calls[0]!.task).toContain("Lee con el índice de HiveDB") // and still reads through the index
+  })
+
   test("a conversation leaves the policy to the profile", async () => {
     const seen: unknown[] = []
     const runner: ProfileRunner = async options => { seen.push(options.reasoning); return "hola" }

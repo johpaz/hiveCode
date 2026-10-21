@@ -66,7 +66,8 @@ const DEFAULT_PROFILE: ProviderProfile = {
 export const PROVIDER_PROFILES: Record<string, ProviderProfile> = {
   openai: { ...DEFAULT_PROFILE, normalizeToolNames: true },
   kimi: { ...DEFAULT_PROFILE, normalizeToolNames: true, disableParallelToolCalls: true, retryWithoutToolsOnCodes: [422] },
-  deepseek: { ...DEFAULT_PROFILE, normalizeToolNames: true },
+  // `reasoning_effort: low` verified against deepseek-flash: 4 640 → 950 reasoning tokens on the same prompt.
+  deepseek: { ...DEFAULT_PROFILE, normalizeToolNames: true, reasoningEffort: true },
   groq: { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
   mistral: { ...DEFAULT_PROFILE, normalizeToolNames: true, toolChoiceAuto: "any", stripAdditionalProperties: true },
   openrouter: { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },

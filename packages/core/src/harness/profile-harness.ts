@@ -12,7 +12,7 @@ import {
 import { describeProjectFacts, estimateTaskWeight, type TaskTier } from "./task-weight.ts"
 import { clearTaskBudget, setTaskBudget, taskBudgetBlocker, taskBudgetUsage, type TaskBudgetLimit } from "../agent/task-budget.ts"
 import type { ReasoningPolicy } from "../agent/reasoning-effort.ts"
-import { checksFor, describeVerdict, verifyDeterministic } from "./deterministic-checks.ts"
+import { describeVerdict, planChecks, verifyDeterministic } from "./deterministic-checks.ts"
 
 export type HarnessApprovalGate = "specification" | "convergence"
 export type HarnessApprovalDecision = "approve" | "cancel"
@@ -125,10 +125,13 @@ export const REPAIR_REASONING: ReasoningPolicy = { base: "medium", onFailure: "h
  * (el banco midió 1,53 M en `inventario` con la ruta acotada, así que el objetivo a secas habría
  * cortado una tarea que terminó bien). Ajustar con la mediana del banco.
  */
+/** Lo que se guarda para BEE y el planner: los workers se detienen antes (ver `TaskBudgetLimit.reserveShare`). */
+export const RESERVE_SHARE = 0.2
+
 export const ROUTE_TOKEN_BUDGETS: Record<TaskTier, TaskBudgetLimit> = {
-  conversation: { maxInputTokens: 100_000, maxOutputTokens: 20_000 },
-  scoped: { maxInputTokens: 3_000_000, maxOutputTokens: 400_000 },
-  feature: { maxInputTokens: 24_000_000, maxOutputTokens: 3_000_000 },
+  conversation: { maxInputTokens: 100_000, maxOutputTokens: 20_000, reserveShare: RESERVE_SHARE },
+  scoped: { maxInputTokens: 3_000_000, maxOutputTokens: 400_000, reserveShare: RESERVE_SHARE },
+  feature: { maxInputTokens: 24_000_000, maxOutputTokens: 3_000_000, reserveShare: RESERVE_SHARE },
 }
 
 /**
@@ -136,7 +139,17 @@ export const ROUTE_TOKEN_BUDGETS: Record<TaskTier, TaskBudgetLimit> = {
  * el contexto, así que 100 K se agotan en una decena de turnos de un solo scout. Tope propio, por
  * encima de `conversation` y por debajo de `scoped`; no es un objetivo, es la red de seguridad.
  */
-export const READING_TOKEN_BUDGET: TaskBudgetLimit = { maxInputTokens: 1_500_000, maxOutputTokens: 150_000 }
+export const READING_TOKEN_BUDGET: TaskBudgetLimit = { maxInputTokens: 1_500_000, maxOutputTokens: 150_000, reserveShare: RESERVE_SHARE }
+
+/**
+ * Pidieron un plan, no sólo hallazgos. El caso que lo motivó: «revisa el proyecto y planea mejoras» lanzó cinco
+ * scouts a la vez, que se gastaron el tope leyendo, y BEE murió antes de llegar al planner: se entregó un listado
+ * de hallazgos y «siguiente paso: entregar a planner un roadmap», sin el roadmap.
+ */
+export const PLAN_AFTER_READING = `Te piden un plan, no sólo hallazgos. Hazlo en este orden y no te saltes el final:
+1. Investiga con a lo sumo 3 scouts a la vez, cada uno con un área y rutas concretas (un scout por módulo, no "todo el repo"). Pide hallazgos con ruta:línea.
+2. Cuando vuelvan, delega en el worker "planner" el roadmap priorizado (P0/P1/P2) con archivos afectados, pruebas de aceptación y dependencias. Es lo que se te pidió: reserva presupuesto para este paso.
+3. Si el presupuesto se agota antes, entrega igualmente el plan con lo ya encontrado y di qué quedó sin revisar.`
 
 /** Cómo se lee el proyecto sin recorrerlo: el índice en HiveDB ya tiene la estructura y el código. */
 export const DB_FIRST_READING = `Lee con el índice de HiveDB, no recorriendo el disco:
@@ -152,7 +165,7 @@ export function routeBudget(tier: TaskTier, env: Record<string, string | undefin
   const base = reading && tier === "conversation" ? READING_TOKEN_BUDGET : ROUTE_TOKEN_BUDGETS[tier]
   if (!Number.isFinite(scale) || scale < 0) return base
   if (scale === 0) return { maxInputTokens: 0, maxOutputTokens: 0 }
-  return { maxInputTokens: Math.round(base.maxInputTokens * scale), maxOutputTokens: Math.round(base.maxOutputTokens * scale) }
+  return { ...base, maxInputTokens: Math.round(base.maxInputTokens * scale), maxOutputTokens: Math.round(base.maxOutputTokens * scale) }
 }
 
 /** La tarea agotó su presupuesto de tokens: se detiene con lo hecho hasta ese punto. */
@@ -352,12 +365,13 @@ export class ProfileHarness {
     }
 
     // The budget belongs to the task: BEE and every worker it launches spend from the same one.
-    setTaskBudget(taskId, routeBudget(weight.tier, process.env, weight.statement.reading))
+    setTaskBudget(taskId, routeBudget(weight.tier, process.env, weight.statement.reading || weight.statement.planning))
     try {
       if (complexity === "conversation") {
-        const reading = weight.statement.reading
+        const reading = weight.statement.reading || weight.statement.planning
         const projectFacts = reading ? describeProjectFacts(weight.project) : ""
-        const task = reading ? `${DB_FIRST_READING}\n${projectFacts ? `\n${projectFacts}\n` : ""}\nObjetivo:\n${objective}` : objective
+        const lead = [weight.statement.reading ? DB_FIRST_READING : "", weight.statement.planning ? PLAN_AFTER_READING : ""].filter(Boolean).join("\n\n")
+        const task = reading ? `${lead}\n${projectFacts ? `\n${projectFacts}\n` : ""}\nObjetivo:\n${objective}` : objective
         const response = await invoke("bee", task, "harness")
         await updateStage("completed")
         return { taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "completed", response, repairCycles: 0 }
@@ -376,7 +390,16 @@ export class ProfileHarness {
         await updateStage("executing")
         // What BEE would otherwise spend turns finding out: how the project runs and what the harness
         // will check by itself at the end.
-        const projectFacts = describeProjectFacts(weight.project, weight.project ? checksFor(weight.project).map(c => c.label) : [])
+        const planned = planChecks(options.workspace)
+        const projectFacts = describeProjectFacts(
+          weight.project,
+          [...new Set(planned.filter(p => !p.skip).map(p => p.label))],
+          // What the harness will not check, and why: a missing toolchain is said, not left to look like a pass.
+          [
+            ...planned.filter(p => p.command && !p.skip).map(p => `${p.label} (${p.ecosystem}): \`${p.command}\``),
+            ...planned.filter(p => p.skip).map(p => `${p.label} (${p.ecosystem}): no se comprobará — ${p.skip}`),
+          ],
+        )
         let response = await invoke(
           "bee",
           `Cambio pequeño y localizado: no inicies Spec Kit. Hazlo tú directamente: busca y lee lo necesario

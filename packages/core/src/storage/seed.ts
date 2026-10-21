@@ -346,6 +346,11 @@ export const SEED_DATA: SeedData = {
 
     // ── DeepSeek (fuente: api-docs.deepseek.com/quick_start/pricing) ──
     // deepseek-chat = DeepSeek-V3.2, deepseek-reasoner = V3.2 thinking mode
+    // The ids the DeepSeek API publishes today (`/models`): `deepseek-flash` is the alias of the current Flash
+    // (V4.1) and carries the 1 M window. Without these rows a fresh database knows no window for them and the
+    // agent falls back to 32.8 k, compacting and capping its answers at a fraction of what the model holds.
+    { id: "deepseek-flash", providerId: "deepseek", name: "DeepSeek V4.1 Flash", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "json_mode", "function_calling", "streaming", "reasoning"]) },
+    { id: "deepseek-v4-pro", providerId: "deepseek", name: "DeepSeek V4 Pro", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "json_mode", "function_calling", "streaming", "reasoning"]) },
     { id: "deepseek-chat", providerId: "deepseek", name: "DeepSeek-V3.2", modelType: "llm", contextWindow: 128000, capabilities: JSON.stringify(["chat", "json_mode", "function_calling", "streaming", "code"]) },
     { id: "deepseek-reasoner", providerId: "deepseek", name: "DeepSeek-V3.2 Thinking", modelType: "llm", contextWindow: 128000, capabilities: JSON.stringify(["chat", "reasoning", "streaming"]) },
 
@@ -861,6 +866,8 @@ const PATCH_PROVIDERS: SeedData["providers"] = [
 ]
 
 const PATCH_MODELS: SeedData["models"] = [
+  { id: "deepseek-flash",   providerId: "deepseek", name: "DeepSeek V4.1 Flash", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "json_mode", "function_calling", "streaming", "reasoning"]) },
+  { id: "deepseek-v4-pro", providerId: "deepseek", name: "DeepSeek V4 Pro",     modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "json_mode", "function_calling", "streaming", "reasoning"]) },
   // Codex
   { id: "codex-mini-latest",          providerId: "codex",       name: "Codex Mini (latest)",   modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat","code","function_calling","streaming","reasoning"]) },
   { id: "o3",                          providerId: "codex",       name: "O3",                    modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat","code","reasoning","streaming"]) },

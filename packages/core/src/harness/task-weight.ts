@@ -15,6 +15,7 @@
  */
 import { existsSync, readFileSync, readdirSync, statSync, type Stats } from "node:fs"
 import { join } from "node:path"
+import { detectProject } from "../tools/code/ecosystems.ts"
 
 export type TaskTier = "conversation" | "scoped" | "feature"
 
@@ -31,6 +32,8 @@ export interface StatementSignals {
   greenfield: boolean
   /** Pide leer, auditar o investigar el código sin cambiarlo: no muta, pero puede costar muchos turnos de lectura. */
   reading: boolean
+  /** Pide además un plan (roadmap, mejoras propuestas): lo que se entrega es el plan, no solo los hallazgos. */
+  planning: boolean
 }
 
 export interface ProjectFacts {
@@ -45,6 +48,12 @@ export interface ProjectFacts {
   hasDependencies: boolean
   /** El compilador de TypeScript está instalado en el proyecto: sin él `bun tsc` no encuentra el script. */
   hasTypescriptCompiler: boolean
+  /** Hay JavaScript o TypeScript (un `package.json` o ficheros `.js`/`.ts`): sólo entonces valen bun, npm y `tsc`. */
+  hasJavaScript: boolean
+  /** Pruebas al estilo JavaScript (`*.test.ts`, `tests/`, script `test`). `hasTests` suma las de los demás ecosistemas. */
+  hasJavaScriptTests: boolean
+  /** Los ecosistemas reconocidos (`node`, `python`, `java`, `rust`…); vacío si no se reconoce ninguno. */
+  ecosystems: string[]
   hasPackageJson: boolean
   scripts: string[]
   /** El gestor de paquetes que indica el lockfile, si hay uno. */
@@ -60,7 +69,7 @@ const LOCKFILES: [string, NonNullable<ProjectFacts["packageManager"]>][] = [
  * ejecuta, qué hay y qué comprobará el harness al final. `checks` son las etiquetas de lo que
  * el harness ejecutará solo (ver `checksFor`). Devuelve "" si no hay nada que decir.
  */
-export function describeProjectFacts(facts: ProjectFacts | undefined, checks: string[] = []): string {
+export function describeProjectFacts(facts: ProjectFacts | undefined, checks: string[] = [], notes: string[] = []): string {
   if (!facts || (facts.files === 0 && !facts.hasPackageJson)) return ""
   const run = facts.packageManager === "bun" ? "bun run" : facts.packageManager === "pnpm" ? "pnpm run" : facts.packageManager === "yarn" ? "yarn" : facts.packageManager === "npm" ? "npm run" : undefined
   const lines = [
@@ -69,9 +78,16 @@ export function describeProjectFacts(facts: ProjectFacts | undefined, checks: st
   ]
   if (facts.packageManager) lines.push(`- gestor de paquetes: ${facts.packageManager}`)
   if (facts.scripts.length) lines.push(`- scripts de package.json: ${facts.scripts.map(s => (run ? `${run} ${s}` : s)).join(", ")}`)
-  lines.push(`- pruebas: ${facts.hasTests ? "sí" : "no hay"} · tsconfig: ${facts.hasTypescript ? "sí" : "no hay"} · dependencias instaladas: ${facts.hasPackageJson ? (facts.hasDependencies ? "sí" : "no") : "n/a"}`)
+  const state = [`pruebas: ${facts.hasTests ? "sí" : "no hay"}`]
+  // `tsconfig` and installed dependencies are JavaScript's: saying them of a Python or Java project is noise.
+  if (facts.hasJavaScript) state.push(`tsconfig: ${facts.hasTypescript ? "sí" : "no hay"}`, `dependencias instaladas: ${facts.hasPackageJson ? (facts.hasDependencies ? "sí" : "no") : "n/a"}`)
+  lines.push(`- ${state.join(" · ")}`)
+  const others = facts.ecosystems.filter(e => e !== "node")
+  if (others.length) lines.push(`- ecosistema: ${others.join(", ")}`)
   if (checks.length) lines.push(`- al terminar, el harness ejecuta solo (${checks.join(", ")}): corre antes tú solo lo que toca tu cambio, no el proyecto entero`)
   else lines.push("- no hay nada que el harness pueda ejecutar solo al terminar (sin pruebas, tipos ni build): comprueba tu cambio tú")
+  // What it will not check, and why: so the agent does not wait for a verdict that will not come.
+  for (const note of notes) lines.push(`- ${note}`)
   return lines.join("\n")
 }
 
@@ -108,6 +124,15 @@ const READING_VERBS = [
   "mapea", "mapear", "map", "explora", "explorar", "explore", "compara", "comparar", "compare",
   "diagnostica", "diagnosticar", "diagnose", "levanta", "relevamiento", "inventario", "evalúa", "evalua", "evaluar", "evaluate",
 ]
+
+/** Verbos y expresiones de planificar: sin orden de mutar, piden un plan como entrega. */
+const PLANNING_VERBS = [
+  "planea", "planear", "planeo", "planean", "planeemos", "planifica", "planificar", "planificame", "propon", "propón",
+  "propone", "proponer", "roadmap", "hoja de ruta", "plan de mejora", "plan de mejoras", "plan de accion", "plan de acción",
+]
+
+/** «meejoras» y «planeea» se leen igual que «mejoras» y «planea»: se colapsan las letras repetidas antes de comparar. */
+const collapseRepeats = (text: string) => text.replace(/(.)\1+/g, "$1")
 
 /**
  * Señales de acoplamiento. Cada una significa que el cambio cruza fronteras del código y
@@ -150,6 +175,7 @@ export function analyzeStatement(objective: string): StatementSignals {
   const mutationRe = new RegExp(`\\b(?:${MUTATION_VERBS.join("|")})\\b`)
   const mutating = mutationRe.test(text)
   const reading = new RegExp(`\\b(?:${READING_VERBS.join("|")})\\b`).test(text)
+  const planning = new RegExp(`\\b(?:${PLANNING_VERBS.map(collapseRepeats).join("|")})\\b`).test(collapseRepeats(text))
 
   const coupled = COUPLED_SIGNALS.filter(([, re]) => re.test(text)).map(([name]) => name)
   const areas = AREA_SIGNALS.filter(([, re]) => re.test(text)).map(([name]) => name)
@@ -169,6 +195,7 @@ export function analyzeStatement(objective: string): StatementSignals {
     deliverables,
     greenfield: GREENFIELD.test(text),
     reading,
+    planning,
   }
 }
 
@@ -179,7 +206,7 @@ const IGNORED_DIRS = new Set(["node_modules", ".git", "dist", "build", "target",
  * módulos, si hay suite de pruebas y qué scripts ofrece. Barato: un recorrido con tope.
  */
 export function readProjectFacts(workspace: string): ProjectFacts {
-  const facts: ProjectFacts = { files: 0, modules: 0, hasTests: false, hasTypescript: false, hasDependencies: false, hasTypescriptCompiler: false, hasPackageJson: false, scripts: [] }
+  const facts: ProjectFacts = { files: 0, modules: 0, hasTests: false, hasTypescript: false, hasDependencies: false, hasTypescriptCompiler: false, hasJavaScript: false, hasJavaScriptTests: false, ecosystems: [], hasPackageJson: false, scripts: [] }
   if (!workspace || !existsSync(workspace)) return facts
 
   const stack: string[] = [workspace]
@@ -196,11 +223,12 @@ export function readProjectFacts(workspace: string): ProjectFacts {
       try { stat = statSync(full) } catch { continue }
       if (stat.isDirectory()) {
         if (dir === workspace) facts.modules++
-        if (entry === "tests" || entry === "test" || entry === "__tests__" || entry === "spec") facts.hasTests = true
+        if (entry === "tests" || entry === "test" || entry === "__tests__" || entry === "spec") facts.hasJavaScriptTests = true
         stack.push(full)
       } else if (stat.isFile()) {
         facts.files++
-        if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(entry)) facts.hasTests = true
+        if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(entry)) facts.hasJavaScriptTests = true
+        if (/\.[cm]?[jt]sx?$/.test(entry) && !entry.endsWith(".d.ts")) facts.hasJavaScript = true
         if (entry === "package.json") facts.hasPackageJson = true
       }
     }
@@ -209,8 +237,9 @@ export function readProjectFacts(workspace: string): ProjectFacts {
   try {
     const pkg = JSON.parse(readFileSync(join(workspace, "package.json"), "utf-8"))
     facts.scripts = Object.keys(pkg.scripts ?? {})
-    facts.hasTests = facts.hasTests || "test" in (pkg.scripts ?? {})
+    facts.hasJavaScriptTests = facts.hasJavaScriptTests || "test" in (pkg.scripts ?? {})
     facts.hasPackageJson = true
+    facts.hasJavaScript = true
   } catch { /* sin package.json: nada que leer */ }
 
   // Los tipos sólo se comprueban si hay configuración: `tsc` sin `tsconfig` no dice nada
@@ -224,6 +253,11 @@ export function readProjectFacts(workspace: string): ProjectFacts {
   // `Script not found "tsc"`, que es el entorno, no el código. Los tipos sólo se comprueban con compilador.
   facts.hasTypescriptCompiler = existsSync(join(workspace, "node_modules/.bin/tsc")) || existsSync(join(workspace, "node_modules/typescript/package.json"))
   facts.packageManager = LOCKFILES.find(([file]) => existsSync(join(workspace, file)))?.[1]
+
+  // The other ecosystems: Python, Java, Go, Rust… A project is "without tests" only if none of them has any.
+  const detected = detectProject(workspace)
+  facts.ecosystems = [...(facts.hasJavaScript ? ["node"] : []), ...detected.ecosystems]
+  facts.hasTests = facts.hasJavaScriptTests || detected.hasTests
 
   return facts
 }
@@ -240,7 +274,11 @@ export function decideTier(statement: StatementSignals, project?: ProjectFacts):
     return {
       tier: "conversation",
       score: 0,
-      signals: statement.reading ? ["no hay orden de mutar", "pide leer o auditar el código"] : ["no hay orden de mutar"],
+      signals: [
+        "no hay orden de mutar",
+        ...(statement.reading ? ["pide leer o auditar el código"] : []),
+        ...(statement.planning ? ["pide un plan como entrega"] : []),
+      ],
     }
   }
   signals.push("hay una orden de mutar")

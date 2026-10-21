@@ -15,6 +15,12 @@ export interface TaskBudgetLimit {
   maxInputTokens: number
   /** Tokens de salida acumulados. 0 = sin límite. */
   maxOutputTokens: number
+  /**
+   * Parte del presupuesto (0–0,9) que los workers no pueden tocar. Ellos se detienen en `límite × (1 − reserva)`;
+   * el coordinador sigue hasta el límite. Sin reserva, cinco scouts leyendo en paralelo se gastaban todo el tope
+   * y BEE moría antes de delegar en el planner: se entregaban hallazgos sueltos y no el plan que se pidió.
+   */
+  reserveShare?: number
 }
 
 interface TaskBudgetState {
@@ -49,12 +55,16 @@ export function recordTaskUsage(taskId: string | undefined, inputTokens: number,
  * El blocker (`task_input_tokens:1500000`) si la tarea ya agotó su presupuesto, y `undefined`
  * si no lo agotó o no tiene uno.
  */
-export function taskBudgetBlocker(taskId: string | undefined): string | undefined {
+export function taskBudgetBlocker(taskId: string | undefined, role: "coordinator" | "worker" = "coordinator"): string | undefined {
   const state = taskId ? budgets.get(taskId) : undefined
   if (!state) return undefined
   const { limit } = state
-  if (limit.maxInputTokens > 0 && state.inputTokens >= limit.maxInputTokens) return `task_input_tokens:${limit.maxInputTokens}`
-  if (limit.maxOutputTokens > 0 && state.outputTokens >= limit.maxOutputTokens) return `task_output_tokens:${limit.maxOutputTokens}`
+  // A worker stops short of the cap by the reserve; the coordinator has it all.
+  const share = role === "worker" ? 1 - Math.min(0.9, Math.max(0, limit.reserveShare ?? 0)) : 1
+  const maxInput = Math.round(limit.maxInputTokens * share)
+  const maxOutput = Math.round(limit.maxOutputTokens * share)
+  if (limit.maxInputTokens > 0 && state.inputTokens >= maxInput) return `task_input_tokens:${maxInput}`
+  if (limit.maxOutputTokens > 0 && state.outputTokens >= maxOutput) return `task_output_tokens:${maxOutput}`
   return undefined
 }
 

@@ -379,6 +379,9 @@ function sourceFingerprint(): string {
 
 const WORKTREES = "/tmp/hivecode-worktrees"
 const listWorktrees = () => { try { return new Set(readdirSync(WORKTREES)) } catch { return new Set<string>() } }
+/** The per-workspace HOME that shell commands get (~65 MB each: its own TypeScript and compile cache). */
+const HOMES = join(tmpdir(), "hivecode-home")
+const listHomes = () => { try { return new Set(readdirSync(HOMES)) } catch { return new Set<string>() } }
 
 /**
  * Kills what a run left behind and removes its temporary state, so the next agent starts from nothing.
@@ -388,7 +391,7 @@ const listWorktrees = () => { try { return new Set(readdirSync(WORKTREES)) } cat
  * working inside its own directory, the worktrees that appeared since `worktreesBefore`, and its own leftover
  * run directories. Another session's processes and worktrees are not.
  */
-function cleanSlate(worktreesBefore: Set<string>, keepRuns: boolean): string {
+function cleanSlate(worktreesBefore: Set<string>, homesBefore: Set<string>, keepRuns: boolean): string {
   const mine = [`${workRoot}/`, ...[...listWorktrees()].filter(w => !worktreesBefore.has(w)).map(w => `${WORKTREES}/${w}`)]
   let killed = 0
   for (const entry of readdirSync("/proc")) {
@@ -402,6 +405,11 @@ function cleanSlate(worktreesBefore: Set<string>, keepRuns: boolean): string {
   for (const name of listWorktrees()) {
     if (worktreesBefore.has(name)) continue
     try { rmSync(`${WORKTREES}/${name}`, { recursive: true, force: true }); removed++ } catch { /* best effort */ }
+  }
+  // The shell homes that appeared during the run: one per workspace, and a benchmark makes a new workspace per run.
+  for (const name of listHomes()) {
+    if (homesBefore.has(name)) continue
+    try { rmSync(join(HOMES, name), { recursive: true, force: true }); removed++ } catch { /* best effort */ }
   }
   if (!keepRuns) {
     const ours = [...tasks.map(t => `${t}-`), "hivehome-", "baseline-"]
@@ -439,7 +447,8 @@ interface RunResult {
 async function runCell(task: string, agentName: string, rep: number, prompt: string): Promise<RunResult> {
   const adapter = ADAPTERS[agentName]!
   const worktreesBefore = listWorktrees()
-  say(`  limpieza previa: ${cleanSlate(worktreesBefore, !!values.keep)}`)
+  const homesBefore = listHomes()
+  say(`  limpieza previa: ${cleanSlate(worktreesBefore, homesBefore, !!values.keep)}`)
   const runDir = join(workRoot, `${task}-${agentName}-${rep}-${Date.now().toString(36)}`)
   const projectDir = join(runDir, "project")
   const logDir = join(out, task, `${agentName}-${rep}`)
@@ -474,7 +483,7 @@ async function runCell(task: string, agentName: string, rep: number, prompt: str
   const q = result.quality
   say(`  calidad: tipos strict ${q.strictErrors} · ${q.srcSloc} líneas en ${q.srcFiles} archivo(s) · ${q.tests} pruebas / ${q.assertions} aserciones · complejidad media ${q.ccAvg} (máx ${q.ccMax}) · duplicación ${(q.dupRatio * 100).toFixed(1)} %`)
   if (!values.keep) { try { rmSync(runDir, { recursive: true, force: true }) } catch { /* best effort */ } }
-  say(`  limpieza: ${cleanSlate(worktreesBefore, !!values.keep)}`)
+  say(`  limpieza: ${cleanSlate(worktreesBefore, homesBefore, !!values.keep)}`)
   return result
 }
 

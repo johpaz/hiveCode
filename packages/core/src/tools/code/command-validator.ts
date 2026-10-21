@@ -15,8 +15,23 @@ export type ValidationResult =
   | { ok: true }
   | { ok: false; reason: string; fatal: boolean };
 
+/**
+ * Killing by name or by pattern. `pkill -f server.ts`, `killall bun` and `kill $(pgrep node)` act on every
+ * process that matches, and one of them can be the harness itself (its command line carries the task, the
+ * file names, the runtime). Killing what the agent started is fine and stays allowed: `kill $!`, `kill $PID`,
+ * `kill 12345`.
+ */
+export const BROAD_KILL_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
+  { pattern: /\b(?:pkill|killall)\b/, reason: "kill by name or pattern (pkill/killall) can match the harness itself; kill the PID you started instead (kill $!)" },
+  { pattern: /\bkill\b[^;&|\n]*(?:\$\(|`)\s*(?:pgrep|pidof|ps|lsof|fuser)\b/, reason: "kill of whatever a search returns can match the harness itself; kill the PID you started instead (kill $!)" },
+  { pattern: /\b(?:pgrep|pidof|ps|lsof|fuser)\b[^;\n]*\|\s*(?:xargs\s+(?:-\S+\s+)*)?kill\b/, reason: "piping a process search into kill can match the harness itself; kill the PID you started instead (kill $!)" },
+  { pattern: /\bfuser\b[^;\n]*\s-k\b/, reason: "fuser -k kills whatever holds the file or port; kill the PID you started instead (kill $!)" },
+  { pattern: /\bkill\s+(?:-\S+\s+)*(?:-1|0)(?:\s|$)/, reason: "kill of every process (kill -1 / kill 0)" },
+];
+
 // Patterns that are always blocked — no mode overrides this
 const BLOCKED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
+  ...BROAD_KILL_PATTERNS,
   { pattern: /rm\s+(-\w*f\w*\s+)*-rf?\s+\/(?!\S)/, reason: "Recursive delete of filesystem root (rm -rf /)" },
   { pattern: /rm\s+(-\w*f\w*\s+)*-rf?\s+~\/?\s*$/, reason: "Recursive delete of home directory" },
   { pattern: /mkfs\b/, reason: "Filesystem format command (mkfs)" },

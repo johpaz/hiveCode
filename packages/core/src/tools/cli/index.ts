@@ -10,6 +10,7 @@ import { spawnTaskProcess } from "../../runtime/task-execution";
 import type { Tool } from "../types.ts";
 import { logger } from "../../utils/logger.ts";
 import { resolveInWorkspace, getWorkspace, expandPath } from "../filesystem/workspace-guard.ts";
+import { BROAD_KILL_PATTERNS } from "../code/command-validator.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -26,6 +27,7 @@ import {
 const log = logger.child("shell-executor");
 
 const BLOCKED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
+  ...BROAD_KILL_PATTERNS,
   { pattern: /rm\s+-rf\s+\/[^\s]*/, reason: "recursive delete from root" },
   { pattern: /rm\s+-rf\s+~/, reason: "recursive delete from home" },
   // /dev/null and the standard streams are how scripts discard or redirect output; any other device is not.
@@ -62,6 +64,37 @@ const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10MB
  * node drop their caches (.bun, .npm, node-compile-cache) under $HOME, and when
  * that was the workspace they were integrated into the user's project.
  */
+/** A sandbox HOME not used for this long is a leftover. */
+export const SANDBOX_HOME_TTL_MS = 6 * 60 * 60 * 1000
+
+/**
+ * Removes the sandbox homes nobody has used for `ttlMs`.
+ *
+ * Every workspace gets its own HOME and TMPDIR under /tmp/hivecode-home, and `bunx tsc` puts its own copy of
+ * TypeScript (31 MB) and a compile cache there: ~65 MB per workspace, never removed. A benchmark, which
+ * makes a new workspace per run, filled the user's whole temp quota with them. `keep` is the one in use.
+ * Returns how many were removed.
+ */
+export function pruneSandboxHomes(root: string, opts: { keep?: string; ttlMs?: number; now?: number } = {}): number {
+  const now = opts.now ?? Date.now()
+  const ttl = opts.ttlMs ?? SANDBOX_HOME_TTL_MS
+  let removed = 0
+  try {
+    for (const name of fs.readdirSync(root)) {
+      const dir = path.join(root, name)
+      if (dir === opts.keep) continue
+      try {
+        if (now - fs.statSync(dir).mtimeMs <= ttl) continue
+        fs.rmSync(dir, { recursive: true, force: true })
+        removed++
+      } catch { /* in use, or gone already */ }
+    }
+  } catch { /* no root yet: nothing to prune */ }
+  return removed
+}
+
+let lastPrune = 0
+
 export function buildSandboxEnv(workspace: string): Record<string, string | undefined> {
   const isolatedTaskDir = path.join(
     os.tmpdir(),
@@ -69,6 +102,13 @@ export function buildSandboxEnv(workspace: string): Record<string, string | unde
     workspace ? createHash("sha256").update(path.resolve(workspace)).digest("hex").slice(0, 16) : `sandbox-${Date.now()}`,
   );
   fs.mkdirSync(isolatedTaskDir, { recursive: true });
+  // Using a home marks it as used; the sweep that removes the stale ones runs at most every ten minutes.
+  const now = Date.now();
+  try { fs.utimesSync(isolatedTaskDir, now / 1000, now / 1000); } catch { /* best effort */ }
+  if (now - lastPrune > 10 * 60 * 1000) {
+    lastPrune = now;
+    pruneSandboxHomes(path.dirname(isolatedTaskDir), { keep: isolatedTaskDir });
+  }
   // The commands a worker runs (`bun test`, `bunx tsc`) must find the same bun that runs hivecode; it often
   // lives under ~/.bun/bin, outside the minimal PATH. Without it workers install their own copy from npm.
   const bun = Bun.which("bun");

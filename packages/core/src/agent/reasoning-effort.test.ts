@@ -3,6 +3,7 @@ import { chooseReasoningEffort, modelReasons, resolveReasoningPolicy } from "./r
 import { CORE_AGENT_DEFINITIONS } from "./agent-profiles"
 import { OpenCodeGoProvider } from "./llm-providers/opencode-go"
 import { DeepSeekProvider } from "./llm-providers/deepseek"
+import { GroqProvider } from "./llm-providers/groq"
 import type { LLMCallOptions } from "./llm-client"
 
 const REASONING = JSON.stringify(["chat", "code", "function_calling", "streaming", "reasoning"])
@@ -79,7 +80,7 @@ describe("reasoning_effort on the wire", () => {
   })
   afterAll(() => server.stop(true))
 
-  const call = async (provider: OpenCodeGoProvider | DeepSeekProvider, name: string, extra: Partial<LLMCallOptions> = {}) => {
+  const call = async (provider: OpenCodeGoProvider | DeepSeekProvider | GroqProvider, name: string, extra: Partial<LLMCallOptions> = {}) => {
     await provider.call({
       provider: name, model: "m", apiKey: "k", baseUrl: `http://localhost:${server.port}/v1`,
       messages: [{ role: "user", content: "hola" }], ...extra,
@@ -100,7 +101,11 @@ describe("reasoning_effort on the wire", () => {
     expect(body.reasoning_effort).toBe("high")
   })
 
+  test("DeepSeek accepts it too (verified against deepseek-flash)", async () => {
+    expect((await call(new DeepSeekProvider(), "deepseek", { reasoningEffort: "low" })).reasoning_effort).toBe("low")
+  })
+
   test("a provider whose profile does not accept it never gets the field", async () => {
-    expect((await call(new DeepSeekProvider(), "deepseek", { reasoningEffort: "low" })).reasoning_effort).toBeUndefined()
+    expect((await call(new GroqProvider(), "groq", { reasoningEffort: "low" })).reasoning_effort).toBeUndefined()
   })
 })

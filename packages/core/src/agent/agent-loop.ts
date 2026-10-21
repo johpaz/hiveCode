@@ -871,7 +871,8 @@ export async function* runAgent(
 
     // The whole task ran out of budget, whichever run spent it: stop here and say so, rather than
     // keep spending until the time limit.
-    const taskBlocker = taskBudgetBlocker(opts.codeTaskId)
+    // Workers stop short of the cap, so the coordinator keeps what it needs to bring the task home.
+    const taskBlocker = taskBudgetBlocker(opts.codeTaskId, opts.runKind === "worker" ? "worker" : "coordinator")
     if (taskBlocker) {
       runStatus = "needs_budget"
       blocker = taskBlocker
