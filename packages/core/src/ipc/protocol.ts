@@ -108,7 +108,7 @@ export type BunMessage =
       halt?: { active: boolean; reason?: string; checkpoint_id?: string }
     }
   | { type: "show_config_modal"; command: string; title: string; fields: ModalField[] }
-  | { type: "show_info_modal"; title: string; content: string }
+  | { type: "show_info_modal"; title: string; content: string; copy?: string }
   | { type: "suspend" }
   | { type: "resume" }
   // low priority — informational, can lag

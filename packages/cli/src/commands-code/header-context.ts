@@ -6,8 +6,9 @@ export async function readCoordinatorContext(sessionId?: string) {
   const bee = (await (await col<AgentDoc>("agents")).get("bee"))?.doc
   const config = await col<CodeConfigDoc>("codeConfig")
   const defaultProvider = (await config.get("default_provider"))?.doc.value || "gemini"
-  let provider = (bee?.model_selection !== "inherit" && fromIndexable(bee?.provider_id)) || defaultProvider
-  let model = (bee?.model_selection !== "inherit" && fromIndexable(bee?.model_id))
+  // Same rule as the harness (configureProfiles): only an explicit choice overrides the global default.
+  let provider = (bee?.model_selection === "custom" && fromIndexable(bee?.provider_id)) || defaultProvider
+  let model = (bee?.model_selection === "custom" && fromIndexable(bee?.model_id))
     || (await config.get(`provider_model_${defaultProvider}`))?.doc.value || "gemini-2.5-flash"
   let catalogModel = (await (await col<ModelDoc>("models")).get(model))?.doc
   let inputTokens: number | null = null

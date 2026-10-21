@@ -41,6 +41,8 @@ La vista se enruta sola según el estado de la tarea (`state.tab_locked` lo impi
 | `Ctrl+U` | Borra la línea de entrada. |
 | `Ctrl+L` | Copia la entrada seleccionada del historial al input. |
 | `Ctrl+Y`, `Ctrl+Shift+C` | Copia al portapapeles. |
+| Arrastrar con el ratón | Selecciona texto **dentro del panel donde empezó el arrastre** (nunca toma el panel de al lado) y lo copia al soltar. Un clic sin arrastrar solo elige la entrada. Funciona igual en todas las vistas, MESA incluida. |
+| `Y` en una ventana informativa | Copia su valor (por ejemplo `/start CÓDIGO` al vincular Telegram) o, si no tiene uno, todo el texto. |
 | `Ctrl+↑/↓` | Mueve la selección en el historial. |
 | `Ctrl+←/→` | Salta por palabras. |
 | `↑/↓` | Historial del input; con el input vacío, navega listas en las vistas Código, Revisión, Plan y Enjambre. |

@@ -10,15 +10,27 @@
  * each test that needs rows writes them, which is what makes them independent of
  * install state as well as of each other.
  */
-import { mkdtempSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const dir = mkdtempSync(join(tmpdir(), "hivecode-test-"))
 
+// Every scratch directory a test makes with `mkdtempSync(tmpdir())` lands inside this run's directory,
+// and the whole tree goes away when the process ends. Over fifty test files make temporary repos and
+// databases and few of them clean up; that filled /tmp (EDQUOT) and failed unrelated tests. Child
+// processes the tests spawn inherit TMPDIR, so they are covered too.
+const scratch = join(dir, "tmp")
+mkdirSync(scratch, { recursive: true })
+process.env.TMPDIR = scratch
+// `bun test` never fires process "exit" for a preload, but it does run its afterAll once, at the very end.
+afterAll(() => {
+  try { rmSync(dir, { recursive: true, force: true }) } catch { /* best effort: never fail a run over cleanup */ }
+})
+
 // Resolved relative to cwd by getHiveDbPath(); an absolute path passes through.
 process.env.HIVE_DB_PATH = dir
-import { beforeEach } from "bun:test";
+import { afterAll, beforeEach } from "bun:test";
 // A test that checks path resolution may temporarily remove the override.
 // Restore it before every following test, even when that test has no own fixture.
 beforeEach(() => { process.env.HIVE_DB_PATH ??= dir; });

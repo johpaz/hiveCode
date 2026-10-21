@@ -199,6 +199,31 @@ impl SwarmState {
         self.waiting.remove(agent);
     }
 
+    /// El agente terminó (bien o mal): nada suyo puede seguir en vuelo ni en
+    /// espera. Si el backend abortó o la tool lanzó, el `tool_done` nunca llega
+    /// y sin esto el contador "trabajando" quedaría pegado para siempre.
+    pub fn release_agent(&mut self, agent: &str, ok: bool) {
+        self.waiting.remove(agent);
+        let stale: Vec<String> = self
+            .in_flight
+            .values()
+            .filter(|c| c.agent == agent)
+            .map(|c| c.call_id.clone())
+            .collect();
+        for id in stale {
+            if let Some(mut call) = self.in_flight.remove(&id) {
+                call.settled = true;
+                call.ok = Some(ok);
+                if let Some(last) = self.last_tool.get_mut(agent) {
+                    if last.call_id == call.call_id {
+                        *last = call.clone();
+                    }
+                }
+                self.push_history(call);
+            }
+        }
+    }
+
     /// Llamadas que ROC no cerró. Un `tool_done` perdido deja el spinner
     /// girando para siempre; contarlas permite dizerlo en voz alta.
     pub fn orphaned_calls(&self) -> usize {
@@ -347,5 +372,24 @@ mod tests {
         let mut swarm = SwarmState::default();
         swarm.start_call(call("c1", "topo", "fs_read", 5_000));
         assert_eq!(swarm.elapsed_ms("c1", 4_000), Some(0));
+    }
+
+    #[test]
+    fn a_finished_agent_leaves_nothing_in_flight_or_waiting() {
+        let mut swarm = SwarmState::default();
+        swarm.start_call(call("c1", "topo", "fs_read", 0));
+        swarm.start_call(call("c2", "otro", "fs_read", 0));
+        swarm.set_waiting(WaitingAgent {
+            agent: "topo".into(),
+            waiting_for: vec![],
+            reason: "dependencia".into(),
+            since: 0,
+        });
+
+        swarm.release_agent("topo", false);
+
+        assert_eq!(swarm.orphaned_calls(), 1, "solo queda la del otro agente");
+        assert!(swarm.waiting.is_empty());
+        assert_eq!(swarm.last_tool["topo"].ok, Some(false));
     }
 }

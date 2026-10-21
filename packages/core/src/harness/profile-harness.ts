@@ -374,8 +374,10 @@ ${objective}`,
    una dependencia falla, la llamada vuelve con blocked_by: decide tú (task_revise a la que falló).
    Máximo ${MAX_PARALLEL_WORKERS} workers a la vez. Reparte la ola completa de tareas listas en un solo paso
    en vez de delegarlas de una en una.
-3. Cada delegación lleva criterios de aceptación tomados de la tarea. Juzga la evidencia de cada una; si
-   no cumple, task_revise con feedback concreto antes de seguir.
+3. Cada delegación lleva criterios de aceptación tomados de la tarea. Si el resultado trae
+   acceptance_met: true, la tarea ya está verificada: no la revises, sigue. Si es null, juzga la evidencia; si
+   no cumple, task_revise con feedback concreto. Como mucho dos revisiones por tarea: si sigue sin cumplir,
+   acéptala con la salvedad o delégala de nuevo con un brief distinto.
 4. Cuando todas estén hechas, delega al worker "verifier" (Quality Gate): reproducir cada criterio de
    aceptación de ${featureDir} contra el sistema real y revisar el diff. Debe terminar con "VERDICT: PASS" o "VERDICT: FAIL".
 5. Termina tu respuesta con el veredicto del Quality Gate tal cual ("VERDICT: PASS" o "VERDICT: FAIL"), la

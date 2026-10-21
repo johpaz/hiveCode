@@ -84,16 +84,16 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
         x += slot_w;
     }
 
-    let provider = if state.session.provider.trim().is_empty() {
+    let provider = if state.session.coordinator_provider().trim().is_empty() {
         "sin provider"
     } else {
-        state.session.provider.as_str()
+        state.session.coordinator_provider()
     };
     let hint = format!(
         "{} · {} · {}",
         state.session.mode.label(),
         provider,
-        state.harness.health_label(&state.session.provider, state.running)
+        state.harness.health_label(state.session.coordinator_provider(), state.running)
     );
     let hint = ellipsize_cells(&hint, area.w.saturating_sub(2) as usize);
     let hint_x = area.right().saturating_sub(cell_width(&hint) as u16 + 2);

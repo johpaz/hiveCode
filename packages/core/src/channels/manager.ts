@@ -93,12 +93,12 @@ export class ChannelManager {
               botToken = await (Bun as any).secrets?.get?.({ service: "hive-code", name: "telegram.bot_token" }) ?? "";
             } catch { throw new Error("Telegram credential keystore is unavailable"); }
           }
-          const rawPolicy = (config.dmPolicy as string) ?? "open";
+          const rawPolicy = (config.dmPolicy as string) ?? "pairing";
           const dmPolicy: "open" | "allowlist" | "pairing" =
             rawPolicy === "allowAll" || rawPolicy === "open" ? "open"
             : rawPolicy === "allowList" || rawPolicy === "allowlist" ? "allowlist"
             : rawPolicy === "pairing" ? "pairing"
-            : "open";
+            : "pairing"; // an unknown or missing policy must not mean "everybody"
           channel = createTelegramChannel(accountId, {
             enabled: true,
             botToken,
@@ -128,6 +128,13 @@ export class ChannelManager {
       });
 
       const key = `${channelName}:${accountId}`;
+      // Replacing a channel that is still running leaves two instances alive. For Telegram that is two bots
+      // polling the same token: Telegram answers 409 ("terminated by other getUpdates request") to one of
+      // them, and the new settings never take effect.
+      const previous = this.channels.get(key);
+      if (previous && previous !== channel) {
+        await previous.stop().catch((error: Error) => this.log.warn(`Could not stop the previous ${key}: ${error.message}`));
+      }
       this.channels.set(key, channel);
 
       this.log.info(`Created channel: ${key}`);

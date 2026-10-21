@@ -6,7 +6,7 @@ use crate::{
         Canvas, Color, Rect, Style, AMBER_BRIGHT, BG_ELEVATED, BG_PANEL, DIM, GREEN, RED,
         SECONDARY, WHITE, YELLOW,
     },
-    ui::{fmt_tokens, truncate_cells},
+    ui::fmt_tokens,
 };
 
 const DESK: u16 = 40;
@@ -155,15 +155,13 @@ fn activity(state: &AppState, agent: &OfficeAgent) -> (String, Color) {
         return (format!("MCP apagado: {}", agent.blocked.join(", ")), YELLOW);
     }
     if let Some(call) = call(state, agent) {
-        return (
-            format!(
-                "{} · {} · {}",
-                call.bee_state.label(),
-                call.tool,
-                short_arg(&call.args_summary)
-            ),
-            call.bee_state.color(),
-        );
+        let arg = short_arg(&call.args_summary);
+        let line = if arg.is_empty() {
+            format!("{} · {}", call.bee_state.label(), call.tool)
+        } else {
+            format!("{} · {} · {}", call.bee_state.label(), call.tool, arg)
+        };
+        return (line, call.bee_state.color());
     }
     let mut worker = agent.worker.clone();
     if state.swarm.last_tool.contains_key(&agent.telemetry) {
@@ -173,6 +171,7 @@ fn activity(state: &AppState, agent: &OfficeAgent) -> (String, Color) {
     match worker.status {
         WorkerStatus::Failed => (format!("falló · {line}"), RED),
         WorkerStatus::Warn => (format!("alerta · {line}"), YELLOW),
+        WorkerStatus::Done if line.starts_with('✓') => (format!("listo · {line}"), GREEN),
         WorkerStatus::Done => (format!("✓ listo · {line}"), GREEN),
         WorkerStatus::Waiting if !state.swarm.last_tool.contains_key(&worker.name) => {
             ("disponible".into(), DIM)
@@ -443,7 +442,7 @@ fn text(canvas: &mut Canvas, area: Rect, row: u16, value: &str, color: Color) {
         canvas.print(
             area.x,
             area.y + row,
-            &truncate_cells(value, area.w as usize),
+            &crate::ui::ellipsize_cells(value, area.w as usize),
             Style::new().fg(color),
         );
     }

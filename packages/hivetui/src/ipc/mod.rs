@@ -301,6 +301,8 @@ pub enum BunMessage {
     ShowInfoModal {
         title: String,
         content: String,
+        #[serde(default)]
+        copy: Option<String>,
     },
 
     // ── Logs (low priority, forwarded by tui-launcher) ────────────────────────

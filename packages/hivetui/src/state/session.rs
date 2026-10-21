@@ -36,6 +36,16 @@ impl TabId {
 
     pub fn from_name(s: &str) -> Option<Self> {
         let lower = s.to_lowercase();
+        // Los comandos y la bienvenida anuncian `/layout plan|code|review`: los nombres en inglés
+        // llevan a la misma vista que el slug en español.
+        let lower = match lower.as_str() {
+            "swarm" => "enjambre",
+            "table" | "thought" => "mesa",
+            "code" => "codigo",
+            "review" => "revision",
+            other => other,
+        }
+        .to_string();
         ALL_TABS.iter().copied().find(|t| t.slug() == lower)
     }
 
@@ -140,6 +150,19 @@ pub struct SessionState {
     pub workers: Vec<String>,
 }
 
+impl SessionState {
+    /// Provider y modelo con los que trabaja el coordinador (BEE): lo que la configuración de su
+    /// agente resuelve, no el provider por defecto de la sesión. Hasta que llega el contexto del
+    /// coordinador se usa el de la sesión.
+    pub fn coordinator_provider(&self) -> &str {
+        self.coordinator_context.as_ref().map_or(self.provider.as_str(), |ctx| ctx.provider.as_str())
+    }
+
+    pub fn coordinator_model(&self) -> &str {
+        self.coordinator_context.as_ref().map_or(self.model.as_str(), |ctx| ctx.model.as_str())
+    }
+}
+
 impl Default for SessionState {
     fn default() -> Self {
         Self {
@@ -225,5 +248,16 @@ mod tests {
         // La vista que responde "¿que esta pasando ahora?" debe ser la primera.
         assert_eq!(TabId::default(), TabId::Swarm);
         assert_eq!(TabId::default().num(), 1);
+    }
+
+    #[test]
+    fn layout_accepts_the_names_the_help_advertises() {
+        // `/layout plan|code|review` es lo que anuncian la bienvenida y el popup de comandos.
+        assert_eq!(TabId::from_name("code"), Some(TabId::Code));
+        assert_eq!(TabId::from_name("review"), Some(TabId::Review));
+        assert_eq!(TabId::from_name("plan"), Some(TabId::Plan));
+        assert_eq!(TabId::from_name("revision"), Some(TabId::Review));
+        assert_eq!(TabId::from_name("CODIGO"), Some(TabId::Code));
+        assert_eq!(TabId::from_name("nada"), None);
     }
 }

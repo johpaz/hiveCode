@@ -39,7 +39,8 @@ import {
   upsertProvider,
 } from "./provider-store"
 
-const VERSION = "1.0.0"
+import pkg from "../../../../package.json"
+const VERSION: string = pkg.version
 
 function isLikelyMarkdown(content: string): boolean {
   if (content.includes("```")) return true
@@ -397,6 +398,13 @@ export async function repl(): Promise<void> {
     let currentMode:     ReplMode = init.mode
     let currentProvider: string   = init.provider
     let currentModel:    string   = init.model
+    // Approving a plan moves the session out of PLAN into the mode it runs in; the header follows.
+    const adoptExecutionMode = (mode: ReplMode) => {
+      if (currentMode === mode) return
+      currentMode = mode
+      void saveMode(mode)
+      _tuiIpcSend?.({ type: "state_update", new_mode: mode })
+    }
     // When in plan mode, track the task awaiting user approval before execution
     let pendingPlanTask: string | null = null
     const tuiControl: {
@@ -765,6 +773,7 @@ export async function repl(): Promise<void> {
           } else if (/^\/approve\s+review/.test(trimmed)) {
             // Approval mode — phase-by-phase
             pendingPlanTask = null
+            adoptExecutionMode("approval")
             const guardResult = await ensureProvider(currentProvider)
             const provider = guardResult ? guardResult.provider : currentProvider
             const model    = guardResult ? guardResult.model    : currentModel
@@ -778,6 +787,7 @@ export async function repl(): Promise<void> {
 
           // Auto approve (default, /approve auto, or any context text)
           pendingPlanTask = null
+          adoptExecutionMode("auto")
           const isPlainApprove = /^(y|si|sí|ok|yes|\/approve)/.test(trimmed) || !trimmed
           const taskWithContext = isPlainApprove
             ? originalTask
@@ -808,6 +818,9 @@ export async function repl(): Promise<void> {
               startChannel: async (type: string, accountId: string, config: Record<string, unknown>) => {
                 const cm = getChannelManager()
                 if (cm) await cm.addChannel(type, accountId, config)
+              },
+              stopChannel: async (type: string, accountId: string) => {
+                await getChannelManager()?.removeChannel(type, accountId)
               },
               cancelTask: taskId => manager.cancelTask(taskId),
               executeTask: async (task: string, mode: string) => {

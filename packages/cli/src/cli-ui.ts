@@ -1,3 +1,4 @@
+import pkg from "../../../package.json"
 import { listModelChoices as getModelsForProvider, listCatalogModels, listCatalogProviders } from "@johpaz/hivecode-core/services/provider-catalog-read"
 import { createInterface } from "node:readline/promises"
 import { stdin, stdout } from "node:process"
@@ -263,7 +264,7 @@ export interface ProviderSetupResult {
 
 export async function runProviderSetupWizard(
   knownProviders: string[] = [],
-  version = "1.0.0",
+  version = pkg.version,
   preferredProvider?: string,
 ): Promise<ProviderSetupResult | null> {
   hiveIntro(`hivecode v${version} · Configurar provider`)

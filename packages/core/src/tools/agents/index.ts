@@ -54,6 +54,21 @@ async function updateTask(taskId: string, patch: Partial<TaskDoc>): Promise<Task
   return updated;
 }
 
+/** Revisions a coordinator may ask of one task before it has to decide: accept it or delegate it anew. */
+export const MAX_REVISIONS = 2;
+
+function taskMeta(task: TaskDoc): { acceptance_met?: boolean | null; revisions?: number } & Record<string, unknown> {
+  try { return JSON.parse(task.metadata ?? "{}"); } catch { return {}; }
+}
+
+/** Records how a delegation ended inside the task's metadata, keeping what is already there. */
+async function recordOutcome(taskId: string, patch: Record<string, unknown>): Promise<void> {
+  const tasks = await col<TaskDoc>("tasks");
+  const entry = await tasks.get(taskId);
+  if (!entry) return;
+  await tasks.put(taskId, { ...entry.doc, metadata: JSON.stringify({ ...taskMeta(entry.doc), ...patch }), updated_at: now() }, { expectedVersion: entry.version });
+}
+
 async function updateProjectProgress(projectId: string): Promise<number | null> {
   const tasks = await col<TaskDoc>("tasks");
   const projects = await col<ProjectDoc>("projects");
@@ -707,6 +722,7 @@ export const taskDelegateTool: Tool = {
         parentRunId: config?.configurable?.run_id,
         runKind: "worker",
         approvedExecution: config?.configurable?.approved_execution === true,
+        approvalChannel: config?.configurable?.approval_channel,
         signal: config?.signal,
         onRun: run => { partial = run.status !== "completed"; },
       });
@@ -723,6 +739,7 @@ export const taskDelegateTool: Tool = {
         result,
         completed_at: now(),
       });
+      await recordOutcome(taskId, { acceptance_met: met, revisions: taskMeta((await (await col<TaskDoc>("tasks")).get(taskId))!.doc).revisions ?? 0 });
       // A worker that stopped short (budget, stall) handed back a partial: whoever depends on it must not build on it.
       board.settleDelegation({ ref, taskId, status: partial && status === "completed" ? "blocked" : status, result }, ref, taskId);
       if (resolvedProjectId) await updateProjectProgress(resolvedProjectId);
@@ -823,6 +840,23 @@ export const taskReviseTool: Tool = {
     const { buildWorkerBrief, checkAcceptance, delegationThreadId, parseAcceptance, summarizeAcceptance } =
       await import("../../agent/delegation.ts");
     const acceptance = parseAcceptance(params.acceptance ?? meta.acceptance, task.description ?? task.name);
+    // Revising what a check already proved wastes a whole worker run, and revising forever never converges.
+    const history = taskMeta(task);
+    if (task.status === "completed" && history.acceptance_met === true && params.acceptance === undefined) {
+      return {
+        ok: false, task_id: resolvedId,
+        error: "Esta tarea ya cumple sus criterios, comprobados de forma determinista: no hace falta revisarla.",
+        hint: "Sigue con la siguiente tarea. Si necesitas algo que sus criterios no cubren, pásalo en `acceptance` (criterios nuevos).",
+      };
+    }
+    const revisions = history.revisions ?? 0;
+    if (revisions >= MAX_REVISIONS) {
+      return {
+        ok: false, task_id: resolvedId, revisions,
+        error: `Esta tarea ya se revisó ${revisions} veces sin cerrarse.`,
+        hint: "Decide: acepta la entrega con la salvedad, o delégala de nuevo con un brief distinto (task_delegate sin task_id).",
+      };
+    }
     await updateTask(resolvedId, { status: "in_progress", progress: 50 });
     const board = await import("../../agent/delegation-board.ts");
     board.announceDelegation(meta_ref(task), resolvedId);
@@ -862,6 +896,7 @@ export const taskReviseTool: Tool = {
         parentRunId: config?.configurable?.run_id,
         runKind: "worker",
         approvedExecution: config?.configurable?.approved_execution === true,
+        approvalChannel: config?.configurable?.approval_channel,
         signal: config?.signal,
       });
       const checks = await checkAcceptance(acceptance, result);
@@ -876,6 +911,7 @@ export const taskReviseTool: Tool = {
         completed_at: now(),
       });
       board.settleDelegation({ ref: meta_ref(task), taskId: resolvedId, status, result }, meta_ref(task), resolvedId);
+      await recordOutcome(resolvedId, { acceptance_met: met, revisions: revisions + 1 });
       return {
         ok: true, task_id: resolvedId, worker_id: worker.id, result, acceptance: checks, acceptance_met: met,
         ...(merge ? { merge: merge.status, merged_files: merge.files, ...(merged ? {} : { merge_error: merge.error?.slice(0, 600) }) } : {}),

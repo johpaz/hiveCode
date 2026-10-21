@@ -17,7 +17,8 @@ import {
   runProviderSetupWizard,
 } from "../cli-ui.ts"
 
-const VERSION = "1.0.0"
+import pkg from "../../../../package.json"
+const VERSION: string = pkg.version
 import { deleteProviderApiKey, getProviderApiKey, storeProviderApiKey } from "@johpaz/hivecode-core/storage/crypto"
 import {
   HIVEAGENTS_MODEL_ID,

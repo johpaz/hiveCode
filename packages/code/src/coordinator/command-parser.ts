@@ -61,11 +61,12 @@ export interface UiCallbacks {
   runProviderSetupWizard?: (knownProviders: string[], version: string) => Promise<{ provider: string; baseUrl?: string; apiKey: string; model?: string } | null>
   runTelegramConnectWizard?: () => Promise<Record<string, any> | null>
   showConfigModal?: (command: string, title: string, fields: ModalField[]) => Promise<Record<string, string> | null>
-  showInfoModal?: (title: string, content: string) => Promise<void>
+  showInfoModal?: (title: string, content: string, copy?: string) => Promise<void>
   cancelTask?: (taskId: string) => Promise<void>
   executeTask?: (task: string, mode: string) => Promise<string>
   /** Start or restart a channel in the running gateway (called after saving channel config to DB) */
   startChannel?: (type: string, accountId: string, config: Record<string, unknown>) => Promise<void>
+  stopChannel?: (type: string, accountId: string) => Promise<void>
 }
 
 export interface CommandResult {
@@ -1627,32 +1628,26 @@ async function handleTaskCommand(
     }
     case "cleanup": {
       const { WorkspaceManager } = await import("../workspace/manager")
+      const { sweepTaskWorktrees } = await import("../workspace/sweep")
       const force = rest.includes("--force")
       const projectPath = process.cwd() // the TUI is launched from the project
       const workspaces = new WorkspaceManager()
-      const stillRunning = new Set(
+      const inUseSlugs = new Set(
         (await scanDocs<CodeTaskDoc>("codeTasks"))
           .filter(task => !["completed", "failed", "cancelled", "rolled_back", "paused"].includes(task.status))
-          .map(task => workspaces.createAssignment({ taskId: task.id, projectPath, mutating: true }).branchName),
+          .map(task => workspaces.createAssignment({ taskId: task.id, projectPath, mutating: true }).branchName.replace("hivecode/task-", "")),
       )
-      const found = await workspaces.listTaskWorktrees(projectPath)
-      if (found.length === 0) return display("\n  No hay worktrees de tareas.\n")
-
-      const lines: string[] = []
-      let removed = 0
-      for (const worktree of found) {
-        const label = `${worktree.branch.replace("hivecode/task-", "").slice(0, 13)}  ${worktree.path}`
-        if (stillRunning.has(worktree.branch)) { lines.push(`  \u25b8 en uso        ${label}`); continue }
-        if (worktree.hasChanges && !force) { lines.push(`  \u25b8 CONSERVADO    ${label}  (trabajo sin integrar; --force lo borra)`); continue }
-        try {
-          await workspaces.cleanup({ ...workspaces.createAssignment({ taskId: worktree.taskSlug, projectPath, mutating: true }), worktreePath: worktree.path })
-          removed++
-          lines.push(`  \u2713 borrado       ${label}${worktree.hasChanges ? "  (tenía trabajo sin integrar)" : ""}`)
-        } catch (err) {
-          lines.push(`  \u2717 error         ${label}  ${(err as Error).message.slice(0, 80)}`)
-        }
-      }
-      return display(["", ...lines, "", `  ${removed} de ${found.length} worktrees borrados.`, ""].join("\n"))
+      const result = await sweepTaskWorktrees({ manager: workspaces, projectPath, inUseSlugs, force })
+      const total = result.removed.length + result.kept.length + result.inUse.length + result.errors.length
+      if (total === 0) return display("\n  No hay worktrees de tareas.\n")
+      const label = (w: { branch: string; path: string }) => `${w.branch.replace(/^hivecode\/(task-)?/, "").slice(0, 13)}  ${w.path}`
+      const lines = [
+        ...result.inUse.map(w => `  \u25b8 en uso        ${label(w)}`),
+        ...result.kept.map(w => `  \u25b8 CONSERVADO    ${label(w)}  (trabajo sin integrar; --force lo borra)`),
+        ...result.removed.map(w => `  \u2713 borrado       ${label(w)}${w.hasChanges ? "  (tenía trabajo sin integrar)" : ""}`),
+        ...result.errors.map(e => `  \u2717 error         ${label(e.worktree)}  ${e.error.slice(0, 80)}`),
+      ]
+      return display(["", ...lines, "", `  ${result.removed.length} de ${total} worktrees borrados.`, ""].join("\n"))
     }
     case "delegations": {
       const { listDelegations, formatDelegations } = await import("@johpaz/hivecode-core/agent/delegation-log")
@@ -1920,7 +1915,7 @@ async function handleGithubCommand(
         handled: true,
         output: token
           ? "  \u2713 GitHub: token configurado"
-          : "  \u2717 GitHub: no hay token. Configura con: hivecode github connect",
+          : "  \u2717 GitHub: no hay token. Conéctalo con /github connect (o F2 → GitHub)",
       }
     }
     case "whoami": {
@@ -2274,6 +2269,17 @@ async function handleLogsCommand(
   }
 }
 
+function pairingInstructions(code: string, expiresAt: number, username?: string): string {
+  const minutes = Math.max(1, Math.round((expiresAt - Date.now()) / 60_000))
+  return [
+    "",
+    `  Vincula el bot a tu cuenta${username ? ` (abre @${username})` : ""}:`,
+    `     /start ${code}`,
+    `  Vale ${minutes} min, se usa una sola vez y la primera persona que lo envíe será la dueña.`,
+    "  Hasta entonces el bot no atiende a nadie.",
+  ].join("\n")
+}
+
 async function handleTelegramCommand(
   args: string[],
   _db: DbCompat,
@@ -2286,7 +2292,7 @@ async function handleTelegramCommand(
     const config = await readChannelConfig("telegram", "telegram")
     const output = !row || !row.active
       ? "Telegram no configurado. Usa Conectar en Configuración → Telegram."
-      : `Estado: ${row.status ?? "desconocido"}\nActivo: ${row.enabled ? "sí" : "no"}\nDM Policy: ${config.dmPolicy ?? "—"}\nGrupos: ${config.groups ? "sí" : "no"}\nLista blanca: ${(config.allowFrom ?? []).join(", ")}`
+      : `Estado: ${row.status ?? "desconocido"}\nActivo: ${row.enabled ? "sí" : "no"}\nPolítica: ${config.dmPolicy ?? "—"}\nGrupos: ${config.groups ? "sí" : "no"}\nPersonas autorizadas: ${(config.allowFrom ?? []).length ? (config.allowFrom ?? []).join(", ") : "ninguna (vincula con /telegram pair)"}\nVinculación pendiente: ${(await (await import("@johpaz/hivecode-core/channels/telegram-pairing")).pairingPending()) ? "sí" : "no"}`
     if (ui?.showInfoModal) {
       await ui.showInfoModal("Estado de Telegram", output)
       return { handled: true, output: "" }
@@ -2294,7 +2300,20 @@ async function handleTelegramCommand(
     return { handled: true, output }
   }
 
+  if (action === "pair") {
+    const { startPairing } = await import("@johpaz/hivecode-core/channels/telegram-pairing")
+    const { code, expiresAt } = await startPairing()
+    const text = pairingInstructions(code, expiresAt)
+    // The code goes in a window of its own, with a key that copies it: it used to appear only in the history,
+    // after the person had left the form.
+    if (ui?.showInfoModal) { await ui.showInfoModal("Vincular Telegram", text, `/start ${code}`); return { handled: true, output: "" } }
+    return { handled: true, output: text }
+  }
+
   if (action === "disconnect") {
+    // Deleting the token and the row is not enough: the bot keeps polling until it is stopped.
+    try { await ui?.stopChannel?.("telegram", "telegram") } catch {}
+    try { await (await import("@johpaz/hivecode-core/channels/telegram-pairing")).cancelPairing() } catch {}
     try { await (Bun as any).secrets?.delete?.({ service: "hive-code", name: "telegram.bot_token" }) } catch {}
     const channels = await col<Record<string, any>>("channels")
     const row = await channels.get("telegram")
@@ -2308,18 +2327,29 @@ async function handleTelegramCommand(
     if (ui?.showConfigModal) {
       const values = await ui.showConfigModal(`telegram_${action}`, `Telegram \u2014 ${action === "connect" ? "Conectar" : "Editar"}`, [
         { key: "bot_token", label: "Bot Token",    placeholder: "123456:ABC-DEF\u2026", required: true,  secret: true,  field_type: "text" },
-        { key: "dm_policy", label: "DM Policy",    placeholder: "",                required: false, secret: false, field_type: "select", options: ["open", "allowlist"] },
+        { key: "dm_policy", label: "Quién puede usarlo (pairing = solo tú, con un código)", placeholder: "", required: false, secret: false, field_type: "select", options: ["pairing", "allowlist", "open"] },
         { key: "groups",    label: "Grupos",        placeholder: "",                required: false, secret: false, field_type: "select", options: ["no", "s\u00ed"] },
-        { key: "allow_from",label: "Lista blanca",  placeholder: "@usuario1,@usuario2", required: false, secret: false, field_type: "text" },
+        { key: "allow_from",label: "IDs autorizados (opcional)",  placeholder: "123456789 (envía /myid al bot)", required: false, secret: false, field_type: "text" },
       ])
       if (!values) return { handled: true, output: "  Configuraci\u00f3n cancelada" }
+      // Nothing is stored until Telegram has confirmed the token and the whitelist can match somebody.
+      const { verifyTelegramToken, normalizeAllowFrom } = await import("./telegram-setup")
+      const token = String(values.bot_token ?? "").trim()
+      const check = await verifyTelegramToken(token)
+      if (check.ok === false) return { handled: true, output: `  \u2717 Telegram no se conect\u00f3: ${check.error}` }
+      const dmPolicy = values.dm_policy || "pairing"
+      const allow = normalizeAllowFrom(values.allow_from, dmPolicy)
+      if (allow.ok === false) return { handled: true, output: `  \u2717 Telegram no se conect\u00f3: ${allow.error}` }
       try {
-        await (Bun as any).secrets?.set?.({ service: "hive-code", name: "telegram.bot_token", value: values.bot_token })
+        await (Bun as any).secrets?.set?.({ service: "hive-code", name: "telegram.bot_token", value: token })
       } catch { throw new Error("Telegram credential keystore is unavailable") }
+      // Re-saving the settings must not forget the people already paired.
+      const previous = await readChannelConfig("telegram", "telegram")
+      const allowFrom = [...new Set([...(Array.isArray(previous.allowFrom) ? previous.allowFrom.map(String) : []), ...allow.allowFrom])]
       const channelConfig = {
-        dmPolicy: values.dm_policy || "open",
+        dmPolicy,
         groups: values.groups === "s\u00ed",
-        allowFrom: values.allow_from ? values.allow_from.split(",").map((s: string) => s.trim()).filter(Boolean) : [],
+        allowFrom,
         enabled: true,
       }
       await storeChannelConfig("default", "telegram", "telegram", channelConfig, true)
@@ -2333,15 +2363,25 @@ async function handleTelegramCommand(
         enabled: true,
         status: "configured",
       }, { expectedVersion: existing?.version ?? 0 })
-      if (ui.startChannel) {
-        await ui.startChannel("telegram", "telegram", channelConfig)
-        const started = await channels.get("telegram")
-        if (started) await channels.put("telegram", { ...started.doc, status: "connected" }, { expectedVersion: started.version })
+      // The channel marks itself "connected" once the bot is polling; claiming it here would be a guess.
+      if (ui.startChannel) await ui.startChannel("telegram", "telegram", channelConfig)
+      const lines = [`  \u2713 Telegram ${action === "connect" ? "conectado" : "actualizado"} como @${check.username}`]
+      let pairingWindow: { text: string; copy: string } | undefined
+      if (dmPolicy === "open") {
+        lines.push("  \u26a0 Pol\u00edtica 'open': cualquiera que encuentre el bot puede usarlo (y lanzar tareas en tu m\u00e1quina). Usa 'pairing'.")
+      } else if (allowFrom.length === 0) {
+        // Nobody is authorised yet: the owner proves it is them with a one-time code from this screen.
+        const { startPairing } = await import("@johpaz/hivecode-core/channels/telegram-pairing")
+        const { code, expiresAt } = await startPairing()
+        const text = pairingInstructions(code, expiresAt, check.username)
+        lines.push(text)
+        pairingWindow = { text: `${lines.slice(0, -1).join("\n")}\n${text}`.trim(), copy: `/start ${code}` }
+      } else {
+        lines.push(`  Autorizados: ${allowFrom.join(", ")}`)
       }
-      return {
-        handled: true,
-        output: `  \u2713 Telegram ${action === "connect" ? "conectado" : "actualizado"}`,
-      }
+      // The code is shown right here, in a window with a key that copies it; the history keeps a copy too.
+      if (pairingWindow && ui.showInfoModal) await ui.showInfoModal("Vincular Telegram", pairingWindow.text, pairingWindow.copy)
+      return { handled: true, output: lines.join("\n") }
     }
     return {
       handled: true,

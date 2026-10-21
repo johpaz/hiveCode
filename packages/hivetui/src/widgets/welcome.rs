@@ -142,17 +142,17 @@ fn draw_boot_lines(canvas: &mut Canvas, x: u16, y: u16, w: u16, state: &AppState
 
     let worker_count = state.workers.workers.len();
     let has_session  = !state.session.session_id.is_empty();
-    let provider     = &state.session.provider;
-    let provider_label = if provider.trim().is_empty() { "sin provider" } else { provider.as_str() };
-    let model_label = if state.session.model.trim().is_empty() {
+    let provider     = state.session.coordinator_provider();
+    let provider_label = if provider.trim().is_empty() { "sin provider" } else { provider };
+    let model_label = if state.session.coordinator_model().trim().is_empty() {
         "modelo pendiente"
     } else {
-        state.session.model.as_str()
+        state.session.coordinator_model()
     };
 
     // Cada línea: (tag_pad, texto, es_last, ok_si_true)
     let load_txt = if worker_count > 0 {
-        format!("{worker_count} workers · bee · arch · back · front · sec · test · devops")
+        format!("{worker_count} workers · bee · planner · scout · builder · verifier · spider")
     } else {
         "iniciando workers...".to_string()
     };
@@ -299,12 +299,12 @@ fn draw_top_chrome(canvas: &mut Canvas, area: Rect, state: &AppState) {
     let workers = format!("{} workers", state.workers.workers.len());
     canvas.print(x, area.y, &workers, Style::new().fg(DIM).bg(BG_PANEL));
 
-    let right = if state.session.provider.is_empty() {
+    let right = if state.session.coordinator_provider().is_empty() {
         "sin provider".to_string()
-    } else if state.session.model.is_empty() {
-        state.session.provider.clone()
+    } else if state.session.coordinator_model().is_empty() {
+        state.session.coordinator_provider().to_string()
     } else {
-        format!("{} · {}", state.session.provider, state.session.model)
+        format!("{} · {}", state.session.coordinator_provider(), state.session.coordinator_model())
     };
     let right = truncate_cells(&right, area.w.saturating_sub(44) as usize);
     let right_x = area.right().saturating_sub(cell_width(&right) as u16 + 2);
@@ -324,7 +324,7 @@ fn draw_footer_prompt(canvas: &mut Canvas, area: Rect, state: &AppState) {
     let y = area.bottom().saturating_sub(1);
     canvas.fill_rect(Rect::new(area.x, y, area.w, 1), ' ', Style::new().bg(BG_PANEL));
 
-    let health = state.harness.health_label(&state.session.provider, state.running);
+    let health = state.harness.health_label(state.session.coordinator_provider(), state.running);
     let left = format!("⬡ {health}");
     canvas.print(area.x + 2, y, &left, Style::new().fg(status_color(state)).bg(BG_PANEL).bold());
 
@@ -337,7 +337,7 @@ fn draw_footer_prompt(canvas: &mut Canvas, area: Rect, state: &AppState) {
 }
 
 fn status_color(state: &AppState) -> Color {
-    match state.harness.health(&state.session.provider, state.running) {
+    match state.harness.health(state.session.coordinator_provider(), state.running) {
         HarnessHealth::MissingProvider => YELLOW,
         HarnessHealth::Starting => AMBER,
         HarnessHealth::Running => BLUE,
@@ -364,7 +364,7 @@ fn draw_left_identity(canvas: &mut Canvas, area: Rect, state: &AppState) {
         row += 1;
         draw_centered(canvas, area.x, row, area.w, "plan · approval · auto", Style::new().fg(SECONDARY));
         row += 2;
-        draw_centered(canvas, area.x, row, area.w, state.harness.health_label(&state.session.provider, state.running), Style::new().fg(status_color(state)).bold());
+        draw_centered(canvas, area.x, row, area.w, state.harness.health_label(state.session.coordinator_provider(), state.running), Style::new().fg(status_color(state)).bold());
     }
 }
 
@@ -392,7 +392,7 @@ fn draw_compact(canvas: &mut Canvas, area: Rect, state: &AppState) {
     let mut row = area.y + 15.min(area.h.saturating_sub(1));
     draw_centered(canvas, area.x, row, area.w, "hiveCode", Style::new().fg(AMBER_BRIGHT).bold());
     row += 1;
-    draw_centered(canvas, area.x, row, area.w, state.harness.health_label(&state.session.provider, state.running), Style::new().fg(status_color(state)).bold());
+    draw_centered(canvas, area.x, row, area.w, state.harness.health_label(state.session.coordinator_provider(), state.running), Style::new().fg(status_color(state)).bold());
     row += 2;
 
     let x = area.x + 2;
@@ -436,7 +436,7 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
         draw_left_identity(canvas, Rect::new(content.x, content.y, left_w, content.h), state);
         draw_vertical_rule(canvas, divider_x, content.y, content.h);
 
-        if state.session.provider.is_empty() {
+        if state.session.coordinator_provider().is_empty() {
             draw_right_no_provider(canvas, right_x, right_y, right_w, state);
         } else {
             draw_right_with_provider(canvas, right_x, right_y, right_w, state);

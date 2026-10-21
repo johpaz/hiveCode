@@ -20,6 +20,8 @@ export interface ToolApprovalRequest {
   kind?: "tool" | "gate"
   /** Heading for the modal when it is not the default tool prompt. */
   title?: string
+  /** Channel the run came from (`telegram`…). Its own approver is asked instead of the TUI. */
+  channel?: string
 }
 
 type Requester = (request: ToolApprovalRequest) => void
@@ -27,6 +29,8 @@ type Requester = (request: ToolApprovalRequest) => void
 const DETAIL_MAX = 1_200
 
 let requester: Requester | null = null
+/** Approvers of remote channels: a run that came from Telegram is answered with Telegram's buttons. */
+const channelRequesters = new Map<string, Requester>()
 /** Calls the person already declined, so a retry of the same call is not asked twice. */
 const declined = new Set<string>()
 const DECLINED_MAX = 200
@@ -42,8 +46,14 @@ export function registerToolApprovalRequester(fn: Requester | null): void {
   }
 }
 
-export function canRequestToolApproval(): boolean {
-  return requester !== null
+/** A channel registers how to ask its person; `null` unregisters it. */
+export function registerChannelApprovalRequester(channel: string, fn: Requester | null): void {
+  if (fn) channelRequesters.set(channel, fn)
+  else channelRequesters.delete(channel)
+}
+
+export function canRequestToolApproval(channel?: string): boolean {
+  return (channel !== undefined && channelRequesters.has(channel)) || requester !== null
 }
 
 export function toolApprovalDetail(args: unknown, max = DETAIL_MAX): string {
@@ -67,7 +77,8 @@ export function requestToolApproval(
   /** Groups declines: the same call is auto-declined again within the same scope (a task). */
   scope?: string,
 ): Promise<boolean> {
-  if (!requester) return Promise.resolve(false)
+  const ask = (request.channel ? channelRequesters.get(request.channel) : undefined) ?? requester
+  if (!ask) return Promise.resolve(false)
   if (signal?.aborted) return Promise.resolve(false)
   const key = scope ? `${scope}\u0000${request.tool}\u0000${request.detail}` : null
   if (key && declined.has(key)) return Promise.resolve(false)
@@ -86,7 +97,7 @@ export function requestToolApproval(
     pending.set(request_id, finish)
     signal?.addEventListener("abort", onAbort, { once: true })
     try {
-      requester!({ request_id, ...request })
+      ask({ request_id, ...request })
     } catch {
       finish(false)
     }

@@ -46,6 +46,7 @@ import { WorkspaceManager, type WorkspaceAssignment } from "../workspace/manager
 import { createSwarmWorkspaceRuntime } from "../workspace/swarm-workspaces"
 import { registerSwarmRuntime, getSwarmRuntime } from "@johpaz/hivecode-core/agent/swarm-runtime"
 import { resetDelegationBoard } from "@johpaz/hivecode-core/agent/delegation-board"
+import { registerCoordinatorControl } from "@johpaz/hivecode-core/agent/task-control"
 import { purgeInstances } from "@johpaz/hivecode-core/agent/swarm-instances"
 import type {
   CoordinatorTask, CoordinatorResult, BeeDecision, ControlMessage,
@@ -212,6 +213,8 @@ export class CoordinatorManager extends CoordinatorBase {
     const latest = await (await col<CodeTaskDoc>("codeTasks")).get(taskId)
     if (latest) await (await col<CodeTaskDoc>("codeTasks")).put(taskId, { ...latest.doc, status: "cancelled", completed_at: new Date().toISOString() }, { expectedVersion: latest.version })
     this.taskSupervisor.updateStage(taskId, "cancelled")
+    // A cancelled task with nothing to integrate has no reason to keep its worktree; one with work keeps it.
+    await this.cleanupTaskWorkspaceIfClean(taskId, "cancelled").catch(() => {})
     if (this.activeTaskId === taskId) this.emitTaskUpdate("cancelled")
   }
 
@@ -257,6 +260,23 @@ export class CoordinatorManager extends CoordinatorBase {
     // Load and distribute secrets BEFORE creating workers
     await this.reloadSecrets()
 
+    // What a channel (Telegram's /stop and /new) may do to the work in progress.
+    registerCoordinatorControl({
+      hasActiveTask: () => !!this.activeTaskId && this.taskExecutions.has(this.activeTaskId),
+      cancelActive: async () => {
+        const taskId = this.activeTaskId
+        if (!taskId || !this.taskExecutions.has(taskId)) return null
+        await this.cancelTask(taskId)
+        return { taskId }
+      },
+      cancelTask: taskId => this.cancelTask(taskId),
+      closeSession: () => {
+        const had = !!this.activeSessionId
+        this.endSession()
+        return had
+      },
+    })
+
     // Parallel instances of a worker (builder#2…) work in private copies of the task worktree.
     registerSwarmRuntime(createSwarmWorkspaceRuntime(this.workspaceManager, message =>
       this.onIpcEvent?.("history_append", { role: "system", content: message, task_id: this.activeTaskId ?? undefined })))
@@ -264,6 +284,7 @@ export class CoordinatorManager extends CoordinatorBase {
     // Reconcile any task a previous process left mid-flight. Recovery and resume
     // reads go straight to HiveDB, so there is no hydration step.
     await this.reconcileInterruptedTasks()
+    void this.sweepLeftoverWorktrees()
 
     // Load all tools from core
     try {
@@ -306,6 +327,32 @@ export class CoordinatorManager extends CoordinatorBase {
         this.scribe.updateTaskStatus(task.id, "failed")
         log.info(`[coordinator-manager] ✗ Task ${task.id} marked failed — no recovery point to resume from`)
       }
+    }
+  }
+
+  /**
+   * Worktrees left by tasks of earlier runs (cancelled, failed, killed). The clean ones go; the ones
+   * that hold work nobody integrated stay, and the person is told once.
+   */
+  private async sweepLeftoverWorktrees(): Promise<void> {
+    try {
+      const { sweepTaskWorktrees } = await import("../workspace/sweep")
+      const projectPath = process.cwd()
+      const tasks = await (await col<CodeTaskDoc>("codeTasks")).scan()
+      const inUseSlugs = new Set(
+        tasks.map(entry => entry.doc)
+          .filter(task => !["completed", "failed", "cancelled", "rolled_back", "paused"].includes(task.status))
+          .map(task => this.workspaceManager.createAssignment({ taskId: task.id, projectPath, mutating: true }).branchName.replace("hivecode/task-", "")),
+      )
+      const result = await sweepTaskWorktrees({ manager: this.workspaceManager, projectPath, inUseSlugs })
+      if (result.removed.length) log.info(`[coordinator-manager] 🧹 ${result.removed.length} leftover worktree(s) removed`)
+      if (result.kept.length) {
+        const text = `ℹ ${result.kept.length} worktree(s) de tareas anteriores conservan trabajo sin integrar. /task cleanup --force los borra.`
+        log.info(`[coordinator-manager] ${text}`)
+        this.onIpcEvent?.("history_append", { role: "system", content: text })
+      }
+    } catch (error) {
+      log.warn(`[coordinator-manager] worktree sweep skipped: ${(error as Error).message}`)
     }
   }
 
@@ -639,6 +686,7 @@ export class CoordinatorManager extends CoordinatorBase {
     stopReflectorCron()
     await getSwarmRuntime()?.cleanup().catch(() => {})
     registerSwarmRuntime(null)
+    registerCoordinatorControl(null)
     for (const [name, worker] of this.workers) {
       worker.terminate()
       log.info(`[coordinator-manager] ${name} terminated`)
@@ -721,7 +769,9 @@ export class CoordinatorManager extends CoordinatorBase {
       const harness = new ProfileHarness()
       // A plan run starts from scratch; any other mode picks up the plan made for this objective.
       const reusePlan = mode !== "plan" ? await this.findReadyPlan(description) : undefined
-      const result = await this.trackExecution(this.activeTaskId, harness.run({
+      let result: Awaited<ReturnType<ProfileHarness["run"]>>
+      try {
+      result = await this.trackExecution(this.activeTaskId, harness.run({
         resumeTaskId: reusePlan,
         signal: this.taskAborts.get(this.activeTaskId)?.signal,
         objective: description,
@@ -796,6 +846,18 @@ export class CoordinatorManager extends CoordinatorBase {
           }
         },
       }))
+      } catch (err) {
+        // A harness that throws (provider down, agent ended failed) must not leave the task "pending":
+        // the next start would take it for an interrupted one. A cancelled task is settled by cancelTask.
+        const failedId = this.activeTaskId
+        if (failedId && !this.cancelledTasks.has(failedId)) {
+          this.scribe.updateTaskStatus(failedId, "failed")
+          this.taskSupervisor.updateStage(failedId, "failed")
+          this.emitTaskUpdate("failed", { title: description, mode })
+          await this.cleanupTaskWorkspaceIfClean(failedId, "failed")
+        }
+        throw err
+      }
 
       this.scribe.appendNarrative({
         taskId: this.activeTaskId,
@@ -869,6 +931,11 @@ export class CoordinatorManager extends CoordinatorBase {
         // Waiting with nothing written yet (a plan, or the gate before implementing) leaves no
         // worktree behind; one with a diff is kept for the person to come back to.
         await this.cleanupTaskWorkspaceIfClean(this.activeTaskId, "paused")
+      } else if (result.status === "failed" || result.status === "blocked") {
+        this.scribe.updateTaskStatus(this.activeTaskId, "failed")
+        this.taskSupervisor.updateStage(this.activeTaskId, "failed")
+        this.emitTaskUpdate("failed", { title: description, mode })
+        await this.cleanupTaskWorkspaceIfClean(this.activeTaskId, "failed")
       } else {
         this.scribe.updateTaskStatus(this.activeTaskId, "cancelled")
         this.emitTaskUpdate("cancelled", { title: description, mode })

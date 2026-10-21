@@ -134,7 +134,11 @@ fn render_agents(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
         let style = if selected { Style::new().fg(WHITE).bold() } else { Style::new().fg(SECONDARY) };
         let model_name = hub.providers.iter().find(|p| p.id == agent.provider)
             .map(|p| p.model_name(&agent.model)).unwrap_or(&agent.model);
-        let provider_model = format!("{} · {}", model_name, agent.provider);
+        let provider_model = if agent.provider.is_empty() && agent.model.is_empty() {
+            "(el provider global)".to_string()
+        } else {
+            format!("{} · {}", model_name, agent.provider)
+        };
         canvas.print(area.x + 2, y, &truncate(&agent.name, 12), style);
         canvas.print(area.x + 15, y, &truncate(&provider_model, 31), style);
         canvas.print(area.x + 48, y, &format!("{}t {}", agent.max_turns, agent.effort), style);

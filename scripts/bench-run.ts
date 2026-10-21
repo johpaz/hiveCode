@@ -30,11 +30,42 @@ const { values } = parseArgs({
     reset: { type: "boolean", default: false },
     "max-minutes": { type: "string", default: "55" },
     "stall-minutes": { type: "string", default: "7" },
+    "grace-minutes": { type: "string", default: "2" },
+    // Internal: the run itself (the parent only supervises it), and reading what a killed run left behind.
+    child: { type: "boolean", default: false },
+    "collect-only": { type: "boolean", default: false },
+    "started-at": { type: "string" },
   },
 })
 if (!values.project || !values.task || !values.out) {
   console.error("uso: bun scripts/bench-run.ts --project <dir> --task <texto> --out <archivo.json> [--reset]")
   process.exit(2)
+}
+
+// ── Supervisor ──────────────────────────────────────────────────────────────────────────────
+// The run does its own timeout, but a process that stops answering (a stuck native call, a cancel that never
+// returns) cannot be trusted to enforce it. So the run lives in a child; if the child outlives the limit by
+// more than a short grace, it is killed with everything it started and the metrics are read from the database.
+if (!values.child && !values["collect-only"]) {
+  const argv = process.argv.slice(2)
+  const startedAt = Date.now()
+  const graceMs = Number(values["grace-minutes"]) * 60_000
+  const hardMs = Number(values["max-minutes"]) * 60_000 + graceMs
+  const child = Bun.spawn([process.execPath, import.meta.path, ...argv, "--child"], { stdio: ["inherit", "inherit", "inherit"], detached: true })
+  let hung = false
+  const killer = setTimeout(() => {
+    hung = true
+    console.log(`[${new Date().toISOString().slice(11, 19)}] ✗ COLGADO: la corrida siguió viva ${values["grace-minutes"]} min después del tiempo máximo. Se mata con todo lo que lanzó.`)
+    try { process.kill(-child.pid, "SIGKILL") } catch { child.kill("SIGKILL") }
+  }, hardMs)
+  const code = await child.exited
+  clearTimeout(killer)
+  if (hung) {
+    const collect = Bun.spawn([process.execPath, import.meta.path, ...argv, "--collect-only", "--started-at", String(startedAt)], { stdio: ["inherit", "inherit", "inherit"] })
+    await collect.exited
+    process.exit(3)
+  }
+  process.exit(code ?? 0)
 }
 
 const project = resolve(values.project)
@@ -44,7 +75,7 @@ const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=bench",
 if (!existsSync(`${project}/.git`)) { console.error(`✗ ${project} no es un repositorio git`); process.exit(2) }
 mkdirSync(dirname(out), { recursive: true })
 
-if (values.reset) {
+if (values.reset && !values["collect-only"]) {
   for (const line of git("worktree", "list", "--porcelain").split("\n")) {
     const path = /^worktree (.+)$/.exec(line)?.[1]
     if (path && path !== project) { try { git("worktree", "remove", "--force", path) } catch { /* already gone */ } }
@@ -69,13 +100,14 @@ logger.setConsole(false)
 const stamp = () => new Date().toISOString().slice(11, 19)
 const say = (line: string) => console.log(`[${stamp()}] ${line}`)
 
+const collectOnly = values["collect-only"] === true
 const previousMode = getExecutionMode()
-setExecutionMode("auto")
-const manager = new CoordinatorManager()
+if (!collectOnly) setExecutionMode("auto")
+const manager = collectOnly ? null : new CoordinatorManager()
 let lastEvent = Date.now()
 let final = ""
 const warnings: string[] = []
-manager.setIpcCallback((event, payload: any) => {
+manager?.setIpcCallback((event, payload: any) => {
   lastEvent = Date.now()
   if (event === "history_append" && typeof payload?.content === "string" && payload.content.startsWith("⚠")) {
     warnings.push(payload.content)
@@ -83,28 +115,41 @@ manager.setIpcCallback((event, payload: any) => {
   }
   if (event === "conflict_alert") say(`⚠ ALERTA de integración: ${payload?.reason ?? ""} ${String(payload?.detail ?? "").split("\n")[0].slice(0, 160)}`)
 })
-manager.setTaskCompleteCallback(text => { final = text })
+manager?.setTaskCompleteCallback(text => { final = text })
 
-const startedAt = Date.now()
-say(`arranca: proyecto=${project}`)
-await manager.startAll()
+const startedAt = collectOnly ? Number(values["started-at"]) : Date.now()
+say(collectOnly ? `recogiendo lo que dejó una corrida colgada (desde ${new Date(startedAt).toISOString().slice(11, 19)})` : `arranca: proyecto=${project}`)
+await manager?.startAll()
 
 const stallMs = Number(values["stall-minutes"]) * 60_000
-const watchdog = setInterval(() => {
+const watchdog = collectOnly ? undefined : setInterval(() => {
   const quiet = Date.now() - lastEvent
   if (quiet > stallMs) { say(`ALERTA: ${Math.round(quiet / 60000)} min sin ningún evento del coordinador`); lastEvent = Date.now() }
 }, 30_000)
-const heartbeat = setInterval(() => say(`latido: ${Math.round((Date.now() - startedAt) / 60000)} min`), 120_000)
+const heartbeat = collectOnly ? undefined : setInterval(() => say(`latido: ${Math.round((Date.now() - startedAt) / 60000)} min`), 120_000)
 
 let error: string | undefined
 let timedOut = false
-const limit = new Promise<void>(resolveLimit => setTimeout(() => { timedOut = true; resolveLimit() }, Number(values["max-minutes"]) * 60_000))
-try {
-  await Promise.race([manager.runTask(values.task!, "auto"), limit])
-  if (timedOut) { error = `tiempo máximo (${values["max-minutes"]} min) agotado`; const id = manager.getActiveTaskId(); if (id) await manager.cancelTask(id).catch(() => {}) }
-} catch (err) {
-  error = (err as Error).message
-  say(`✗ la tarea falló: ${error.slice(0, 200)}`)
+if (collectOnly) {
+  error = "colgada: el proceso dejó de responder y hubo que matarlo; las cifras son lo que alcanzó a guardar"
+} else {
+  const limit = new Promise<void>(resolveLimit => setTimeout(() => { timedOut = true; resolveLimit() }, Number(values["max-minutes"]) * 60_000))
+  try {
+    await Promise.race([manager!.runTask(values.task!, "auto"), limit])
+    if (timedOut) {
+      error = `tiempo máximo (${values["max-minutes"]} min) agotado`
+      const id = manager!.getActiveTaskId()
+      say(`tiempo máximo alcanzado: cancelando la tarea ${id ? id.slice(0, 8) : "(sin id activo)"}`)
+      if (id) {
+        // Cancelling is bounded here as well: a cancel that never returns must not hold the report hostage.
+        const cancelled = await Promise.race([manager!.cancelTask(id).then(() => true, () => false), new Promise<false>(r => setTimeout(() => r(false), 60_000))])
+        say(cancelled ? "tarea cancelada" : "⚠ la cancelación no terminó en 60 s: se sigue sin ella")
+      }
+    }
+  } catch (err) {
+    error = (err as Error).message
+    say(`✗ la tarea falló: ${error.slice(0, 200)}`)
+  }
 }
 clearInterval(watchdog); clearInterval(heartbeat)
 const finishedAt = Date.now()
@@ -155,6 +200,8 @@ const swarm = {
   waitFor: tools.filter(t => t.tool_name === "wait_for").length,
   shellSleepPolling: tools.filter(t => t.tool_name === "shell_executor" && /\bsleep\b/.test(String(t.args_json ?? ""))).length,
   maxConcurrentTools,
+  toolCalls: tools.length,
+  steps: sum(runs, r => r.turn ?? 0),
   toolCallsPerStep: +(tools.length / Math.max(1, sum(runs, r => r.turn ?? 0))).toFixed(2),
 }
 
@@ -174,6 +221,7 @@ const result = {
     maxConcurrentWorkers: maxConcurrent,
   },
   tokens: { input: sum(runs, r => r.input_tokens), output: sum(runs, r => r.output_tokens) },
+  costUsd: +sum(runs, r => r.cost_usd ?? 0).toFixed(4),
   workerMinutes: {
     total: +(sum(workers, dur) / 60).toFixed(1),
     revisions: +(sum(workers.filter(isRevision), dur) / 60).toFixed(1),
@@ -188,8 +236,8 @@ const result = {
   finalAnswer: final.slice(0, 600),
 }
 writeFileSync(out, JSON.stringify(result, null, 2))
-setExecutionMode(previousMode)
-await manager.stopAll().catch(() => {})
+if (!collectOnly) setExecutionMode(previousMode)
+await manager?.stopAll().catch(() => {})
 
 const t = result
 say(`resultado → ${out}`)

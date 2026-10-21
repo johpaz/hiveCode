@@ -3,7 +3,13 @@ import { BaseChannel, type ChannelConfig, type IncomingMessage, type OutboundMes
 import { logger } from "../utils/logger.ts";
 import { col } from "../storage/hive.ts";
 import { shortId } from "../storage/ids.ts";
+import { escapeHtml, markdownToTelegramHtml, telegramMessageChunks } from "./telegram-format.ts";
+import { registerChannelApprovalRequester, resolveToolApproval, type ToolApprovalRequest } from "../agent/tool-approval.ts";
+import { getCoordinatorControl, startNewThread, stopChannelRun } from "../agent/task-control.ts";
+import { getExecutionMode, setExecutionMode } from "../agent/execution-mode.ts";
 import type { ChannelDoc, CodeConfigDoc, CodeNarrativeDoc, CodeTaskDoc, ProviderDoc } from "../storage/collections.ts";
+
+export { escapeHtml };
 
 export interface TelegramConfig extends ChannelConfig {
   botToken: string;
@@ -77,6 +83,10 @@ export class TelegramChannel extends BaseChannel {
   private approvalResolvers: Map<string, (decision: "approve" | "skip") => void> = new Map();
   /** Active approval timeouts keyed by "taskId:phaseId" */
   private approvalTimeouts: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  /** Tool / gate approvals waiting for a button: request id → the message shown and its timeout. */
+  private toolApprovals: Map<string, { html: string; chatId: number; messageId?: number; timer: ReturnType<typeof setTimeout> }> = new Map();
+  /** Short button token → "taskId:phaseId" (callback_data may not exceed 64 bytes). */
+  private phaseTokens: Map<string, string> = new Map();
   /** Chat ID to use for proactive notifications (set on first authorized message) */
   private notifyChatId: number | null = null;
 
@@ -85,7 +95,7 @@ export class TelegramChannel extends BaseChannel {
     this.accountId = accountId;
     this.config = {
       ...config,
-      dmPolicy: config.dmPolicy ?? "open",
+      dmPolicy: config.dmPolicy ?? "pairing",
       allowFrom: config.allowFrom ?? [],
       enabled: config.enabled ?? true,
     };
@@ -102,35 +112,60 @@ export class TelegramChannel extends BaseChannel {
     }
 
     this.bot = new Bot(this.config.botToken);
+    // A run that came from Telegram is answered with Telegram's buttons, not on a screen nobody is watching.
+    registerChannelApprovalRequester("telegram", request => this.askToolApproval(request));
 
     this.bot.on("message", async (ctx: Context) => {
       await this.handleTelegramMessage(ctx);
     });
 
+    // Editing a message never re-runs a command, with one exception: people fix a mistyped pairing code by
+    // editing the message, and the bot would otherwise keep answering the first version.
+    this.bot.on("edited_message", async (ctx: Context) => {
+      const text = ctx.editedMessage?.text ?? "";
+      if (/^\/(?:start|pair)(?:@\S+)?\s+\S+/.test(text)) await this.handleTelegramMessage(ctx);
+    });
+
     // Inline keyboard callbacks
     this.bot.on("callback_query:data", async (ctx) => {
       const data = ctx.callbackQuery.data;
+      // Buttons are as powerful as commands: only people the bot talks to may press them.
+      if (!this.isUserAllowed(String(ctx.callbackQuery.from.id))) {
+        await ctx.answerCallbackQuery({ text: "No estás autorizado.", show_alert: true }).catch(() => {});
+        return;
+      }
       try {
-        if (data.startsWith("cancel_task:")) {
+        if (data.startsWith("ta:")) {
+          // Tool / gate approval: ta:<y|n>:<request id>
+          const [, verdict, requestId] = data.split(":");
+          const approved = verdict === "y";
+          const asked = this.toolApprovals.get(requestId);
+          const answered = resolveToolApproval(requestId, approved);
+          this.clearToolApproval(requestId);
+          const note = !answered ? "⌛ Esta solicitud ya no estaba pendiente."
+            : approved ? "✅ <b>Aprobado</b>" : "❌ <b>Rechazado</b>";
+          await ctx.editMessageText(`${asked?.html ?? ""}\n\n${note}`.trim(), { parse_mode: "HTML" });
+        } else if (data.startsWith("cancel_task:")) {
           const taskId = data.slice("cancel_task:".length);
-          await updateTaskStatus(taskId, "cancelled");
-          await ctx.editMessageText(`❌ Tarea <code>${shortId(taskId)}</code> cancelada.`, { parse_mode: "HTML" });
+          const control = getCoordinatorControl();
+          if (control) await control.cancelTask(taskId);
+          else await updateTaskStatus(taskId, "cancelled");
+          await ctx.editMessageText(`❌ Tarea <code>${escapeHtml(shortId(taskId))}</code> cancelada.`, { parse_mode: "HTML" });
         } else if (data === "cancel_abort") {
           await ctx.editMessageText("↩️ Cancelación abortada.");
-        } else if (data.startsWith("approve_phase:")) {
-          const [, taskId, phaseId] = data.split(":");
-          const resolver = this.approvalResolvers.get(`${taskId}:${phaseId}`);
-          if (resolver) { resolver("approve"); this.approvalResolvers.delete(`${taskId}:${phaseId}`); }
-          await ctx.editMessageText("✅ Fase aprobada — continuando...");
-        } else if (data.startsWith("skip_phase:")) {
-          const [, taskId, phaseId] = data.split(":");
-          const resolver = this.approvalResolvers.get(`${taskId}:${phaseId}`);
-          if (resolver) { resolver("skip"); this.approvalResolvers.delete(`${taskId}:${phaseId}`); }
-          await ctx.editMessageText("⏭ Fase saltada.");
+        } else if (data.startsWith("ap:")) {
+          // Phase approval: ap:<y|s>:<token>; callback_data is capped at 64 bytes, so ids travel as a token.
+          const [, verdict, token] = data.split(":");
+          const key = this.phaseTokens.get(token);
+          const resolver = key ? this.approvalResolvers.get(key) : undefined;
+          if (key && resolver) { resolver(verdict === "y" ? "approve" : "skip"); this.approvalResolvers.delete(key); }
+          this.phaseTokens.delete(token);
+          await ctx.editMessageText(!resolver ? "⌛ Esta solicitud ya no estaba pendiente." : verdict === "y" ? "✅ Fase aprobada — continuando..." : "⏭ Fase saltada.");
         } else if (data.startsWith("mode:")) {
           const newMode = data.slice("mode:".length);
-          await setCodeConfig("active_mode", newMode);
-          await ctx.editMessageText(`🎛 Modo cambiado a: <code>${newMode}</code>`, { parse_mode: "HTML" });
+          if (newMode !== "plan" && newMode !== "approval" && newMode !== "auto") throw new Error("modo desconocido");
+          setExecutionMode(newMode);
+          await ctx.editMessageText(`🎛 Modo cambiado a: <code>${escapeHtml(newMode)}</code>`, { parse_mode: "HTML" });
         }
       } catch (e) {
         this.log.error(`Callback error: ${(e as Error).message}`);
@@ -152,15 +187,19 @@ export class TelegramChannel extends BaseChannel {
         void setChannelStatus(this.accountId, "connected");
       },
     }).catch((error: Error) => {
-      this.log.error(`Telegram bot error: ${error.message}`);
+      const conflict = /409|terminated by other getUpdates/i.test(error.message);
+      this.log.error(conflict
+        ? `Telegram bot error: another process is polling this same bot token (409). Stop the other hivecode or gateway using @${this.bot?.botInfo?.username ?? "the bot"}, or revoke the token in @BotFather. (${error.message})`
+        : `Telegram bot error: ${error.message}`);
       this.running = false;
       void setChannelStatus(this.accountId, "error");
     });
   }
 
   private async handleTelegramMessage(ctx: Context): Promise<void> {
-    const message = ctx.message;
+    const message = ctx.message ?? ctx.editedMessage;
     if (!message) return;
+    const edited = !ctx.message;
 
     const chatId = message.chat.id.toString();
     const userId = message.from?.id?.toString() ?? "unknown";
@@ -177,11 +216,11 @@ export class TelegramChannel extends BaseChannel {
 
     // Deduplication: ignore message_ids already processed in the last 60 seconds
     const now = Date.now();
-    if (this.recentlyProcessed.has(messageId)) {
+    if (!edited && this.recentlyProcessed.has(messageId)) {
       this.log.debug(`Duplicate message_id ${messageId} ignored`);
       return;
     }
-    this.recentlyProcessed.set(messageId, now);
+    if (!edited) this.recentlyProcessed.set(messageId, now);
     // Clean up old entries (> 60s) to prevent unbounded growth
     for (const [id, ts] of this.recentlyProcessed) {
       if (now - ts > 60_000) this.recentlyProcessed.delete(id);
@@ -191,12 +230,30 @@ export class TelegramChannel extends BaseChannel {
     const isCommand = text?.startsWith("/") ?? false;
 
     if (text === "/myid" || text?.startsWith("/myid@")) {
-      await ctx.reply(
-        `🆔 Tu Telegram ID es: <code>${userId}</code>\n\n` +
-        `Para autorizarte, ejecuta:\n` +
-        `<code>hive config set channels.telegram.accounts.default.allowFrom.+ "tg:${userId}"</code>`,
-        { parse_mode: "HTML" }
-      );
+      await ctx.reply(`🆔 Tu Telegram ID es: <code>${escapeHtml(userId)}</code>`, { parse_mode: "HTML" });
+      return;
+    }
+
+    // ── Pairing: the person at the terminal proves they own the bot by sending the one-time code ──
+    const pairing = /^\/(?:start|pair)(?:@\S+)?\s+(\S+)/.exec(text ?? "");
+    if (pairing) {
+      await this.handlePairing(ctx, pairing[1]!, message.chat.id, userId, isGroup);
+      return;
+    }
+
+    // ── Authorization comes BEFORE any command: /status, /tareas, /cancelar… are as sensitive as a task ──
+    const authorized = isGroup
+      ? (this.config.groups ?? false) && this.isUserAllowed(userId)
+      : this.isUserAllowed(chatId);
+    if (!authorized) {
+      if (isGroup) return; // never answer strangers in a group
+      this.log.debug(`Message from unauthorized user: ${chatId}`);
+      if (this.shouldReplyToStranger(chatId)) {
+        await ctx.reply(
+          `⛔ No estás autorizado para usar este bot.\n\nSi eres su dueño, vincúlalo enviando <code>/start CÓDIGO</code> con el código que muestra hivecode (F2 → Telegram).`,
+          { parse_mode: "HTML" },
+        );
+      }
       return;
     }
 
@@ -217,12 +274,26 @@ export class TelegramChannel extends BaseChannel {
     }
 
     if (text === "/stop" || text?.startsWith("/stop@")) {
-      await ctx.reply("⏹ Detención actual cancelada.", { parse_mode: "HTML" });
+      // Whatever is running for this chat, and the task the coordinator has in hand.
+      const stoppedChat = stopChannelRun(`telegram:${peerId}`);
+      const control = getCoordinatorControl();
+      let stoppedTask: { taskId: string; title?: string } | null = null;
+      try { stoppedTask = control ? await control.cancelActive() : null; } catch (e) { this.log.warn(`/stop: ${(e as Error).message}`); }
+      const what = [stoppedChat ? "la respuesta en curso" : "", stoppedTask ? `la tarea <code>${escapeHtml(shortId(stoppedTask.taskId))}</code>` : ""].filter(Boolean).join(" y ");
+      await ctx.reply(what ? `⏹ Detenido: ${what}.` : "No hay nada en curso que detener.", { parse_mode: "HTML" });
       return;
     }
 
     if (text === "/new" || text?.startsWith("/new@")) {
-      await ctx.reply("🔄 Sesión reiniciada.", { parse_mode: "HTML" });
+      const control = getCoordinatorControl();
+      if (control?.hasActiveTask()) {
+        await ctx.reply("Hay una tarea en curso. Envía /stop primero y luego /new.");
+        return;
+      }
+      stopChannelRun(`telegram:${peerId}`);
+      await startNewThread(`telegram:${peerId}`);
+      const closed = control?.closeSession() ?? false;
+      await ctx.reply(`🔄 Conversación nueva: ya no recuerdo lo anterior (sigue guardado).${closed ? " También cerré la sesión de la terminal." : ""}`);
       return;
     }
 
@@ -230,18 +301,19 @@ export class TelegramChannel extends BaseChannel {
 
     if (text === "/status" || text?.startsWith("/status@")) {
       try {
-        const provider = await getCodeConfig("active_provider");
-        const mode = await getCodeConfig("active_mode");
+        const provider = await getCodeConfig("default_provider");
+        const model = provider ? await getCodeConfig(`provider_model_${provider}`) : null;
+        const mode = getExecutionMode();
         const activeTask = await latestTask(["running", "planning"]);
         const tokens = await tokenTotal24h();
         const cost = (tokens / 1_000_000 * 3).toFixed(4);
 
         await ctx.reply(
           `🐝 <b>Estado de hivecode</b>\n\n` +
-          `Provider: <code>${provider ?? "N/A"}</code>\n` +
-          `Modo: <code>${mode ?? "auto"}</code>\n` +
+          `Provider: <code>${escapeHtml(provider ?? "N/A")}${model ? ` · ${escapeHtml(model)}` : ""}</code>\n` +
+          `Modo: <code>${mode}</code>\n` +
           `Costo hoy: <b>~$${cost}</b>\n` +
-          (activeTask ? `\n✅ Tarea activa:\n<code>${activeTask.description?.slice(0, 60)}</code>` : "\n💤 Sin tarea activa"),
+          (activeTask ? `\n✅ Tarea activa:\n<code>${escapeHtml(activeTask.description?.slice(0, 60))}</code>` : "\n💤 Sin tarea activa"),
           { parse_mode: "HTML" }
         );
       } catch (e) {
@@ -259,7 +331,7 @@ export class TelegramChannel extends BaseChannel {
         }
         const lines = tasks.map(t =>
           `${t.status === "completed" ? "✅" : t.status === "failed" ? "❌" : "🔄"} ` +
-          `<code>${shortId(t.id)}</code> — ${t.description?.slice(0, 50)}`
+          `<code>${escapeHtml(shortId(t.id))}</code> — ${escapeHtml(t.description?.slice(0, 50))}`
         );
         await ctx.reply(`📋 <b>Últimas tareas:</b>\n\n${lines.join("\n")}`, { parse_mode: "HTML" });
       } catch (e) {
@@ -276,7 +348,7 @@ export class TelegramChannel extends BaseChannel {
           return;
         }
         const lines = entries.map(e =>
-          `<b>[${e.coordinator}/${e.phase}]</b>\n${e.entry?.slice(0, 120)}…`
+          `<b>[${escapeHtml(e.coordinator)}/${escapeHtml(e.phase)}]</b>\n${escapeHtml(e.entry?.slice(0, 120))}…`
         );
         await ctx.reply(`📖 <b>Narrativo reciente:</b>\n\n${lines.join("\n\n")}`, { parse_mode: "HTML" });
       } catch (e) {
@@ -291,10 +363,10 @@ export class TelegramChannel extends BaseChannel {
       try {
         const rows = await recentNarrative(3, query);
         if (rows.length === 0) {
-          await ctx.reply(`🔍 Sin resultados para: <i>${query}</i>`, { parse_mode: "HTML" });
+          await ctx.reply(`🔍 Sin resultados para: <i>${escapeHtml(query)}</i>`, { parse_mode: "HTML" });
           return;
         }
-        const lines = rows.map(r => `<b>[${r.coordinator}]</b> ${r.entry?.slice(0, 100)}…`);
+        const lines = rows.map(r => `<b>[${escapeHtml(r.coordinator)}]</b> ${escapeHtml(r.entry?.slice(0, 100))}…`);
         await ctx.reply(`🔍 <b>Resultados:</b>\n\n${lines.join("\n\n")}`, { parse_mode: "HTML" });
       } catch (e) {
         await ctx.reply(`❌ Error: ${(e as Error).message}`);
@@ -318,7 +390,7 @@ export class TelegramChannel extends BaseChannel {
 
     if (text === "/modo" || text?.startsWith("/modo@")) {
       try {
-        const current = await getCodeConfig("active_mode") ?? "auto";
+        const current = getExecutionMode();
         await ctx.reply(
           `🎛 <b>Modo actual:</b> <code>${current}</code>\n\nCambia con los botones:`,
           {
@@ -338,27 +410,8 @@ export class TelegramChannel extends BaseChannel {
       return;
     }
 
-    if (text === "/pausa" || text?.startsWith("/pausa@")) {
-      try {
-        const task = await latestTask(["running"]);
-        if (!task) { await ctx.reply("💤 Sin tarea activa para pausar."); return; }
-        await updateTaskStatus(task.id, "paused");
-        await ctx.reply(`⏸ Tarea <code>${shortId(task.id)}</code> pausada.`, { parse_mode: "HTML" });
-      } catch (e) {
-        await ctx.reply(`❌ Error: ${(e as Error).message}`);
-      }
-      return;
-    }
-
-    if (text === "/reanudar" || text?.startsWith("/reanudar@")) {
-      try {
-        const task = await latestTask(["paused"]);
-        if (!task) { await ctx.reply("💤 Sin tarea pausada para reanudar."); return; }
-        await updateTaskStatus(task.id, "running");
-        await ctx.reply(`▶️ Tarea <code>${shortId(task.id)}</code> reanudada.`, { parse_mode: "HTML" });
-      } catch (e) {
-        await ctx.reply(`❌ Error: ${(e as Error).message}`);
-      }
+    if (text === "/pausa" || text?.startsWith("/pausa@") || text === "/reanudar" || text?.startsWith("/reanudar@")) {
+      await ctx.reply("Una tarea en curso no se puede pausar. Usa /stop para detenerla, o /cancelar para cancelarla con confirmación.");
       return;
     }
 
@@ -367,7 +420,7 @@ export class TelegramChannel extends BaseChannel {
         const task = await latestTask(["running", "planning"]);
         if (!task) { await ctx.reply("💤 Sin tarea activa para cancelar."); return; }
         await ctx.reply(
-          `⚠️ ¿Cancelar tarea <code>${shortId(task.id)}</code>?\n<i>${task.description?.slice(0, 60)}</i>`,
+          `⚠️ ¿Cancelar tarea <code>${shortId(task.id)}</code>?\n<i>${escapeHtml(task.description?.slice(0, 60))}</i>`,
           {
             parse_mode: "HTML",
             reply_markup: {
@@ -391,29 +444,13 @@ export class TelegramChannel extends BaseChannel {
         const lines = [
           `🩺 <b>Doctor hivecode</b>\n`,
           `HiveDB: ✅ conectada`,
-          `Providers: ${providers.length > 0 ? providers.map(p => `${p.name} (${p.active ? "active" : "inactive"})`).join(", ") : "ninguno configurado"}`,
+          `Providers: ${providers.length > 0 ? providers.map(p => `${escapeHtml(p.name)} (${p.active ? "active" : "inactive"})`).join(", ") : "ninguno configurado"}`,
           `Tareas activas: ${activeTasks}`,
         ];
         await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
       } catch (e) {
         await ctx.reply(`❌ Error: ${(e as Error).message}`);
       }
-      return;
-    }
-
-    if (!isGroup && !this.isUserAllowed(chatId)) {
-      this.log.debug(`Message from unauthorized user: ${chatId}`);
-      const rejectMsg = this.config.dmPolicy === "allowlist"
-        ? `⛔ No estás autorizado.\n\n` +
-        `Tu Telegram ID: <code>${userId}</code>\n\n` +
-        `Para autorizarte:\n` +
-        `1. Ejecuta en el servidor: <code>hive config edit</code>\n` +
-        `2. Añade bajo channels.telegram.accounts.default.allowFrom:\n` +
-        `<pre>  - "tg:${userId}"</pre>\n` +
-        `3. Ejecuta: <code>hive reload</code>`
-        : `⛔ No estás autorizado para usar este bot.\n\n` +
-        `Tu Telegram ID: <code>${userId}</code>`;
-      await ctx.reply(rejectMsg, { parse_mode: "HTML" });
       return;
     }
 
@@ -568,16 +605,14 @@ export class TelegramChannel extends BaseChannel {
 
 <b>Control</b>
 <code>/modo</code>       — Ver y cambiar modo (plan/approval/auto)
-<code>/pausa</code>      — Pausar tarea activa
-<code>/reanudar</code>   — Reanudar tarea pausada
 <code>/cancelar</code>   — Cancelar tarea activa
 
 <b>Sistema</b>
 <code>/myid</code>       — Tu Telegram ID
 <code>/start</code>      — Iniciar conversación
 <code>/help</code>       — Esta ayuda
-<code>/stop</code>       — Detener bot
-<code>/new</code>        — Reiniciar sesión
+<code>/stop</code>       — Detener lo que está en curso
+<code>/new</code>        — Empezar una conversación nueva
 
 💡 <i>Envía texto libre para lanzar una tarea nueva.</i>`;
   }
@@ -593,6 +628,93 @@ export class TelegramChannel extends BaseChannel {
     }
   }
 
+  /** Strangers get one polite answer per 10 minutes, so the bot cannot be used to flood a chat. */
+  private strangerReplies: Map<string, number> = new Map();
+  private shouldReplyToStranger(chatId: string): boolean {
+    const now = Date.now();
+    const last = this.strangerReplies.get(chatId) ?? 0;
+    if (now - last < 10 * 60 * 1000) return false;
+    this.strangerReplies.set(chatId, now);
+    if (this.strangerReplies.size > 500) this.strangerReplies.clear();
+    return true;
+  }
+
+  private async handlePairing(ctx: Context, code: string, chatId: number, userId: string, isGroup: boolean): Promise<void> {
+    if (isGroup) { await ctx.reply("Vincula el bot desde un chat privado conmigo."); return; }
+    const { claimPairing } = await import("./telegram-pairing.ts");
+    const result = await claimPairing(code);
+    if (result !== "ok") {
+      this.log.warn(`Pairing attempt rejected (${result}) from ${userId}`);
+      await ctx.reply(result === "expired" ? "⌛ Ese código ya caducó. Genera uno nuevo en hivecode (F2 → Telegram)."
+        : result === "none" ? "No hay ninguna vinculación pendiente."
+        : "❌ Código incorrecto.");
+      return;
+    }
+    // The first person to present the code is the owner: only their id is served from now on.
+    const allowFrom = [...new Set([...(this.config.allowFrom ?? []), userId])];
+    this.config = { ...this.config, allowFrom, dmPolicy: this.config.dmPolicy === "open" ? "open" : "allowlist" };
+    try {
+      const { readChannelConfig, storeChannelConfig } = await import("../services/channel-config.ts");
+      const stored = await readChannelConfig("telegram", this.accountId);
+      await storeChannelConfig("default", "telegram", this.accountId, { ...stored, allowFrom, dmPolicy: this.config.dmPolicy }, true);
+    } catch (error) {
+      this.log.warn(`Pairing stored in memory only: ${(error as Error).message}`);
+    }
+    this.notifyChatId = chatId;
+    this.log.info(`Telegram bot paired with user ${userId}`);
+    await ctx.reply("✅ <b>Vinculado.</b> Eres el dueño de este bot: solo tú puedes usarlo.\nEscribe /help para ver los comandos.", { parse_mode: "HTML" });
+  }
+
+  /**
+   * Asks a person, over Telegram, to approve a tool call or a harness gate. The answer comes back through
+   * the `ta:` buttons into `resolveToolApproval`; unanswered requests are declined after 30 minutes so the
+   * run is never left hanging on a phone that nobody looks at.
+   */
+  private askToolApproval(request: ToolApprovalRequest): void {
+    const chatId = this.notifyChatId;
+    if (!this.bot || !chatId) { resolveToolApproval(request.request_id, false); return; }
+    const isGate = request.kind === "gate";
+    const html = [
+      `🔐 <b>${escapeHtml(request.title ?? (isGate ? "Aprobación requerida" : "Confirmar acción"))}</b>`,
+      isGate
+        ? `<i>${escapeHtml(request.agent)}</i> espera tu decisión: <b>${escapeHtml(request.tool)}</b>`
+        : `<i>${escapeHtml(request.agent)}</i> quiere ejecutar <code>${escapeHtml(request.tool)}</code>`,
+      request.summary && request.summary !== request.title ? escapeHtml(request.summary.slice(0, 300)) : "",
+      request.detail ? `<pre>${escapeHtml(request.detail.slice(0, 1800))}</pre>` : "",
+    ].filter(Boolean).join("\n");
+    const timer = setTimeout(() => {
+      const asked = this.toolApprovals.get(request.request_id);
+      resolveToolApproval(request.request_id, false);
+      this.clearToolApproval(request.request_id);
+      if (asked?.messageId) {
+        void this.bot?.api.editMessageText(asked.chatId, asked.messageId, `${asked.html}\n\n⌛ <b>Sin respuesta: rechazado</b>`, { parse_mode: "HTML" }).catch(() => {});
+      }
+    }, 30 * 60 * 1000);
+    this.toolApprovals.set(request.request_id, { html, chatId, timer });
+    this.bot.api.sendMessage(chatId, html, {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "✅ Aprobar", callback_data: `ta:y:${request.request_id}` },
+          { text: "❌ Rechazar", callback_data: `ta:n:${request.request_id}` },
+        ]],
+      },
+    }).then(sent => {
+      const asked = this.toolApprovals.get(request.request_id);
+      if (asked) asked.messageId = sent.message_id;
+    }).catch(error => {
+      this.log.warn(`Approval request not delivered: ${(error as Error).message}`);
+      resolveToolApproval(request.request_id, false);
+      this.clearToolApproval(request.request_id);
+    });
+  }
+
+  private clearToolApproval(requestId: string): void {
+    const asked = this.toolApprovals.get(requestId);
+    if (asked) clearTimeout(asked.timer);
+    this.toolApprovals.delete(requestId);
+  }
+
   /** Send approval request for a completed phase and wait for user response (30 min timeout) */
   async sendApprovalRequest(opts: {
     taskId: string;
@@ -602,17 +724,19 @@ export class TelegramChannel extends BaseChannel {
   }): Promise<"approve" | "skip" | "timeout"> {
     if (!this.bot || !this.notifyChatId) return "approve"; // no bot → auto-approve
     const key = `${opts.taskId}:${opts.phaseId}`;
+    const token = Math.random().toString(36).slice(2, 10);
+    this.phaseTokens.set(token, key);
 
     try {
       await this.bot.api.sendMessage(
         this.notifyChatId,
-        `📋 <b>Fase completada: ${opts.phase}</b>\n\n${opts.summary.slice(0, 600)}`,
+        `📋 <b>Fase completada: ${escapeHtml(opts.phase)}</b>\n\n${escapeHtml(opts.summary.slice(0, 600))}`,
         {
           parse_mode: "HTML",
           reply_markup: {
             inline_keyboard: [[
-              { text: "✅ Aprobar", callback_data: `approve_phase:${opts.taskId}:${opts.phaseId}` },
-              { text: "⏭ Saltar", callback_data: `skip_phase:${opts.taskId}:${opts.phaseId}` },
+              { text: "✅ Aprobar", callback_data: `ap:y:${token}` },
+              { text: "⏭ Saltar", callback_data: `ap:s:${token}` },
             ], [
               { text: "❌ Cancelar tarea", callback_data: `cancel_task:${opts.taskId}` },
             ]],
@@ -636,6 +760,8 @@ export class TelegramChannel extends BaseChannel {
   }
 
   async stop(): Promise<void> {
+    registerChannelApprovalRequester("telegram", null);
+    for (const id of [...this.toolApprovals.keys()]) { resolveToolApproval(id, false); this.clearToolApproval(id); }
     if (this.bot) {
       await this.bot.stop();
       this.running = false;
@@ -708,18 +834,12 @@ export class TelegramChannel extends BaseChannel {
     }
 
     const replyToId = this.getMessageIdFromSession(sessionId);
-    const maxLength = 4096;
-
     try {
-      if (content.length <= maxLength) {
-        await this.sendWithRetry(chatId, content, replyToId);
-      } else {
-        const chunks = this.chunkMessage(content, maxLength);
-        for (let i = 0; i < chunks.length; i++) {
-          await this.sendWithRetry(chatId, chunks[i]!, i === 0 ? replyToId : undefined);
-          if (i < chunks.length - 1) {
-            await new Promise((resolve) => setTimeout(resolve, 300));
-          }
+      const chunks = telegramMessageChunks(content);
+      for (let i = 0; i < chunks.length; i++) {
+        await this.sendWithRetry(chatId, chunks[i]!, i === 0 ? replyToId : undefined);
+        if (i < chunks.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
         }
       }
     } catch (error: unknown) {
@@ -872,64 +992,7 @@ export class TelegramChannel extends BaseChannel {
   }
 
   private markdownToHTML(text: string): string {
-    // ── Step 1: extract code blocks before any escaping ────────────────────
-    // Prevents code content from being HTML-escaped or markdown-converted.
-    const codeBlocks: string[] = [];
-    const inlineCodes: string[] = [];
-
-    let out = text
-      // Fenced code blocks (``` ... ```) — strip optional language hint
-      .replace(/```(?:[^\n]*)\n?([\s\S]*?)```/g, (_m, code: string) => {
-        const idx = codeBlocks.push(code.trim()) - 1;
-        return `\x00BLOCK${idx}\x00`;
-      })
-      // Inline code (`...`)
-      .replace(/`([^`\n]+)`/g, (_m, code: string) => {
-        const idx = inlineCodes.push(code) - 1;
-        return `\x00INLINE${idx}\x00`;
-      });
-
-    // ── Step 2: escape HTML entities in the remaining text ─────────────────
-    out = out
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-
-    // ── Step 3: block-level conversions ────────────────────────────────────
-    // Headers: ### h3, ## h2, # h1 → <b>text</b>
-    out = out.replace(/^#{1,6}\s+(.+)$/gm, "<b>$1</b>");
-
-    // Horizontal rules → blank line
-    out = out.replace(/^---+$/gm, "");
-
-    // ── Step 4: inline conversions ─────────────────────────────────────────
-    // Bold **text** or __text__
-    out = out.replace(/\*\*(.+?)\*\*/gs, "<b>$1</b>");
-    out = out.replace(/__(.+?)__/gs, "<b>$1</b>");
-
-    // Italic *text* (single star, not double) — avoid greedy cross-line
-    out = out.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/gs, "<i>$1</i>");
-
-    // Italic _text_ — only match when surrounded by non-word chars (avoids snake_case)
-    out = out.replace(/(?<!\w)_(?!\s)(.+?)(?<!\s)_(?!\w)/gs, "<i>$1</i>");
-
-    // Strikethrough ~~text~~
-    out = out.replace(/~~(.+?)~~/gs, "<s>$1</s>");
-
-    // ── Step 5: restore code placeholders (now safely escaped) ─────────────
-    // Restore inline code
-    out = out.replace(/\x00INLINE(\d+)\x00/g, (_m, i) => {
-      const code = inlineCodes[Number(i)] ?? "";
-      return `<code>${code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code>`;
-    });
-
-    // Restore block code
-    out = out.replace(/\x00BLOCK(\d+)\x00/g, (_m, i) => {
-      const code = codeBlocks[Number(i)] ?? "";
-      return `<pre><code>${code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code></pre>`;
-    });
-
-    return out;
+    return markdownToTelegramHtml(text);
   }
 }
 

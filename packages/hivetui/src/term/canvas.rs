@@ -170,6 +170,43 @@ impl Canvas {
         }
     }
 
+    /// Text of row `y` from column `x0` to `x1` (inclusive), without the trailing blanks of a short line.
+    pub fn row_text(&self, y: u16, x0: u16, x1: u16) -> String {
+        let mut line = String::new();
+        for x in x0..=x1.min(self.w.saturating_sub(1)) {
+            if let Some(cell) = self.cell_at(x, y) {
+                match cell.ch {
+                    '\0' => {}
+                    ch => line.push(ch),
+                }
+            }
+        }
+        line.trim_end().to_string()
+    }
+
+    /// The columns of the pane that holds `(x, y)`: the cells between the nearest vertical border glyphs on
+    /// that row, never beyond `min_x..=max_x`. A selection made inside a pane stays in it, so copying the
+    /// history does not drag along whatever the pane beside it shows on the same rows.
+    pub fn pane_columns(&self, x: u16, y: u16, min_x: u16, max_x: u16) -> (u16, u16) {
+        const BORDER: [char; 3] = ['│', '┃', '║'];
+        let is_border = |cx: u16| self.cell_at(cx, y).map_or(false, |c| BORDER.contains(&c.ch));
+        let mut left = min_x;
+        for cx in (min_x..=x.min(max_x)).rev() {
+            if is_border(cx) {
+                left = cx.saturating_add(1);
+                break;
+            }
+        }
+        let mut right = max_x;
+        for cx in x..=max_x {
+            if is_border(cx) {
+                right = cx.saturating_sub(1);
+                break;
+            }
+        }
+        (left.min(right), right)
+    }
+
     /// Extracts plain text from a rectangular range of cells in the back buffer.
     pub fn extract_text_range(&self, x0: u16, y0: u16, x1: u16, y1: u16) -> String {
         let (start_x, start_y, end_x, end_y) = if y0 < y1 || (y0 == y1 && x0 <= x1) {

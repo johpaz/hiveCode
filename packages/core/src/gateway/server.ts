@@ -1,3 +1,4 @@
+import { beginChannelRun, currentThreadId, endChannelRun } from "../agent/task-control";
 import { createStreamingCallbacks } from "./streaming-callbacks";
 import { findMcpServer as findMcpServer } from "../mcp/server-config";
 import { serverRuntimeConfig } from "../mcp/server-config";
@@ -444,6 +445,9 @@ export async function startGateway(config: Config): Promise<void> {
 
     const messages = [{ role: "user" as const, content: messageContentWithTime }];
 
+    // The person can stop this run from the channel (/stop) and start the conversation over (/new).
+    const runKey = `${message.channel}:${routingSessionId}`;
+    const run = beginChannelRun(runKey);
     try {
       log.info(`🤖 Routing to agent loop...`);
 
@@ -454,7 +458,8 @@ export async function startGateway(config: Config): Promise<void> {
         maxTokens: 4096,
         tools: prepareTools(agent, unifiedSessionId),
         maxSteps: DEFAULT_INTERACTIVE_MAX_STEPS,
-        threadId: unifiedSessionId,
+        threadId: await currentThreadId(unifiedSessionId, runKey),
+        signal: run.signal,
         userId,
         channel: message.channel,
         onStep: async (step) => {
@@ -532,10 +537,16 @@ export async function startGateway(config: Config): Promise<void> {
       log.info(`✅ Response sent to ${routingSessionId} via ${message.channel}`);
     } catch (error) {
       await channelManager.stopTyping(message.channel, routingSessionId);
+      if (run.signal.aborted) {
+        log.info(`⏹ Run stopped from ${runKey}`);
+        return; // /stop already told the person
+      }
       log.error(`❌ Error: ${(error as Error).message} `);
       await channelManager.send(message.channel, routingSessionId, {
         content: `Error: ${(error as Error).message} `,
       });
+    } finally {
+      endChannelRun(runKey, run);
     }
   });
 

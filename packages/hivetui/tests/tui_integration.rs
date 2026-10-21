@@ -1040,3 +1040,26 @@ fn settings_opened_from_the_welcome_screen_is_drawn() {
     }
     assert!(text.contains("Providers"), "el hub debe verse sobre la bienvenida");
 }
+
+#[test]
+fn welcome_screen_shows_the_coordinators_model_not_the_session_default() {
+    let mut state = base_state(); // provider/model de la sesión: anthropic · claude-3-5-sonnet
+    state.show_welcome = true;
+    state.apply_message(BunMessage::CoordinatorContext {
+        agent: "bee".into(),
+        session_id: None,
+        provider: "deepseek".into(),
+        model: "deepseek-v4-pro".into(),
+        context_window: None,
+        input_tokens: None,
+        estimated: false,
+    });
+
+    let mut canvas = make_canvas(140, 40);
+    renderer::render(&mut canvas, &mut state);
+    let frame = canvas.to_text_rows().join("\n");
+
+    assert!(frame.contains("deepseek"), "{frame}");
+    assert!(frame.contains("deepseek-v4-pro"), "{frame}");
+    assert!(!frame.contains("claude-3-5-sonnet"), "{frame}");
+}

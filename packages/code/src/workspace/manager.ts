@@ -202,15 +202,17 @@ export class WorkspaceManager {
    * failed task leaves its worktree behind on purpose, so the work can be inspected; over time
    * they pile up, and this is how they are found again.
    */
-  async listTaskWorktrees(projectPath: string): Promise<TaskWorktree[]> {
+  async listTaskWorktrees(projectPath: string, options: { includeSwarm?: boolean } = {}): Promise<TaskWorktree[]> {
     const listed = await this.runCommand(["git", "worktree", "list", "--porcelain"], projectPath)
     if (!listed.ok) return []
     const found: TaskWorktree[] = []
     for (const block of (listed.stdout ?? "").split(/\n\n+/)) {
       const path = /^worktree (.+)$/m.exec(block)?.[1]
-      const branch = /^branch refs\/heads\/(hivecode\/task-.+)$/m.exec(block)?.[1]
+      const branch = /^branch refs\/heads\/(hivecode\/(?:task-.+|swarm-.+))$/m.exec(block)?.[1]
       if (!path || !branch) continue
-      const taskSlug = branch.replace("hivecode/task-", "")
+      const isSwarm = branch.startsWith("hivecode/swarm-")
+      if (isSwarm && !options.includeSwarm) continue
+      const taskSlug = branch.replace(/^hivecode\/(task-)?/, "")
       let changed = false
       try {
         const assignment = this.createAssignment({ taskId: taskSlug, projectPath, mutating: true })

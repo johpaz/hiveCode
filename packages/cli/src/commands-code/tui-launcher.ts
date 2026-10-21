@@ -23,7 +23,7 @@ import { broadcastUiMessage, registerUiMessageHandler } from "@johpaz/hivecode-c
 import { registerToolApprovalRequester, resolveToolApproval } from "@johpaz/hivecode-core/agent/tool-approval"
 import { agentAlias } from "@johpaz/hivecode-core/agent/agent-identity"
 import { parseSkillTools, isMinimalSkill } from "@johpaz/hivecode-core/agent/minimal-loadout"
-import { col } from "@johpaz/hivecode-core/storage/hive"
+import { col, fromIndexable } from "@johpaz/hivecode-core/storage/hive"
 import type {
   AdrDoc,
   AgentDoc,
@@ -164,7 +164,7 @@ export interface TuiCallbacks {
     resume: (() => void) | null
     send: ((msg: BunMessage) => void) | null
     showConfigModal: ((command: string, title: string, fields: ModalField[]) => Promise<Record<string, string> | null>) | null
-    showInfoModal: ((title: string, content: string) => Promise<void>) | null
+    showInfoModal: ((title: string, content: string, copy?: string) => Promise<void>) | null
     /**
      * Re-send the full snapshot for `sessionId` after `/session resume`. The
      * caller is responsible for having already emitted `session_changed`, which
@@ -250,9 +250,9 @@ export async function launchTui(callbacks: TuiCallbacks, stdio?: TuiStdio): Prom
       return new Promise((res) => { modalResolve = res })
     }
 
-    const showInfoModal = (title: string, content: string): Promise<void> => {
+    const showInfoModal = (title: string, content: string, copy?: string): Promise<void> => {
       console.error(`[tui-ipc] showInfoModal: ${title}`)
-      send({ type: "show_info_modal", title, content })
+      send({ type: "show_info_modal", title, content, ...(copy ? { copy } : {}) })
       return new Promise((res) => { infoModalResolve = res })
     }
 
@@ -772,6 +772,21 @@ async function sendHistorySnapshot(send: (m: BunMessage) => void, sessionId: str
         timestamp: timeFrom(turn.completed_at ?? turn.created_at),
         task_id: turn.task_id ?? undefined,
       })
+    } else {
+      // A turn with no answer whose task is over would otherwise replay as "esperando respuesta…" for ever.
+      const status = turn.task_id ? (await (await col<CodeTaskDoc>("codeTasks")).get(turn.task_id).catch(() => null))?.doc.status : undefined
+      if (!status || ["failed", "cancelled", "paused", "completed", "rolled_back"].includes(status)) {
+        send({
+          type: "history_append",
+          role: "system",
+          content: status === "failed" ? "⚠ Esta tarea falló y no dejó respuesta."
+            : status === "cancelled" ? "Esta tarea se canceló antes de responder."
+            : "Esta tarea no llegó a terminar: no hay respuesta guardada.",
+          content_type: "plain",
+          timestamp: timeFrom(turn.completed_at ?? turn.created_at),
+          task_id: turn.task_id ?? undefined,
+        })
+      }
     }
   }
 }
@@ -1174,16 +1189,17 @@ export async function sendSettingsSnapshot(send: (msg: object) => void): Promise
 
   let agents: any[] = []
   try {
-    const order = ["bee", "scout", "builder", "verifier", "spider"]
+    const order = ["bee", "planner", "scout", "builder", "verifier", "spider"]
     agents = (await (await col<AgentDoc>("agents")).scan())
       .map(entry => entry.doc)
       .filter(agent => !!agent.agent_type)
-      .sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id))
+      .sort((a, b) => (order.indexOf(a.id) + 1 || 99) - (order.indexOf(b.id) + 1 || 99))
       .map(agent => ({
         id: agent.id,
         name: agent.name,
-        provider: String(agent.provider_id ?? ""),
-        model: String(agent.model_id ?? ""),
+        // Stored through toIndexable: "no value" is a sentinel, not something to show.
+        provider: String(fromIndexable(agent.provider_id) ?? ""),
+        model: String(fromIndexable(agent.model_id) ?? ""),
         effort: agent.effort ?? "medium",
         max_turns: agent.max_iterations,
         max_input_tokens: agent.max_input_tokens ?? 0,

@@ -55,3 +55,38 @@ describe("task_revise finds the task the coordinator names", () => {
     expect(result.error).toContain("task 000000000000002")
   })
 })
+
+describe("task_revise does not spend a worker run where it cannot help", () => {
+  const meta = (extra: Record<string, unknown>) => JSON.stringify({ worker_id: "builder", ref: "T010", ...extra })
+
+  test("a task whose criteria were all proven deterministically is not revised", async () => {
+    await putTask("000000000000010", { metadata: meta({ acceptance_met: true, revisions: 0 }) })
+    const result = await taskReviseTool.execute({ task_id: "T010", feedback: "se ve raro" }) as any
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain("ya cumple sus criterios")
+    expect(result.hint).toContain("acceptance")
+    // And nothing was started: the task is still completed, untouched.
+    expect((await (await col<TaskDoc>("tasks")).get("000000000000010"))?.doc.status).toBe("completed")
+  })
+
+  test("new criteria reopen a verified task", async () => {
+    await putTask("000000000000011", { metadata: meta({ acceptance_met: true, revisions: 0 }) })
+    const result = await taskReviseTool.execute({ task_id: "T010", feedback: "falta validar", acceptance: [{ id: "n", description: "valida" }] }) as any
+    // Past the guard: it got as far as running the worker (which the test environment cannot run).
+    expect(result.error ?? "").not.toContain("ya cumple sus criterios")
+  })
+
+  test("a judged task (acceptance_met null) can still be revised", async () => {
+    await putTask("000000000000012", { metadata: meta({ acceptance_met: null, revisions: 1 }), result: "r" })
+    const result = await taskReviseTool.execute({ task_id: "T010", feedback: "corrige" }) as any
+    expect(result.error ?? "").not.toMatch(/ya cumple|ya se revisó/)
+  })
+
+  test("after the revision limit the coordinator has to decide", async () => {
+    await putTask("000000000000013", { metadata: meta({ acceptance_met: false, revisions: 2 }), status: "blocked" })
+    const result = await taskReviseTool.execute({ task_id: "T010", feedback: "otra vez" }) as any
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain("ya se revisó 2 veces")
+    expect(result.hint).toContain("task_delegate")
+  })
+})

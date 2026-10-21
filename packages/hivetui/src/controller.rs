@@ -43,14 +43,26 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
 
     // ── Modal de info activo ───────────────────────────────────────────────────
     if let ModalState::Info(info) = &mut state.modal {
+        let mut to_copy: Option<String> = None;
         match key.code {
             KeyCode::Esc => {
                 state.modal = ModalState::None;
                 state.pending_ipc.push(TuiMessage::InfoModalClose);
+                return false;
             }
             KeyCode::Up   => { info.scroll = info.scroll.saturating_sub(1); }
             KeyCode::Down => { info.scroll += 1; }
+            // Y copia el valor de la ventana (un código que hay que pegar en otra parte); sin valor, todo el texto.
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('c') => {
+                to_copy = Some(info.copy.clone().unwrap_or_else(|| info.content.clone()));
+                info.copied = true;
+            }
             _ => {}
+        }
+        if let Some(text) = to_copy {
+            #[cfg(not(test))]
+            { let _ = clipboard::copy_text(&text); }
+            state.last_copied = Some(text);
         }
         return false;
     }
@@ -273,6 +285,16 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 if input == "__plan_suggest__" {
                     // Don't send a message — just close modal and let user type
                 } else {
+                    // Approving a plan decides how it runs; the header must say so instead of staying on PLAN.
+                    let executes_in = match input.as_str() {
+                        "/approve auto" => Some(ReplMode::Auto),
+                        "/approve review" => Some(ReplMode::Approval),
+                        _ => None,
+                    };
+                    if let Some(mode) = executes_in {
+                        state.session.mode = mode;
+                        state.pending_ipc.push(TuiMessage::ModeChange { mode: mode.as_str().to_string() });
+                    }
                     state.pending_ipc.push(TuiMessage::Submit { input });
                 }
             }
@@ -381,6 +403,7 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                             title: "Comandos disponibles".to_string(),
                             content: help_text(state),
                             scroll: 0,
+                            ..Default::default()
                         });
                         return false;
                     }
@@ -1252,7 +1275,8 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
                         state.history.scroll = 0;
                         restore_hscroll_for_selected(state);
                         state.selection = None;
-                        return;
+                        // No `return`: the same press may start a drag. A click only picks the entry; a drag
+                        // selects text, as in every other view (it used to be impossible in MESA).
                     }
                 }
             }
@@ -1283,7 +1307,12 @@ pub fn handle_mouse_event(state: &mut AppState, mouse: MouseEvent) {
             if let Some(ref mut sel) = state.selection {
                 if sel.active {
                     sel.active = false;
-                    state.pending_copy_request = true;
+                    // A press and release on the same cell is a click, not a selection: nothing to copy.
+                    if sel.anchor == sel.cursor {
+                        state.selection = None;
+                    } else {
+                        state.pending_copy_request = true;
+                    }
                 }
             }
         }
@@ -2473,6 +2502,42 @@ mod tests {
         assert_eq!(state.input.value(), before_input);
     }
 
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE }
+    }
+
+    #[test]
+    fn dragging_over_the_history_selects_text_in_mesa_and_keeps_the_entry() {
+        let mut state = mk_state_with_entries(3);
+        state.active_tab = TabId::Mesa;
+        let area = content_rect_from_size(&state, None).expect("content area");
+        let row = area.y;
+        let col = area.x + 2;
+
+        handle_mouse_event(&mut state, mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+        assert!(state.history.selected.is_some(), "the press still picks the entry under it");
+        assert!(state.selection.as_ref().is_some_and(|s| s.active), "and starts a text selection");
+        handle_mouse_event(&mut state, mouse(MouseEventKind::Drag(MouseButton::Left), col + 8, row));
+        handle_mouse_event(&mut state, mouse(MouseEventKind::Up(MouseButton::Left), col + 8, row));
+
+        assert!(state.pending_copy_request, "a real drag is copied");
+        assert!(state.selection.as_ref().is_some_and(|s| s.anchor != s.cursor));
+    }
+
+    #[test]
+    fn a_plain_click_selects_nothing_and_copies_nothing() {
+        for tab in [TabId::Mesa, TabId::Plan, TabId::Code, TabId::Review] {
+            let mut state = mk_state_with_entries(3);
+            state.active_tab = tab;
+            let area = content_rect_from_size(&state, None).expect("content area");
+            let (col, row) = (area.x + 2, area.y + 1);
+            handle_mouse_event(&mut state, mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+            handle_mouse_event(&mut state, mouse(MouseEventKind::Up(MouseButton::Left), col, row));
+            assert!(!state.pending_copy_request, "{tab:?}: a click is not a selection");
+            assert!(state.selection.is_none(), "{tab:?}");
+        }
+    }
+
     #[test]
     fn mouse_scroll_moves_focus_response_by_default() {
         let mut state = mk_state_with_entries(3);
@@ -2651,6 +2716,58 @@ mod tests {
 
         assert_eq!(state.dashboard_scroll, 3);
         assert_eq!(state.history.selected, Some(1));
+    }
+
+    #[test]
+    fn y_in_an_info_window_copies_its_value_and_says_so() {
+        let mut state = mk_state_with_entries(1);
+        state.modal = ModalState::Info(InfoModalState {
+            title: "Vincular Telegram".into(),
+            content: "Envía al bot:\n/start ABCD-EFGH".into(),
+            copy: Some("/start ABCD-EFGH".into()),
+            ..Default::default()
+        });
+
+        let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        assert_eq!(state.last_copied.as_deref(), Some("/start ABCD-EFGH"));
+        assert!(matches!(&state.modal, ModalState::Info(info) if info.copied));
+    }
+
+    #[test]
+    fn an_info_window_without_a_value_copies_its_whole_text() {
+        let mut state = mk_state_with_entries(1);
+        state.modal = ModalState::Info(InfoModalState { title: "t".into(), content: "uno\ndos".into(), ..Default::default() });
+        let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE));
+        assert_eq!(state.last_copied.as_deref(), Some("uno\ndos"));
+    }
+
+    #[test]
+    fn approving_a_plan_moves_the_header_out_of_plan_into_the_mode_it_runs_in() {
+        for (selected, expected, command) in [(0usize, ReplMode::Auto, "/approve auto"), (1, ReplMode::Approval, "/approve review")] {
+            let mut state = mk_state_with_entries(1);
+            state.session.mode = ReplMode::Plan;
+            state.modal = ModalState::PlanApproval(crate::state::PlanApprovalState { selected });
+
+            let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+            assert_eq!(state.session.mode, expected, "{command}");
+            let sent: Vec<_> = state.pending_ipc.iter().collect();
+            assert!(matches!(sent[0], TuiMessage::ModeChange { mode } if mode == expected.as_str()), "{command}: first the mode");
+            assert!(matches!(sent[1], TuiMessage::Submit { input } if input == command), "{command}: then the approval");
+        }
+    }
+
+    #[test]
+    fn cancelling_or_adding_context_to_a_plan_leaves_the_mode_alone() {
+        for selected in [2usize, 3] {
+            let mut state = mk_state_with_entries(1);
+            state.session.mode = ReplMode::Plan;
+            state.modal = ModalState::PlanApproval(crate::state::PlanApprovalState { selected });
+            let _ = handle_key_event(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert_eq!(state.session.mode, ReplMode::Plan);
+            assert!(!state.pending_ipc.iter().any(|m| matches!(m, TuiMessage::ModeChange { .. })));
+        }
     }
 
     #[test]

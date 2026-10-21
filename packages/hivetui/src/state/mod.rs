@@ -149,6 +149,8 @@ pub struct AppState {
     /// Set by controller when user releases mouse after selection or presses Ctrl+Shift+C.
     /// The renderer reads this, extracts text from the canvas, copies to clipboard, and clears it.
     pub pending_copy_request: bool,
+    /// Lo último que se mandó al portapapeles desde una ventana (para comprobarlo en las pruebas).
+    pub last_copied: Option<String>,
 }
 
 fn bun_event_name(msg: &crate::ipc::BunMessage) -> &'static str {
@@ -718,6 +720,11 @@ impl AppState {
                     self.harness.active_task_status = Some(status.clone());
                 }
                 let wstatus = status_to_worker_status(&status);
+                match wstatus {
+                    WorkerStatus::Done => self.swarm.release_agent(&worker, true),
+                    WorkerStatus::Failed => self.swarm.release_agent(&worker, false),
+                    _ => {}
+                }
                 self.upsert_worker(
                     worker.clone(),
                     Some(phase.clone()),
@@ -1106,8 +1113,8 @@ impl AppState {
                 });
                 self.modal_focused = 0;
             }
-            BunMessage::ShowInfoModal { title, content } => {
-                self.modal = ModalState::Info(InfoModalState { title, content, scroll: 0 });
+            BunMessage::ShowInfoModal { title, content, copy } => {
+                self.modal = ModalState::Info(InfoModalState { title, content, scroll: 0, copy, copied: false });
             }
 
             // ── Settings Hub ───────────────────────────────────────────────────

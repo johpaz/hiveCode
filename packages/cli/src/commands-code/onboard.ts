@@ -20,7 +20,8 @@ import {
   upsertProvider,
 } from "./provider-store"
 
-const VERSION = "1.0.0"
+import pkg from "../../../../package.json"
+const VERSION: string = pkg.version
 
 export async function onboard(version = VERSION): Promise<void> {
   hiveIntro(`hivecode  v${version}`)

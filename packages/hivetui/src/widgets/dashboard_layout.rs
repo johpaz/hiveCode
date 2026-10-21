@@ -587,7 +587,7 @@ pub(super) fn agent_live_line(state: &AppState, worker: &Worker) -> (String, Col
         if last.settled {
             let mark = if last.ok == Some(false) { "✗" } else { "✓" };
             return (
-                format!("{mark} {} · {}", last.tool, last.duration_ms.unwrap_or(0)),
+                format!("{mark} {} · {}ms", last.tool, last.duration_ms.unwrap_or(0)),
                 if last.ok == Some(false) { RED } else { DIM },
             );
         }

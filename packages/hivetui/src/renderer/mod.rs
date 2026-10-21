@@ -105,13 +105,14 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
     let input_area = render_main(canvas, area, state);
 
     // Apply selection highlight after all content is rendered
-    apply_selection_highlight(canvas, state);
+    let content_area = content_area_for_popup(area, state);
+    apply_selection_highlight(canvas, state, content_area);
 
     // Handle pending copy request (controller sets this, renderer executes it with canvas access)
     if state.pending_copy_request {
         if let Some(ref sel) = state.selection {
-            let text = canvas.extract_text_range(sel.anchor.0, sel.anchor.1, sel.cursor.0, sel.cursor.1);
-            if !text.is_empty() {
+            let text = selected_text(canvas, sel, content_area);
+            if !text.trim().is_empty() {
                 #[cfg(not(test))]
                 {
                     let _ = clipboard::copy_text(&text);
@@ -423,25 +424,33 @@ fn render_focus(canvas: &mut Canvas, area: Rect, state: &AppState) {
     focus_layout::render(canvas, area, state);
 }
 
-fn apply_selection_highlight(canvas: &mut Canvas, state: &AppState) {
-    let Some(ref sel) = state.selection else { return; };
-    let (x0, y0) = sel.anchor;
-    let (x1, y1) = sel.cursor;
-    let (start_x, start_y, end_x, end_y) = if y0 < y1 || (y0 == y1 && x0 <= x1) {
-        (x0, y0, x1, y1)
-    } else {
-        (x1, y1, x0, y0)
-    };
-
+/// The rows and columns a selection covers, kept inside the pane where the drag began.
+///
+/// Returns `(y, x0, x1)` per row. The first row starts at the anchor's column, the last ends at the
+/// pointer's, the rows between take the whole pane width.
+fn selection_spans(canvas: &Canvas, sel: &crate::state::Selection, content: Rect) -> Vec<(u16, u16, u16)> {
+    if content.w == 0 || content.h == 0 {
+        return Vec::new();
+    }
+    let max_x = content.right().saturating_sub(1);
+    let (left, right) = canvas.pane_columns(sel.anchor.0, sel.anchor.1, content.x, max_x);
+    let clamp = |x: u16| x.clamp(left, right);
+    let (a, b) = ((clamp(sel.anchor.0), sel.anchor.1), (clamp(sel.cursor.0), sel.cursor.1));
+    let ((start_x, start_y), (end_x, end_y)) = if a.1 < b.1 || (a.1 == b.1 && a.0 <= b.0) { (a, b) } else { (b, a) };
+    let mut spans = Vec::new();
     for y in start_y..=end_y {
         if y >= canvas.h { break; }
-        let row_start = if y == start_y { start_x } else { 0 };
-        let row_end = if y == end_y {
-            end_x.min(canvas.w.saturating_sub(1))
-        } else {
-            canvas.w.saturating_sub(1)
-        };
-        for x in row_start..=row_end {
+        let x0 = if y == start_y { start_x } else { left };
+        let x1 = if y == end_y { end_x } else { right };
+        spans.push((y, x0, x1));
+    }
+    spans
+}
+
+fn apply_selection_highlight(canvas: &mut Canvas, state: &AppState, content: Rect) {
+    let Some(ref sel) = state.selection else { return; };
+    for (y, x0, x1) in selection_spans(canvas, sel, content) {
+        for x in x0..=x1 {
             if let Some(cell) = canvas.cell_mut(x, y) {
                 if cell.ch != '\0' {
                     cell.style.bg = crossterm::style::Color::DarkGrey;
@@ -449,6 +458,15 @@ fn apply_selection_highlight(canvas: &mut Canvas, state: &AppState) {
             }
         }
     }
+}
+
+/// What the selection says, as plain text, one line per row.
+fn selected_text(canvas: &Canvas, sel: &crate::state::Selection, content: Rect) -> String {
+    selection_spans(canvas, sel, content)
+        .into_iter()
+        .map(|(y, x0, x1)| canvas.row_text(y, x0, x1))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn content_area_for_popup(area: Rect, _state: &AppState) -> Rect {
@@ -470,4 +488,59 @@ fn cursor_position(state: &AppState, input_area: Rect) -> (u16, u16) {
         .saturating_add(cursor_offset as u16)
         .min(input_area.right().saturating_sub(mode_badge_w + 4));
     (x, input_area.y + 1)
+}
+
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::state::Selection;
+    use crate::term::Style;
+
+    /// Two panes side by side, a `│` between them, each with its own text on the same rows.
+    fn two_panes() -> (Canvas, Rect) {
+        let mut canvas = Canvas::new(40, 4);
+        for y in 0..4u16 {
+            canvas.print(0, y, &format!("izq-linea-{y}"), Style::new());
+            canvas.print(20, y, "│", Style::new());
+            canvas.print(22, y, &format!("der-linea-{y}"), Style::new());
+        }
+        (canvas, Rect::new(0, 0, 40, 4))
+    }
+
+    fn sel(a: (u16, u16), c: (u16, u16)) -> Selection {
+        Selection { anchor: a, cursor: c, active: false }
+    }
+
+    #[test]
+    fn a_selection_in_the_left_pane_never_takes_the_right_pane() {
+        let (canvas, content) = two_panes();
+        // Drag from the start of row 0 to far into the right pane on row 2.
+        let text = selected_text(&canvas, &sel((0, 0), (35, 2)), content);
+        assert_eq!(text, "izq-linea-0\nizq-linea-1\nizq-linea-2");
+        assert!(!text.contains("der-"));
+    }
+
+    #[test]
+    fn a_selection_in_the_right_pane_never_takes_the_left_pane() {
+        let (canvas, content) = two_panes();
+        let text = selected_text(&canvas, &sel((22, 1), (0, 3)), content);
+        assert!(text.contains("der-linea-"), "{text}");
+        assert!(!text.contains("izq-"), "{text}");
+        assert!(!text.contains('│'), "the divider is not part of the text: {text}");
+    }
+
+    #[test]
+    fn a_selection_within_one_row_is_the_exact_slice() {
+        let (canvas, content) = two_panes();
+        assert_eq!(selected_text(&canvas, &sel((4, 1), (8, 1)), content), "linea");
+    }
+
+    #[test]
+    fn without_a_divider_the_pane_is_the_whole_content() {
+        let mut canvas = Canvas::new(30, 2);
+        canvas.print(0, 0, "una linea", Style::new());
+        canvas.print(0, 1, "otra linea", Style::new());
+        assert_eq!(selected_text(&canvas, &sel((0, 0), (9, 1)), Rect::new(0, 0, 30, 2)), "una linea\notra linea");
+    }
 }

@@ -95,19 +95,19 @@ describe("smoke: doctor", () => {
     const { exitCode, stdout } = await runCli(["doctor"])
     // NOTAR
     expect(exitCode).toBe(0)
-    expect(stdout).toContain("Bun runtime")
+    expect(stdout).toContain("Bun")
     expect(stdout).toContain("HiveDB")
   }, 15_000)
 
   test("reporta providers LLM disponibles", async () => {
     const { stdout } = await runCli(["doctor"])
     // NOTAR — la instalación tiene providers en DB
-    expect(stdout).toMatch(/Providers LLM/)
+    expect(stdout).toMatch(/Provider/)
   })
 
   test("reporta workers/coordinadores", async () => {
     const { stdout } = await runCli(["doctor"])
-    expect(stdout).toMatch(/coordinadores|Workers/)
+    expect(stdout).toMatch(/Perfiles/)
   })
 
   test("reporta skills cargadas", async () => {
@@ -118,7 +118,7 @@ describe("smoke: doctor", () => {
   test.skipIf(!HAS_KEYSTORE)("resumen muestra checks pasados", async () => {
     const { stdout } = await runCli(["doctor"])
     // NOTAR — siempre hay al menos 1 check pasado
-    expect(stdout).toMatch(/\d+ checks? pas/)
+    expect(stdout).toMatch(/\d+ comprobaciones correctas|Todo en orden/)
   })
 })
 

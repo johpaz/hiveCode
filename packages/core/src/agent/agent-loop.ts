@@ -65,7 +65,7 @@ async function executeTool(
   allTools: Array<{ name: string; execute?: (params: Record<string, unknown>, config?: any) => Promise<unknown> }>,
   toolName: string,
   args: unknown,
-  config: { user_id?: string; thread_id?: string; channel?: string; workspace?: string | null; signal?: AbortSignal; agent_id?: string; run_id?: string; approved_execution?: boolean; code_session_id?: string; code_task_id?: string }
+  config: { user_id?: string; thread_id?: string; channel?: string; workspace?: string | null; signal?: AbortSignal; agent_id?: string; run_id?: string; approved_execution?: boolean; approval_channel?: string; code_session_id?: string; code_task_id?: string }
 ): Promise<unknown> {
   const tool = allTools.find(t => t.name === toolName)
   if (!tool?.execute) {
@@ -378,6 +378,8 @@ export interface AgentLoopOptions {
   runKind?: AgentRunDoc["kind"]
   /** The harness already passed its explicit approval gate for this run. */
   approvedExecution?: boolean
+  /** Channel whose person answers approvals (a delegated worker keeps the one its coordinator was asked through). */
+  approvalChannel?: string
   /** Per-run ceiling used by the harness to keep orchestration token-bounded. */
   maxSteps?: number
   /** Answer tokens as the model produces them. Drives `assistant_chunk`. */
@@ -1044,12 +1046,13 @@ export async function* runAgent(
       }
 
       // The TUI cannot share stdin, so it is asked over IPC instead.
-      if (currentMode === "approval" && !opts.approvedExecution && callRequiresConfirmation(toolName, tc.function.arguments) && canRequestToolApproval()) {
+      if (currentMode === "approval" && !opts.approvedExecution && callRequiresConfirmation(toolName, tc.function.arguments) && canRequestToolApproval(opts.approvalChannel ?? opts.channel)) {
         const approved = await requestToolApproval({
           agent: opts.agentId,
           tool: toolName,
           summary: summarizeArgs(tc.function.arguments),
           detail: toolApprovalDetail(tc.function.arguments),
+          channel: opts.approvalChannel ?? opts.channel,
         }, opts.signal, opts.codeTaskId ?? opts.threadId)
         if (!approved) {
           const toolResultJS = { ok: false, error: `[CANCELADO] Usuario canceló '${toolName}'`, hint: "El usuario rechazó esta acción. No la repitas ni busques otra vía para hacer lo mismo; pregunta qué prefiere." }
@@ -1172,6 +1175,7 @@ export async function* runAgent(
         agent_id: opts.agentId,
         run_id: runId,
         approved_execution: opts.approvedExecution === true,
+        approval_channel: opts.approvalChannel ?? opts.channel,
       })
       
       const toolMs = Math.round(performance.now() - tTool)
@@ -1655,6 +1659,7 @@ export async function runAgentIsolated(opts: {
   parentRunId?: string
   runKind?: AgentRunDoc["kind"]
   approvedExecution?: boolean
+  approvalChannel?: string
   onStep?: (step: StepEvent) => Promise<void>
   maxSteps?: number
   signal?: AbortSignal
@@ -1681,6 +1686,7 @@ export async function runAgentIsolated(opts: {
     parentRunId: opts.parentRunId,
     runKind: opts.runKind,
     approvedExecution: opts.approvedExecution,
+    approvalChannel: opts.approvalChannel,
     onStep: opts.onStep,
     maxSteps: opts.maxSteps,
     signal: opts.signal,

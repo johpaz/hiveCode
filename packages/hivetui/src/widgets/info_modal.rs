@@ -43,7 +43,8 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &AppState) {
 
     // Scrollbar indicator + hint
     let hint_y = area.bottom().saturating_sub(1);
-    canvas.print(area.x + 2, hint_y, "↑↓ scroll  Esc cerrar", Style::new().fg(DIM));
+    let hint = if modal.copied { "✓ copiado · Esc cerrar" } else { "Y copiar · ↑↓ scroll · Esc cerrar" };
+    canvas.print(area.x + 2, hint_y, hint, Style::new().fg(if modal.copied { GREEN } else { DIM }));
 
     // Indicador de scroll si hay más contenido
     if lines.len() > content_h {

@@ -54,6 +54,10 @@ pub struct InfoModalState {
     pub title: String,
     pub content: String,
     pub scroll: usize,
+    /// Lo que copia la tecla Y: un valor concreto (un código, un comando). Sin él copia todo el contenido.
+    pub copy: Option<String>,
+    /// Ya se copió: la ayuda de abajo lo confirma.
+    pub copied: bool,
 }
 
 #[derive(Debug, Clone, Default)]
