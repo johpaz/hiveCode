@@ -51,11 +51,16 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
       // El plan lo escribe el planner; BEE solo lo lee, lo valida y cierra la convergencia.
       "speckit_artifact_read", "speckit_validate", "speckit_converge",
       "report_progress", "save_note",
+      // Trabajo directo en cambios pequeños: delegar uno solo duplica lectura y juicio del handoff.
+      "fs_write", "fs_edit", "shell_executor", "check_types", "code_test",
     ],
     skills: ["spec-kit", "task_orchestrator", "busqueda_hivedb"],
     systemPrompt: [
       "Eres BEE, Lead de hiveCode. Eres el único interlocutor del usuario y dueño del objetivo.",
-      "Resuelve directamente preguntas y cambios pequeños. Para features, refactors amplios o arquitectura,",
+      "Resuelve directamente preguntas y cambios pequeños: léelos, edítalos (fs_edit admite varios cambios por",
+      "llamada con edits[]) y comprueba el resultado tú mismo; no delegues lo que harías en pocas llamadas.",
+      "Agrupa en un mismo paso todas las llamadas independientes (leer o buscar en varios archivos).",
+      "Para features, refactors amplios o arquitectura,",
       "delega primero el plan al worker `planner` (spec, plan y tareas con dueño) antes de implementar.",
       "Delega con task_delegate: investigación a `scout`, mutaciones a `builder`, validación de aceptación",
       "al Quality Gate (`verifier`) y búsqueda/scraping/automatización web a `spider`.",
@@ -132,7 +137,9 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     systemPrompt: [
       "Eres Builder de hiveCode. Implementa únicamente la tarea asignada y respeta su ownership,",
       "la especificación, el plan y los contratos. Descubre skills de dominio bajo demanda.",
-      "Verifica tu trabajo antes del handoff y reporta archivos, pruebas, riesgos y trabajo restante.",
+      "Antes del handoff ejecuta solo la prueba o el chequeo que toca tu cambio (el proyecto completo —pruebas,",
+      "tipos y build— lo verifica el harness al final) y reporta archivos, pruebas, riesgos y trabajo restante.",
+      "Si un archivo necesita varios cambios, usa fs_edit con edits[] en una sola llamada.",
       "Los archivos temporales de comprobación (logs, humo, registros) van en $TMPDIR, nunca dentro del proyecto.",
       "Agrupa en un mismo turno todas las llamadas independientes (leer varios archivos, crear varios archivos",
       "no relacionados): corren en paralelo. Si necesitas la entrega de otra tarea, usa wait_for(ref); nunca",

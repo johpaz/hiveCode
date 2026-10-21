@@ -30,7 +30,7 @@ pub use conflicts::{AgentConflict, ConflictState};
 pub use dashboard::{
     BlackboardEvent, DashboardLevel, DashboardLevelStatus, DashboardState, HaltState, ResumeInfo, SecurityState,
 };
-pub use diff::DiffState;
+pub use diff::{DiffFile, DiffState};
 pub use crate::ipc::DiffLine;
 pub use filemap::{FileEntry, FileMapState, RiskLevel};
 pub use harness::{HarnessHealth, HarnessState};
@@ -1540,12 +1540,13 @@ impl AppState {
 
             // ── Diff activo ─────────────────────────────────────────────────────
             BunMessage::FileDiff { path, branch, stats_added, stats_removed, chunks } => {
-                self.diff.path = path;
-                self.diff.branch = branch.unwrap_or_default();
-                self.diff.stats_added = stats_added.unwrap_or(0);
-                self.diff.stats_removed = stats_removed.unwrap_or(0);
-                self.diff.lines = chunks;
-                self.diff.scroll = 0;
+                self.diff.upsert(DiffFile {
+                    path,
+                    branch: branch.unwrap_or_default(),
+                    stats_added: stats_added.unwrap_or(0),
+                    stats_removed: stats_removed.unwrap_or(0),
+                    lines: chunks,
+                });
                 self.harness.active_workspace_status = Some("diff".to_string());
                 self.route_after_diff();
             }

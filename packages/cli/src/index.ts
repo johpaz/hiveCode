@@ -38,6 +38,7 @@ const HELP = `
   hivecode provider set-default <name>  Establecer provider por defecto
   hivecode provider set-model <provider> <model>  Asignar modelo a provider
   hivecode provider test [name]    Probar conexión a provider
+  hivecode run "<tarea>"           Ejecutar una tarea sin TUI (--out, --provider, --model, --max-minutes)
   hivecode upgrade             Verificar actualizaciones
   hivecode exit                Detener el sistema
   hivecode free                Modelos hivecode-free (requiere login)
@@ -151,6 +152,13 @@ async function main(): Promise<void> {
           console.log(HELP)
           process.exit(1)
       }
+      break
+    }
+
+    case "run": {
+      await ensureGlobalInit()
+      const { runHeadless } = await import("./commands-code/headless-run")
+      await runHeadless(normalizedArgs.slice(1))
       break
     }
 

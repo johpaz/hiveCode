@@ -665,7 +665,7 @@ fn plan_layout_shows_adrs_in_plan_mode() {
 
     let frame = canvas.to_text_rows().join("\n");
     assert!(frame.contains("PRD / TAREA"));
-    assert!(frame.contains("PLAN EN CONSTRUCCIÓN"));
+    assert!(frame.contains("PLAN PARA APROBACIÓN"));
     assert!(frame.contains("Usar JWT para sesiones"), "Plan layout debe mostrar el título del ADR en contexto");
 }
 

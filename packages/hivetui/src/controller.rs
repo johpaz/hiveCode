@@ -745,6 +745,13 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                 }
             }
         }
+        // Navegar entre archivos con diff en Code tab ([ y ])
+        (_, KeyCode::Char('[')) if state.active_tab == TabId::Code && state.input.value().is_empty() => {
+            state.diff.select_relative(-1);
+        }
+        (_, KeyCode::Char(']')) if state.active_tab == TabId::Code && state.input.value().is_empty() => {
+            state.diff.select_relative(1);
+        }
         // Navegar entre ADRs en Review tab ([ y ])
         (_, KeyCode::Char('[')) if state.active_tab == TabId::Review => {
             if state.adrs.selected > 0 {

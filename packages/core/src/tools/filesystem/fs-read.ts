@@ -15,6 +15,9 @@ const log = logger.child("fs-read");
 /** Most characters one read returns, whatever the line count. */
 const MAX_READ_CHARS = 20_000;
 
+/** Lines returned when a larger file is read without offset/limit. */
+const LARGE_FILE_LINES = 500;
+
 export const fsReadTool: Tool = {
   name: "fs_read",
   description: "Read file content from agent workspace. Spanish: leer archivo, ver contenido, abrir archivo",
@@ -54,25 +57,17 @@ export const fsReadTool: Tool = {
       const lines = content.split("\n");
       const totalLines = lines.length;
 
-      // §39.4 — warn when reading a large file without offset/limit
-      if (totalLines > 500 && rawOffset === undefined && (params.limit as number | undefined) === undefined) {
-        return {
-          ok: true,
-          path: filePath,
-          content: "",
-          totalLines,
-          linesRead: 0,
-          warning: `Archivo grande (${totalLines} líneas). Protocolo §39: usa parse_ast primero para obtener el mapa estructural, luego fs_read con offset y limit para leer solo el fragmento necesario.`,
-          requiresProtocol: true,
-        };
-      }
+      // A large file read without offset/limit still returns its first lines (never an empty turn),
+      // with the way to continue.
+      const bounded = totalLines > LARGE_FILE_LINES && rawOffset === undefined && (params.limit as number | undefined) === undefined;
+      const effectiveLimit = bounded ? LARGE_FILE_LINES : limit;
 
       // Support negative offset: -20 → last 20 lines
       const resolvedOffset = rawOffset === undefined ? 1 : rawOffset;
       const start = resolvedOffset < 0
         ? Math.max(0, totalLines + resolvedOffset)
         : Math.max(0, resolvedOffset - 1);
-      const end = Math.min(totalLines, start + limit);
+      const end = Math.min(totalLines, start + effectiveLimit);
       let selected = lines.slice(start, end);
 
       // Line limits do not bound size (a minified file is one line). Cap the
@@ -99,6 +94,11 @@ export const fsReadTool: Tool = {
           truncated: true,
           nextOffset: start + selected.length + 1,
           note: `Lectura cortada a ~${MAX_READ_CHARS} caracteres. Continúa con fs_read offset=${start + selected.length + 1}.`,
+        }),
+        ...(!truncated && bounded && {
+          truncated: true,
+          nextOffset: start + selected.length + 1,
+          note: `Archivo grande (${totalLines} líneas): se devolvieron las primeras ${selected.length}. Continúa con fs_read offset=${start + selected.length + 1}, o usa parse_ast para ver su estructura.`,
         }),
       };
     } catch (error) {

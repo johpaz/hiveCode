@@ -156,23 +156,9 @@ const finishedAt = Date.now()
 say(`terminó en ${((finishedAt - startedAt) / 60000).toFixed(1)} min${error ? ` (con error)` : ""}`)
 
 // ── What the run left behind ────────────────────────────────────────────────────────────────
-const ms = (t: number) => (t < 1e12 ? t * 1000 : t)
-const runs = (await (await col<any>("agentRuns")).scan()).map(e => e.doc).filter(r => ms(r.created_at) >= startedAt - 1000)
-const tools = (await (await col<any>("toolRuns")).scan()).map(e => e.doc).filter(t => ms(t.started_at) >= startedAt - 1000)
-const dur = (r: any) => (ms(r.completed_at ?? r.updated_at) - ms(r.created_at)) / 1000
-const workers = runs.filter(r => r.kind === "worker")
-const events = workers.flatMap(r => [[ms(r.created_at), 1], [ms(r.completed_at ?? r.updated_at), -1]] as const).sort((a, b) => a[0] - b[0])
-let active = 0, maxConcurrent = 0
-for (const [, delta] of events) { active += delta; maxConcurrent = Math.max(maxConcurrent, active) }
-
-const isRevision = (r: any) => String(r.objective).startsWith("Revisión de una tarea")
-const sum = (items: any[], f: (r: any) => number) => items.reduce((s, r) => s + f(r), 0)
-
-const blockers: Record<string, number> = {}
-for (const r of runs.filter(r => r.status === "blocked")) blockers[String(r.blocker)] = (blockers[String(r.blocker)] ?? 0) + 1
-
-const readLines = (file: string) => (existsSync(file) ? readFileSync(file, "utf-8").trim().split("\n").filter(Boolean).map(l => JSON.parse(l)) : [])
-const raw = readLines(rawLog)
+// The same module the binary's `hivecode run` uses: one yardstick, two ways of measuring.
+const { collectRunReport } = await import("../packages/code/src/runtime/task-report")
+const report = await collectRunReport({ project, startedAt, rawLogPath: rawLog })
 
 let tests = { pass: 0, fail: 0, files: 0, ran: false }
 {
@@ -186,52 +172,21 @@ let tests = { pass: 0, fail: 0, files: 0, ran: false }
   }
 }
 
-const leftoverWorktrees = git("worktree", "list", "--porcelain").split("\n").filter(l => l.startsWith("worktree ")).length - 1
-// Swarm: parallel instances, merges, waits, and the shell polling that wait_for replaces.
-const toolEvents = tools.flatMap(t => [[ms(t.started_at), 1], [ms(t.completed_at ?? t.started_at), -1]] as const).sort((a, b) => a[0] - b[0])
-let activeTools = 0, maxConcurrentTools = 0
-for (const [, delta] of toolEvents) { activeTools += delta; maxConcurrentTools = Math.max(maxConcurrentTools, activeTools) }
-const delegationResults = tools.filter(t => t.tool_name === "task_delegate" || t.tool_name === "task_revise").map(t => String(t.result_json ?? ""))
-const swarm = {
-  instancesUsed: [...new Set(runs.filter(r => /#\d+$/.test(String(r.agent_id))).map(r => r.agent_id))],
-  mergesOk: delegationResults.filter(r => /"merge":"(integrated|noop)"/.test(r)).length,
-  mergeConflicts: delegationResults.filter(r => /"merge":"(conflict|failed)"/.test(r)).length,
-  dependencyBlocks: delegationResults.filter(r => r.includes("blocked_by")).length,
-  waitFor: tools.filter(t => t.tool_name === "wait_for").length,
-  shellSleepPolling: tools.filter(t => t.tool_name === "shell_executor" && /\bsleep\b/.test(String(t.args_json ?? ""))).length,
-  maxConcurrentTools,
-  toolCalls: tools.length,
-  steps: sum(runs, r => r.turn ?? 0),
-  toolCallsPerStep: +(tools.length / Math.max(1, sum(runs, r => r.turn ?? 0))).toFixed(2),
-}
-
 const result = {
   task: values.task,
-  minutes: +((finishedAt - startedAt) / 60000).toFixed(2),
+  minutes: report.minutes,
   error: error ?? null,
-  integrated: leftoverWorktrees === 0 && existsSync(`${project}/package.json`),
-  leftoverWorktrees,
+  integrated: report.integrated,
+  hasPackageJson: report.hasPackageJson,
+  leftoverWorktrees: report.leftoverWorktrees,
   projectTests: tests,
-  runs: {
-    total: runs.length,
-    byAgent: Object.fromEntries([...new Set(runs.map(r => r.agent_id))].map(a => [a, runs.filter(r => r.agent_id === a).length])),
-    blocked: runs.filter(r => r.status === "blocked").length,
-    blockers,
-    revisions: workers.filter(isRevision).length,
-    maxConcurrentWorkers: maxConcurrent,
-  },
-  tokens: { input: sum(runs, r => r.input_tokens), output: sum(runs, r => r.output_tokens) },
-  costUsd: +sum(runs, r => r.cost_usd ?? 0).toFixed(4),
-  workerMinutes: {
-    total: +(sum(workers, dur) / 60).toFixed(1),
-    revisions: +(sum(workers.filter(isRevision), dur) / 60).toFixed(1),
-  },
-  swarm,
-  delegations: { delegate: tools.filter(t => t.tool_name === "task_delegate").length, revise: tools.filter(t => t.tool_name === "task_revise").length },
-  modelOddities: {
-    markupDropped: raw.filter(r => r.parsed === 0 && !r.empty).length,
-    emptyResponses: raw.filter(r => r.empty).length,
-  },
+  runs: report.runs,
+  tokens: report.tokens,
+  costUsd: report.costUsd,
+  workerMinutes: report.workerMinutes,
+  swarm: report.swarm,
+  delegations: report.delegations,
+  modelOddities: report.modelOddities,
   warningsShown: warnings,
   finalAnswer: final.slice(0, 600),
 }

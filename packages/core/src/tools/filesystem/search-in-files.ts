@@ -6,16 +6,24 @@
  * @spanish buscar en archivos, grep, buscar patrón
  */
 
+import { stat } from "node:fs/promises";
 import type { Tool } from "../types.ts";
 import { logger } from "../../utils/logger.ts";
 import { resolveInWorkspace, getWorkspace } from "./workspace-guard.ts";
 
 const log = logger.child("search-in-files");
-const MAX_MATCHES = 100;
+const DEFAULT_MAX_MATCHES = 100;
+const HARD_MAX_MATCHES = 500;
+const MAX_CONTEXT = 5;
+const DEFAULT_GLOB = "**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yaml,yml,toml,rs,py,go}";
+/** Directories that are never the answer and can hold thousands of files. */
+const SKIPPED_DIR = /(^|\/)(node_modules|\.git|dist|build|target|\.next|coverage)\//;
+
+type Match = { file: string; line: number; content: string; before?: string[]; after?: string[] };
 
 export const searchInFilesTool: Tool = {
   name: "search_in_files",
-  description: "Search for a string or regex pattern in a file or directory. Returns matching lines with line numbers. Spanish: buscar en archivos, grep, buscar patrón",
+  description: "Search for a string or regex pattern in a file or directory (like grep). Returns matching lines with line numbers; filter files with glob, add surrounding lines with context, or list only the matching files with output='files'. Spanish: buscar en archivos, grep, buscar patrón",
   parameters: {
     type: "object",
     properties: {
@@ -30,6 +38,23 @@ export const searchInFilesTool: Tool = {
       flags: {
         type: "string",
         description: "Regex flags: 'i' for case-insensitive, 'g' is always applied (default: '')",
+      },
+      glob: {
+        type: "string",
+        description: "Only search files matching this glob, relative to path (e.g. '**/*.ts', 'src/**/*.test.ts'). Default: common source and config files.",
+      },
+      context: {
+        type: "number",
+        description: `Lines of context before and after each match (0-${MAX_CONTEXT}, default 0)`,
+      },
+      output: {
+        type: "string",
+        enum: ["lines", "files"],
+        description: "'lines' (default) returns matching lines; 'files' returns only the files that match, with their match count",
+      },
+      limit: {
+        type: "number",
+        description: `Maximum matches to return (default ${DEFAULT_MAX_MATCHES}, max ${HARD_MAX_MATCHES})`,
       },
     },
     required: ["pattern", "path"],
@@ -53,21 +78,33 @@ export const searchInFilesTool: Tool = {
       regex = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags);
     }
 
+    const context = Math.min(MAX_CONTEXT, Math.max(0, Math.floor(Number(params.context) || 0)));
+    const filesOnly = params.output === "files";
+    const maxMatches = Math.min(HARD_MAX_MATCHES, Math.max(1, Math.floor(Number(params.limit) || DEFAULT_MAX_MATCHES)));
+    const globPattern = typeof params.glob === "string" && params.glob ? params.glob : DEFAULT_GLOB;
+
     log.debug(`Searching "${pattern}" in ${targetPath}`);
 
-    const matches: { file: string; line: number; content: string }[] = [];
+    const matches: Match[] = [];
+    const perFile = new Map<string, number>();
 
     async function searchFile(filePath: string): Promise<void> {
-      if (matches.length >= MAX_MATCHES) return;
+      if (matches.length >= maxMatches) return;
       try {
         const content = await Bun.file(filePath).text();
         const lines = content.split("\n");
         for (let i = 0; i < lines.length; i++) {
-          if (matches.length >= MAX_MATCHES) break;
+          if (matches.length >= maxMatches) break;
           regex.lastIndex = 0;
-          if (regex.test(lines[i])) {
-            matches.push({ file: filePath, line: i + 1, content: lines[i].trim() });
+          if (!regex.test(lines[i])) continue;
+          perFile.set(filePath, (perFile.get(filePath) ?? 0) + 1);
+          if (filesOnly) { matches.push({ file: filePath, line: i + 1, content: "" }); continue; }
+          const match: Match = { file: filePath, line: i + 1, content: lines[i].trim() };
+          if (context > 0) {
+            match.before = lines.slice(Math.max(0, i - context), i).map(l => l.trimEnd());
+            match.after = lines.slice(i + 1, i + 1 + context).map(l => l.trimEnd());
           }
+          matches.push(match);
         }
       } catch {
         // Skip unreadable files silently
@@ -75,17 +112,16 @@ export const searchInFilesTool: Tool = {
     }
 
     try {
-      const stat = await Bun.file(targetPath).stat?.() ?? null;
-      // Bun.file().stat() works for files; for dirs we use the glob approach
-      const isDir = stat === null || (stat as any)?.isDirectory?.() === true;
+      const isDir = (await stat(targetPath)).isDirectory();
 
       if (!isDir) {
         await searchFile(targetPath);
       } else {
         // Recursive directory search using Bun's glob
-        const glob = new Bun.Glob("**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yaml,yml,toml,rs,py,go}");
+        const glob = new Bun.Glob(globPattern);
         for await (const entry of glob.scan({ cwd: targetPath, onlyFiles: true })) {
-          if (matches.length >= MAX_MATCHES) break;
+          if (matches.length >= maxMatches) break;
+          if (SKIPPED_DIR.test(`/${entry}`)) continue;
           await searchFile(`${targetPath}/${entry}`);
         }
       }
@@ -93,13 +129,18 @@ export const searchInFilesTool: Tool = {
       return { ok: false, error: `Search failed: ${(error as Error).message}` };
     }
 
+    const truncated = matches.length >= maxMatches;
+    if (filesOnly) {
+      const files = [...perFile].map(([file, count]) => ({ file, count }));
+      return { ok: true, pattern, path: targetPath, files, count: files.length, truncated };
+    }
     return {
       ok: true,
       pattern,
       path: targetPath,
       matches,
       count: matches.length,
-      truncated: matches.length >= MAX_MATCHES,
+      truncated,
     };
   },
 };

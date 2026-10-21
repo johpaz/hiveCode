@@ -110,6 +110,33 @@ const SINGLE_TOOL_DOMINANCE_NUDGE = 3
 const SINGLE_TOOL_DOMINANCE_LIMIT = 5
 /** Orchestration tools: calling them in a row is the job, not a loop. */
 const DOMINANCE_EXEMPT_TOOLS = new Set(["task_delegate", "task_revise", "task_status", "wait_for"])
+/** Failures of the same tool, in a row, before we point out that it is not converging. */
+const FAILED_COMMAND_NUDGE = 4
+
+/**
+ * Un comando que falla es información; el mismo fallo otra vez, con otro comando, es ruido.
+ *
+ * El detector de repeticiones compara llamadas *idénticas*, así que no ve a un modelo que
+ * prueba variantes de un mismo comando que falla (`tsc --noEmit`, `tsc --noEmit --types bun`,
+ * `bunx tsc`…): cada una es una firma nueva. Medido el 21-oct-2026: 52 llamadas al shell en
+ * una tarea de un archivo, casi todas variantes de un chequeo de tipos que no convergía.
+ *
+ * Un acierto borra la cuenta de esa herramienta: reintentar una prueba después de arreglar el
+ * código es progreso, no un bucle.
+ */
+export class FailedCommandTracker {
+  private readonly counts = new Map<string, number>()
+
+  record(toolName: string, failed: boolean): number {
+    if (!failed) {
+      this.counts.delete(toolName)
+      return 0
+    }
+    const count = (this.counts.get(toolName) ?? 0) + 1
+    this.counts.set(toolName, count)
+    return count
+  }
+}
 /** Sampling temperature for the tool-calling loop. Matches the worker loop's 0.3. */
 const TOOL_CALLING_TEMPERATURE = 0.3
 /**
@@ -214,9 +241,15 @@ function canonicalJSON(value: unknown): string {
 
 const FILE_WRITING_TOOLS = new Set(["fs_write", "fs_edit", "fs_delete", "speckit_artifact_write"])
 
+/** Whether a finished call actually failed, however the tool chose to say so. */
+export function toolResultFailed(result: string): boolean {
+  if (!result) return false
+  return result.startsWith("[Tool Error]") || /(^|[\s{,"])ok"?:\s*false/.test(result.slice(0, 160))
+}
+
 /** Whether a finished call actually changed files, which is what makes repeating a command fair. */
 export function changedWorkspace(toolName: string, argsJson: unknown, result: string): boolean {
-  if (result.startsWith("[Tool Error]") || /(^|[\s{,"])ok"?:\s*false/.test(result.slice(0, 160))) return false
+  if (toolResultFailed(result)) return false
   if (FILE_WRITING_TOOLS.has(toolName)) return true
   if (toolName !== "shell_executor") return false
   let args: unknown = argsJson
@@ -762,6 +795,8 @@ export async function* runAgent(
   let finalContentEmitted = false
   // Loop detection: counts repeated calls across the whole run, nudging before breaking.
   let repeats = new RepeatTracker()
+  // Failures in a row of the same tool: variants of a command that does not work.
+  const failedCommands = new FailedCommandTracker()
   let loopDetected = false
   let wrapUpAnnounced = false
   let markupRetries = 0
@@ -1299,16 +1334,9 @@ export async function* runAgent(
       // ride along inside the tool result the model is about to read.
       const verdict = repeats.record(r.name, r.sig)
       if (changedWorkspace(r.name, r.argsJson, r.toolResultLLM)) repeats.noteProgress()
+      const failedStreak = failedCommands.record(r.name, toolResultFailed(r.toolResultLLM))
       let resultContent = r.toolResultLLM
-      if (verdict === "nudge") {
-        const repeatCount = repeats.countFor(r.sig)
-        const streak = repeats.streakFor(r.name)
-        resultContent += `\n\n[AVISO DEL HARNESS] Ya llamaste \`${r.name}\``
-          + (repeatCount > 1 ? ` ${repeatCount} veces con estos mismos argumentos` : ` ${streak} veces seguidas`)
-          + ` y el objetivo no avanzó. No repitas esta llamada: cambia de enfoque, usa otra`
-          + ` herramienta, o responde al usuario con lo que tengas.`
-        log.warn(`[agent-loop] Repeat nudge: "${r.name}" repeat=${repeatCount} streak=${streak}`)
-      } else if (verdict === "stop") {
+      if (verdict === "stop") {
         log.warn(`[agent-loop] Loop detected: "${r.name}" repeat=${repeats.countFor(r.sig)} streak=${repeats.streakFor(r.name)}. Breaking.`)
         runStatus = "blocked"
         blocker = `repeated_tool_call:${r.name}`
@@ -1316,6 +1344,21 @@ export async function* runAgent(
         // message's tool_calls all have their matching tool replies. Breaking here would
         // leave the history invalid.
         loopDetected = true
+      } else if (verdict === "nudge") {
+        const repeatCount = repeats.countFor(r.sig)
+        const streak = repeats.streakFor(r.name)
+        resultContent += `\n\n[AVISO DEL HARNESS] Ya llamaste \`${r.name}\``
+          + (repeatCount > 1 ? ` ${repeatCount} veces con estos mismos argumentos` : ` ${streak} veces seguidas`)
+          + ` y el objetivo no avanzó. No repitas esta llamada: cambia de enfoque, usa otra`
+          + ` herramienta, o responde al usuario con lo que tengas.`
+        log.warn(`[agent-loop] Repeat nudge: "${r.name}" repeat=${repeatCount} streak=${streak}`)
+      } else if (failedStreak >= FAILED_COMMAND_NUDGE) {
+        // Variants of a command that does not work: the fix is to read the error, not to
+        // try the next flag. This is a warning, never a stop: some retries are legitimate.
+        resultContent += `\n\n[AVISO DEL HARNESS] Los últimos ${failedStreak} intentos de \`${r.name}\` fallaron.`
+          + ` No pruebes otra variante del mismo comando: lee el error, corrige la causa y vuelve a intentarlo una vez.`
+          + ` Si las pruebas del proyecto fallan, usa \`code_test\`; para los tipos, \`check_types\`.`
+        log.warn(`[agent-loop] Failing command streak: "${r.name}" failures=${failedStreak}`)
       }
 
       // Stuck / stall detection runs on every result, including the ones the

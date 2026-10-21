@@ -28,7 +28,7 @@ import type { LLMMessage, LLMToolDef, ContentPart } from "./llm-client"
 import type { MCPClientManager } from "@johpaz/hivecode-mcp"
 import { syncToolCatalogToIndex, mcpToolFullName } from "./tool-selector"
 import { syncSkillsToIndex, getMinimalSkills, selectSkills, type SkillDescriptor } from "./skill-selector"
-import { COORDINATOR_PINNED_TOOLS, MINIMAL_TOOLS } from "./minimal-loadout"
+import { COORDINATOR_PINNED_TOOLS, COORDINATOR_WORK_TOOLS, MINIMAL_TOOLS } from "./minimal-loadout"
 import { getHiveDb } from "../storage/hivedb"
 import { causalLogEnabled } from "../storage/causal-events"
 import { syncPlaybookToIndex } from "./playbook-selector"
@@ -339,7 +339,7 @@ export async function compileContext(opts: {
   const initialToolNames = new Set(MINIMAL_TOOLS)
   if (isCoordinator) {
     for (const name of configuredToolNames) {
-      if (name === "spawn_agent" || name === "get_project_context" || name.startsWith("speckit_") || COORDINATOR_PINNED_TOOLS.has(name)) initialToolNames.add(name)
+      if (name === "spawn_agent" || name === "get_project_context" || name.startsWith("speckit_") || COORDINATOR_PINNED_TOOLS.has(name) || COORDINATOR_WORK_TOOLS.has(name)) initialToolNames.add(name)
     }
   } else if (isSpecialistProfile) {
     for (const name of configuredToolNames) initialToolNames.add(name)
@@ -618,13 +618,15 @@ export async function compileContext(opts: {
       `${minimalToolsDocs}\n\n` +
       `**REGLAS DE USO:**\n` +
       `1. Si ya recibiste PROJECT CONTEXT, úsalo. Consulta get_project_context solo para ampliar información faltante, con query, paths y scope="task".\n` +
-      `2. Si necesitas una herramienta que no esté en la lista arriba → USA \`search_knowledge\` para encontrarla:\n` +
+      `2. Tienes además estas herramientas nativas en tu contexto: ${filteredNativeTools.map(t => t.name).join(", ") || "—"}.\n` +
+      `   Úsalas directamente. Buscar "herramienta para hacer X" cuando X ya es una de ellas gasta un turno entero.\n` +
+      `3. Si necesitas algo que de verdad no esté en tu contexto (MCP, skills, playbook, código del proyecto) → \`search_knowledge\`:\n` +
       `   - Herramientas nativas: \`search_knowledge(type="tools", query="<qué necesitas>")\`\n` +
       `   - Herramientas MCP (externas): \`search_knowledge(type="mcp", query="<qué necesitas>")\`\n` +
       `   - Código fuente del proyecto: \`search_knowledge(type="code", query="<función o clase>")\`\n` +
       `   - Todo junto: \`search_knowledge(type="all", query="<qué necesitas>")\`\n` +
-      `2. NUNCA uses una herramienta MCP si existe una nativa equivalente en el catálogo\n` +
-      `3. Las herramientas MCP se activan dinámicamente vía search_knowledge — NO están en tu contexto por defecto\n\n` +
+      `4. NUNCA uses una herramienta MCP si existe una nativa equivalente en el catálogo\n` +
+      `5. Las herramientas MCP se activan dinámicamente vía search_knowledge — NO están en tu contexto por defecto\n\n` +
       `# CATÁLOGO DE HERRAMIENTAS\n` +
       `Usá \`search_knowledge\` para descubrir:\n` +
       `- Skills (instrucciones de tareas complejas): type="skills"\n` +
@@ -678,11 +680,23 @@ export async function compileContext(opts: {
 
   // For isolated workers, add task context + tool discovery instruction
   if (isWorker && opts.taskContext) {
+    // The worker already has its profile's tools in the request. Saying "you start with basic
+    // tools" made weaker models go looking for a shell runner they were already holding: seven
+    // `search_knowledge` calls before the first line of code, each one a full context round-trip.
+    const inHand = toolsForLLM.map(t => t.function.name).filter(Boolean)
     systemPrompt += `\n\n# HERRAMIENTAS DISPONIBLES\n` +
-      `Arrancas con herramientas básicas. Si tu tarea requiere herramientas adicionales (web_search, fs_read, browser_navigate, etc.):\n` +
-      `1. Usá \`search_knowledge(type="tools", query="<herramienta o tarea>")\` para encontrarlas.\n` +
-      `2. Las herramientas que encuentres estarán disponibles para usar inmediatamente.\n` +
-      `Si el coordinador te indicó herramientas específicas, buscalas primero con search_knowledge antes de ejecutar tu tarea.\n` +
+      `Ya tienes estas herramientas en tu contexto: ${inHand.join(", ")}.\n` +
+      `Úsalas directamente. NO busques herramientas que ya están aquí: buscar "cómo ejecutar un comando" ` +
+      `o "herramienta para escribir un archivo" gasta un turno entero y no devuelve nada nuevo.\n` +
+      `Usa \`search_knowledge\` sólo para lo que de verdad no está en la lista: herramientas MCP externas, ` +
+      `skills, playbook o código del proyecto.\n` +
+      `\n# CÓMO SE USA CADA COSA\n` +
+      `- Leer un archivo: \`fs_read\` · listar: \`fs_list\` · buscar en el código: \`search_in_files\`\n` +
+      `- Escribir o cambiar un archivo: \`fs_write\` / \`fs_edit\` (no con redirecciones de shell)\n` +
+      `- **Correr las pruebas: \`code_test\`. Revisar tipos: \`check_types\`. Compilar: \`code_build\`.**\n` +
+      `  Estas tres herramientas ya hacen el trabajo: no reproduzcas \`bun test\`, \`tsc --noEmit\` ni \`bun build\` a mano con \`shell_executor\`.\n` +
+      `- \`shell_executor\` es para lo que no hay herramienta: instalar dependencias, git, procesos.\n` +
+      `- Antes de repetir un comando que falló: lee el error y corrige la causa. Probar variantes del mismo comando no converge.\n` +
       `\n# CURRENT TASK\n${opts.taskContext}\n\nFocus ONLY on this task. Do not deviate.`
   }
 

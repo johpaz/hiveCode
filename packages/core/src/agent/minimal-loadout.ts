@@ -33,6 +33,16 @@ export const MINIMAL_TOOLS = new Set([
  */
 export const COORDINATOR_PINNED_TOOLS = new Set(["task_delegate", "task_revise", "task_status"])
 
+/**
+ * The tools of ordinary coding work — read, search, edit, run. The coordinator holds them from
+ * the first turn so a small change is done directly, as Claude Code does, instead of paying a
+ * `search_knowledge` round trip per tool or a delegation to a worker that has them.
+ */
+export const COORDINATOR_WORK_TOOLS = new Set([
+  "fs_read", "fs_list", "fs_glob", "search_in_files",
+  "fs_edit", "fs_write", "shell_executor", "check_types", "code_test",
+])
+
 /** Splits a SkillDoc's comma-separated `tools` column into tool names. */
 export function parseSkillTools(toolsCsv: string | null | undefined): string[] {
   return (toolsCsv ?? "")

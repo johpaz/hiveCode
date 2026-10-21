@@ -978,6 +978,10 @@ export interface HarnessTaskDoc {
   worktreePath?: string;
   branchName?: string;
   mutating: boolean;
+  /** Route the weight estimate chose, and the signals behind it. */
+  route?: "conversation" | "scoped" | "feature";
+  routeSignals?: string[];
+  routeScore?: number;
   blocker?: string;
   nextAction?: string;
   createdAt: number;

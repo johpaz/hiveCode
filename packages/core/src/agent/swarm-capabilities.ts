@@ -89,7 +89,10 @@ export async function describeSwarmCapabilities(
 }
 
 /** Tools whose results do not depend on each other; safe to run concurrently. */
-const READ_ONLY_TOOLS = /^(fs_read|fs_list|fs_glob|fs_exists|web_search|web_fetch|memory_read|memory_search|artifact_read|artifact_inspect|task_status|agent_find)$/
+const READ_ONLY_TOOLS = /^(fs_read|fs_list|fs_glob|fs_exists|search_in_files|find_imports|parse_ast|git_status|git_diff|git_log|web_search|web_fetch|memory_read|memory_search|artifact_read|artifact_inspect|task_status|agent_find)$/
+
+/** Read-only tools that look inside files: next to a write they may depend on what it changes. */
+const FILE_CONTENT_READS = /^(fs_read|fs_list|fs_glob|search_in_files|find_imports|parse_ast|git_status|git_diff|git_log)$/
 
 /** Tools that write one named file. */
 const FILE_WRITE_TOOLS = /^(fs_write|fs_edit)$/
@@ -126,8 +129,9 @@ export async function structuralParallelism(calls: ToolCallLike[]): Promise<{ ki
     const read = calls.filter(c => !FILE_WRITE_TOOLS.test(c.function.name))
     const safe = written.every(Boolean)
       && new Set(written).size === written.length
-      // fs_list / fs_glob / web reads name no file of the batch; fs_read of a written file is a dependency.
-      && read.every(c => !/^(fs_read|fs_list|fs_glob)$/.test(c.function.name) || (c.function.name === "fs_read" && !written.includes(target(c))))
+      // Web reads name no file of the batch; fs_read of a written file is a dependency, and a search,
+      // listing, AST or git read may see the write, so those never share a batch with one.
+      && read.every(c => !FILE_CONTENT_READS.test(c.function.name) || (c.function.name === "fs_read" && !written.includes(target(c))))
     return { kind: "writes", safe }
   }
   if (names.every(n => n === "spawn_agent")) {

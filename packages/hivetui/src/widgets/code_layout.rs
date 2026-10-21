@@ -64,6 +64,12 @@ fn render_diff_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
     // Backend indicator top-right
     canvas.print(backend_x, area.y, backend_tag, Style::new().fg(BLUE));
 
+    if state.diff.files.len() > 1 {
+        let idx = state.diff.active_index().map(|i| i + 1).unwrap_or(1);
+        let strip = format!("archivo {}/{} · [ ] cambiar", idx, state.diff.files.len());
+        canvas.print(area.x + 1, area.y + 1, &truncate_cells(&strip, area.w.saturating_sub(2) as usize), Style::new().fg(AMBER_DIM));
+    }
+
     let avail_h = area.h.saturating_sub(3) as usize;
     let start = state.diff.scroll.min(state.diff.lines.len().saturating_sub(avail_h));
     let mut y = area.y + 2;
@@ -124,7 +130,7 @@ fn render_diff_footer(canvas: &mut Canvas, area: Rect, state: &AppState, start: 
 }
 
 fn render_filemap_fallback(canvas: &mut Canvas, area: Rect, state: &AppState) {
-    canvas.print(area.x + 1, area.y, "⬡ ARCHIVOS MODIFICADOS", Style::new().fg(AMBER).bold());
+    canvas.print(area.x + 1, area.y, "⬡ ARCHIVOS MODIFICADOS (sin diff aún)", Style::new().fg(AMBER).bold());
 
     let avail_h = area.h.saturating_sub(2) as usize;
     let entries = &state.filemap.entries;

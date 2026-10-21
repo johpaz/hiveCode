@@ -43,6 +43,56 @@ export interface SeedData {
   codeBridgeConfig: Array<{ id: string; key: string; value: string }>
 }
 
+/**
+ * Catálogo de OpenCode Go, tal como lo publica el gateway (opencode.ai/zen/go/v1/models).
+ *
+ * Si un modelo del gateway no está aquí, su ventana de contexto cae al valor por defecto
+ * (32 k) y el agente compacta sin parar. Las ventanas vienen de models.dev.
+ */
+const OPENCODE_GO_MODELS: SeedData["models"] = [
+    // ── OpenCode Go (fuente: opencode.ai/docs/es/go) — OpenAI-compatible endpoint ──
+    // El catálogo sigue al gateway: si un modelo no está aquí, la ventana de contexto cae al
+    // valor por defecto (32 k) y el agente compacta sin parar. Contextos tomados de models.dev.
+    { id: "opencode-go/minimax-m3.1-flash-free", providerId: "opencode-go", name: "MiniMax M3.1 Flash (free)", modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "vision", "function_calling", "streaming", "reasoning"]) },
+    { id: "opencode-go/minimax-m3",             providerId: "opencode-go", name: "MiniMax M3",            modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "vision", "function_calling", "streaming", "reasoning"]) },
+    { id: "opencode-go/minimax-m2.7",           providerId: "opencode-go", name: "MiniMax M2.7",          modelType: "llm", contextWindow: 262100,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/minimax-m2.5",           providerId: "opencode-go", name: "MiniMax M2.5",          modelType: "llm", contextWindow: 228700,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/deepseek-v4.1-flash",    providerId: "opencode-go", name: "DeepSeek V4.1 Flash",   modelType: "llm", contextWindow: 1050000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/deepseek-v4-pro",        providerId: "opencode-go", name: "DeepSeek V4 Pro",       modelType: "llm", contextWindow: 1050000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/glm-5.3-flash",          providerId: "opencode-go", name: "GLM-5.3 Flash",         modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/glm-5.3",                providerId: "opencode-go", name: "GLM-5.3",               modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/glm-5.2",                providerId: "opencode-go", name: "GLM-5.2",               modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/glm-5.1",                providerId: "opencode-go", name: "GLM-5.1",               modelType: "llm", contextWindow: 204800,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/kimi-k3",                providerId: "opencode-go", name: "Kimi K3",               modelType: "llm", contextWindow: 1113088, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/kimi-k2.7-code",         providerId: "opencode-go", name: "Kimi K2.7 Code",        modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/kimi-k2.6",              providerId: "opencode-go", name: "Kimi K2.6",             modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/mimo-v2.6-pro",          providerId: "opencode-go", name: "MiMo-V2.6 Pro",         modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/mimo-v2.6-flash",        providerId: "opencode-go", name: "MiMo-V2.6 Flash",       modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/mimo-v2.5-pro",          providerId: "opencode-go", name: "MiMo-V2.5 Pro",         modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/mimo-v2.5",              providerId: "opencode-go", name: "MiMo-V2.5",             modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/qwen3.8-max",            providerId: "opencode-go", name: "Qwen3.8 Max",           modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/qwen3.8-flash",          providerId: "opencode-go", name: "Qwen3.8 Flash",         modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/qwen3.7-max",            providerId: "opencode-go", name: "Qwen3.7 Max",           modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/qwen3.7-plus",           providerId: "opencode-go", name: "Qwen3.7 Plus",          modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/qwen3.6-plus",           providerId: "opencode-go", name: "Qwen3.6 Plus",          modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/grok-4.7",               providerId: "opencode-go", name: "Grok 4.7",              modelType: "llm", contextWindow: 500000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/grok-4.6",               providerId: "opencode-go", name: "Grok 4.6",              modelType: "llm", contextWindow: 500000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/gpt-6-luna",             providerId: "opencode-go", name: "GPT-6 Luna",            modelType: "llm", contextWindow: 1050000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/gpt-5.6-luna",           providerId: "opencode-go", name: "GPT-5.6 Luna",          modelType: "llm", contextWindow: 1050000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/claude-haiku-5-5",       providerId: "opencode-go", name: "Claude Haiku 5.5",      modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "vision", "function_calling", "streaming"]) },
+    { id: "opencode-go/gemini-4-argon-contributor", providerId: "opencode-go", name: "Gemini 4 Argon (contributor)", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "vision", "function_calling", "streaming"]) },
+    { id: "opencode-go/muse-spark-1.3-contributor", providerId: "opencode-go", name: "Muse Spark 1.3 (contributor)", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/muse-spark-1.2-contributor", providerId: "opencode-go", name: "Muse Spark 1.2 (contributor)", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/longcat-2.5-preview-free", providerId: "opencode-go", name: "LongCat 2.5 Preview (free)", modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/longcat-2.0",            providerId: "opencode-go", name: "LongCat 2.0",           modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/hy4-preview",            providerId: "opencode-go", name: "Hunyuan 4 Preview",     modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/hy3",                    providerId: "opencode-go", name: "Hunyuan 3",             modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/step-5-preview",         providerId: "opencode-go", name: "Step 5 Preview",        modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/omen-alpha",             providerId: "opencode-go", name: "Omen Alpha",            modelType: "llm", contextWindow: 200000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    { id: "opencode-go/beam-free",              providerId: "opencode-go", name: "Beam (free)",           modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+
+]
+
 export const SEED_DATA: SeedData = {
   tools: [
 
@@ -378,21 +428,7 @@ export const SEED_DATA: SeedData = {
     { id: "o3", providerId: "codex", name: "O3", modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat", "code", "reasoning", "streaming"]) },
     { id: "o4-mini-codex", providerId: "codex", name: "O4 Mini (Codex)", modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat", "code", "reasoning", "streaming"]) },
 
-    // ── OpenCode Go (fuente: opencode.ai/docs/es/go) — OpenAI-compatible endpoint ──
-    { id: "opencode-go/minimax-m3",         providerId: "opencode-go", name: "MiniMax M3",          modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "vision", "function_calling", "streaming", "reasoning"]) },
-    { id: "opencode-go/minimax-m2.7",       providerId: "opencode-go", name: "MiniMax M2.7",        modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
-    { id: "opencode-go/minimax-m2.5",       providerId: "opencode-go", name: "MiniMax M2.5",        modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
-    { id: "opencode-go/kimi-k2.6",          providerId: "opencode-go", name: "Kimi K2.6",         modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
-    { id: "opencode-go/kimi-k2.5",          providerId: "opencode-go", name: "Kimi K2.5",         modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
-    { id: "opencode-go/glm-5.1",            providerId: "opencode-go", name: "GLM-5.1",            modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
-    { id: "opencode-go/glm-5",              providerId: "opencode-go", name: "GLM-5",              modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
-    { id: "opencode-go/deepseek-v4-pro",    providerId: "opencode-go", name: "DeepSeek V4 Pro",   modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming", "reasoning"]) },
-    { id: "opencode-go/deepseek-v4-flash",  providerId: "opencode-go", name: "DeepSeek V4 Flash", modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
-    { id: "opencode-go/mimo-v2-pro",        providerId: "opencode-go", name: "MiMo-V2 Pro",       modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming", "reasoning"]) },
-    { id: "opencode-go/mimo-v2-omni",       providerId: "opencode-go", name: "MiMo-V2 Omni",      modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
-    { id: "opencode-go/mimo-v2.5-pro",      providerId: "opencode-go", name: "MiMo-V2.5 Pro",     modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming", "reasoning"]) },
-    { id: "opencode-go/mimo-v2.5",          providerId: "opencode-go", name: "MiMo-V2.5",         modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
-    { id: "opencode-go/hy3-preview",        providerId: "opencode-go", name: "Hunyuan 3 Preview", modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat", "code", "function_calling", "streaming"]) },
+    ...OPENCODE_GO_MODELS,
 
     // ── MiniMax (fuente: platform.minimaxi.com) — OpenAI-compatible endpoint ──
     { id: "MiniMax-M3", providerId: "minimax", name: "MiniMax M3", modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat", "code", "vision", "function_calling", "streaming", "reasoning"]) },
@@ -818,20 +854,7 @@ const PATCH_MODELS: SeedData["models"] = [
   { id: "o3",                          providerId: "codex",       name: "O3",                    modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat","code","reasoning","streaming"]) },
   { id: "o4-mini-codex",              providerId: "codex",       name: "O4 Mini (Codex)",       modelType: "llm", contextWindow: 200000, capabilities: JSON.stringify(["chat","code","reasoning","streaming"]) },
   // OpenCode Go — OpenAI-compatible
-  { id: "opencode-go/minimax-m3",           providerId: "opencode-go", name: "MiniMax M3",          modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","vision","function_calling","streaming","reasoning"]) },
-  { id: "opencode-go/minimax-m2.7",         providerId: "opencode-go", name: "MiniMax M2.7",        modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
-  { id: "opencode-go/minimax-m2.5",         providerId: "opencode-go", name: "MiniMax M2.5",        modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
-  { id: "opencode-go/kimi-k2.6",         providerId: "opencode-go", name: "Kimi K2.6",         modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
-  { id: "opencode-go/kimi-k2.5",         providerId: "opencode-go", name: "Kimi K2.5",         modelType: "llm", contextWindow: 262144,  capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
-  { id: "opencode-go/glm-5.1",           providerId: "opencode-go", name: "GLM-5.1",           modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
-  { id: "opencode-go/glm-5",             providerId: "opencode-go", name: "GLM-5",             modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
-  { id: "opencode-go/deepseek-v4-pro",   providerId: "opencode-go", name: "DeepSeek V4 Pro",   modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat","code","function_calling","streaming","reasoning"]) },
-  { id: "opencode-go/deepseek-v4-flash", providerId: "opencode-go", name: "DeepSeek V4 Flash", modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
-  { id: "opencode-go/mimo-v2-pro",       providerId: "opencode-go", name: "MiMo-V2 Pro",       modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat","code","function_calling","streaming","reasoning"]) },
-  { id: "opencode-go/mimo-v2-omni",      providerId: "opencode-go", name: "MiMo-V2 Omni",      modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
-  { id: "opencode-go/mimo-v2.5-pro",     providerId: "opencode-go", name: "MiMo-V2.5 Pro",     modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat","code","function_calling","streaming","reasoning"]) },
-  { id: "opencode-go/mimo-v2.5",         providerId: "opencode-go", name: "MiMo-V2.5",         modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
-  { id: "opencode-go/hy3-preview",       providerId: "opencode-go", name: "Hunyuan 3 Preview", modelType: "llm", contextWindow: 128000,  capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },
+  ...OPENCODE_GO_MODELS,
   // MiniMax — OpenAI-compatible (platform.minimaxi.com)
   { id: "MiniMax-M3",              providerId: "minimax", name: "MiniMax M3",              modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","vision","function_calling","streaming","reasoning"]) },
   { id: "MiniMax-M2.7",            providerId: "minimax", name: "MiniMax M2.7",            modelType: "llm", contextWindow: 1000000, capabilities: JSON.stringify(["chat","code","function_calling","streaming"]) },

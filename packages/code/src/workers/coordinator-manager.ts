@@ -5,7 +5,7 @@ import { computeBackoffDelay } from "@johpaz/hivecode-core/utils/retry"
 import { createAllTools } from "@johpaz/hivecode-core/tools"
 import { ProfileHarness } from "@johpaz/hivecode-core/harness/profile-harness"
 import { canRequestToolApproval, requestToolApproval, toolApprovalDetail } from "@johpaz/hivecode-core/agent/tool-approval"
-import { classifyTask } from "@johpaz/hivecode-core/harness/adaptive-scheduler"
+import { estimateTaskWeight } from "@johpaz/hivecode-core/harness/task-weight"
 import type { Config } from "@johpaz/hivecode-core/config"
 import { loadConfig } from "@johpaz/hivecode-core/config"
 import type { Tool } from "@johpaz/hivecode-core/tools"
@@ -23,6 +23,40 @@ import { parsePlan, getDefaultPhases, groupPhasesByLevel } from "./plan-parser"
 import type { ParsedPhase } from "./plan-parser"
 
 /** Shape of the `submit_review_verdict` structured decision (see worker-handler.ts). */
+/**
+ * El ProfileHarness entrega el plan en prosa (sin DAG). Extrae los pasos de una lista
+ * numerada o con viñetas para que la pestaña Plan muestre fases reales y su orden.
+ * Sin lista reconocible devuelve una única fase genérica.
+ */
+export function extractPlanPhases(response: string): Array<{
+  name: string; coordinator: string; description: string; depends_on: string[]; level: number; status: string
+}> {
+  const steps: string[] = []
+  for (const line of response.split("\n")) {
+    const m = line.match(/^\s*(?:\d+[.)]|[-*])\s+(?:\*\*)?(.+?)(?:\*\*)?\s*$/)
+    if (m && m[1].trim().length > 2) steps.push(m[1].trim())
+    if (steps.length >= 8) break
+  }
+  if (steps.length < 2) {
+    return [{
+      name: "Ejecutar plan",
+      coordinator: "bee",
+      description: "BEE delega y verifica las tareas del plan",
+      depends_on: [],
+      level: 0,
+      status: "pending",
+    }]
+  }
+  return steps.map((step, i) => ({
+    name: step.slice(0, 60),
+    coordinator: "bee",
+    description: step.length > 60 ? step : "",
+    depends_on: i === 0 ? [] : [steps[i - 1].slice(0, 60)],
+    level: i,
+    status: "pending",
+  }))
+}
+
 interface ReviewVerdict {
   verdict: "aprobado" | "aprobado_con_observaciones" | "rechazado"
   criteria: Array<{ description: string; met: boolean; evidence?: string }>
@@ -121,6 +155,8 @@ export class CoordinatorManager extends CoordinatorBase {
   private scribe = new Scribe()
   private activeTaskId: string | null = null
   private cancelledTasks = new Set<string>()
+  /** Archivos escritos por tarea; alimentan `affected_files` del veredicto de revisión. */
+  private taskFiles = new Map<string, Set<string>>()
   private cancellations = new Map<string, Promise<void>>()
   private workerTasks = new Map<PhaseName, string>()
   private toolTasks = new Map<string, { taskId: string; worker: Bun.Worker }>()
@@ -156,15 +192,15 @@ export class CoordinatorManager extends CoordinatorBase {
     return action.finally(() => this.taskExecutions.delete(taskId))
   }
 
-  cancelTask(taskId: string): Promise<void> {
+  cancelTask(taskId: string, options?: { integrate?: boolean }): Promise<void> {
     const existing = this.cancellations.get(taskId)
     if (existing) return existing
-    const action = this.cancelOwnedTask(taskId).catch(error => { this.cancellations.delete(taskId); throw error })
+    const action = this.cancelOwnedTask(taskId, options).catch(error => { this.cancellations.delete(taskId); throw error })
     this.cancellations.set(taskId, action)
     return action
   }
 
-  private async cancelOwnedTask(taskId: string): Promise<void> {
+  private async cancelOwnedTask(taskId: string, options?: { integrate?: boolean }): Promise<void> {
     const task = await (await col<CodeTaskDoc>("codeTasks")).get(taskId)
     if (!task) throw new Error(`Tarea no encontrada: ${taskId}`)
     if (["completed", "failed", "cancelled", "rolled_back"].includes(task.doc.status)) return
@@ -213,6 +249,17 @@ export class CoordinatorManager extends CoordinatorBase {
     const latest = await (await col<CodeTaskDoc>("codeTasks")).get(taskId)
     if (latest) await (await col<CodeTaskDoc>("codeTasks")).put(taskId, { ...latest.doc, status: "cancelled", completed_at: new Date().toISOString() }, { expectedVersion: latest.version })
     this.taskSupervisor.updateStage(taskId, "cancelled")
+    // A task cut short by the clock has already built things: applying them beats throwing
+    // them away. Measured 21-oct-2026: a run stopped at the limit had the whole CLI written
+    // in its worktree, and the project ended up with nothing because the cancel path never
+    // integrated. Only when the person asked for the stop does the work stay in the worktree.
+    if (options?.integrate) {
+      const integrationState = await this.integrateTaskWorkspace(taskId, "auto").catch(() => "paused" as const)
+      if (integrationState === "completed") {
+        this.emitTaskUpdate("cancelled", { workspace: this.taskWorkspaces.get(taskId), integrationStatus: "integrated" })
+        return
+      }
+    }
     // A cancelled task with nothing to integrate has no reason to keep its worktree; one with work keeps it.
     await this.cleanupTaskWorkspaceIfClean(taskId, "cancelled").catch(() => {})
     if (this.activeTaskId === taskId) this.emitTaskUpdate("cancelled")
@@ -750,7 +797,8 @@ export class CoordinatorManager extends CoordinatorBase {
     const initialWorkspace = await this.ensureTaskWorkspace(
       this.activeTaskId,
       // El modo plan es de solo lectura: no necesita worktree (ni repo git).
-      mode !== "plan" && classifyTask(description) !== "conversation",
+      // La ruta la decide el estimador de alcance, el mismo que usa el harness.
+      mode !== "plan" && (await estimateTaskWeight(description)).tier !== "conversation",
     )
     this.emitTaskUpdate("running", { title: description, mode })
     const taskStartTime = performance.now()
@@ -889,15 +937,8 @@ export class CoordinatorManager extends CoordinatorBase {
           adr_title: description.slice(0, 80),
           adr_content: result.response,
           status: "pending",
-          // La TUI descarta planes sin fases; el ProfileHarness entrega un plan en prosa, sin DAG.
-          phases: [{
-            name: "Ejecutar plan",
-            coordinator: "bee",
-            description: "BEE delega y verifica las tareas del plan",
-            depends_on: [],
-            level: 0,
-            status: "pending",
-          }],
+          // La TUI descarta planes sin fases: derivamos pasos de la prosa del plan.
+          phases: extractPlanPhases(result.response),
           risks: [],
         })
       }
@@ -1208,6 +1249,13 @@ export class CoordinatorManager extends CoordinatorBase {
       provider: configuredProvider || undefined,
       model: configuredModel || undefined,
     }
+    if (mode === "plan") {
+      // Borrador inicial: la pestaña Plan deja de estar vacía mientras Architecture trabaja.
+      this.onIpcEvent?.("plan_draft_update", {
+        task_id: this.activeTaskId,
+        adr_title: description.slice(0, 80),
+      })
+    }
     const archResult = await this.dispatchPhase("architecture", archTask)
 
     if (archResult.status === "failed" || archResult.status === "blocked") {
@@ -1242,6 +1290,24 @@ export class CoordinatorManager extends CoordinatorBase {
     const plan = archResult.structuredDecision
       ? parsePlan(archResult.structuredDecision)
       : parsePlan(archResult.narrativeEntry)
+    if (mode === "plan" && plan.phases.length > 0) {
+      // Borrador con lo que se alcanzó a parsear: si la validación falla, el usuario ve el plan parcial.
+      const draftGroups = groupPhasesByLevel(plan.phases)
+      this.onIpcEvent?.("plan_draft_update", {
+        task_id: this.activeTaskId,
+        adr_title: plan.adr.title && plan.adr.title !== "Untitled ADR" ? plan.adr.title : undefined,
+        adr_content: [plan.adr.context, plan.adr.options, plan.adr.decision, plan.adr.consequences].filter(Boolean).join("\n\n") || undefined,
+        phases: plan.phases.map((p) => ({
+          name: p.name,
+          coordinator: p.coordinator,
+          description: p.description,
+          depends_on: p.dependsOn,
+          level: draftGroups.findIndex((g) => g.some((gp) => gp.name === p.name && gp.coordinator === p.coordinator)),
+          status: "pending",
+        })),
+        risks: plan.risks,
+      })
+    }
     if (mode === "plan") {
       const incompleteReason = plan.parseError
         ?? (!plan.adr.title.trim() || plan.adr.title === "Untitled ADR"
@@ -1823,6 +1889,7 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
 
         if (result.status === "blocked") {
           this.scribe.updatePhaseStatus(task.phaseId, "blocked", result.blockerDescription)
+          this.emitBlackboard(phase, "BLOCKED", result.blockerDescription ?? `fase ${phase} bloqueada`)
           this.scribe.updateTaskStatus(this.activeTaskId!, "paused")
           log.warn(`[coordinator-manager] ⚠️ ${phase} phase blocked: ${result.blockerDescription}`)
           await this.cleanupTaskWorkspaceIfClean(this.activeTaskId!, "paused")
@@ -1830,6 +1897,7 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
         }
 
         this.scribe.updatePhaseStatus(task.phaseId, "completed", result.narrativeEntry)
+        this.emitBlackboard(phase, "DONE", `fase ${phase} completada`)
         this.scribe.updatePhaseMetadata(task.phaseId, result.tokensIn ?? 0, result.tokensOut ?? 0, result.durationMs)
 
         if (this.activeTaskId) {
@@ -1846,6 +1914,7 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
         if (phase === "quality") {
           const structuredVerdict = result.structuredDecision as unknown as ReviewVerdict | undefined
           const verdict = structuredVerdict?.verdict ?? this.parseReviewerVerdict(result.narrativeEntry)
+          const affectedFiles = this.activeTaskId ? [...(this.taskFiles.get(this.activeTaskId) ?? [])] : []
           if (structuredVerdict) {
             const unmet = structuredVerdict.criteria.filter((c) => !c.met)
             this.onIpcEvent?.("review_verdict_update", {
@@ -1859,9 +1928,22 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
                   : `${structuredVerdict.criteria.length}/${structuredVerdict.criteria.length} criterios cumplidos`),
               observations: (structuredVerdict.categories ?? []).map((c) => `[${c.status}] ${c.name}${c.detail ? `: ${c.detail}` : ""}`),
               requested_changes: unmet.map((c) => c.description),
-              affected_files: [],
+              affected_files: affectedFiles,
               criteria: structuredVerdict.criteria,
               categories: structuredVerdict.categories,
+            })
+          } else {
+            // El reviewer no usó la tool estructurada: derivamos el veredicto del texto
+            // para que la pestaña Revisión no quede vacía.
+            this.onIpcEvent?.("review_verdict_update", {
+              reviewer: "quality",
+              status: verdict,
+              summary: result.narrativeEntry.trim().slice(0, 400),
+              observations: [],
+              requested_changes: [],
+              affected_files: affectedFiles,
+              criteria: [],
+              categories: [],
             })
           }
           if (verdict === "aprobado" || verdict === "aprobado_con_observaciones") {
@@ -2179,6 +2261,16 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
    * (e.g. a weaker model that ignores tool calls). The primary path is the
    * structured decision handled above — deterministic checklist over free text.
    */
+  /** Alimenta el feed del blackboard del Enjambre con hitos reales del trabajo. */
+  private emitBlackboard(agent: string, eventType: string, content: string): void {
+    this.onIpcEvent?.("blackboard_event", {
+      timestamp: new Date().toTimeString().slice(0, 8),
+      agent,
+      event_type: eventType,
+      content,
+    })
+  }
+
   private parseReviewerVerdict(narrative: string): "aprobado" | "aprobado_con_observaciones" | "rechazado" {
     const normalized = narrative.toLowerCase()
     if (normalized.includes("aprobado_con_observaciones") || normalized.includes("aprobado con observaciones")) {
@@ -2793,6 +2885,14 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
           ? "deleted"
           : msg.toolName === "fs_write" ? "created" : "modified"
         this.evaluateFileRisk(logicalRiskPath, riskOp as "created" | "modified" | "deleted", name)
+        if (taskId) {
+          const files = this.taskFiles.get(taskId) ?? new Set<string>()
+          files.add(logicalRiskPath)
+          this.taskFiles.set(taskId, files)
+          // Acotado: el Map no se limpia por tarea, así que descartamos las más antiguas.
+          if (this.taskFiles.size > 20) this.taskFiles.delete(this.taskFiles.keys().next().value as string)
+        }
+        this.emitBlackboard(name, riskOp.toUpperCase(), logicalRiskPath)
 
         // Sync code search index after successful write/edit (fire-and-forget)
         if (this.activeSessionId) {

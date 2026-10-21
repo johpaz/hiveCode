@@ -49,12 +49,14 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
 fn render_plan_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
     canvas.fill_rect(area, ' ', Style::new().bg(BG_PANEL));
 
-    let title = "⬡ PLAN EN CONSTRUCCIÓN";
+    let is_draft = state.plan.current.as_ref().is_some_and(|plan| plan.status == "draft");
+    let title = if is_draft { "⬡ PLAN · BORRADOR EN CONSTRUCCIÓN" } else { "⬡ PLAN PARA APROBACIÓN" };
     canvas.print(area.x + 1, area.y, title, Style::new().fg(AMBER).bold());
 
-    if state.plan.current.is_none() && state.thought.chunks.is_empty() && state.filemap.entries.is_empty() {
-        canvas.print(area.x + 2, area.y + 2, "No hay plan activo.", Style::new().fg(DIM));
-        canvas.print(area.x + 2, area.y + 3, "Envía una tarea en modo PLAN para generar uno.", Style::new().fg(DIM));
+    if state.plan.current.is_none() && state.filemap.entries.is_empty() {
+        canvas.print(area.x + 2, area.y + 2, "Sin plan aún.", Style::new().fg(DIM));
+        canvas.print(area.x + 2, area.y + 3, "El plan aparecerá aquí para aprobación.", Style::new().fg(DIM));
+        canvas.print(area.x + 2, area.y + 4, "El chat en vivo está en Mesa.", Style::new().fg(DIM));
         return;
     }
 
@@ -91,10 +93,11 @@ fn render_plan_pane(canvas: &mut Canvas, area: Rect, state: &AppState) {
         );
         canvas.print(area.x + 1, area.bottom().saturating_sub(1), "↑↓/PgUp/PgDn · rueda", Style::new().fg(DIM));
     }
-    // Approval hint always visible at bottom right
-    let hint = "↩ ejecutar · m modificar · n regenerar";
-    let hint_x = area.right().saturating_sub(hint.len() as u16 + 1);
-    canvas.print(hint_x, area.bottom().saturating_sub(1), hint, Style::new().fg(AMBER_DIM));
+    if state.plan.current.is_some() && !is_draft {
+        let hint = "↩ ejecutar · m modificar · n regenerar";
+        let hint_x = area.right().saturating_sub(hint.len() as u16 + 1);
+        canvas.print(hint_x, area.bottom().saturating_sub(1), hint, Style::new().fg(AMBER_DIM));
+    }
 }
 
 fn render_prd_reference(canvas: &mut Canvas, area: Rect, state: &AppState) {
@@ -155,11 +158,7 @@ fn render_architect_thought(canvas: &mut Canvas, area: Rect, state: &AppState) {
         .iter()
         .filter(|chunk| matches!(chunk.coordinator.as_str(), "architecture" | "architect"))
         .collect();
-    let chunks: Vec<_> = if architect_chunks.is_empty() {
-        state.thought.chunks.iter().collect()
-    } else {
-        architect_chunks
-    };
+    let chunks = architect_chunks;
     let mut y = area.y + 2;
     if !chunks.is_empty() {
         let start = chunks.len().saturating_sub(area.h.saturating_sub(3) as usize);
@@ -254,58 +253,9 @@ fn draw_vertical_rule(canvas: &mut Canvas, x: u16, area: Rect) {
 fn build_plan_pane_lines(state: &AppState, width: usize) -> Vec<StyledLine> {
     let mut lines = Vec::new();
 
-    if !state.thought.chunks.is_empty() {
-        lines.push(StyledLine::new("STREAMING", Style::new().fg(AMBER_DIM).bold(), 0));
-        for chunk in &state.thought.chunks {
-            let display = agent_display_name(&chunk.coordinator);
-            let phase = phase_label(&chunk.phase);
-            let title = if phase.is_empty() {
-                format!("⬡ {}", display)
-            } else {
-                format!("⬡ {} · {}", display, phase)
-            };
-            push_wrapped_lines(
-                &mut lines,
-                &title,
-                width,
-                Style::new().fg(worker_color(&chunk.coordinator)).bold(),
-                0,
-            );
-
-            let content = clean_thought_content(&chunk.content);
-            if !content.is_empty() {
-                for paragraph in content.lines() {
-                    let paragraph = paragraph.trim();
-                    if paragraph.is_empty() {
-                        continue;
-                    }
-                    let style = if chunk.phase.contains("think") || chunk.phase.contains("reason") {
-                        Style::new().fg(DIM).dim()
-                    } else {
-                        Style::new().fg(SECONDARY)
-                    };
-                    push_wrapped_lines(
-                        &mut lines,
-                        paragraph,
-                        width.saturating_sub(2),
-                        style,
-                        2,
-                    );
-                }
-            }
-            lines.push(blank_plan_line());
-        }
-    }
-
     if state.plan.current.is_some() {
-        if !lines.is_empty() {
-            lines.push(StyledLine::new("PLAN FORMAL · FASES Y APROBACIÓN", Style::new().fg(AMBER_DIM).bold(), 0));
-        }
         lines.extend(build_plan_lines(state, width));
     } else if !state.filemap.entries.is_empty() {
-        if !lines.is_empty() {
-            lines.push(blank_plan_line());
-        }
         lines.push(StyledLine::new("MAPA DE ARCHIVOS", Style::new().fg(AMBER_DIM).bold(), 0));
         lines.push(StyledLine::new(
             format!("{} archivos reportados por IPC", state.filemap.entries.len()),
@@ -601,6 +551,21 @@ mod tests {
     use crate::widgets::components::text_width;
 
     #[test]
+    fn plan_draft_shows_title_without_approval_hint() {
+        let mut state = AppState::default();
+        state.plan.current = Some(PlanEntry {
+            adr_title: "Borrador JWT".to_string(),
+            status: "draft".to_string(),
+            ..Default::default()
+        });
+        let mut canvas = Canvas::new(100, 20);
+        render(&mut canvas, Rect::new(0, 0, 100, 20), &state);
+        let rows = canvas.to_text_rows();
+        assert!(rows.iter().any(|row| row.contains("BORRADOR")));
+        assert!(!rows.iter().any(|row| row.contains("ejecutar")));
+    }
+
+    #[test]
     fn plan_scroll_exposes_review_details_and_scrollbar() {
         let mut state = AppState::default();
         state.plan.current = Some(PlanEntry {
@@ -645,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_renders_reasoning_stream_when_plan_is_still_forming() {
+    fn plan_does_not_duplicate_bee_stream_from_mesa() {
         let mut state = AppState::default();
         state.thought.chunks.push(ThoughtChunk {
             coordinator: "bee".to_string(),
@@ -657,9 +622,8 @@ mod tests {
         render(&mut canvas, Rect::new(0, 0, 100, 20), &state);
         let rows = canvas.to_text_rows();
 
-        assert!(rows.iter().any(|row| row.contains("ACTIVIDAD")));
-        assert!(rows.iter().any(|row| row.contains("Abeja Reina")));
-        assert!(rows.iter().any(|row| row.contains("refresh-token")));
+        assert!(rows.iter().any(|row| row.contains("Sin plan aún")));
+        assert!(!rows.iter().any(|row| row.contains("refresh-token")));
     }
 
     #[test]

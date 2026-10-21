@@ -16,7 +16,8 @@
  *    hidden-test result, and whether the agent's own `bun test` passes. Models differ between agents and
  *    are recorded as they are.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, copyFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, copyFileSync, statSync, symlinkSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { parseArgs } from "node:util"
 
@@ -31,6 +32,7 @@ const { values } = parseArgs({
     work: { type: "string", default: "/tmp/bench-agents" },
     baseline: { type: "boolean", default: false },
     force: { type: "boolean", default: false },
+    "opencode-model": { type: "string" },
     keep: { type: "boolean", default: false },
   },
 })
@@ -169,11 +171,18 @@ const codex: Adapter = {
 const makeOpencode = (model?: string): Adapter => ({
   async describe() { return model ? `opencode (${model})` : "opencode (modelo por defecto de su configuración)" },
   async run({ dir, prompt, logDir, maxMs }) {
+    // A home of its own: without the user's MCP servers and skills, like claude's --strict-mcp-config.
+    // The data directory is a symlink to the real one, so the credentials are still found.
+    const home = mkdtempSync(join(tmpdir(), "oc-home-"))
+    mkdirSync(join(home, ".local", "share"), { recursive: true })
+    try { symlinkSync(join(process.env.HOME ?? "", ".local", "share", "opencode"), join(home, ".local", "share", "opencode")) } catch { /* already there */ }
+    const env = { HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local", "share"), XDG_STATE_HOME: join(home, ".local", "state"), XDG_CACHE_HOME: join(home, ".cache") }
     const stdoutPath = join(logDir, "stdout.jsonl")
     const { exitCode, timedOut } = await exec(
-      ["opencode", "run", ...(model ? ["--model", model] : []), "--format", "json", "--auto", prompt],
-      { cwd: dir, timeoutMs: maxMs, stdoutPath, stderrPath: join(logDir, "stderr.log") },
+      ["opencode", "run", "--standalone", ...(model ? ["--model", model] : []), "--format", "json", "--auto", prompt],
+      { cwd: dir, timeoutMs: maxMs, stdoutPath, stderrPath: join(logDir, "stderr.log"), env },
     )
+    rmSync(home, { recursive: true, force: true })
     const usage = emptyUsage()
     // The event stream can end before its final usage event, so the totals come from the session itself.
     const sessionId = jsonLines(readText(stdoutPath)).find(e => e.sessionID)?.sessionID as string | undefined
@@ -196,7 +205,7 @@ const makeOpencode = (model?: string): Adapter => ({
     return { exitCode, timedOut, usage }
   },
 })
-const opencode = makeOpencode()
+const opencode = makeOpencode(values["opencode-model"] ?? process.env.BENCH_OPENCODE_MODEL)
 // Same model family as hivecode's default (DeepSeek V4.1 Flash): this pair isolates the harness.
 const opencodeDeepseek = makeOpencode("opencode/deepseek-v4.1-flash-free")
 
@@ -234,6 +243,40 @@ const hivecode: Adapter = {
   },
 }
 
+/** El binario distribuido, tal como lo usaría una persona: sin TUI, sin gateway, sin TTY. */
+const HIVECODE_BIN = process.env.BENCH_HIVECODE_BIN ?? join(ROOT, "dist/hivecode-linux-x64")
+const hivecodeBin: Adapter = {
+  async describe() { return `hivecode binario (${HIVECODE_PROVIDER} · ${HIVECODE_MODEL})` },
+  async run({ dir, prompt, logDir, maxMs }) {
+    const resultPath = join(logDir, "hivecode-result.json")
+    // Estado limpio por corrida, como el resto de agentes sin configuración del usuario.
+    const home = join(workRoot, `hivehome-bin-${Date.now().toString(36)}`)
+    mkdirSync(home, { recursive: true })
+    const env = { HIVE_HOME: home }
+    const { exitCode, timedOut } = await exec(
+      [HIVECODE_BIN, "run", prompt, "--out", resultPath, "--provider", HIVECODE_PROVIDER,
+        "--model", HIVECODE_MODEL, "--max-minutes", String(Math.round(maxMs / 60_000)), "--project", dir],
+      { cwd: dir, env, timeoutMs: maxMs + 5 * 60_000, stdoutPath: join(logDir, "stdout.log"), stderrPath: join(logDir, "stderr.log") },
+    )
+    rmSync(home, { recursive: true, force: true })
+    const usage = emptyUsage()
+    let note: string | undefined
+    try {
+      const data = JSON.parse(readText(resultPath))
+      usage.promptTokens = data.tokens?.input ?? 0
+      usage.outputTokens = data.tokens?.output ?? 0
+      usage.costUsd = data.costUsd || null
+      usage.steps = data.swarm?.steps ?? data.runs?.total ?? null
+      usage.toolCalls = data.swarm?.toolCalls ?? null
+      usage.model = `${HIVECODE_PROVIDER}/${HIVECODE_MODEL}`
+      note = data.error ?? undefined
+      if (data.runs?.maxConcurrentWorkers) note = `${note ? note + " · " : ""}workers simultáneos máx. ${data.runs.maxConcurrentWorkers}`
+      if (!data.integrated) note = `${note ? note + " · " : ""}el trabajo no quedó integrado en el proyecto`
+    } catch { note = "sin informe del binario" }
+    return { exitCode, timedOut, usage, note }
+  },
+}
+
 // Controls for the evaluation itself: the reference solution must score 100 %, doing nothing must score 0 %.
 const reference: Adapter = {
   async describe() { return "control: solución de referencia" },
@@ -251,7 +294,7 @@ const nothing: Adapter = {
   async run() { return { exitCode: 0, timedOut: false, usage: emptyUsage() } },
 }
 
-const ADAPTERS: Record<string, Adapter> = { claude, codex, opencode, "opencode-ds": opencodeDeepseek, hivecode, reference, nothing }
+const ADAPTERS: Record<string, Adapter> = { claude, codex, opencode, "opencode-ds": opencodeDeepseek, hivecode, "hivecode-bin": hivecodeBin, reference, nothing }
 
 // ── Hidden material ─────────────────────────────────────────────────────────────────────────
 // The hidden tests and the reference solutions live in `eval.bin` (a tar.gz) and only exist unpacked while a
@@ -301,6 +344,8 @@ const TELLTALES = ["eval.bin", "hidden.test", "bench/tasks", "bench-agents.ts", 
 function looksAtAnswers(logDir: string): boolean {
   for (const file of readdirSync(logDir)) {
     if (file === "result.json") continue
+    // Un adaptador puede dejar un directorio en sus logs (un HOME propio, por ejemplo).
+    if (existsSync(join(logDir, file)) && !statSync(join(logDir, file)).isFile()) continue
     const text = readText(join(logDir, file))
     if (TELLTALES.some(t => text.includes(t))) return true
   }

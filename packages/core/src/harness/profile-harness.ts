@@ -6,10 +6,11 @@ import { CORE_AGENT_DEFINITIONS, ensureCoreAgentProfiles, type CoreAgentType } f
 import { runAgentIsolated } from "../agent/agent-loop.ts"
 import type { StepEvent } from "../agent/agent-loop.ts"
 import {
-  classifyTask,
   DEFAULT_MAX_REPAIR_CYCLES,
   type TaskComplexity,
 } from "./adaptive-scheduler.ts"
+import { estimateTaskWeight, type TaskTier } from "./task-weight.ts"
+import { describeVerdict, verifyDeterministic } from "./deterministic-checks.ts"
 
 export type HarnessApprovalGate = "specification" | "convergence"
 export type HarnessApprovalDecision = "approve" | "cancel"
@@ -66,6 +67,9 @@ export function sessionHistoryPreamble(history: ProfileHarnessOptions["history"]
 export interface ProfileHarnessResult {
   taskId: string
   complexity: TaskComplexity
+  /** The route the weight estimate chose, and why. */
+  route: TaskTier
+  routeSignals: string[]
   status: HarnessTaskDoc["stage"]
   response: string
   featureDir?: string
@@ -175,7 +179,11 @@ export class ProfileHarness {
     const tasks = await col<HarnessTaskDoc>("harnessTasks")
     const existing = options.resumeTaskId ? await tasks.get(options.resumeTaskId) : null
     const objective = existing?.doc.title ?? options.objective
-    const complexity = classifyTask(objective)
+    // The route comes from the weight of the change, not from how the sentence is phrased: a
+    // detailed contract is evidence that the task is bounded, not that it is big.
+    const weight = await estimateTaskWeight(objective, options.workspace)
+    const complexity: TaskComplexity =
+      weight.tier === "feature" ? "complex" : weight.tier === "scoped" ? "simple_change" : "conversation"
     const taskId = existing?.doc.taskId ?? `harness:${options.sessionId}:${Date.now()}`
     const now = Date.now()
     const task: HarnessTaskDoc = {
@@ -189,6 +197,9 @@ export class ProfileHarness {
       parentTaskId: options.parentTaskId,
       worktreePath: options.workspace,
       mutating: complexity !== "conversation",
+      route: weight.tier,
+      routeSignals: weight.signals,
+      routeScore: weight.score,
       createdAt: now,
       updatedAt: now,
     }
@@ -276,7 +287,7 @@ export class ProfileHarness {
       if (complexity === "conversation") {
         const response = await invoke("bee", objective, "harness")
         await updateStage("completed")
-        return { taskId, complexity, status: "completed", response, repairCycles: 0 }
+        return { taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "completed", response, repairCycles: 0 }
       }
 
       if (complexity === "simple_change") {
@@ -287,13 +298,19 @@ export class ProfileHarness {
             "harness",
           )
           await updateStage("ready")
-          return { taskId, complexity, status: "ready", response, repairCycles: 0 }
+          return { taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "ready", response, repairCycles: 0 }
         }
         await updateStage("executing")
-        const response = await invoke(
+        let response = await invoke(
           "bee",
-          `Cambio pequeño y localizado: no inicies Spec Kit. Delégalo al worker "builder" con task_delegate
-(con criterios de aceptación concretos) y juzga su handoff; si no cumple, usa task_revise.
+`Cambio pequeño y localizado: no inicies Spec Kit. Hazlo tú directamente: busca y lee lo necesario
+(agrupa en un mismo paso las lecturas independientes), edita (fs_edit admite varios cambios por llamada
+con edits[]) y comprueba tu cambio con la prueba o el chequeo que le toque. No lo delegues al worker
+"builder" salvo que el trabajo resulte ser grande o tenga bloques independientes que ganen en paralelo;
+si empieza a crecer, delega ese bloque con task_delegate y criterios de aceptación concretos.
+No llames al worker "verifier": la verificación determinista (pruebas, tipos, build) ya se ejecuta sola
+sobre el resultado y su veredicto va en el informe. Un gate por modelo aquí duplica ese trabajo con un
+presupuesto de minutos, y medido el 21-oct-2026 se comía 19 turnos y el 27 % de los tokens de la tarea.
 Responde al usuario con un resumen compacto: archivos tocados y pruebas ejecutadas, sin repetir logs
 ni afirmar pruebas que no estén en la evidencia.
 
@@ -301,8 +318,39 @@ Objetivo:
 ${objective}`,
           "harness",
         )
-        await updateStage("completed")
-        return { taskId, complexity, status: "completed", response, repairCycles: 0 }
+
+        // La verificación determinista: se ejecuta el proyecto. Cuesta segundos, no minutos, y su
+        // veredicto no depende de quién juzgue. Si sale en rojo, un ciclo de reparación; si
+        // vuelve a salir en rojo, la tarea se reporta como fallida con la evidencia, no como buena.
+        let verdict = await verifyDeterministic(options.workspace, options.signal)
+        let repairCycles = 0
+        if (!verdict.ok) {
+          await updateStage("reviewing")
+          const failed = verdict.checks.filter(c => c.status === "failed")
+          response = await invoke(
+            "bee",
+            `La verificación del proyecto salió en rojo. Corrígelo tú directamente (o, si el arreglo es grande,
+delegá ese bloque al worker "builder" con task_delegate o task_revise), y después resumí qué
+cambiaste. No afirmes que las pruebas pasan si no lo has comprobado.
+
+Comprobaciones en rojo:
+${failed.map(c => `- ${c.name}: ${c.detail}`).join("\n")}
+
+Objetivo original:
+${objective}`,
+            "harness",
+          )
+          repairCycles = 1
+          verdict = await verifyDeterministic(options.workspace, options.signal)
+        }
+
+        await updateStage(verdict.ok ? "completed" : "failed")
+        return {
+          taskId, complexity, route: weight.tier, routeSignals: weight.signals,
+          status: verdict.ok ? "completed" : "failed",
+          response: `${response}\n\n${describeVerdict(verdict)}`,
+          repairCycles,
+        }
       }
 
       // A plan approved after a `plan` run is reused, not redone. Only if its artifacts are still
@@ -339,7 +387,7 @@ ${objective}`,
       await updateStage("ready", { planId: featureDir })
 
       if (policy === "plan" && !existing) {
-        return { taskId, complexity, status: "ready", response: planning, featureDir, repairCycles: 0 }
+        return { taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "ready", response: planning, featureDir, repairCycles: 0 }
       }
       const needsSpecificationApproval = !existing
         || existing.doc.nextAction === "approve_specification"
@@ -350,12 +398,12 @@ ${objective}`,
         // responder: la tarea queda esperando decisión, no se descarta. El stage ya está
         // persistido, así que es retomable. Mismo criterio que el gate de convergencia.
         if (!options.approve) {
-          return { taskId, complexity, status: "waiting_user", response: planning, featureDir, repairCycles: 0 }
+          return { taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "waiting_user", response: planning, featureDir, repairCycles: 0 }
         }
         const decision = await options.approve("specification", await specificationEvidence(options.workspace, featureDir, planning))
         if (decision !== "approve") {
           await updateStage("cancelled")
-          return { taskId, complexity, status: "cancelled", response: planning, featureDir, repairCycles: 0 }
+          return { taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "cancelled", response: planning, featureDir, repairCycles: 0 }
         }
       }
 
@@ -414,12 +462,12 @@ ${quality}`,
         await updateStage("waiting_user", { nextAction: "approve_convergence" })
         const decision = await options.approve?.("convergence", convergence)
         if (decision !== "approve") {
-          return { taskId, complexity, status: "waiting_user", response: convergence, featureDir, repairCycles }
+          return { taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "waiting_user", response: convergence, featureDir, repairCycles }
         }
       }
 
       await updateStage("completed", { nextAction: undefined })
-      return { taskId, complexity, status: "completed", response: convergence, featureDir, repairCycles }
+      return { taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "completed", response: convergence, featureDir, repairCycles }
     } catch (error) {
       await updateStage(options.signal?.aborted ? "cancelled" : "failed", { blocker: (error as Error).message, nextAction: "inspect_or_resume" })
       throw error
