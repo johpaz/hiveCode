@@ -28,7 +28,8 @@ const log = logger.child("shell-executor");
 const BLOCKED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /rm\s+-rf\s+\/[^\s]*/, reason: "recursive delete from root" },
   { pattern: /rm\s+-rf\s+~/, reason: "recursive delete from home" },
-  { pattern: />\s*\/dev\//, reason: "write to device file" },
+  // /dev/null and the standard streams are how scripts discard or redirect output; any other device is not.
+  { pattern: />\s*\/dev\/(?!null\b|stdout\b|stderr\b|stdin\b|tty\b|fd\/)/, reason: "write to device file" },
   { pattern: /mkfs/, reason: "filesystem format" },
   { pattern: /dd\s+if=/, reason: "raw disk write" },
   { pattern: /:\(\)\s*\{/, reason: "fork bomb pattern" },
@@ -68,8 +69,12 @@ export function buildSandboxEnv(workspace: string): Record<string, string | unde
     workspace ? createHash("sha256").update(path.resolve(workspace)).digest("hex").slice(0, 16) : `sandbox-${Date.now()}`,
   );
   fs.mkdirSync(isolatedTaskDir, { recursive: true });
+  // The commands a worker runs (`bun test`, `bunx tsc`) must find the same bun that runs hivecode; it often
+  // lives under ~/.bun/bin, outside the minimal PATH. Without it workers install their own copy from npm.
+  const bun = Bun.which("bun");
+  const toolchain = bun ? [path.dirname(bun)] : [];
   return {
-    PATH: "/usr/local/bin:/usr/bin:/bin",
+    PATH: [...new Set([...toolchain, "/usr/local/bin", "/usr/bin", "/bin"])].join(":"),
     HOME: isolatedTaskDir,
     TMPDIR: isolatedTaskDir,
     LANG: "en_US.UTF-8",
