@@ -52,6 +52,7 @@ import {
   type RunCheckpoint,
   type RepeatTrackerSnapshot,
 } from "./run-store"
+import { recordTaskUsage, taskBudgetBlocker } from "./task-budget"
 import { broadcastThinking } from "../gateway/task-streaming"
 import { emitLoadout, emitToolCall, emitToolDone, emitWaiting, summarizeArgs } from "./tool-telemetry"
 
@@ -152,6 +153,7 @@ export function describeBlocker(blocker: string | null, status: string): string 
     case "output_truncated": return "su respuesta se cortó por el límite de longitud"
     case "max_steps": return `agotó sus ${detail} pasos sin terminar`
     case "max_input_tokens": case "max_output_tokens": case "max_cost_usd": return `alcanzó su límite (${blocker})`
+    case "task_input_tokens": case "task_output_tokens": return `la tarea agotó su presupuesto (${blocker})`
     default: return blocker.slice(0, 160)
   }
 }
@@ -852,6 +854,15 @@ export async function* runAgent(
 
     iterations++
 
+    // The whole task ran out of budget, whichever run spent it: stop here and say so, rather than
+    // keep spending until the time limit.
+    const taskBlocker = taskBudgetBlocker(opts.codeTaskId)
+    if (taskBlocker) {
+      runStatus = "needs_budget"
+      blocker = taskBlocker
+      break
+    }
+
     if ((maxInputTokens > 0 && totalInputTokens >= maxInputTokens)
       || (maxOutputTokens > 0 && totalOutputTokens >= maxOutputTokens)
       || (Number(agent.max_cost_usd || 0) > 0 && totalCostUsd >= Number(agent.max_cost_usd))) {
@@ -924,6 +935,8 @@ export async function* runAgent(
       totalCostUsd += (
         response.usage.input_tokens + response.usage.output_tokens
       ) * getAverageTokenCost(providerCfg.model)
+      // The task's budget is shared with every other run of the task (BEE and its workers).
+      recordTaskUsage(opts.codeTaskId, response.usage.input_tokens, response.usage.output_tokens)
     }
 
     await updateRun({input_tokens: totalInputTokens, output_tokens: totalOutputTokens,

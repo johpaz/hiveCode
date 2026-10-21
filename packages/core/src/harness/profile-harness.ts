@@ -10,6 +10,7 @@ import {
   type TaskComplexity,
 } from "./adaptive-scheduler.ts"
 import { estimateTaskWeight, type TaskTier } from "./task-weight.ts"
+import { clearTaskBudget, setTaskBudget, taskBudgetBlocker, taskBudgetUsage, type TaskBudgetLimit } from "../agent/task-budget.ts"
 import { describeVerdict, verifyDeterministic } from "./deterministic-checks.ts"
 
 export type HarnessApprovalGate = "specification" | "convergence"
@@ -74,6 +75,8 @@ export interface ProfileHarnessResult {
   response: string
   featureDir?: string
   repairCycles: number
+  /** The task stopped on its token budget (`task_input_tokens:N`): bigger than its route expected, not a quality verdict. */
+  budgetExceeded?: string
 }
 
 export type ProfileRunner = (opts: {
@@ -99,6 +102,37 @@ export type ProfileRunner = (opts: {
  * planning turn died on budget every time.
  */
 export const DEFAULT_MAX_HARNESS_STEPS = 40
+
+/**
+ * Tokens que una tarea puede gastar entre todos sus runs, por ruta (`docs/rutas-por-costo.md` §6).
+ *
+ * El doc fija como objetivo 50 K / 1,5 M / 12 M de entrada. El tope es el doble: se corta cuando
+ * la tarea es el doble de grande de lo que la ruta esperaba, no cuando acaba de pasar el objetivo
+ * (el banco midió 1,53 M en `inventario` con la ruta acotada, así que el objetivo a secas habría
+ * cortado una tarea que terminó bien). Ajustar con la mediana del banco.
+ */
+export const ROUTE_TOKEN_BUDGETS: Record<TaskTier, TaskBudgetLimit> = {
+  conversation: { maxInputTokens: 100_000, maxOutputTokens: 20_000 },
+  scoped: { maxInputTokens: 3_000_000, maxOutputTokens: 400_000 },
+  feature: { maxInputTokens: 24_000_000, maxOutputTokens: 3_000_000 },
+}
+
+/** `HIVECODE_BUDGET_SCALE`: multiplica los topes (2 = el doble) o los quita (0). Para bancos y depuración. */
+export function routeBudget(tier: TaskTier, env: Record<string, string | undefined> = process.env): TaskBudgetLimit {
+  const raw = env.HIVECODE_BUDGET_SCALE
+  const scale = raw === undefined || raw.trim() === "" ? 1 : Number(raw)
+  const base = ROUTE_TOKEN_BUDGETS[tier]
+  if (!Number.isFinite(scale) || scale < 0) return base
+  if (scale === 0) return { maxInputTokens: 0, maxOutputTokens: 0 }
+  return { maxInputTokens: Math.round(base.maxInputTokens * scale), maxOutputTokens: Math.round(base.maxOutputTokens * scale) }
+}
+
+/** La tarea agotó su presupuesto de tokens: se detiene con lo hecho hasta ese punto. */
+class BudgetExceededError extends Error {
+  constructor(readonly blocker: string, readonly partial: string) {
+    super(`budget_exceeded: ${blocker}`)
+  }
+}
 
 /** Workers BEE may run at once; mutating ones are serialized per file set by its own instructions. */
 export const MAX_PARALLEL_WORKERS = 3
@@ -269,6 +303,10 @@ export class ProfileHarness {
         if (blockedReason && agentId === "bee" && !output.trim()) {
           throw new Error(`BEE quedó bloqueado: ${blockedReason}`)
         }
+        // BEE and its workers spent the task's whole budget: the runs already stopped on their own;
+        // stop the route too, instead of planning, verifying and converging on top of a cut-off run.
+        const exhausted = taskBudgetBlocker(taskId)
+        if (exhausted) throw new BudgetExceededError(exhausted, output)
         options.onEvent?.({ type: "agent_completed", agent: agentId, message: output.slice(0, 160) })
         return output
       } catch (error) {
@@ -283,6 +321,8 @@ export class ProfileHarness {
       }
     }
 
+    // The budget belongs to the task: BEE and every worker it launches spend from the same one.
+    setTaskBudget(taskId, routeBudget(weight.tier))
     try {
       if (complexity === "conversation") {
         const response = await invoke("bee", objective, "harness")
@@ -469,8 +509,23 @@ ${quality}`,
       await updateStage("completed", { nextAction: undefined })
       return { taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "completed", response: convergence, featureDir, repairCycles }
     } catch (error) {
+      if (error instanceof BudgetExceededError) {
+        // Not a quality failure: the task is bigger than its route expected. Report what was done.
+        await updateStage("failed", { blocker: error.message, nextAction: "inspect_or_resume" })
+        options.onEvent?.({ type: "budget_exceeded", message: error.blocker })
+        const usage = taskBudgetUsage(taskId)
+        const spent = usage ? `${Math.round(usage.inputTokens / 1000)} K de entrada y ${Math.round(usage.outputTokens / 1000)} K de salida` : "su presupuesto"
+        return {
+          taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "failed",
+          response: `${error.partial}\n\nPresupuesto agotado (budget_exceeded): la tarea gastó ${spent} de tokens y se detuvo en el tope de la ruta ${weight.tier} (${error.blocker}). Es más grande de lo que parecía: lo hecho hasta aquí queda en el proyecto, sin verificar. Reintenta con un objetivo más acotado o con HIVECODE_BUDGET_SCALE mayor.`.trim(),
+          repairCycles: 0,
+          budgetExceeded: error.blocker,
+        }
+      }
       await updateStage(options.signal?.aborted ? "cancelled" : "failed", { blocker: (error as Error).message, nextAction: "inspect_or_resume" })
       throw error
+    } finally {
+      clearTaskBudget(taskId)
     }
   }
 }

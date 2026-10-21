@@ -7,7 +7,8 @@ import { col } from "../storage/hive.ts"
 import { ensureHiveDb } from "../storage/bootstrap.ts"
 import type { AgentDoc } from "../storage/collections.ts"
 import { HIVEAGENTS_MODEL_ID } from "../agent/llm-providers/hiveagents.ts"
-import { DEFAULT_MAX_HARNESS_STEPS, ProfileHarness, type ProfileRunner } from "./profile-harness.ts"
+import { DEFAULT_MAX_HARNESS_STEPS, ProfileHarness, ROUTE_TOKEN_BUDGETS, routeBudget, type ProfileRunner } from "./profile-harness.ts"
+import { recordTaskUsage, taskBudgetUsage } from "../agent/task-budget.ts"
 
 const previousHiveDbPath = process.env.HIVE_DB_PATH
 
@@ -175,6 +176,52 @@ describe("BEE-led execution", () => {
     expect(calls[0]!.task).toContain("Hazlo tú directamente")
     expect(calls[0]!.task).not.toContain("en el PRIMER paso")
     expect(calls[0]!.task).toContain("no inicies Spec Kit")
+  })
+})
+
+describe("task token budget", () => {
+  test("a route's budget stops the task and reports budget_exceeded with what was done", async () => {
+    const previous = process.env.HIVECODE_BUDGET_SCALE
+    process.env.HIVECODE_BUDGET_SCALE = "0.001" // scoped: 3 000 tokens of input
+    try {
+      let afterBudget = 0
+      const runner: ProfileRunner = async options => {
+        afterBudget++
+        // Stands in for the loop: BEE and its workers report their turns under the task's id.
+        recordTaskUsage(options.codeTaskId, 4_000, 10)
+        return "edité src/a.ts"
+      }
+      const result = await new ProfileHarness(runner).run({
+        objective: "corrige el typo en el README",
+        sessionId: "session-budget",
+        workspace: "/workspace/test",
+      })
+      expect(result.status).toBe("failed")
+      expect(result.budgetExceeded).toBe("task_input_tokens:3000")
+      expect(result.response).toContain("edité src/a.ts")
+      expect(result.response).toContain("budget_exceeded")
+      expect(afterBudget).toBe(1) // no verification, no repair cycle on top of a cut-off run
+    } finally {
+      if (previous === undefined) delete process.env.HIVECODE_BUDGET_SCALE
+      else process.env.HIVECODE_BUDGET_SCALE = previous
+    }
+  })
+
+  test("the budget is released when the task ends", async () => {
+    const runner: ProfileRunner = async options => {
+      recordTaskUsage(options.codeTaskId, 10, 1)
+      return "hola"
+    }
+    const result = await new ProfileHarness(runner).run({ objective: "hola", sessionId: "session-release", workspace: "/workspace/test" })
+    expect(result.budgetExceeded).toBeUndefined()
+    expect(taskBudgetUsage(result.taskId)).toBeUndefined()
+  })
+
+  test("routeBudget scales the caps, and 0 removes them", () => {
+    expect(routeBudget("scoped", {})).toEqual(ROUTE_TOKEN_BUDGETS.scoped)
+    expect(routeBudget("scoped", { HIVECODE_BUDGET_SCALE: "2" }).maxInputTokens).toBe(ROUTE_TOKEN_BUDGETS.scoped.maxInputTokens * 2)
+    expect(routeBudget("feature", { HIVECODE_BUDGET_SCALE: "0" })).toEqual({ maxInputTokens: 0, maxOutputTokens: 0 })
+    expect(routeBudget("feature", { HIVECODE_BUDGET_SCALE: "abc" })).toEqual(ROUTE_TOKEN_BUDGETS.feature)
   })
 })
 

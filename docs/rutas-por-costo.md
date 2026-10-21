@@ -179,7 +179,7 @@ F0 y F1 juntos ya cambian el resultado del benchmark; F2 es lo que lo hace barat
 
 ## 11. Estado de implementación
 
-Implementado y medido el 21-oct-2026 (F0–F3). F4 (presupuestos) y F5 (banco de pruebas) siguen pendientes.
+Implementado y medido el 21-oct-2026 (F0–F3). F4 (presupuestos) y P1 (trabajo directo de BEE) están implementados pero **sin medir**; F5 (banco de pruebas) sigue pendiente.
 
 | fase | estado | qué se hizo |
 |---|---|---|
@@ -187,7 +187,8 @@ Implementado y medido el 21-oct-2026 (F0–F3). F4 (presupuestos) y F5 (banco de
 | F1 | hecha | `packages/core/src/harness/task-weight.ts`: estimador de alcance con señales del enunciado **y** del proyecto; sustituye a las regex y al tope de 600 caracteres |
 | F2 | hecha | `packages/core/src/harness/deterministic-checks.ts`: verificación determinista (pruebas, tipos, build) consciente del proyecto, con **1** ciclo de reparación en la ruta acotada |
 | F3 | hecha (lite) | el prompt del worker lista las herramientas que ya tiene y cómo se usa cada una; se acabaron las búsquedas de herramientas que ya estaban en la mano |
-| F4 | pendiente | presupuestos por ruta con corte duro |
+| F4 | hecha (sin medir) | `packages/core/src/agent/task-budget.ts`: presupuesto de tokens **por tarea**, compartido por BEE y sus workers (se identifican por `codeTaskId`); `ROUTE_TOKEN_BUDGETS` en `profile-harness.ts` fija el tope por ruta, al **doble** del objetivo de §6 (100 K / 3 M / 24 M de entrada) porque `inventario` midió 1,53 M con la ruta acotada. Al agotarlo el bucle corta (`needs_budget`) y el harness devuelve `status: "failed"` con `budgetExceeded`. `HIVECODE_BUDGET_SCALE` escala los topes (0 los quita). Pendiente: calibrar con la mediana del banco; sólo cuenta tokens (no tiempo ni número de runs) |
+| P1 | hecha (sin medir) | BEE hace los cambios acotados él mismo (tiene `fs_edit`/`fs_write`/`shell_executor` fijados), `fs_edit` con `edits[]`, `fs_read` sin bloqueo en archivos grandes, `search_in_files` con `glob`/`context`, y lotes de lectura en paralelo |
 | F5 | pendiente | tercera tarea (grande real) y cuarta (mediana) en el banco |
 
 Cambios de comportamiento que hubo que hacer al implementar:
