@@ -357,16 +357,22 @@ function looksAtAnswers(logDir: string): boolean {
 }
 
 /**
- * Which code a run measured: HEAD plus a hash of what is uncommitted in the packages and scripts. A run of
- * hivecode uses the working tree, and somebody may be editing it; two runs with different fingerprints did
- * not measure the same program, and one whose fingerprint changed while it ran measured neither.
+ * Which code a run measured, by content: a hash of the TypeScript and JSON that hivecode actually executes
+ * (core, code, cli and these scripts; the TUI is Rust and a headless run does not touch it). A run of hivecode
+ * uses the working tree, and somebody may be editing it; two runs with different fingerprints did not measure
+ * the same program, and one whose fingerprint changed while it ran measured neither. Committing the same
+ * content does not change it.
  */
 function sourceFingerprint(): string {
   const git = (...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: ROOT }).stdout.toString()
-  const head = git("rev-parse", "--short", "HEAD").trim()
-  const changed = git("diff", "HEAD", "--name-only", "--", "packages", "scripts").trim().split("\n").filter(Boolean).length
-  const hash = Bun.hash(git("diff", "HEAD", "--", "packages", "scripts")).toString(16).slice(0, 8)
-  return `${head} +${changed} archivos sin commitear #${hash}`
+  const files = git("ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "packages", "scripts")
+    .split("\0").filter(f => /^(packages\/(core|code|cli)|scripts)\/.*\.(ts|json)$/.test(f) && !f.includes("/dist/")).sort()
+  const hash = new Bun.CryptoHasher("sha1")
+  for (const file of files) {
+    hash.update(file)
+    try { hash.update(readFileSync(join(ROOT, file))) } catch { /* removed since the listing */ }
+  }
+  return `${git("rev-parse", "--short", "HEAD").trim()} · contenido #${hash.digest("hex").slice(0, 10)} (${files.length} archivos)`
 }
 
 // ── A clean slate between runs ──────────────────────────────────────────────────────────────

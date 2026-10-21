@@ -6,7 +6,7 @@ import { describeProjectFacts, readProjectFacts, type ProjectFacts } from "./tas
 import { checksFor } from "./deterministic-checks.ts"
 
 const facts = (over: Partial<ProjectFacts> = {}): ProjectFacts => ({
-  files: 18, modules: 3, hasTests: true, hasTypescript: true, hasDependencies: true,
+  files: 18, modules: 3, hasTests: true, hasTypescript: true, hasDependencies: true, hasTypescriptCompiler: true,
   hasPackageJson: true, scripts: ["test", "build"], packageManager: "bun", ...over,
 })
 
@@ -32,8 +32,10 @@ describe("checksFor", () => {
   test("only the checks that apply to the project", () => {
     expect(checksFor(facts()).map(c => c.label)).toEqual(["pruebas", "tipos", "build"])
     expect(checksFor(facts({ hasTests: false, scripts: [] })).map(c => c.label)).toEqual(["tipos"])
-    // Types without installed dependencies would measure the environment, not the code.
-    expect(checksFor(facts({ hasDependencies: false })).map(c => c.label)).toEqual(["pruebas", "build"])
+    // Without the compiler installed `bun tsc` finds no script: that measures the environment, not the code.
+    expect(checksFor(facts({ hasTypescriptCompiler: false })).map(c => c.label)).toEqual(["pruebas", "build"])
+    // `node_modules` alone is not enough (`bun add -d @types/bun` creates it without TypeScript).
+    expect(checksFor(facts({ hasDependencies: true, hasTypescriptCompiler: false })).map(c => c.label)).not.toContain("tipos")
   })
 })
 
@@ -45,6 +47,18 @@ describe("readProjectFacts", () => {
     fs.writeFileSync(path.join(root, "bun.lock"), "")
   })
   afterAll(() => fs.rmSync(root, { recursive: true, force: true }))
+
+  test("tells a project with TypeScript installed from one that only has node_modules", () => {
+    const withTs = fs.mkdtempSync(path.join(os.tmpdir(), "project-facts-ts-"))
+    const without = fs.mkdtempSync(path.join(os.tmpdir(), "project-facts-nots-"))
+    try {
+      for (const dir of [withTs, without]) { fs.writeFileSync(path.join(dir, "package.json"), "{}"); fs.mkdirSync(path.join(dir, "node_modules/@types"), { recursive: true }) }
+      fs.mkdirSync(path.join(withTs, "node_modules/typescript"), { recursive: true })
+      fs.writeFileSync(path.join(withTs, "node_modules/typescript/package.json"), "{}")
+      expect(readProjectFacts(withTs)).toMatchObject({ hasDependencies: true, hasTypescriptCompiler: true })
+      expect(readProjectFacts(without)).toMatchObject({ hasDependencies: true, hasTypescriptCompiler: false })
+    } finally { fs.rmSync(withTs, { recursive: true, force: true }); fs.rmSync(without, { recursive: true, force: true }) }
+  })
 
   test("detects the package manager from the lockfile", () => {
     const read = readProjectFacts(root)

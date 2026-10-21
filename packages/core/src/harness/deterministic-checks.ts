@@ -26,7 +26,7 @@ export interface DeterministicVerdict {
 }
 
 /** Salidas que significan "no había nada que correr", no "falló". */
-const NOTHING_TO_RUN = /0 test files|no test files|no tests found|0 tests|no build script|no test script|not found|no tsconfig/i
+const NOTHING_TO_RUN = /0 test files|no test files|no tests found|0 tests|no build script|no test script|not found|no tsconfig|typescript no est[aá] instalado/i
 
 const CHECKS: { tool: string; label: string }[] = [
   { tool: "code_test", label: "pruebas" },
@@ -46,7 +46,7 @@ const CHECKS: { tool: string; label: string }[] = [
 export function checksFor(facts: ProjectFacts): { tool: string; label: string }[] {
   return CHECKS.filter(check => {
     if (check.tool === "code_test") return facts.hasTests
-    if (check.tool === "check_types") return facts.hasTypescript && !(facts.hasPackageJson && !facts.hasDependencies)
+    if (check.tool === "check_types") return facts.hasTypescript && facts.hasTypescriptCompiler
     if (check.tool === "code_build") return facts.scripts.includes("build")
     return true
   })

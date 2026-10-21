@@ -43,6 +43,8 @@ export interface ProjectFacts {
   hasTypescript: boolean
   /** Las dependencias están instaladas: sin ellas, la comprobación mide el entorno. */
   hasDependencies: boolean
+  /** El compilador de TypeScript está instalado en el proyecto: sin él `bun tsc` no encuentra el script. */
+  hasTypescriptCompiler: boolean
   hasPackageJson: boolean
   scripts: string[]
   /** El gestor de paquetes que indica el lockfile, si hay uno. */
@@ -177,7 +179,7 @@ const IGNORED_DIRS = new Set(["node_modules", ".git", "dist", "build", "target",
  * módulos, si hay suite de pruebas y qué scripts ofrece. Barato: un recorrido con tope.
  */
 export function readProjectFacts(workspace: string): ProjectFacts {
-  const facts: ProjectFacts = { files: 0, modules: 0, hasTests: false, hasTypescript: false, hasDependencies: false, hasPackageJson: false, scripts: [] }
+  const facts: ProjectFacts = { files: 0, modules: 0, hasTests: false, hasTypescript: false, hasDependencies: false, hasTypescriptCompiler: false, hasPackageJson: false, scripts: [] }
   if (!workspace || !existsSync(workspace)) return facts
 
   const stack: string[] = [workspace]
@@ -218,6 +220,9 @@ export function readProjectFacts(workspace: string): ProjectFacts {
   // Sin node_modules, una comprobación mide el entorno (tipos que no están instalados), no el
   // código: su rojo sería una evidencia inventada.
   facts.hasDependencies = existsSync(join(workspace, "node_modules"))
+  // `node_modules` puede existir sin TypeScript (basta `bun add -d @types/bun`): entonces `bun tsc` responde
+  // `Script not found "tsc"`, que es el entorno, no el código. Los tipos sólo se comprueban con compilador.
+  facts.hasTypescriptCompiler = existsSync(join(workspace, "node_modules/.bin/tsc")) || existsSync(join(workspace, "node_modules/typescript/package.json"))
   facts.packageManager = LOCKFILES.find(([file]) => existsSync(join(workspace, file)))?.[1]
 
   return facts

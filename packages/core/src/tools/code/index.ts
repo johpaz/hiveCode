@@ -777,6 +777,15 @@ const checkTypesTool: Tool = {
       const errors = allOutput.split("\n")
         .filter(l => l.includes("error TS"))
         .map(l => ({ message: l.trim() }))
+      // A non-zero exit with no `error TS` line is not a type error: the compiler did not run. Reporting it
+      // as `pass: false` with "0 error(s)" made the project look broken, and an agent would spend its turns
+      // "fixing" what was only a missing install.
+      if (exitCode !== 0 && errors.length === 0) {
+        return {
+          ok: false,
+          error: `TypeScript no está instalado en el proyecto, o tsc no pudo ejecutarse (${(allOutput || stderr).trim().split("\n")[0]?.slice(0, 160) ?? "sin salida"}). Instálalo con: bun add -d typescript`,
+        }
+      }
       const warnings = allOutput.split("\n")
         .filter(l => (l.includes("warning") || l.includes("@types")) && !l.includes("error"))
         .map(l => ({ message: l.trim() }))
