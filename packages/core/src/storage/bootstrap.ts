@@ -5,6 +5,7 @@
  * equality indexes and reseeds static catalogs.
  */
 
+import { repairKnownContextWindows } from "../services/model-windows";
 import { getHiveDb } from "./hivedb";
 import { col } from "./hive";
 import { seedAllData } from "./seed";
@@ -235,6 +236,8 @@ export async function ensureHiveDb(): Promise<void> {
   await getHiveDb();
   await ensureIndexes();
   await seedAllData();
+  // The seed only inserts what is missing: rows written with the default window are fixed here.
+  await repairKnownContextWindows();
   await ensureCoreAgentProfiles(await resolveUserId());
   await enforceHiveAgentsPreset();
   await reconcileInterruptedHarnessState();

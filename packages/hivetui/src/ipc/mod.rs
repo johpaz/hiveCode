@@ -801,11 +801,6 @@ pub struct IpcSettingsAgent {
     pub name: String,
     pub provider: String,
     pub model: String,
-    pub effort: String,
-    pub max_turns: u32,
-    pub max_input_tokens: u64,
-    pub max_output_tokens: u64,
-    pub max_cost_usd: f64,
     pub permission_profile: String,
 }
 

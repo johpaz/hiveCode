@@ -1129,10 +1129,6 @@ impl AppState {
                     }).collect();
                     hub.agents = agents.into_iter().map(|a| SettingsAgent {
                         id: a.id, name: a.name, provider: a.provider, model: a.model,
-                        effort: a.effort, max_turns: a.max_turns,
-                        max_input_tokens: a.max_input_tokens,
-                        max_output_tokens: a.max_output_tokens,
-                        max_cost_usd: a.max_cost_usd,
                         permission_profile: a.permission_profile,
                     }).collect();
                     hub.mcp = mcp.into_iter().map(|m| SettingsMcp {

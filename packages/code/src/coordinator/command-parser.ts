@@ -8,6 +8,9 @@ import { callLLM, resolveProviderConfig } from "@johpaz/hivecode-core/agent/llm-
 import { saveScratchpadNote, getScratchpad, deleteScratchpadNote } from "@johpaz/hivecode-core/agent/conversation-store"
 import { hasProviderApiKey, storeProviderApiKey, encryptConfig, serializeConfig, deserializeConfig, isFreeProvider } from "@johpaz/hivecode-core/storage/crypto"
 import { col, ensureIndexes, nextId } from "@johpaz/hivecode-core/storage/hive"
+import { applyModelToAllAgents, describeApplied } from "@johpaz/hivecode-core/services/agent-models"
+import { repairKnownContextWindows } from "@johpaz/hivecode-core/services/model-windows"
+import { DEFAULT_CONTEXT_WINDOW } from "@johpaz/hivecode-core/agent/context-budget"
 import { formatIdCandidates, resolveIdFragment, shortId } from "@johpaz/hivecode-core/storage/ids"
 import type {
   CodeConfigDoc,
@@ -155,7 +158,7 @@ async function upsertModelDoc(modelId: string, patch: Partial<ModelDoc> & { prov
     provider_id: patch.provider_id,
     name: patch.name ?? existing?.doc.name ?? modelId,
     model_type: patch.model_type ?? existing?.doc.model_type ?? "llm",
-    context_window: patch.context_window ?? existing?.doc.context_window ?? 20000,
+    context_window: patch.context_window ?? existing?.doc.context_window ?? DEFAULT_CONTEXT_WINDOW,
     capabilities: patch.capabilities ?? existing?.doc.capabilities ?? null,
     enabled: patch.enabled ?? existing?.doc.enabled ?? true,
     active: patch.active ?? existing?.doc.active ?? false,
@@ -980,7 +983,10 @@ async function handleModelCommand(
         }
         await setCodeConfig(`provider_model_${providerId}`, modelId)
         await setCodeConfig("default_provider", providerId)
-        return { handled: true, output: `Modelo confirmado: ${modelId} [${providerId}]`,
+        // The session's model is every agent's model unless one is given its own afterwards.
+        await repairKnownContextWindows() // the header reads this row: it must carry the model's real window
+        const applied = describeApplied(await applyModelToAllAgents(providerId, modelId))
+        return { handled: true, output: `Modelo confirmado: ${modelId} [${providerId}]${applied ? ` · ${applied}` : ""}`,
           newState: { activeProvider: providerId, activeModel: modelId } }
       }
 
@@ -1043,9 +1049,11 @@ async function handleModelCommand(
         if (!modelId) return { handled: true, output: "  Modelo no especificado" }
         await setCodeConfig(`provider_model_${targetProvider}`, modelId)
         await setCodeConfig("default_provider", targetProvider)
+        await repairKnownContextWindows()
+        const applied = describeApplied(await applyModelToAllAgents(targetProvider, modelId))
         return {
           handled: true,
-          output: `  \u2b22 Modelo: ${modelId}  [${targetProvider}]`,
+          output: `  \u2b22 Modelo: ${modelId}  [${targetProvider}]${applied ? ` \u00b7 ${applied}` : ""}`,
           newState: { activeProvider: targetProvider, activeModel: modelId },
         }
       }
@@ -1082,19 +1090,19 @@ async function handleModelCommand(
           { key: "name",           label: "Nombre",           placeholder: "Claude Sonnet 4.6",     required: true,  secret: false, field_type: "text" },
           { key: "provider_id",    label: "Provider",         placeholder: "",                      required: true,  secret: false, field_type: "select", options: providers.map(p => p.id) },
           { key: "model_type",     label: "Tipo",             placeholder: "",                      required: false, secret: false, field_type: "select", options: ["llm", "stt", "tts", "vision", "embedding"] },
-          { key: "context_window", label: "Ventana contexto", placeholder: "200000",                required: false, secret: false, field_type: "text" },
         ])
         if (!values) return { handled: true, output: "  Cancelado" }
         const modelId     = values.id.trim()
         const modelName   = values.name || modelId
         const providerId  = values.provider_id
         const modelType   = values.model_type || "llm"
-        const ctxWindow   = parseInt(values.context_window || "20000", 10) || 20000
+        // The window is the provider's data, not something typed here: the catalog sync fills it in
+        // (see provider-catalog.ts). Until then the default stands in for what is not yet known.
         await upsertModelDoc(modelId, {
           provider_id: providerId,
           name: modelName,
           model_type: modelType as ModelDoc["model_type"],
-          context_window: ctxWindow,
+          context_window: DEFAULT_CONTEXT_WINDOW,
           enabled: true,
         })
         return {

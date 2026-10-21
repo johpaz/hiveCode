@@ -965,7 +965,7 @@ fn agent_model_editor_shows_focused_field_in_short_terminal() {
 }
 
 #[test]
-fn model_picker_displays_provider_name_and_submits_api_id() {
+fn models_tab_shows_only_the_selected_model_and_enter_opens_the_picker() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use hivetui::ipc::TuiMessage;
     let mut state = settings_hub_state(vec![("deepseek", true, false)], "deepseek");
@@ -978,12 +978,12 @@ fn model_picker_displays_provider_name_and_submits_api_id() {
     let mut canvas = make_canvas(140, 40);
     renderer::render(&mut canvas, &mut state);
     let frame = canvas.to_text_rows().join("\n");
-    assert!(frame.contains("DeepSeek-V4.1-Flash"));
-    assert!(frame.contains("deepseek-flash"));
-    assert!(frame.contains("deepseek-v4-pro"), "missing names fall back to the API id");
-    assert!(frame.contains("ID API"));
+    assert!(frame.contains("DeepSeek-V4.1-Flash"), "se ve el nombre del modelo seleccionado");
+    assert!(frame.contains("deepseek-flash"), "y su id de API");
+    assert!(!frame.contains("deepseek-v4-pro"), "los otros modelos no se listan");
+    assert!(frame.contains("Cambiar modelo"));
     hivetui::controller::handle_key_event(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(state.pending_ipc.iter().any(|message| matches!(message, TuiMessage::Submit {input} if input == "/modelo set deepseek deepseek-flash")));
+    assert!(state.pending_ipc.iter().any(|message| matches!(message, TuiMessage::Submit {input} if input == "/modelo set deepseek")));
 }
 
 #[test]

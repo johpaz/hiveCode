@@ -248,11 +248,6 @@ pub struct SettingsAgent {
     pub name: String,
     pub provider: String,
     pub model: String,
-    pub effort: String,
-    pub max_turns: u32,
-    pub max_input_tokens: u64,
-    pub max_output_tokens: u64,
-    pub max_cost_usd: f64,
     pub permission_profile: String,
 }
 
@@ -349,11 +344,12 @@ impl SettingsHubState {
         }
     }
 
-    /// Cuántas filas navega el tab Modelos.
+    /// Cuántas filas navega el tab Modelos (con provider activo, solo el modelo seleccionado).
     pub fn model_row_count(&self) -> usize {
         match self.model_rows() {
             ModelRows::NeedProvider { providers } => providers.len(),
-            ModelRows::Models { models, .. } => models.len(),
+            // Solo se ve el modelo seleccionado: una fila.
+            ModelRows::Models { .. } => 1,
         }
     }
 }

@@ -2,6 +2,7 @@ import { col, ensureIndexes } from "../storage/hive"
 import type { CodeConfigDoc, ModelDoc, ProviderDoc } from "../storage/collections"
 import { getProviderApiKey } from "../storage/crypto"
 import { knownContextWindow } from "../storage/seed"
+import { DEFAULT_CONTEXT_WINDOW } from "../agent/context-budget"
 import { HIVEAGENTS_MODEL_ID } from "../agent/llm-providers/hiveagents"
 import { eventBus } from "../events/event-bus"
 import { logger } from "../utils/logger"
@@ -104,6 +105,10 @@ export async function discoverProviderModels(provider: ProviderDoc, apiKey: stri
   throw new Error(`${provider.id}: catálogo excede el límite de páginas`)
 }
 
+/** A window that can be used: a finite number above zero. A stored 0 is "unknown", not a window. */
+const positiveWindow = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined
+
 export async function reconcileProviderModels(provider: ProviderDoc, remote: RemoteModel[], now = Date.now()): Promise<SyncResult> {
   if (!remote.length) throw new Error("No se reconcilia un catálogo vacío")
   await ensureIndexes([["models", "provider_id"]])
@@ -135,10 +140,12 @@ export async function reconcileProviderModels(provider: ProviderDoc, remote: Rem
     const doc: ModelDoc = {
       ...old, id: key, provider_id: provider.id, name: model.name ?? old?.name ?? model.id,
       model_type: old?.model_type ?? model.type ?? "llm",
-      // The curated catalog wins where the provider's own list carries no window (OpenCode Go): a row
-      // written earlier with the 32 768 placeholder — or a stale seed value — would otherwise stay
-      // that way forever and the agent would compact and cap its answers at a fraction of the window.
-      context_window: knownContextWindow(provider.id, model.id) ?? old?.context_window ?? model.context ?? 32768,
+      // The window is the provider's data, so what it publishes today wins over what was stored: with
+      // `old ?? published` a row written earlier — with 0, with a stale seed value, with the 32 768
+      // default — stayed that way through every later sync. Where the provider publishes none (OpenCode
+      // Go) the curated catalog is the source; a stored value is only the last resort, and only if valid.
+      context_window: positiveWindow(model.context) ?? knownContextWindow(provider.id, model.id)
+        ?? positiveWindow(old?.context_window) ?? DEFAULT_CONTEXT_WINDOW,
       capabilities: (() => {
         if (!model.capabilities) return old?.capabilities ?? null
         try {

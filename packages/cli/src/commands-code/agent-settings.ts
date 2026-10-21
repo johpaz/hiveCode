@@ -1,4 +1,4 @@
-import { col, fromIndexable } from "@johpaz/hivecode-core/storage/hive"
+import { col, fromIndexable, toIndexable } from "@johpaz/hivecode-core/storage/hive"
 import type { AgentDoc, CodeConfigDoc } from "@johpaz/hivecode-core/storage/collections"
 import { listCatalogModels, listCatalogProviders } from "@johpaz/hivecode-core/services/provider-catalog-read"
 import type { ModalField } from "./tui-launcher"
@@ -27,21 +27,31 @@ export async function agentConfigFields(profile: AgentDoc): Promise<ModalField[]
     key, label, placeholder: value, default_value: value, required: false, secret: false, field_type: "text",
   })
   return [
-    {key: "model_choice", label: "Modelo · provider activo primero", placeholder: "", required: true, secret: false,
+    {key: "model_choice", label: "Modelo (o usar el de la sesión)", placeholder: "", required: true, secret: false,
       field_type: "select", options: choices, default_value: profile.model_selection === "custom" && current ? current : INHERIT_MODEL},
     text("fallback_provider", "Provider fallback", fromIndexable(profile.fallback_provider_id) ?? ""),
     text("fallback_model", "Modelo fallback", fromIndexable(profile.fallback_model_id) ?? ""),
-    {key: "effort", label: "Esfuerzo", placeholder: "", required: true, secret: false, field_type: "select", options: ["low", "medium", "high", "xhigh", "max"], default_value: profile.effort ?? "medium"},
-    text("max_turns", "Máx. turnos", String(profile.max_iterations)),
-    text("max_input_tokens", "Máx. tokens entrada", String(profile.max_input_tokens ?? 0)),
-    text("max_output_tokens", "Máx. tokens salida", String(profile.max_output_tokens ?? 0)),
-    text("max_cost_usd", "Costo máximo USD", String(profile.max_cost_usd ?? 0)),
     text("user_instructions", "Instrucciones adicionales", profile.user_instructions ?? ""),
   ]
 }
 
+/** The model the session runs: the one every agent that is not `custom` follows. */
+async function sessionModel(): Promise<{provider: string; model: string} | undefined> {
+  const config = await col<CodeConfigDoc>("codeConfig")
+  const provider = (await config.get("default_provider"))?.doc.value
+  const model = provider ? (await config.get(`provider_model_${provider}`))?.doc.value : undefined
+  return provider && model ? {provider, model} : undefined
+}
+
 export async function agentModelPatch(choice: string): Promise<Partial<AgentDoc>> {
-  if (choice === INHERIT_MODEL) return {model_selection: "inherit"}
+  if (choice === INHERIT_MODEL) {
+    // Back to the session's model: the stored provider and model mirror it, so a model the agent
+    // had of its own does not linger behind the "inherit" label.
+    const session = await sessionModel()
+    return session
+      ? {model_selection: "inherit", provider_id: toIndexable(session.provider), model_id: toIndexable(session.model)}
+      : {model_selection: "inherit"}
+  }
   for (const provider of (await listCatalogProviders()).filter(provider => provider.enabled)) {
     const model = (await listCatalogModels(provider.id)).find(model =>
       choice === `${provider.id}/${model.id}` || choice === modelLabel(provider.id, model))

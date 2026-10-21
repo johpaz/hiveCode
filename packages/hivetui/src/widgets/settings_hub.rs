@@ -121,8 +121,7 @@ fn render_agents(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
     let ModalState::Settings(hub) = &state.modal else { return };
     canvas.print(area.x, area.y, "Agente", Style::new().fg(DIM));
     canvas.print(area.x + 15, area.y, "Provider/Modelo", Style::new().fg(DIM));
-    canvas.print(area.x + 48, area.y, "Límite", Style::new().fg(DIM));
-    canvas.print(area.x + 60, area.y, "Permisos", Style::new().fg(DIM));
+    canvas.print(area.x + 52, area.y, "Permisos", Style::new().fg(DIM));
     let visible = area.h.saturating_sub(1) as usize;
     for (i, agent) in hub.agents.iter().enumerate().skip(hub.scroll_offset).take(visible) {
         let y = area.y + 1 + (i - hub.scroll_offset) as u16;
@@ -141,8 +140,7 @@ fn render_agents(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
         };
         canvas.print(area.x + 2, y, &truncate(&agent.name, 12), style);
         canvas.print(area.x + 15, y, &truncate(&provider_model, 31), style);
-        canvas.print(area.x + 48, y, &format!("{}t {}", agent.max_turns, agent.effort), style);
-        canvas.print(area.x + 60, y, &truncate(&agent.permission_profile, 16), Style::new().fg(DIM));
+        canvas.print(area.x + 52, y, &truncate(&agent.permission_profile, 16), Style::new().fg(DIM));
         if register_hits {
             state.hit_map.push(MouseRegion::new(
                 format!("settings:row:{i}"),
@@ -391,48 +389,30 @@ fn render_models(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
             print_hint(canvas, area, "Elige un provider  ·  P → cambiar de provider");
         }
 
-        // Provider activo: solo sus modelos.
-        ModelRows::Models { provider_id, models } => {
-            canvas.print(area.x,      area.y,
-                &format!("Modelo · {provider_id}"), Style::new().fg(DIM));
-            canvas.print(area.right().saturating_sub(12), area.y, "Estado", Style::new().fg(DIM));
-
+        // Provider activo: solo el modelo seleccionado. Cambiarlo abre el selector de Bun
+        // (`/modelo set <provider>`), que acota la lista a los modelos de este provider, y lo
+        // que se elija se aplica a todos los agentes.
+        ModelRows::Models { provider_id, .. } => {
             let provider = hub.active_provider();
-            let id_x = area.x + area.w / 2;
-            canvas.print(id_x, area.y, "ID API", Style::new().fg(DIM));
-            let total = models.len();
-            for (i, m) in models.iter().enumerate().skip(offset).take(visible) {
-                let y = area.y + 1 + (i - offset) as u16;
-                let is_active = *m == hub.active_provider().map(|p| p.model.as_str()).unwrap_or("");
-                let is_sel = selected == i;
-                if is_sel {
-                    canvas.fill_rect(Rect { x: area.x, y, w: area.w, h: 1 }, ' ', Style::new().fg(WHITE));
-                    canvas.print(area.x, y, "▶ ", Style::new().fg(AMBER).bold());
-                }
-                if is_active {
-                    canvas.print(area.x + 2, y, "●", Style::new().fg(GREEN).bold());
-                }
-                let style = if is_sel { Style::new().fg(WHITE).bold() } else { Style::new().fg(SECONDARY) };
-                let name = provider.map(|p| p.model_name(m)).unwrap_or(m);
-                canvas.print(area.x + 4, y, &truncate(name, (area.w / 2).saturating_sub(5) as usize), style);
-                canvas.print(id_x, y, &truncate(m, (area.w - area.w / 2).saturating_sub(13) as usize), Style::new().fg(DIM));
-                if is_active {
-                    canvas.print(area.right().saturating_sub(12), y, "Activo", Style::new().fg(GREEN).bold());
-                }
-                register_row_hit(&mut state.hit_map, register_hits, i, area, y);
+            let model = provider.map(|p| p.model.as_str()).unwrap_or("");
+            let name = provider.map(|p| p.model_name(model)).unwrap_or(model);
+            canvas.print(area.x, area.y, &format!("Modelo · {provider_id}"), Style::new().fg(DIM));
+            let width = area.w.saturating_sub(6) as usize;
+            canvas.print(area.x + 2, area.y + 2, "●", Style::new().fg(GREEN).bold());
+            canvas.print(area.x + 4, area.y + 2, &truncate(name, width), Style::new().fg(WHITE).bold());
+            if name != model {
+                canvas.print(area.x + 4, area.y + 3, &truncate(model, width), Style::new().fg(DIM));
             }
-            draw_scrollbar(canvas, area, offset, total, visible);
+            canvas.print(area.x + 4, area.y + 5,
+                &truncate("Lo usan todos los agentes. Cada uno puede tener el suyo en la pestaña Agentes.", width),
+                Style::new().fg(SECONDARY));
             let button_y = area.bottom().saturating_sub(1);
-            let button = "[ Confirmar modelo ]";
+            let button = "[ Cambiar modelo ]";
             canvas.print(area.x + 2, button_y, button, Style::new().fg(AMBER).bold());
-            if let Some(model) = models.get(selected) {
-                canvas.print(area.x + 2, button_y.saturating_sub(1),
-                    &truncate(&format!("Elegido: {} · {model}", provider.map(|p| p.model_name(model)).unwrap_or(model)), area.w.saturating_sub(4) as usize), Style::new().fg(SECONDARY));
-            }
-            if register_hits && !models.is_empty() {
-                state.hit_map.push(MouseRegion::new("settings:confirm-model",
+            if register_hits {
+                state.hit_map.push(MouseRegion::new("settings:change-model",
                     Rect { x: area.x + 2, y: button_y, w: button.len() as u16, h: 1 }, HUB_Z,
-                    HitAction::Custom("settings:confirm-model".into())));
+                    HitAction::Custom("settings:change-model".into())));
             }
         }
     }

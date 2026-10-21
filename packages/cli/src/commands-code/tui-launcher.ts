@@ -462,13 +462,6 @@ async function handleTuiMessage(
               ...await agentModelPatch(values.model_choice),
               fallback_provider_id: values.fallback_provider || profile.fallback_provider_id,
               fallback_model_id: values.fallback_model || profile.fallback_model_id,
-              effort: (["low", "medium", "high", "xhigh", "max"].includes(values.effort)
-                ? values.effort
-                : profile.effort) as AgentDoc["effort"],
-              max_iterations: Number(values.max_turns || profile.max_iterations),
-              max_input_tokens: Number(values.max_input_tokens || 0),
-              max_output_tokens: Number(values.max_output_tokens || 0),
-              max_cost_usd: Number(values.max_cost_usd || 0),
               user_instructions: values.user_instructions ?? profile.user_instructions,
               config_version: (profile.config_version ?? 0) + 1,
               updated_at: Date.now(),
@@ -1200,11 +1193,6 @@ export async function sendSettingsSnapshot(send: (msg: object) => void): Promise
         // Stored through toIndexable: "no value" is a sentinel, not something to show.
         provider: String(fromIndexable(agent.provider_id) ?? ""),
         model: String(fromIndexable(agent.model_id) ?? ""),
-        effort: agent.effort ?? "medium",
-        max_turns: agent.max_iterations,
-        max_input_tokens: agent.max_input_tokens ?? 0,
-        max_output_tokens: agent.max_output_tokens ?? 0,
-        max_cost_usd: agent.max_cost_usd ?? 0,
         permission_profile: agent.permission_profile ?? "",
       }))
   } catch { /* agents puede no existir */ }

@@ -82,6 +82,25 @@ describe("weekly catalog", () => {
     // A model the catalog does not know keeps the old default rather than an invented window.
     expect((await models.get("opencode-go/not-in-the-catalog"))?.doc.context_window).toBe(32768)
   })
+  test("what the provider publishes today wins over a stale or zero stored window", async () => {
+    const models = await col<ModelDoc>("models")
+    await models.put("stale", { ...model("stale"), context_window: 262144 }) // stored larger than the real one
+    await models.put("zero", { ...model("zero"), context_window: 0 }) // "unknown", written by an older sync
+    await models.put("same", { ...model("same"), context_window: 4096 })
+    await reconcileProviderModels(provider(), [{ id: "stale", context: 131072 }, { id: "zero", context: 8192 }, { id: "same", context: 4096 }, { id: "brand-new", context: 65536 }], sunday)
+    expect((await models.get("stale"))?.doc.context_window).toBe(131072)
+    expect((await models.get("zero"))?.doc.context_window).toBe(8192)
+    expect((await models.get("same"))?.doc.context_window).toBe(4096)
+    expect((await models.get("brand-new"))?.doc.context_window).toBe(65536)
+  })
+  test("with no published window, a stored one is kept only if it is valid", async () => {
+    const models = await col<ModelDoc>("models")
+    await models.put("kept", { ...model("kept"), context_window: 7777 })
+    await models.put("invalid", { ...model("invalid"), context_window: 0 })
+    await reconcileProviderModels(provider(), [{ id: "kept" }, { id: "invalid" }], sunday)
+    expect((await models.get("kept"))?.doc.context_window).toBe(7777)
+    expect((await models.get("invalid"))?.doc.context_window).toBe(32768) // the default, not a 0 that means nothing
+  })
   test("other providers keep their stored window: only the curated OpenCode Go catalog overrides", async () => {
     const models = await col<ModelDoc>("models")
     await models.put("minimax-m3.1-flash-free", { ...model("minimax-m3.1-flash-free", "deepseek"), context_window: 7777 })
@@ -174,7 +193,9 @@ test("agent editor offers discovered models from the selected provider without a
   expect(await agentModelPatch("Gemini Current Flash · gemini/gemini-test-new-flash")).toEqual({provider_id: "gemini", model_id: "gemini-test-new-flash", model_selection: "custom"})
   const customFields = await agentConfigFields({...builder, provider_id: "gemini", model_id: "gemini-test-new-flash", model_selection: "custom"})
   expect(customFields[0].default_value).toBe("Gemini Current Flash · gemini/gemini-test-new-flash")
-  expect(fields.find(field => field.key === "max_input_tokens")?.default_value).toBe("12345")
+  // Limits and effort are not editable per agent: the harness decides them by route and phase.
+  expect(fields.map(field => field.key)).not.toContain("max_input_tokens")
+  expect(fields.map(field => field.key)).not.toContain("effort")
   expect(fields.find(field => field.key === "user_instructions")?.default_value).toBe("Mantener contratos")
   const patch = await agentModelPatch("gemini/gemini-test-new-flash")
   expect(patch).toEqual({provider_id: "gemini", model_id: "gemini-test-new-flash", model_selection: "custom"})

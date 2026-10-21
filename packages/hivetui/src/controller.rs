@@ -190,13 +190,12 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     return false;
                 }
                 let cmd = match hub.active_tab {
-                    // Cambiar el modelo. Con provider activo las filas son sus modelos, así que
-                    // Enter aplica el modelo elegido. Sin provider activo las filas
-                    // son providers y Enter elige el provider (modelo después).
+                    // Cambiar el modelo. Con provider activo se ve solo el seleccionado y Enter abre
+                    // el selector. Sin provider activo las filas son providers y Enter elige el
+                    // provider (modelo después).
                     SettingsTab::Models => match hub.model_rows() {
-                        ModelRows::Models { provider_id, models } => models
-                            .get(hub.selected_row)
-                            .map(|m| format!("/modelo set {provider_id} {m}")),
+                        // Solo se ve el modelo seleccionado: Enter abre el selector del provider.
+                        ModelRows::Models { provider_id, .. } => Some(format!("/modelo set {provider_id}")),
                         ModelRows::NeedProvider { providers } => providers
                             .get(hub.selected_row)
                             .map(|p| format!("/provider set {}", p.id)),
@@ -1399,7 +1398,7 @@ fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
                 handle_key_event(state, KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
                 return true;
             }
-            if id == "settings:confirm-model" {
+            if id == "settings:change-model" {
                 handle_key_event(state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                 return true;
             }
@@ -2219,7 +2218,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_selects_model_and_confirm_button_submits_the_exact_choice() {
+    fn change_model_button_opens_the_provider_picker_and_shows_only_the_selected_model() {
         let mut p = provider_row("gemini", true, false);
         p.is_active = true;
         p.models = vec!["gemini-one".into(), "gemini-two".into()];
@@ -2228,15 +2227,13 @@ mod tests {
         if let ModalState::Settings(hub) = &mut state.modal { hub.active_tab = SettingsTab::Models; }
         let mut canvas = crate::term::Canvas::new(130, 40);
         crate::renderer::render(&mut canvas, &mut state);
-        let row = state.hit_map.regions().iter().find(|r| r.id == "settings:row:1").unwrap().rect;
-        handle_mouse_event(&mut state, MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
-            column: row.x, row: row.y, modifiers: KeyModifiers::NONE });
-        assert!(matches!(&state.modal, ModalState::Settings(hub) if hub.selected_row == 1));
-        crate::renderer::render(&mut canvas, &mut state);
-        let button = state.hit_map.regions().iter().find(|r| r.id == "settings:confirm-model").unwrap().rect;
+        let frame = canvas.to_text_rows().join("\n");
+        assert!(frame.contains("gemini-one"));
+        assert!(!frame.contains("gemini-two"), "los demás modelos no se listan");
+        let button = state.hit_map.regions().iter().find(|r| r.id == "settings:change-model").unwrap().rect;
         handle_mouse_event(&mut state, MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: button.x, row: button.y, modifiers: KeyModifiers::NONE });
-        assert!(pending(&state).iter().any(|msg| matches!(msg, TuiMessage::Submit { input } if input == "/modelo set gemini gemini-two")));
+        assert!(pending(&state).iter().any(|msg| matches!(msg, TuiMessage::Submit { input } if input == "/modelo set gemini")));
         assert!(matches!(&state.modal, ModalState::Settings(hub) if hub.loading));
     }
 
