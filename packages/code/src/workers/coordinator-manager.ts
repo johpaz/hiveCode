@@ -266,6 +266,8 @@ export class CoordinatorManager extends CoordinatorBase {
   }
 
   private activeSessionId: string | null = null
+  /** Indexación en curso por sesión: la primera tarea la espera para no leer un índice vacío. */
+  private readonly indexReady = new Map<string, Promise<void>>()
   private broadcastChannel: BroadcastChannel | null = null
   private pendingResolvers = new Map<string, { resolve: (value: CoordinatorResult) => void; reject: (err: Error) => void }>()
   private pendingTimeouts  = new Map<string, ReturnType<typeof setTimeout>>()
@@ -469,13 +471,32 @@ export class CoordinatorManager extends CoordinatorBase {
     this.loadProjectAdrs(projectPath)
     // Index the project in the background: detect external edits and new files,
     // then build the global project context the agents are primed with.
-    void reconcileCodeIndex(sessionId, projectPath).then(async () => {
+    const indexing = reconcileCodeIndex(sessionId, projectPath).then(async () => {
       if (!(await loadProjectContext(sessionId))) {
         return buildProjectContext(sessionId, projectPath)
       }
     }).catch((err) => {
       log.debug(`[coordinator-manager] Project indexing failed: ${(err as Error).message}`)
+    }).finally(() => {
+      if (this.indexReady.get(sessionId) === indexing) this.indexReady.delete(sessionId)
     })
+    this.indexReady.set(sessionId, indexing)
+  }
+
+  /**
+   * Espera (con tope) a que termine la indexación de la sesión. Sin esto, la primera tarea de un
+   * proyecto sin índice corre contra `codeGraph` vacío y los agentes recorren el disco a ciegas.
+   */
+  private async awaitProjectIndex(sessionId: string, timeoutMs = 20_000): Promise<void> {
+    const pending = this.indexReady.get(sessionId)
+    if (!pending) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timedOut = await Promise.race([
+      pending.then(() => false),
+      new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(true), timeoutMs) }),
+    ])
+    clearTimeout(timer)
+    if (timedOut) log.warn(`[coordinator-manager] Project index not ready after ${timeoutMs}ms; continuing without waiting`)
   }
 
   /** Combined emitter: gateway broadcast plus the optional TUI socket callback. */
@@ -810,6 +831,8 @@ export class CoordinatorManager extends CoordinatorBase {
       : ""
 
     log.info(`[coordinator-manager] 🚀 Task ${this.activeTaskId} (mode: ${mode}, provider: ${configuredProvider || "env-default"}): ${description}`)
+
+    await this.awaitProjectIndex(sessionId)
 
     // Canonical profile harness. The old specialized coordinator pipeline is
     // retained below only to resume legacy plans when explicitly requested.

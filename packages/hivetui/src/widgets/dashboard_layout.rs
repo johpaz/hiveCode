@@ -86,12 +86,12 @@ fn dashboard_areas(area: Rect) -> DashboardAreas {
             footer: Rect::new(area.x, area.bottom().saturating_sub(footer_h), area.w, footer_h),
         };
     }
-    let header_h = area.h.min(1);
-    let pipeline_h = area.h.saturating_sub(header_h).min(2);
+    let header_h = u16::from(area.h >= 24);
+    let pipeline_h = area.h.saturating_sub(header_h).min(if area.h >=24 {2} else {1});
     let footer_h = area.h.saturating_sub(header_h + pipeline_h).min(if area.h < 18 { 1 } else { 2 });
     let body_h = area.h.saturating_sub(header_h + pipeline_h + footer_h);
     // Reserve a fixed activity strip so narration cannot move the colony's cells.
-    let feed_h=if body_h>=18 {2} else {0};
+    let feed_h=if body_h>=4 {2} else {0};
     let grid_h=body_h-feed_h;
 
     DashboardAreas {
@@ -213,6 +213,9 @@ fn render_pipeline(canvas: &mut Canvas, area: Rect, state: &AppState) {
         canvas.print(area.x + 1, area.y, &format!("PIPELINE · activo: {active}"), Style::new().fg(AMBER_DIM).bold());
     }
     if area.h < 2 {
+        let labels=pipeline_nodes(state).iter().map(|n|format!("[{}]",n.label)).collect::<Vec<_>>().join(" → ");
+        let active=pipeline_nodes(state).iter().find(|n|n.status==DashboardLevelStatus::Active).map(|n|n.label).unwrap_or("pendiente");
+        canvas.print(area.x+1,area.y,&truncate_cells(&format!("PIPELINE · activo: {active} · {labels}"),area.w.saturating_sub(2) as usize),Style::new().fg(SECONDARY));
         return;
     }
 
@@ -270,6 +273,12 @@ fn render_blackboard_feed(canvas: &mut Canvas, area: Rect, state: &AppState) {
         return;
     }
 
+    if state.dashboard.halt.active {
+        let reason=state.dashboard.halt.reason.as_deref().unwrap_or("enjambre detenido");
+        canvas.fill_rect(area,' ',Style::new().bg(BG_CONFLICT));
+        canvas.print(area.x+1,area.y,&truncate_cells(&format!("HALT · {reason}"),area.w.saturating_sub(2) as usize),Style::new().fg(RED).bg(BG_CONFLICT).bold());
+        return;
+    }
     let events = if state.dashboard.blackboard_events.is_empty() {
         fallback_blackboard_events(state)
     } else {

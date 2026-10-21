@@ -105,6 +105,47 @@ fn main() {
             });
         }
     }
+    if std::env::var("HIVE_COLONY_PREVIEW_MIXED").is_ok() && !full_cast {
+        let at = chrono::Utc::now().timestamp_millis() as u64;
+        for (agent, tool) in [("spider", "web_search"), ("verifier", "code_test")] {
+            state.apply_message(BunMessage::ToolDone {
+                agent: agent.into(),
+                tool: tool.into(),
+                call_id: agent.into(),
+                ok: true,
+                duration_ms: 3200,
+                result_summary: "Comprobación completada".into(),
+                task_id: None,
+                at,
+            });
+        }
+        state.apply_message(BunMessage::ThoughtChunk {
+            task_id: None,
+            coordinator: "planner".into(),
+            phase: "thinking".into(),
+            content: "Reviso las dependencias antes de distribuir el trabajo.".into(),
+        });
+        state.apply_message(BunMessage::NarrativeChunk {
+            task_id: None,
+            coordinator: "spider".into(),
+            phase: "narrative".into(),
+            content: "Encontré las referencias; preparo la entrega.".into(),
+            content_type: None,
+            stream_id: None,
+            replay: false,
+        });
+        state.apply_message(BunMessage::Esperando {
+            task_id: None,
+            agent: "verifier".into(),
+            esperando_a: vec!["builder".into()],
+            razon: "dependencia".into(),
+            at,
+        });
+    }
+    state.anim_tick = std::env::var("HIVE_COLONY_PREVIEW_FRAME")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     if let Ok(agent) = std::env::var("HIVE_COLONY_PREVIEW_AGENT") {
         office::select(&mut state, agent);
     }

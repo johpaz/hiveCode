@@ -814,7 +814,13 @@ fn draw_agent(canvas: &mut Canvas, state: &AppState, agent: &OfficeAgent, area: 
                 canvas,
                 detail,
                 2,
-                if bee { "orquestador" } else { "especialista" },
+                if bee {
+                    "orquestador"
+                } else if active {
+                    task(state, agent)
+                } else {
+                    "especialista"
+                },
                 DIM,
             );
         }
@@ -843,7 +849,7 @@ fn draw_agent(canvas: &mut Canvas, state: &AppState, agent: &OfficeAgent, area: 
                 })
                 .unwrap_or_else(|| activity.clone())
         } else if active {
-            activity.clone()
+            task(state, agent).to_string()
         } else if bee {
             "ESPERANDO TU TAREA".into()
         } else {
@@ -1338,13 +1344,21 @@ mod tests {
         );
         s.anim_tick = 0;
         render(&mut canvas, area, &s);
-        let working = canvas.to_text_rows();
+        let pixels = |canvas: &Canvas| {
+            (0..area.h)
+                .flat_map(|y| (0..area.w).map(move |x| (x, y)))
+                .map(|(x, y)| {
+                    let cell = canvas.cell_at(x, y).unwrap();
+                    (cell.ch, cell.style)
+                })
+                .collect::<Vec<_>>()
+        };
+        let working = pixels(&canvas);
         s.anim_tick = 1;
         render(&mut canvas, area, &s);
-        assert_ne!(
-            working,
-            canvas.to_text_rows(),
-            "el personaje activo debe animarse"
+        assert!(
+            working != pixels(&canvas),
+            "el personaje activo debe animarse, incluyendo sus colores"
         );
     }
 }

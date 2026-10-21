@@ -14,7 +14,7 @@ test("colony shows real instances, concurrent tools, separate output and handoff
       s.ipc.send({type:"tool_call",task_id:"colony-task",agent:"builder#2",tool,call_id:id,args_summary:"src/auth.ts",bee_state:"reading",at:Date.now()})
     }
     let frame = await waitForFrame(s.iter,f => frameContains(f,"@BUILDER#2") && frameContains(f,"(+1)"))
-    expect(frameContains(frame,"@BUILDER ·")).toBe(true)
+    expect(frame.rows.some(row => row.includes("@BUILDER") && !row.includes("@BUILDER#2"))).toBe(true)
     expect(frameContains(frame,"delega")).toBe(true)
     s.ipc.send({type:"thought_chunk",task_id:"colony-task",coordinator:"builder#2",phase:"thinking",content:"REASONING_DETAIL_SENTINEL"})
     s.ipc.send({type:"narrative_chunk",task_id:"colony-task",coordinator:"builder#2",phase:"narrative",content:"NARRATION_SENTINEL"})
