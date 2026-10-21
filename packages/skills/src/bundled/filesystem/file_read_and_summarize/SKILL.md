@@ -1,16 +1,15 @@
 ---
 name: file_read_and_summarize
-description: "Read and understand file content with automatic summarization for large files"
-version: 1.0.0
+description: "Understand a file or area of code by reading only the lines that matter, guided by the project index"
+version: 1.1.0
 author: Hive Team
 icon: "📄"
 category: filesystem
 permissions:
   - filesystem_read
 dependencies: []
-tools: [fs_read, fs_exists]
+tools: [fs_read, outline]
 
-# Structured skill fields
 triggers:
   - "leé este archivo"
   - "read this file"
@@ -24,85 +23,29 @@ triggers:
 
 preferred_agents: []
 
-steps:
-  - step: 1
-    action: project_exists
-    instruction: "Verify file exists before attempting to read"
-    output: exists_boolean
-
-  - step: 2
-    action: project_read
-    instruction: "Read file content. Use offset/limit for large files (>1000 lines)"
-    params:
-      path: "file path"
-      offset: 0
-      limit: 100
-    output: file_content
-
-  - step: 3
-    action: synthesize
-    instruction: "Summarize content if file is large. Extract key information relevant to user request"
-    output: summary
-
 rules:
-  - "Always check file exists with project_exists before reading"
-  - "Use offset and limit for files >1000 lines to avoid context saturation"
-  - "Read in chunks for very large files — iterate with offset"
-  - "Summarize automatically for files >500 lines unless user requests full content"
-  - "Identify file type by extension and adapt summary format (code vs text vs config)"
-
-output_format:
-  structure: markdown
-  sections:
-    - "file_path"
-    - "file_type"
-    - "line_count"
-    - "summary"
-    - "key_points"
-  max_length: "500 words for summary, full content if requested"
-
-examples:
-  - user_input: "leé el archivo package.json"
-    expected_behavior: "Check exists → project_read({ path: 'package.json' }) → return full content (small file)"
-
-  - user_input: "resumí el archivo src/main.ts"
-    expected_behavior: "project_read with offset/limit → identify main exports and functions → summarize structure"
-
-  - user_input: "qué dice este archivo de configuración"
-    expected_behavior: "project_read → parse config format → explain key settings in plain language"
+  - "Before opening a source file, ask the index: outline(path) lists what it declares and on which lines"
+  - "Read with fs_read(path, offset, limit) only the ranges the question needs; never a large file whole"
+  - "A search_knowledge(type=code) hit already carries a fragment and its lines: start from it"
+  - "Small files (config, package.json, a few dozen lines) can be read whole"
+  - "Summarize for whoever acts next: paths, line ranges, what each part does, risks. Do not paste the code back"
 ---
 
-# File Read and Summarize Skill
+# Leer y resumir sin leer de más
 
-## Cuándo se Activa
+## Flujo
 
-Esta skill se activa cuando el usuario necesita leer y entender el contenido de un archivo, especialmente cuando:
-- El archivo es grande y necesita resumen
-- Se requiere comprensión del contenido (no solo lectura)
-- El usuario pide "qué dice", "resumí", "entendé"
+1. `outline(path)` → qué declara el archivo y en qué líneas (si no está indexado, `fs_read` con `limit`).
+2. `fs_read(path, offset, limit)` → solo el rango de la función o clase que importa.
+3. Resumir: ruta y líneas, qué hace, qué depende de qué, riesgos.
 
-## Herramientas Disponibles
+## Qué entregar
 
-| Tool | Qué hace | Cuándo usarla |
-|------|----------|---------------|
-| `project_read` | Lee contenido de archivo del workspace | Lectura de cualquier archivo |
+- `archivo:líneas` de cada hallazgo, para que otro agente lo encuentre sin volver a buscar.
+- Un resumen por parte, no una transcripción.
 
-## Workflow
+## Errores a evitar
 
-1. **Verificar existencia** → `project_exists({ path })`
-2. **Leer contenido** → `project_read({ path, offset, limit })`
-3. **Sintetizar** → Resumir si es grande, extraer puntos clave
-
-## Mejores Prácticas
-
-- Para archivos >1000 líneas, usar `offset` y `limit`
-- Identificar tipo de archivo por extensión y adaptar formato de resumen
-- Para código: identificar funciones, clases, exports principales
-- Para config: explicar settings clave en lenguaje simple
-- Para texto: extraer ideas principales
-
-## Errores a Evitar
-
-- ❌ Leer sin verificar existencia
-- ❌ Retornar archivo completo sin resumir si es muy grande
-- ❌ No identificar tipo de archivo para adaptar resumen
+- ❌ Leer un archivo grande entero para responder sobre una función.
+- ❌ Volver a leer lo que el índice ya te mostró.
+- ❌ Resumir sin indicar rutas y líneas.

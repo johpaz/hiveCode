@@ -6,6 +6,7 @@ import { repl } from "./commands-code/repl"
 import { freeDispatch } from "./commands-code/free"
 import { login, logout, whoami } from "./commands-code/auth"
 import { agentList, agentInspect, agentEdit, agentReset, agentConfigure } from "./commands-code/agent"
+import { skillList, skillEnable, skillDisable, skillAdd, skillRemove, skillInspect } from "./commands-code/skill"
 import { providerList, providerAdd, providerRemove, providerEdit, providerSetDefault, providerSetModel, providerTest } from "./commands-code/provider"
 import { stop } from "./commands/gateway"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
@@ -38,6 +39,9 @@ const HELP = `
   hivecode provider set-default <name>  Establecer provider por defecto
   hivecode provider set-model <provider> <model>  Asignar modelo a provider
   hivecode provider test [name]    Probar conexión a provider
+  hivecode skill list          Listar skills
+  hivecode skill add <repo|url|ruta> [--skill <nombre>] [--list]  Instalar skills desde GitHub o una ruta
+  hivecode skill remove <name> Eliminar skill instalada
   hivecode run "<tarea>"           Ejecutar una tarea sin TUI (--out, --provider, --model, --max-minutes)
   hivecode upgrade             Verificar actualizaciones
   hivecode exit                Detener el sistema
@@ -115,6 +119,25 @@ async function main(): Promise<void> {
           break
         default:
           console.error(`❌ Subcomando de agent desconocido: "${sub}"`)
+          console.log(HELP)
+          process.exit(1)
+      }
+      break
+    }
+
+    case "skill": {
+      await ensureGlobalInit()
+      const sub = normalizedArgs[1]
+      const rest = normalizedArgs.slice(2)
+      switch (sub) {
+        case "list": await skillList(); break
+        case "enable": await skillEnable(rest[0]); break
+        case "disable": await skillDisable(rest[0]); break
+        case "add": await skillAdd(rest); break
+        case "remove": await skillRemove(rest[0]); break
+        case "inspect": await skillInspect(rest[0]); break
+        default:
+          console.error(`❌ Subcomando de skill desconocido: "${sub}"`)
           console.log(HELP)
           process.exit(1)
       }

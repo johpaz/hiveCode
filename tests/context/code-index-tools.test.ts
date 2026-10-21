@@ -79,3 +79,65 @@ test("a file edited after indexing is flagged stale", async () => {
   const out = await outlineTool.execute({ path: "src/store.ts" }, config()) as any
   expect(out.stale).toBe(true)
 })
+
+import { refreshSourceIndex } from "../../packages/core/src/agent/source-index"
+import { writeFileSync as write } from "node:fs"
+
+test("editing a file keeps the reverse import map, moving only its own edges", async () => {
+  // app.ts stops importing store.ts and starts importing util.ts (new file).
+  write(path.join(workspace, "src/util.ts"), "export const pad = (s: string) => s\n")
+  await refreshSourceIndex("idx", workspace, "src/util.ts")
+  write(path.join(workspace, "src/app.ts"), "import { pad } from './util'\nexport const app = pad('x')\n")
+  await refreshSourceIndex("idx", workspace, "src/app.ts")
+  const store = await dependentsTool.execute({ path: "src/store.ts" }, config()) as any
+  const util = await dependentsTool.execute({ path: "src/util.ts" }, config()) as any
+  expect(store.imported_by).toEqual([])
+  expect(util.imported_by).toEqual(["src/app.ts"])
+})
+
+test("an edit that leaves the imports alone changes no other row", async () => {
+  const before = await dependentsTool.execute({ path: "src/store.ts" }, config()) as any
+  write(path.join(workspace, "src/app.ts"), "import { makeStore } from './store'\nexport const app = makeStore()\nexport const more = 1\n")
+  await refreshSourceIndex("idx", workspace, "src/app.ts")
+  const after = await dependentsTool.execute({ path: "src/store.ts" }, config()) as any
+  expect(after.imported_by).toEqual(before.imported_by)
+})
+
+import { reconcileCodeIndex } from "../../packages/code/src/agent/code-indexer"
+
+test("reconcile skips a file whose mtime moved but whose content did not, and the index is fresh again", async () => {
+  const file = path.join(workspace, "src/store.ts")
+  const later = new Date(Date.now() + 120_000)
+  utimesSync(file, later, later)
+  expect(((await outlineTool.execute({ path: "src/store.ts" }, config())) as any).stale).toBe(true)
+  const result = await reconcileCodeIndex("idx", workspace)
+  expect(result.reindexed).toBe(0)
+  expect(((await outlineTool.execute({ path: "src/store.ts" }, config())) as any).stale).toBe(false)
+})
+
+test("reconcile reindexes a file whose content changed", async () => {
+  const file = path.join(workspace, "src/store.ts")
+  write(file, "export function onlyOne() {}\n")
+  const later = new Date(Date.now() + 120_000)
+  utimesSync(file, later, later)
+  expect((await reconcileCodeIndex("idx", workspace)).reindexed).toBe(1)
+  const out = await outlineTool.execute({ path: "src/store.ts" }, config()) as any
+  expect(out.symbols.map((s: any) => s.name)).toEqual(["onlyOne"])
+})
+
+import { testsForTool } from "../../packages/core/src/tools/core/code-index"
+
+test("tests_for finds the tests that import a file and the one beside it, and maps a test back", async () => {
+  write(path.join(workspace, "src/store.test.ts"), "import { Store } from './store'\nexport const t = new Store()\n")
+  mkdirSync(path.join(workspace, "tests"), { recursive: true })
+  write(path.join(workspace, "tests/app.test.ts"), "import { app } from '../src/app'\nexport const a = app\n")
+  await buildFullIndex("idx", workspace)
+  const store = await testsForTool.execute({ path: "src/store.ts" }, config()) as any
+  expect(store.tests).toEqual(["src/store.test.ts"])
+  const app = await testsForTool.execute({ path: "src/app.ts" }, config()) as any
+  expect(app.tests).toEqual(["tests/app.test.ts"])
+  const back = await testsForTool.execute({ path: "src/store.test.ts" }, config()) as any
+  expect(back).toMatchObject({ kind: "test", covers: ["src/store.ts"] })
+  const none = await testsForTool.execute({ path: "src/util.ts" }, config()) as any
+  expect(none.ok === false || none.tests?.length === 0).toBe(true)
+})

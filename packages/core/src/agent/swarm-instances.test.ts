@@ -16,3 +16,14 @@ describe("canWriteWorkspace", () => {
     expect(canWriteWorkspace({ tools_json: "{not json" })).toBe(true)
   })
 })
+
+import { CORE_AGENT_DEFINITIONS } from "./agent-profiles"
+import { REQUIRED_PROFILE_SKILLS } from "./specialties"
+
+describe("core profiles declare the skills they load", () => {
+  test("a profile's skills are its required skills, so a duplicate loads the same as its base", () => {
+    for (const [id, required] of Object.entries(REQUIRED_PROFILE_SKILLS)) {
+      expect(CORE_AGENT_DEFINITIONS[id as keyof typeof CORE_AGENT_DEFINITIONS].skills).toEqual(required)
+    }
+  })
+})

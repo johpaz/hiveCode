@@ -49,8 +49,9 @@ steps:
     output: analysis_result
 
 rules:
-  - "Use parse_ast BEFORE fs_read on large files — it gives structure without reading everything"
-  - "Use find_imports to understand impact before modifying a module"
+  - "Ask the index first: outline(path) gives a file's declarations with line ranges, find_symbol(name) where something is defined, dependents(path) who imports it"
+  - "Use parse_ast BEFORE fs_read on large files, then read only the ranges you need with offset/limit"
+  - "Use find_imports or dependents to understand impact before modifying a module"
   - "Run check_types after edits to catch TypeScript errors early"
   - "Use code_test_parallel when running multiple test suites — faster than sequential"
   - "run_script is for utility scripts, migrations, seeders — has 60s timeout"
@@ -91,8 +92,8 @@ Para entender profundamente la estructura del código antes de modificarlo, veri
 ## Flujo de Análisis Previa a Edición
 
 ```
-1. parse_ast(path)           → entender estructura
-2. find_imports(path)        → evaluar impacto del cambio
+1. outline(path) / parse_ast(path) → entender estructura
+2. dependents(path) / find_imports(path) → evaluar impacto del cambio
 3. [hacer ediciones]
 4. check_types()             → verificar no rompí nada
 5. code_diff_create(a, b)    → documentar qué cambió
@@ -138,7 +139,7 @@ run_script({ path: "scripts/migrate-db.ts" })
 
 ## Mejores Prácticas
 
-- **parse_ast primero** para archivos > 200 líneas antes de fs_read
+- **outline o parse_ast primero** para archivos > 200 líneas, y fs_read solo del rango que necesitas
 - **find_imports** antes de mover o eliminar un módulo
 - **check_types** es la verificación más importante post-edición
 - **run_script** tiene timeout de 60s — no para scripts largos

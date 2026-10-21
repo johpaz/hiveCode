@@ -10,7 +10,7 @@
 export const DISK_READ_TOOLS: ReadonlySet<string> = new Set(["fs_read", "fs_list", "fs_glob", "search_in_files", "parse_ast"])
 
 /** Tools that answer from the index. */
-export const INDEX_READ_TOOLS: ReadonlySet<string> = new Set(["search_knowledge", "get_project_context", "outline", "find_symbol", "dependents"])
+export const INDEX_READ_TOOLS: ReadonlySet<string> = new Set(["search_knowledge", "get_project_context", "outline", "find_symbol", "dependents", "tests_for"])
 
 export type ReadKind = "disk" | "index" | "other"
 
@@ -46,4 +46,23 @@ export function readMix(tools: ToolRow[], runs: RunRow[]): { total: ReadMix; byA
     }
   }
   return { total, byAgent }
+}
+
+/** Disk reads a reader may make before being pointed back to the index. */
+export const DISK_READ_NUDGE_AFTER = 6
+const READERS = new Set(["scout", "planner"])
+const diskReads = new Map<string, number>()
+const MAX_TRACKED_READERS = 500
+
+/**
+ * A line to append to the result of a disk read when a reader (scout, planner) has made several in one run.
+ * Soft: it never blocks, it says what the index can do instead. Repeats every few reads, not on each one.
+ */
+export function diskReadNudge(runId: string, agentType: string | undefined, toolName: string): string | undefined {
+  if (!agentType || !READERS.has(agentType) || classifyRead(toolName) !== "disk") return undefined
+  if (diskReads.size >= MAX_TRACKED_READERS && !diskReads.has(runId)) diskReads.delete(diskReads.keys().next().value as string)
+  const count = (diskReads.get(runId) ?? 0) + 1
+  diskReads.set(runId, count)
+  if (count < DISK_READ_NUDGE_AFTER || (count - DISK_READ_NUDGE_AFTER) % 4 !== 0) return undefined
+  return `\n\n[Llevas ${count} lecturas de disco en esta tarea. El índice responde sin leer archivos: outline(path) lista lo que declara un archivo con sus líneas, find_symbol(name) dice dónde se define algo, search_knowledge(type="code") devuelve fragmento y líneas. Lee el disco solo por rango (offset/limit) y para confirmar.]`
 }

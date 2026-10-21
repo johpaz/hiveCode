@@ -7,6 +7,7 @@ import type { CodeFileDoc, CodeGraphDoc } from "../storage/collections"
 import { upsertCapabilityDocs, deleteCapabilitiesByFilter } from "./capability-search"
 import { logger } from "../utils/logger"
 import { extractSymbols, type SourceSymbol } from "./source-symbols"
+import { resolveWorkspaceImport } from "./workspace-packages"
 const log = logger.child("source-index")
 export const CODE_EXTENSIONS = ["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs", "rs", "sql", "json", "toml", "md"]
 const JS_EXTENSIONS = new Set(["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"])
@@ -76,6 +77,11 @@ export async function indexFile(filePath: string, workspace: string): Promise<Fi
           return resolved
         })
       imports = (await Promise.all(importPromises)).filter(Boolean)
+      // Imports through a workspace package name resolve to the source file that package exports.
+      for (const spec of (scan.imports ?? []).map((i: any) => i.path as string).filter((p: string) => !p.startsWith("."))) {
+        const resolved = resolveWorkspaceImport(workspace, spec)
+        if (resolved && resolved !== filePath && !imports.includes(resolved)) imports.push(resolved)
+      }
 
       exports = (scan.exports ?? []).map((e: any) => e.original ?? e).filter(Boolean)
     } catch {
@@ -234,9 +240,39 @@ export async function refreshSourceIndex(sessionId: string, workspace: string, f
   await ensureIndexes([["codeGraph", "session_id"], ["codeFiles", "session_id"]])
   const absolute = path.resolve(workspace, filePath)
   if (!shouldIndexFile(absolute, workspace)) return
+  const before = await (await col<CodeGraphDoc>("codeGraph")).get(codeFileId(sessionId, absolute))
   const source = await indexFile(absolute, workspace)
   if (source) await upsertFileIndex(sessionId, source)
   else await deleteFileSearchIndex(sessionId, absolute)
-  await buildExportedByIndex(sessionId)
+  // A new file may already be imported by others (their import did not resolve until now): that needs the whole map.
+  // Any other edit only moves the edges of the file itself, which is a handful of rows, not one write per file.
+  if (!before && source) await buildExportedByIndex(sessionId)
+  else await patchExportedBy(sessionId, absolute, parseList(before?.doc.imports), source?.imports ?? [])
   await (await col("codeContextCache")).delete(`project_context:${sessionId}`)
+}
+
+const parseList = (raw: string | null | undefined): string[] => {
+  try { const value = JSON.parse(raw || "[]"); return Array.isArray(value) ? value : [] } catch { return [] }
+}
+
+/**
+ * Moves one file's edges in the reverse import map: `exported_by` of every file it stopped importing loses it,
+ * of every file it started importing gains it. An edit that leaves the imports as they were writes nothing.
+ */
+export async function patchExportedBy(sessionId: string, file: string, oldImports: string[], newImports: string[]): Promise<void> {
+  const before = new Set(oldImports)
+  const after = new Set(newImports)
+  const touched = [
+    ...[...before].filter(dep => !after.has(dep)).map(dep => ({ dep, add: false })),
+    ...[...after].filter(dep => !before.has(dep)).map(dep => ({ dep, add: true })),
+  ]
+  if (!touched.length) return
+  const codeGraph = await col<CodeGraphDoc>("codeGraph")
+  for (const { dep, add } of touched) {
+    const entry = await codeGraph.get(codeFileId(sessionId, dep))
+    if (!entry) continue // not indexed (a dependency, a generated file): nothing to keep
+    const importers = new Set(parseList(entry.doc.exported_by))
+    if (add) importers.add(file); else importers.delete(file)
+    await codeGraph.put(entry.doc.id, { ...entry.doc, exported_by: JSON.stringify([...importers]) }, { expectedVersion: entry.version })
+  }
 }

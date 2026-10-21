@@ -1,7 +1,7 @@
 ---
 name: busqueda_hivedb
-description: "Core discovery skill - learn how to find any capability using search_knowledge"
-version: 1.1.0
+description: "Cómo usar el índice de HiveDB: entender el código antes de leer el disco y descubrir solo lo que no tienes"
+version: 1.2.0
 author: Hive Team
 icon: "🔍"
 category: core
@@ -21,88 +21,27 @@ triggers:
 
 ---
 
-# busqueda_hivedb — Discovery System
+# busqueda_hivedb — el índice antes que el disco
 
-Tienes 4 herramientas al arrancar. Todo lo demás se descubre con **search_knowledge**.
+Las herramientas de tu rol ya están en tu contexto: úsalas directamente, no las busques.
 
-El motor actual es HiveDB capability search.
+## Entender el código: índice primero
 
-## Regla de Oro: BUSCA POR CAPACIDAD
+El proyecto está indexado en HiveDB. Cada consulta al índice cuesta una fracción de leer archivos.
 
-```
-search_knowledge(type="all", query="buscar en internet")
-```
+1. `get_project_context` → mapa del proyecto y módulos más importados.
+2. `search_knowledge(type="code", query="<símbolo o concepto>")` → archivos con fragmento y líneas (`lines`).
+3. `outline(path)` → qué declara un archivo y en qué líneas. `find_symbol(name)` → dónde se define. `dependents(path)` → quién lo importa.
+4. Solo entonces `fs_read(path, offset, limit)` de las líneas que necesitas, no el archivo entero.
 
-HiveDB acepta texto natural, acentos y nombres de tools. Puedes usar una palabra de dominio o una frase corta de la tarea.
+Si el resultado trae `stale: true`, el archivo cambió después de indexarse: confírmalo en disco antes de editar. Lo que vas a editar léelo siempre del disco.
 
-| Query | Resultado |
-|-------|-----------|
-| `"web"` ✅ | web_search + web_fetch + web_research (skill) + MCP web tools |
-| `"buscar en internet"` ✅ | web_search + web_fetch + skills relacionadas |
-| `"leer archivo"` ✅ | fs_read + skills de filesystem |
+## Descubrir lo que no tienes
 
-## Vocabulario de Dominio (una palabra cada uno)
+Cada búsqueda de capacidades cuesta un turno entero. Máximo dos por tarea, y solo para:
 
-| Dominio | Query | Herramientas que retorna |
-|---------|-------|--------------------------|
-| Web | `"web"` | web_search, web_fetch |
-| Archivos | `"file"` o `"archivo"` | fs_read, fs_write, fs_edit, fs_list, fs_glob |
-| Memoria | `"memory"` o `"memoria"` | memory_write, memory_read, memory_search |
-| Cron/Agenda | `"cron"` o `"schedule"` | cron.create, cron.list, cron.update... |
-| Git | `"git"` | git_status, git_diff, git_commit, git_log |
-| Agentes | `"agent"` o `"agente"` | agent_create, agent_find, task_delegate |
-| Proyectos | `"project"` o `"proyecto"` | project_create, task_create, project_list |
-| Browser | `"browser"` | browser_navigate, browser_click, browser_type |
-| Canvas/UI | `"canvas"` | , ,  |
-| Código | `"code"` o `"código"` | code_search, code_test, code_build |
-| Notificar | `"notify"` | notify, report_progress |
-| Shell | `"shell"` o `"bash"` | shell_executor |
+- `type="mcp"` → herramientas de servidores externos (GitHub, Slack, Airtable…).
+- `type="skills"` → instrucciones para un tipo de tarea.
+- `type="playbook"` → reglas y buenas prácticas.
 
-## Tipos de Búsqueda
-
-```
-type="tools"    → Herramientas nativas de Hive
-type="skills"   → Skills con instrucciones de tareas
-type="mcp"      → Herramientas externas (Airtable, GitHub, Slack...)
-type="playbook" → Reglas y mejores prácticas
-type="all"      → Todo a la vez (recomendado para exploración)
-```
-
-## Flujo Correcto para un Worker
-
-```
-1. Recibo tarea: "buscar noticias sobre IA y guardar en archivo"
-2. search_knowledge(type="all", query="web")    → web_search, web_fetch
-3. search_knowledge(type="all", query="file")   → fs_write, fs_read
-4. Herramientas se inyectan automáticamente en mi contexto
-5. Ejecuto: web_search(...) → fs_write(...)
-```
-
-## Ejemplos Concretos
-
-```
-// Encontrar todo lo relacionado con web
-search_knowledge({type: "all", query: "web"})
-→ tools: [web_search, web_fetch]
-→ skills: [web_research, browser_automation]
-
-// Encontrar tools de sistema de archivos
-search_knowledge({type: "tools", query: "file"})
-→ tools: [fs_read, fs_write, fs_edit, fs_list, fs_glob, fs_exists]
-
-// Encontrar tools MCP de un servidor externo
-search_knowledge({type: "mcp", query: "airtable"})
-→ toolsmcp: [AIRTABLE_LIST_BASES, AIRTABLE_CREATE_RECORD, ...]
-
-// Explorar todo lo disponible para tareas de código
-search_knowledge({type: "all", query: "code"})
-→ tools: [code_search, code_test, code_build, shell_executor]
-→ skills: [git_workflow, code_review, ...]
-```
-
-## Reglas
-
-1. Usa una palabra de dominio o una frase corta de la capacidad requerida
-2. `type="all"` para explorar — `type="tools"` para ser específico
-3. Herramientas nativas tienen prioridad sobre MCP cuando hacen lo mismo
-4. Si no encuentras con una palabra → prueba el equivalente en inglés/español
+Usa una palabra o frase corta (`"airtable"`, `"revisión de seguridad"`); acepta español e inglés. Si la herramienta existe pero tu rol no puede usarla, se te avisa: no la busques otra vez, dilo en tu handoff.

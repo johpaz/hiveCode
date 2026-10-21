@@ -156,4 +156,48 @@ export const dependentsTool: Tool = {
   },
 }
 
-export const codeIndexTools: Tool[] = [outlineTool, findSymbolTool, dependentsTool]
+const TEST_FILE = /(?:\.(?:test|spec)\.[a-z]+$|(?:^|[\\/])(?:tests?|__tests__)[\\/])/i
+
+/** The test files that exercise a source file: the ones that import it, plus a sibling named after it. */
+export function testsFor(graphs: CodeGraphDoc[], scope: ProjectScope, graph: CodeGraphDoc): string[] {
+  const stem = path.basename(graph.file_path).replace(/\.[a-z]+$/i, "")
+  const importers = list<string>(graph.exported_by).filter(file => TEST_FILE.test(relativeTo(scope, file)))
+  const siblings = graphs
+    .map(g => g.file_path)
+    .filter(file => TEST_FILE.test(relativeTo(scope, file)) && path.dirname(file) === path.dirname(graph.file_path)
+      && path.basename(file).replace(/\.(?:test|spec)\.[a-z]+$/i, "") === stem)
+  return [...new Set([...importers, ...siblings])].map(file => relativeTo(scope, file)).sort()
+}
+
+export const testsForTool: Tool = {
+  name: "tests_for",
+  description: "Which test files cover a source file (tests that import it or sit beside it), from the project index. For a test file, the source files it imports. Use it to know what to run after a change. Spanish: pruebas de un archivo, qué tests cubren, qué prueba cubre este archivo",
+  parameters: {
+    type: "object",
+    properties: { path: { type: "string", description: "Source or test file path, relative to the workspace" }, ...SESSION_PARAMS },
+    required: ["path"],
+  },
+  execute: async (params: Record<string, unknown>, config?: any) => {
+    try {
+      const scope = await scoped(params, config)
+      if ("ok" in scope) return scope
+      const target = String(params.path ?? "").trim()
+      if (!target) return { ok: false, error: "path is required" }
+      const graphs = await projectGraphs(scope)
+      const graph = findGraph(graphs, scope, target)
+      if (!graph) return { ok: false, error: `${target} is not in the index.` }
+      const rel = relativeTo(scope, graph.file_path)
+      if (TEST_FILE.test(rel)) {
+        const covers = list<string>(graph.imports).map(file => relativeTo(scope, file)).filter(file => !TEST_FILE.test(file))
+        return { ok: true, path: rel, kind: "test", covers: covers.slice(0, MAX_LIST), covers_total: covers.length, indexed_at: graph.indexed_at, stale: isStale(scope, graph) }
+      }
+      const tests = testsFor(graphs, scope, graph)
+      return {
+        ok: true, path: rel, kind: "source", tests, indexed_at: graph.indexed_at, stale: isStale(scope, graph),
+        ...(tests.length === 0 ? { note: "No test imports or sits beside this file; its behaviour may be covered indirectly." } : {}),
+      }
+    } catch (error) { return { ok: false, error: `tests_for failed: ${(error as Error).message}` } }
+  },
+}
+
+export const codeIndexTools: Tool[] = [outlineTool, findSymbolTool, dependentsTool, testsForTool]

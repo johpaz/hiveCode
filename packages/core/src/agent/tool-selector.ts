@@ -238,6 +238,7 @@ export const CORE_TOOL_CATALOG: ToolDescriptor[] = [
     { name: "outline", description: "List what a source file declares (functions, classes, methods) with line ranges, from the index. Decide which lines to read before fs_read. Spanish keywords: esquema del archivo, símbolos de un archivo", category: "core", abstractionLevel: "atomic" },
     { name: "find_symbol", description: "Find where a function, class, method or type is defined, with file and line range, from the index. Spanish keywords: dónde está definido, buscar símbolo, definición", category: "core", abstractionLevel: "atomic" },
     { name: "dependents", description: "Which files import a file and which it imports, from the index. See what a change can break. Spanish keywords: quién usa este archivo, dependientes, impacto de un cambio", category: "core", abstractionLevel: "atomic" },
+    { name: "tests_for", description: "Which test files cover a source file (importers and sibling tests), from the index. Know what to run after a change. Spanish keywords: pruebas de un archivo, qué tests cubren", category: "core", abstractionLevel: "atomic" },
     { name: "get_project_context", description: "Get cached project structure summary: key files, modules, active ADRs. Faster than recursive fs_list. Spanish keywords: contexto del proyecto, estructura del proyecto, resumen del proyecto", category: "core", abstractionLevel: "atomic" },
 
     // Git (advanced)

@@ -1,3 +1,4 @@
+import { isProjectIndexed, omittedAtStart } from "./loadout"
 import { buildContextPacket, resolveProjectScope, type ContextReference, type ProjectScope } from "./project-context"
 import { selectSpecialty, REQUIRED_PROFILE_SKILLS, FACTORY_SPECIALTIES } from "./specialties"
 /**
@@ -352,6 +353,10 @@ export async function compileContext(opts: {
     initialToolNames.delete("web_search")
     initialToolNames.delete("web_fetch")
   }
+  // Readers explore through the index when there is one; the tree-walking tools stay one search away.
+  if (isSpecialistProfile && opts.codeSessionId) {
+    for (const name of omittedAtStart(agent.agent_type, await isProjectIndexed(opts.codeSessionId))) initialToolNames.delete(name)
+  }
   const filteredNativeTools: ContextTool[] = allTools.filter(t => initialToolNames.has(t.name))
 
   const nativeToolsForLLM: LLMToolDef[] = filteredNativeTools.map(t => ({
@@ -385,7 +390,8 @@ export async function compileContext(opts: {
     minimalSkills = await getMinimalSkills()
     log.info(`[context-compiler] [STEP-8b] ✅ Loaded ${minimalSkills.length} minimal skills`)
 
-    const configuredSkillNames = new Set(agent.ephemeral ? parseStringList(agent.skills_json) : isCoreProfile ? [...(REQUIRED_PROFILE_SKILLS[agent.agent_type!] ?? parseStringList(agent.skills_json)), ...(specialty?.skills ?? [])] : parseStringList(agent.skills_json))
+    // A profile's duplicate (scout#2) is ephemeral but still a core profile: it loads what its base loads. Spawned children have no agent_type and keep their own subset.
+    const configuredSkillNames = new Set(isCoreProfile ? [...(REQUIRED_PROFILE_SKILLS[agent.agent_type!] ?? parseStringList(agent.skills_json)), ...(specialty?.skills ?? [])] : parseStringList(agent.skills_json))
     if (configuredSkillNames.size > 0) {
       const skillsCol = await col<SkillDoc>("skills")
       configuredSkills = (await skillsCol.scan())

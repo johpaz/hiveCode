@@ -1,7 +1,7 @@
 import { syncSkillCatalog } from "../services/skill-catalog";
 import * as path from "node:path"
 import type { Collection } from "@johpaz/hive-db"
-import { SkillLoader, getClaudeSkillsDirs } from "@johpaz/hivecode-skills"
+import { SkillLoader, getClaudeSkillsDirs, getProjectSkillsDirs } from "@johpaz/hivecode-skills"
 import { col, nextId, toIndexable } from "./hive"
 import type {
   AgentDoc,
@@ -189,6 +189,7 @@ export const SEED_DATA: SeedData = {
     { id: "outline", name: "outline", category: "core", description: "Listar lo que declara un archivo (funciones, clases, métodos) con su rango de líneas, desde el índice. Decide qué líneas leer antes de fs_read. Sinónimos: esquema del archivo, símbolos de un archivo" },
     { id: "find_symbol", name: "find_symbol", category: "core", description: "Encontrar dónde se define una función, clase, método o tipo, con archivo y rango de líneas, desde el índice. Sinónimos: dónde está definido, buscar símbolo, definición" },
     { id: "dependents", name: "dependents", category: "core", description: "Qué archivos importan un archivo y cuáles importa él, desde el índice. Para ver qué puede romper un cambio. Sinónimos: quién usa este archivo, dependientes, impacto de un cambio" },
+    { id: "tests_for", name: "tests_for", category: "core", description: "Qué archivos de prueba cubren un archivo fuente (los que lo importan y los hermanos), desde el índice. Para saber qué correr tras un cambio. Sinónimos: pruebas de un archivo, qué tests cubren" },
     { id: "get_project_context", name: "get_project_context", category: "core", description: "Obtener resumen cacheado de la estructura del proyecto: módulos clave, archivos críticos, ADRs activos. Más rápido que fs_list recursivo. Sinónimos: contexto del proyecto, estructura del proyecto, resumen del proyecto, qué hay en el proyecto" },
 
     // ─────────────────────────────────────────
@@ -617,6 +618,7 @@ async function reseedToolsAndSkills(): Promise<void> {
     skills: {
       extraDirs: [
         ...getClaudeSkillsDirs(),
+        ...getProjectSkillsDirs(),
         ...(process.env.HIVE_SKILL_DIRS?.split(path.delimiter).filter(Boolean) ?? []),
       ],
     },

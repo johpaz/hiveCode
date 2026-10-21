@@ -408,6 +408,14 @@ export function createSkillLoader(config: Config): SkillLoader {
  *
  * Solo retorna paths que existen en el sistema. Si no hay ninguno instalado, retorna [].
  */
+/**
+ * Skill folders of one project: where `npx skills add` and Claude Code put a skill installed for this
+ * project and not globally (`./.agents/skills`, `./.claude/skills`). Only the ones that exist.
+ */
+export function getProjectSkillsDirs(cwd: string = process.cwd()): string[] {
+  return [path.join(cwd, ".agents", "skills"), path.join(cwd, ".claude", "skills")].filter(d => fs.existsSync(d));
+}
+
 export function getClaudeSkillsDirs(): string[] {
   const home = os.homedir();
   const platform = os.platform();

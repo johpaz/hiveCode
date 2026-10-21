@@ -1,4 +1,4 @@
-import { SkillLoader, getClaudeSkillsDirs, type Skill } from "@johpaz/hivecode-skills";
+import { SkillLoader, getClaudeSkillsDirs, getProjectSkillsDirs, type Skill } from "@johpaz/hivecode-skills";
 import path from "node:path";
 import { col } from "../storage/hive";
 import type { SkillDoc } from "../storage/collections";
@@ -37,7 +37,7 @@ export async function syncSkillCatalog(skills: Skill[]): Promise<void> {
 export function catalogSkillLoader(config: Config): SkillLoader {
   return new SkillLoader({ workspacePath: process.cwd(), skills: {
     ...config.skills,
-    extraDirs: [...getClaudeSkillsDirs(), ...(config.skills?.extraDirs ?? []),
+    extraDirs: [...getClaudeSkillsDirs(), ...getProjectSkillsDirs(), ...(config.skills?.extraDirs ?? []),
       ...(process.env.HIVE_SKILL_DIRS?.split(path.delimiter).filter(Boolean) ?? [])],
   } });
 }

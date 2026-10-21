@@ -586,6 +586,7 @@ export const taskDelegateTool: Tool = {
       workspace: { type: "string", description: "Project workspace" },
       paths: { type: "array", items: { type: "string" }, description: "Files assigned to this task" },
       context_refs: { type: "array", items: { type: "object" }, description: "Versioned code ranges from get_project_context" },
+      context: { type: "string", description: "Evidence you already hold that the worker needs (file paths with line ranges, symbols, findings from the index), up to 8000 characters. Saves the worker rediscovering it: it reads those lines instead of walking the repo." },
       worker_id: { type: "string", description: "ID of the worker agent (scout, builder, verifier, spider, planner, ...). To run the same profile twice at once use an instance: builder#2, builder#3 — each gets its own copy of the workspace and its work is merged back when it finishes." },
       after: { type: "array", items: { type: "string" }, description: "Refs or task_ids this task depends on (e.g. [\"T001\"]). The worker does not start until they finish, costs no tokens while waiting, and receives their handoffs. If one of them fails you get blocked_by back instead." },
       task_description: { type: "string", description: "Clear, detailed instructions for the worker" },
@@ -634,6 +635,11 @@ export const taskDelegateTool: Tool = {
     const paths = Array.isArray(params.paths) ? params.paths.filter((p): p is string => typeof p === "string") : [];
     if (refs.length && !scope) return failEarly("References require an explicit project session");
     if (scope) await resolveContextReferences(scope, refs);
+
+    const MAX_CONTEXT_CHARS = 8000;
+    const context = typeof params.context === "string" ? params.context.trim() : "";
+    if (context.length > MAX_CONTEXT_CHARS) return failEarly(`context is ${context.length} characters (max ${MAX_CONTEXT_CHARS}): pass paths with line ranges, not the text of the files.`);
+    const contextBrief = context ? `\n\nContexto que ya tiene el coordinador (úsalo antes de explorar):\n${context}` : "";
 
     // Dependencies: park here (no run started, no slot held) until the tasks this one needs have finished.
     const after = Array.isArray(params.after) ? params.after.filter((a): a is string => typeof a === "string" && !!a.trim()) : [];
@@ -727,7 +733,7 @@ export const taskDelegateTool: Tool = {
       const { runAgentIsolated } = await import("../../agent/agent-loop.ts");
       const result = await runAgentIsolated({
         agentId: workerId,
-        taskDescription: buildWorkerBrief(taskDescription, acceptance) + dependencyBrief,
+        taskDescription: buildWorkerBrief(taskDescription, acceptance) + contextBrief + dependencyBrief,
         codeSessionId: scope?.sessionId, codeTaskId: scope?.taskId, workspace: runWorkspace,
         specialty, contextRefs: refs, contextPaths: paths,
         threadId: delegationThreadId(taskId, workerId),

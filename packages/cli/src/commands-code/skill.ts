@@ -4,7 +4,7 @@
  * hivecode skill list
  * hivecode skill enable <name>
  * hivecode skill disable <name>
- * hivecode skill add <path>
+ * hivecode skill add <repo-github|url|ruta> [--skill <nombre>]... [--list]
  * hivecode skill remove <name>
  * hivecode skill inspect <name>
  * hivecode skill assign <skill> <coordinator>
@@ -16,6 +16,8 @@ import {
 } from "../cli-ui.ts"
 import { col } from "@johpaz/hivecode-core/storage/hive"
 import type { SkillDoc } from "@johpaz/hivecode-core/storage/collections"
+import { addSkillsFromSource, parseSkillAddArgs } from "@johpaz/hivecode-core/services/skill-install"
+import { syncSkillsToIndex } from "@johpaz/hivecode-core/agent/skill-selector"
 
 export async function skillList(): Promise<void> {
   hiveIntro("hivecode · Skills")
@@ -49,6 +51,7 @@ export async function skillEnable(name?: string): Promise<void> {
   const skills = await col<SkillDoc>("skills")
   const row = await skills.get(name)
   if (row) await skills.put(name, { ...row.doc, active: true, updated_at: Date.now() }, { expectedVersion: row.version })
+  await syncSkillsToIndex()
   hiveOutro(`Skill ${name} habilitada`)
 }
 
@@ -62,54 +65,54 @@ export async function skillDisable(name?: string): Promise<void> {
   const skills = await col<SkillDoc>("skills")
   const row = await skills.get(name)
   if (row) await skills.put(name, { ...row.doc, active: false, updated_at: Date.now() }, { expectedVersion: row.version })
+  await syncSkillsToIndex()
   hiveOutro(`Skill ${name} deshabilitada`)
 }
 
-export async function skillAdd(pathArg?: string): Promise<void> {
+export async function skillAdd(args: string[] = []): Promise<void> {
   hiveIntro("hivecode · Añadir Skill")
-
-  const filePath = pathArg ?? await hiveText({
-    message: "Ruta al archivo .md de la skill:",
-    placeholder: "/path/to/skill.md",
-  })
-
-  if (isCancel(filePath) || !filePath || typeof filePath !== "string") {
-    hiveOutro("Cancelado", "error")
-    return
+  const parsed = parseSkillAddArgs(args)
+  let source = parsed.source
+  if (!source) {
+    const answer = await hiveText({ message: "Repositorio de GitHub, URL o ruta de la skill:", placeholder: "https://github.com/vercel-labs/skills" })
+    if (isCancel(answer) || !answer || typeof answer !== "string") { hiveOutro("Cancelado", "error"); return }
+    source = answer
   }
 
+  const spinner = hiveSpinner()
+  spinner.start(`Buscando skills en ${source}`)
   try {
-    const content = await Bun.file(filePath).text()
-    const nameMatch = content.match(/^#\s+(.+)/m)
-    const name = nameMatch ? nameMatch[1].trim() : filePath.split("/").pop()?.replace(".md", "") || "custom"
-    const id = name.toLowerCase().replace(/[^a-z0-9_-]/g, "_")
+    const result = await addSkillsFromSource(source, { skills: parsed.skills, list: parsed.list })
+    spinner.stop(`${result.available.length} skill(s) en la fuente`)
 
-    const skills = await col<SkillDoc>("skills")
-    const existing = await skills.get(id)
-    const now = Date.now()
-    await skills.put(id, {
-      id,
-      name,
-      description: `Imported from ${filePath}`,
-      version: "0.0.1",
-      author: "local",
-      icon: "skill",
-      category: "custom",
-      permissions: JSON.stringify([]),
-      dependencies: JSON.stringify([]),
-      tools: "",
-      triggers: "",
-      preferred_agents: JSON.stringify([]),
-      body: content,
-      version_num: 1,
-      active: true,
-      created_at: existing?.doc.created_at ?? now,
-      updated_at: now,
-    }, { expectedVersion: existing?.version ?? 0 })
-
-    hiveOutro(`Skill ${id} añadida`)
+    if (parsed.list || (result.needsChoice && !result.outcomes.length)) {
+      hiveNote("Skills disponibles", result.available.map(name => `· ${name}`))
+      hiveOutro(parsed.list ? "Instala una con: hivecode skill add <fuente> --skill <nombre>" : "La fuente tiene varias skills: elige con --skill <nombre>", parsed.list ? "success" : "error")
+      if (!parsed.list) process.exit(1)
+      return
+    }
+    if (result.missing.length) {
+      hiveNote("No encontré", result.missing.map(name => `· ${name}`))
+      hiveNote("Disponibles", result.available.map(name => `· ${name}`))
+    }
+    let failed = result.missing.length > 0
+    for (const outcome of result.outcomes) {
+      if (outcome.status === "failed") { failed = true; hiveNote(`✗ ${outcome.name}`, [outcome.error ?? "error"]); continue }
+      const v = outcome.verified
+      const ok = !!v && v.stored && v.active && v.searchable
+      if (!ok) failed = true
+      const label = outcome.status === "installed" ? "instalada" : outcome.status === "updated" ? "actualizada" : "ya estaba cargada desde una carpeta de skills"
+      hiveNote(`${ok ? "✓" : "⚠"} ${outcome.name} (${label})`, [
+        `Origen: ${outcome.origin}`,
+        `En la base de datos: ${v?.stored ? "sí" : "NO"} · activa: ${v?.active ? "sí" : "NO"} · encontrable con search_knowledge: ${v?.searchable ? "sí" : "NO"}`,
+        "El texto de una skill entra en el prompt del agente: instala solo de fuentes en las que confíes.",
+      ])
+    }
+    hiveOutro(failed ? "Terminó con problemas" : `${result.outcomes.length} skill(s) cargada(s) en la base de datos`, failed ? "error" : "success")
+    if (failed) process.exit(1)
   } catch (err) {
-    hiveOutro(`Error leyendo ${filePath}: ${(err as Error).message}`, "error")
+    spinner.stop("No se pudo leer la fuente", "error")
+    hiveOutro((err as Error).message, "error")
     process.exit(1)
   }
 }
@@ -122,6 +125,7 @@ export async function skillRemove(name?: string): Promise<void> {
   }
 
   await (await col<SkillDoc>("skills")).delete(name)
+  await syncSkillsToIndex()
   hiveOutro(`Skill ${name} eliminada`)
 }
 

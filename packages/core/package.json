@@ -92,6 +92,7 @@
     "./services/agent-models": "./src/services/agent-models.ts",
     "./services/channel-config": "./src/services/channel-config.ts",
     "./services/diagnostics": "./src/services/diagnostics.ts",
+    "./services/skill-install": "./src/services/skill-install.ts",
     "./services/model-windows": "./src/services/model-windows.ts",
     "./services/narrative-mapping": "./src/services/narrative-mapping.ts",
     "./services/provider-capabilities": "./src/services/provider-capabilities.ts",

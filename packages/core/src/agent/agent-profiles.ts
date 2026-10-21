@@ -1,6 +1,6 @@
 import { col, mutateDoc, toIndexable } from "../storage/hive"
 import type { AgentDoc } from "../storage/collections"
-import { SUBDIVISION_INSTRUCTIONS } from "./specialties"
+import { REQUIRED_PROFILE_SKILLS, SUBDIVISION_INSTRUCTIONS } from "./specialties"
 import { obscuraToolNames } from "../tools/web/obscura"
 import type { ReasoningPolicy } from "./reasoning-effort"
 
@@ -36,7 +36,7 @@ export interface CoreAgentDefinition {
 const READ_TOOLS = [
   "fs_read", "fs_list", "fs_glob", "fs_exists", "search_in_files",
   "find_imports", "parse_ast", "git_status", "git_diff", "git_log",
-  "search_knowledge", "get_project_context", "outline", "find_symbol", "dependents", "web_search", "web_fetch",
+  "search_knowledge", "get_project_context", "outline", "find_symbol", "dependents", "tests_for", "web_search", "web_fetch",
 ]
 
 export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> = {
@@ -59,7 +59,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
       // Trabajo directo en cambios pequeños: delegar uno solo duplica lectura y juicio del handoff.
       "fs_write", "fs_edit", "shell_executor", "check_types", "code_test",
     ],
-    skills: ["spec-kit", "task_orchestrator", "busqueda_hivedb"],
+    skills: REQUIRED_PROFILE_SKILLS.bee,
     systemPrompt: [
       "Eres BEE, Lead de hiveCode. Eres el único interlocutor del usuario y dueño del objetivo.",
       "Resuelve directamente preguntas y cambios pequeños: léelos, edítalos (fs_edit admite varios cambios por",
@@ -96,7 +96,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     // Lee y resume: trabajo mecánico.
     reasoning: { base: "low", onFailure: "medium" },
     tools: READ_TOOLS,
-    skills: ["file_manager", "file_read_and_summarize", "code_analysis", "web_research"],
+    skills: REQUIRED_PROFILE_SKILLS.scout,
     systemPrompt: [
       "Eres Scout de hiveCode. Investiga sin modificar archivos, git ni estado externo.",
       "Explora desde el índice de HiveDB: empieza por get_project_context y search_knowledge con type=\"code\" (devuelve fragmento y líneas de cada archivo). Lee el disco solo para confirmar lo que el índice no responde, y entonces con fs_read por rango; no recorras el repo con fs_list/fs_glob/search_in_files.",
@@ -119,7 +119,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
       "speckit_init", "speckit_artifact_read", "speckit_artifact_write", "speckit_validate",
       "save_note",
     ],
-    skills: ["spec-kit", "code_analysis", "busqueda_hivedb"],
+    skills: REQUIRED_PROFILE_SKILLS.planner,
     systemPrompt: [
       "Eres Planner de hiveCode. Conviertes un objetivo en artefactos Spec Kit y no tocas código fuente.",
       "Flujo: speckit_init; recoge contexto desde el índice (get_project_context, search_knowledge type=\"code\") y lee el disco solo por rango para lo que falte; completa spec.md, plan.md y",
@@ -151,7 +151,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
       // Esperar a otra tarea (p. ej. la API) sin sondear con sleep en el shell.
       "wait_for",
     ],
-    skills: ["test_driven_development", "git_workflow", "busqueda_hivedb"],
+    skills: REQUIRED_PROFILE_SKILLS.builder,
     systemPrompt: [
       "Eres Builder de hiveCode. Implementa únicamente la tarea asignada y respeta su ownership,",
       "la especificación, el plan y los contratos. Descubre skills de dominio bajo demanda.",
@@ -190,10 +190,8 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     // Las tres del verifier (reproducir, automatizar, entender) más las dos
     // del reviewer (juzgar calidad, auditar seguridad). La fusión no puede
     // dejar al gate sin criterio para rechazar.
-    skills: [
-      "test_driven_development", "browser_automate", "code_analysis",
-      "code_review", "code_security_audit",
-    ],
+    // code_security_audit and browser_automate arrive with the `security` / `acceptance` specialties.
+    skills: REQUIRED_PROFILE_SKILLS.verifier,
     systemPrompt: [
       "Eres el gate de calidad de hiveCode. No cambies código fuente. Trabaja en dos mitades,",
       "en orden: (1) reproduce cada criterio de aceptación contra el sistema real y registra",
@@ -226,7 +224,8 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
       // El set completo de automatización de navegador (Obscura, MCP 2.0)
       ...obscuraToolNames(),
     ],
-    skills: ["web_research", "browser_automate", "browser_scrape", "web_monitor"],
+    // browser_scrape / browser_automate arrive with the `web` specialty, only when the task is about the web.
+    skills: REQUIRED_PROFILE_SKILLS.spider,
     systemPrompt: [
       "Eres Spider de hiveCode, especialista web del enjambre. Eres dueño de la búsqueda,",
       "el scraping y la automatización web: web_search/web_fetch para investigación ligera,",

@@ -54,6 +54,8 @@ import {
 } from "./run-store"
 import { recordTaskUsage, taskBudgetBlocker } from "./task-budget"
 import { commandPreview, traceStep } from "./step-trace"
+import { diskReadNudge } from "./read-mix"
+import { CAPABILITY_SEARCH_LIMIT_MESSAGE, chargeCapabilitySearch, isCapabilitySearch } from "./discovery-budget"
 import { chooseReasoningEffort, resolveReasoningPolicy, type ReasoningPolicy } from "./reasoning-effort"
 import { CORE_AGENT_DEFINITIONS, type CoreAgentType } from "./agent-profiles"
 import { broadcastThinking } from "../gateway/task-streaming"
@@ -1247,7 +1249,8 @@ export async function* runAgent(
       })
 
       opts.signal?.throwIfAborted()
-      const toolResultJS = await executeTool(ctx.allTools, toolName, tc.function.arguments, {
+      const overDiscoveryBudget = opts.runKind === "worker" && isCapabilitySearch(toolName, tc.function.arguments) && !chargeCapabilitySearch(runId)
+      const toolResultJS = overDiscoveryBudget ? { ok: false, error: CAPABILITY_SEARCH_LIMIT_MESSAGE } : await executeTool(ctx.allTools, toolName, tc.function.arguments, {
         signal: opts.signal,
         user_id: opts.userId,
         thread_id: opts.threadId,
@@ -1265,7 +1268,8 @@ export async function* runAgent(
       const toolMs = Math.round(performance.now() - tTool)
       // One result never gets to take the window: an fs_list of a whole repo used
       // to go in whole and the next call died with a 400.
-      const toolResultLLM = capToolResult(formatToolResult(toolResultJS, cleanModel), providerCfg.contextWindow)
+      const readNudge = diskReadNudge(runId, agent.agent_type, toolName)
+      const toolResultLLM = capToolResult(formatToolResult(toolResultJS, cleanModel), providerCfg.contextWindow) + (readNudge ?? "")
       const toolError = !!(
         toolResultJS
         && typeof toolResultJS === "object"
@@ -1455,10 +1459,12 @@ export async function* runAgent(
           const foundMcpTools: Array<{ tool_name: string; full_name?: string; id?: string }> = result?.toolsmcp ?? []
           const currentToolNames = new Set(ctx.tools.map((t: any) => t.function?.name))
           const injectedTools: string[] = []
+          const outsideRole: string[] = []
 
           for (const found of foundTools) {
             if (!currentToolNames.has(found.name)) {
               const nativeTool = ctx.allTools.find(t => t.name === found.name)
+              if (!nativeTool) outsideRole.push(found.name)
               if (nativeTool) {
                 ctx.tools.push({
                   type: "function",
@@ -1497,18 +1503,26 @@ export async function* runAgent(
             }
           }
 
+          // A tool the search found but this role may not use used to vanish: the model asked for it again next turn.
+          if (outsideRole.length > 0) {
+            const lastMsg = messages[messages.length - 1]
+            if (lastMsg?.role === "tool" && typeof lastMsg.content === "string") {
+              lastMsg.content += `\n\n[Nota: ${outsideRole.join(", ")} existe pero tu rol no puede usarla. No la busques otra vez: resuélvelo con tus herramientas o devuelve en tu handoff qué necesitas para que BEE lo haga.]`
+            }
+          }
+
           if (injectedTools.length > 0) {
             try {
               const skillsCol = await col<SkillDoc>("skills")
-              const skillsWithTools = (await skillsCol.scan({}))
+              // Exact tool names: a skill that merely mentions "fs_read_all" is not the skill of "fs_read".
+              const matchingSkills = (await skillsCol.scan({}))
                 .map(e => e.doc)
-                .filter(s => s.active && injectedTools.some(t => s.tools.includes(t)))
+                .filter(s => s.active)
                 .map(s => ({ name: s.name, body: s.body, tools: s.tools }))
-
-              const matchingSkills = skillsWithTools.filter(s => {
-                const skillTools = s.tools?.split(",").map(t => t.trim()) ?? []
-                return injectedTools.some(injected => skillTools.includes(injected))
-              })
+                .filter(s => {
+                  const skillTools = s.tools?.split(",").map(t => t.trim()) ?? []
+                  return injectedTools.some(injected => skillTools.includes(injected))
+                })
 
               if (matchingSkills.length > 0) {
                 const systemMsg = messages.find(m => m.role === "system")

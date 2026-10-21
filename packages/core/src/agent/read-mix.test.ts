@@ -28,3 +28,21 @@ describe("readMix", () => {
     expect(readMix([{ run_id: "gone", tool_name: "fs_read" }], []).byAgent["unknown"]?.disk).toBe(1)
   })
 })
+
+import { DISK_READ_NUDGE_AFTER, diskReadNudge } from "./read-mix"
+
+describe("diskReadNudge", () => {
+  test("a scout hears about the index after several disk reads, then again every few", () => {
+    const hits: number[] = []
+    for (let i = 1; i <= 14; i++) if (diskReadNudge("run-s", "scout", "fs_read")) hits.push(i)
+    expect(hits).toEqual([DISK_READ_NUDGE_AFTER, DISK_READ_NUDGE_AFTER + 4, DISK_READ_NUDGE_AFTER + 8])
+  })
+
+  test("index calls, writers and other tools never trigger it", () => {
+    for (let i = 0; i < 20; i++) {
+      expect(diskReadNudge("run-i", "scout", "search_knowledge")).toBeUndefined()
+      expect(diskReadNudge("run-b", "builder", "fs_read")).toBeUndefined()
+      expect(diskReadNudge("run-b", undefined, "fs_read")).toBeUndefined()
+    }
+  })
+})

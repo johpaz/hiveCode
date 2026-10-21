@@ -119,6 +119,16 @@ test("compiler automatically supplies a task packet and a factory specialty", as
   expect(compiled.contextMetrics!.project).toBeGreaterThan(0)
 })
 
+test("an indexed project starts a scout without the tree-walking tools, a builder with them", async () => {
+  const names = async (agentId: string) => (await compileContext({agentId, threadId: `t-${agentId}`, userMessage: "Revisar render_office",
+    codeSessionId: "a", workspace: scope.workspace, isolated: true})).tools.map(tool => tool.function.name)
+  const scout = await names("scout")
+  expect(scout).not.toContain("fs_list")
+  expect(scout).not.toContain("fs_glob")
+  expect(scout).toEqual(expect.arrayContaining(["fs_read", "search_in_files", "get_project_context", "outline", "find_symbol"]))
+  expect(await names("builder")).toEqual(expect.arrayContaining(["fs_list", "fs_glob"]))
+})
+
 test("children keep parent permissions, metadata and full durable evidence", async () => {
   const parent = (await (await col<AgentDoc>("agents")).get("scout"))!.doc
   expect(() => childCapabilities(parent, {tools: ["fs_write"]})).toThrow("outside parent")

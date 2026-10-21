@@ -1,5 +1,6 @@
 import { readChannelConfig, storeChannelConfig } from "@johpaz/hivecode-core/services/channel-config";
 import { renderRuntimeDiagnostics } from "@johpaz/hivecode-core/services/diagnostics";
+import { addSkillsFromSource, describeSkillInstall, parseSkillAddArgs } from "@johpaz/hivecode-core/services/skill-install";
 import packageInfo from "../../../../package.json"
 import { getCodeConfig, setCodeConfig } from "@johpaz/hivecode-core/storage/code-config"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
@@ -1484,43 +1485,21 @@ async function handleSkillCommand(
     }
 
     case "add": {
-      let path = rest[0]
-      if (!path && ui?.showConfigModal) {
-        const values = await ui.showConfigModal("skill_import", "Importar skill", [
-          { key: "path", label: "Ruta del archivo Markdown", placeholder: "./SKILL.md", required: true, secret: false, field_type: "text" },
+      const parsed = parseSkillAddArgs(rest)
+      let source = parsed.source
+      if (!source && ui?.showConfigModal) {
+        const values = await ui.showConfigModal("skill_import", "Instalar skill", [
+          { key: "path", label: "Repositorio de GitHub, URL o ruta", placeholder: "https://github.com/vercel-labs/skills", required: true, secret: false, field_type: "text" },
+          { key: "skill", label: "Nombre de la skill (vacío: lista las disponibles)", placeholder: "find-skills", required: false, secret: false, field_type: "text" },
         ])
-        if (!values) return { handled: true, output: "  Importación cancelada" }
-        path = values.path.trim()
+        if (!values) return { handled: true, output: "  Instalación cancelada" }
+        source = values.path.trim()
+        if (values.skill?.trim()) parsed.skills.push(values.skill.trim())
       }
-      if (!path) return { handled: true, output: "uso: /skill add <path>\nejemplo: /skill add ~/my-skills/custom_auth.md" }
+      if (!source) return { handled: true, output: "uso: /skill add <repo-github|url|ruta> [--skill <nombre>] [--list]\nejemplo: /skill add https://github.com/vercel-labs/skills --skill find-skills" }
       try {
-        const content = await Bun.file(path).text()
-        const nameMatch = content.match(/^#\s+(.+)/m)
-        const skillName = nameMatch ? nameMatch[1].trim() : path.split("/").pop()?.replace(".md", "") || "custom"
-        const id = skillName.toLowerCase().replace(/[^a-z0-9_-]/g, "_")
-        const skills = await col<SkillDoc>("skills")
-        const existing = await skills.get(id)
-        const now = Date.now()
-        await skills.put(id, {
-          id,
-          name: skillName,
-          description: `Imported from ${path}`,
-          version: existing?.doc.version ?? "0.0.1",
-          author: existing?.doc.author ?? "local",
-          icon: existing?.doc.icon ?? "skill",
-          category: "custom",
-          permissions: existing?.doc.permissions ?? JSON.stringify([]),
-          dependencies: existing?.doc.dependencies ?? JSON.stringify([]),
-          tools: existing?.doc.tools ?? "",
-          triggers: existing?.doc.triggers ?? "",
-          preferred_agents: existing?.doc.preferred_agents ?? JSON.stringify([]),
-          body: content,
-          version_num: existing?.doc.version_num ?? 1,
-          active: true,
-          created_at: existing?.doc.created_at ?? now,
-          updated_at: now,
-        }, { expectedVersion: existing?.version ?? 0 })
-        return { handled: true, output: `  \u2713 Skill ${id} agregada desde ${path}` }
+        const result = await addSkillsFromSource(source, { skills: parsed.skills, list: parsed.list })
+        return { handled: true, output: describeSkillInstall(result, parsed.list) }
       } catch (err) {
         return { handled: true, output: `  \u2717 Error: ${(err as Error).message}` }
       }

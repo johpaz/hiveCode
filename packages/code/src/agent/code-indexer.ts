@@ -7,6 +7,7 @@
  * Uses Bun.Transpiler for lightweight AST analysis (no tsc needed).
  */
 
+import { createHash } from "node:crypto"
 import { col } from "@johpaz/hivecode-core/storage/hive"
 import type { CodeFileDoc, CodeGraphDoc, CodeSessionDoc } from "@johpaz/hivecode-core/storage/collections"
 import {
@@ -232,7 +233,14 @@ export async function reconcileCodeIndex(sessionId: string, workspace: string): 
       // lastModified is stored as the file's mtime, so a match means unchanged.
       // Hashing every file here read the whole repo on each reconcile.
       if (dbTime !== fsTime) {
-        toReindex.push(row.file_path)
+        // Only files whose mtime moved are hashed. A touch or a checkout that left the content alone just
+        // records the new mtime, instead of re-parsing and re-indexing the file.
+        const hash = row.content_hash ? createHash("sha256").update(await Bun.file(row.file_path).text()).digest("hex") : undefined
+        if (hash && hash === row.content_hash) {
+          await codeGraph.put(row.id, { ...row, last_modified: stat.mtime.toISOString() })
+        } else {
+          toReindex.push(row.file_path)
+        }
       }
     } catch {
       // file missing — already handled above
