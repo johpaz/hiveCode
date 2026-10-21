@@ -258,3 +258,35 @@ Y de dónde sale el contexto de cada turno (medido con el compilador de contexto
 3. **Bajar el coste fijo por turno** (~8,2 K × pasos). Dos medidas: enviar las skills como índice y cargar el cuerpo bajo demanda (como las herramientas MCP), y dar a cada worker sólo los esquemas que su tarea va a usar. Con 48 turnos, son ~390 K tokens: un 26 % del total.
 
 La palanca 3 es la que más crece con el tiempo: el coste por turno se paga en cada paso, y los pasos son muchos.
+
+### Una fragilidad que salió al medir: cortar tira el trabajo
+
+`cancelOwnedTask` no integraba: una tarea cortada dejaba su trabajo en el worktree y el proyecto se quedaba vacío. Medido el 21-oct-2026: una corrida detenida en el límite **tenía el CLI entero escrito** (`src/inventario.ts`, `src/index.ts`, 5 ficheros de test) y el proyecto acabó con **0 de 31**.
+
+Ahora cancelar tiene dos modalities: la del reloj (tiempo agotado) **integra lo que haya**; la que pide la persona deja el trabajo en el worktree, donde puede verlo. `cancelTask(taskId, { integrate: true })`.
+
+### Resultado tras aplicar las tres cosas
+
+Cuatro corridas seguidas de la misma celda (`inventario`, binario, `minimax-m3.1-flash-free`):
+
+| corrida | tiempo | tokens entrada | pasos | herramientas | ocultas | runs |
+|---|---|---|---|---|---|---|
+| ruta nueva, sin las palancas | 22,1 min | 1,53 M | 48 | 80 | 31/31 | 3 (bee, builder, verifier) |
+| + sin verificador | 25,0 min (corte) | 1,51 M | 50 | 65 | **0/31** (no integró) | 3 (bee, builder×2) |
+| + integra al cortar | 15,9 min | 1,82 M | 53 | 70 | 31/31 | 2 (bee, builder) |
+| **+ BEE hace el cambio pequeño él mismo** | **12,6 min** | **0,51 M** | **21** | 38 | **31/31** | **1 (bee)** |
+
+La última fila es la ruta acotada en su forma mínima: **un solo run**. BEE tiene herramientas de escritura (`fs_write`, `fs_edit`, `shell_executor`, `check_types`, `code_test`) y su perfil le dice que resuelva él mismo los cambios pequeños: delegar un solo cambio duplica la lectura y el juicio del handoff. Cuando el trabajo sí son muchas piezas, delega el bloque al `builder`.
+
+Los pasos no bajaron por el modelo (53 → 21 porque no hubo verificador ni ciclo de revisión), sino porque **dejó de haber dos workers mirando lo mismo**: leer, delegar, volver a leer, juzgar el handoff.
+
+### Tabla final del banco (21-oct-2026)
+
+| agente | modelo | tiempo | tokens entrada | tokens salida | pasos | herramientas | ocultas |
+|---|---|---|---|---|---|---|---|
+| claude code | claude-sonnet-5-5 | 0,6 min | 0,04 M | 5 K | 3 | — | **31/31** |
+| codex | gpt-6.1-sol | 1,8 min | 0,09 M | 4 K | 1 | 5 | **31/31** |
+| opencode | minimax-m3.1-flash-free | 6,9 min | 1,13 M | 43 K | 32 | 31 | **31/31** |
+| **hivecode (binario)** | minimax-m3.1-flash-free | **12,6 min** | 0,51 M | 82 K | 21 | 38 | **31/31** |
+
+hivecode queda a 2× de opencode en tiempo y por debajo en tokens de entrada, con los cuatro entregando el mismo resultado. Sigue siendo el más lento: el margen restante es el modelo (pasos pequeños para 18 ficheros) y el coste fijo por turno (§12).

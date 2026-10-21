@@ -7,7 +7,7 @@ import { col } from "../storage/hive.ts"
 import { ensureHiveDb } from "../storage/bootstrap.ts"
 import type { AgentDoc } from "../storage/collections.ts"
 import { HIVEAGENTS_MODEL_ID } from "../agent/llm-providers/hiveagents.ts"
-import { DEFAULT_MAX_HARNESS_STEPS, ProfileHarness, ROUTE_TOKEN_BUDGETS, routeBudget, type ProfileRunner } from "./profile-harness.ts"
+import { DEFAULT_MAX_HARNESS_STEPS, ProfileHarness, ROUTE_TOKEN_BUDGETS, SCOPED_REASONING, routeBudget, type ProfileRunner } from "./profile-harness.ts"
 import { recordTaskUsage, taskBudgetUsage } from "../agent/task-budget.ts"
 
 const previousHiveDbPath = process.env.HIVE_DB_PATH
@@ -176,6 +176,23 @@ describe("BEE-led execution", () => {
     expect(calls[0]!.task).toContain("Hazlo tú directamente")
     expect(calls[0]!.task).not.toContain("en el PRIMER paso")
     expect(calls[0]!.task).toContain("no inicies Spec Kit")
+  })
+
+  test("the harness decides how hard a scoped change thinks: low, not the TUI effort", async () => {
+    const { calls, runner } = scripted(["listo"])
+    const seen: unknown[] = []
+    const spy: ProfileRunner = async options => { seen.push(options.reasoning); return runner(options) }
+    await new ProfileHarness(spy).run({ objective: "corrige el typo en el README", sessionId: "session-reasoning", workspace: "/workspace/test" })
+    expect(calls).toHaveLength(1)
+    expect(seen[0]).toEqual(SCOPED_REASONING)
+    expect(SCOPED_REASONING).toEqual({ base: "low", onFailure: "medium" })
+  })
+
+  test("a conversation leaves the policy to the profile", async () => {
+    const seen: unknown[] = []
+    const runner: ProfileRunner = async options => { seen.push(options.reasoning); return "hola" }
+    await new ProfileHarness(runner).run({ objective: "hola", sessionId: "session-conv", workspace: "/workspace/test" })
+    expect(seen[0]).toBeUndefined()
   })
 
   test("the scoped prompt carries the project facts, so BEE does not spend turns finding them out", async () => {

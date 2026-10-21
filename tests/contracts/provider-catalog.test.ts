@@ -68,6 +68,26 @@ describe("weekly catalog", () => {
       await expect(discoverProviderModels(provider(), null)).rejects.toThrow()
     }
   })
+  test("OpenCode Go: the curated window repairs a 32 768 placeholder or a stale value, and fills a new row", async () => {
+    const models = await col<ModelDoc>("models")
+    const goModel = (id: string, context_window: number): ModelDoc =>
+      ({ ...model(`opencode-go/${id}`, "opencode-go"), context_window, catalog_managed: true, catalog_wire_id: id })
+    await models.put("opencode-go/minimax-m3.1-flash-free", goModel("minimax-m3.1-flash-free", 32768)) // placeholder written by an earlier sync
+    await models.put("opencode-go/minimax-m2.7", goModel("minimax-m2.7", 1_000_000)) // stale: the real window is 204 800
+    // The gateway lists ids only: no window anywhere in the payload.
+    await reconcileProviderModels(provider("opencode-go"), [{ id: "minimax-m3.1-flash-free" }, { id: "minimax-m2.7" }, { id: "minimax-m3" }, { id: "not-in-the-catalog" }], sunday)
+    expect((await models.get("opencode-go/minimax-m3.1-flash-free"))?.doc.context_window).toBe(1_000_000)
+    expect((await models.get("opencode-go/minimax-m2.7"))?.doc.context_window).toBe(204_800)
+    expect((await models.get("opencode-go/minimax-m3"))?.doc.context_window).toBe(1_000_000)
+    // A model the catalog does not know keeps the old default rather than an invented window.
+    expect((await models.get("opencode-go/not-in-the-catalog"))?.doc.context_window).toBe(32768)
+  })
+  test("other providers keep their stored window: only the curated OpenCode Go catalog overrides", async () => {
+    const models = await col<ModelDoc>("models")
+    await models.put("minimax-m3.1-flash-free", { ...model("minimax-m3.1-flash-free", "deepseek"), context_window: 7777 })
+    await reconcileProviderModels(provider("deepseek"), [{ id: "minimax-m3.1-flash-free" }], sunday)
+    expect((await models.get("minimax-m3.1-flash-free"))?.doc.context_window).toBe(7777)
+  })
   test("preserves manual choices, isolates provider IDs and deprecates after two weekly slots", async () => {
     const models = await col<ModelDoc>("models")
     await models.put("present", model("present"))

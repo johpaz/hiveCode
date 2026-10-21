@@ -1,6 +1,7 @@
 import { col, ensureIndexes } from "../storage/hive"
 import type { CodeConfigDoc, ModelDoc, ProviderDoc } from "../storage/collections"
 import { getProviderApiKey } from "../storage/crypto"
+import { knownContextWindow } from "../storage/seed"
 import { HIVEAGENTS_MODEL_ID } from "../agent/llm-providers/hiveagents"
 import { eventBus } from "../events/event-bus"
 import { logger } from "../utils/logger"
@@ -134,7 +135,10 @@ export async function reconcileProviderModels(provider: ProviderDoc, remote: Rem
     const doc: ModelDoc = {
       ...old, id: key, provider_id: provider.id, name: model.name ?? old?.name ?? model.id,
       model_type: old?.model_type ?? model.type ?? "llm",
-      context_window: old?.context_window ?? model.context ?? 32768,
+      // The curated catalog wins where the provider's own list carries no window (OpenCode Go): a row
+      // written earlier with the 32 768 placeholder — or a stale seed value — would otherwise stay
+      // that way forever and the agent would compact and cap its answers at a fraction of the window.
+      context_window: knownContextWindow(provider.id, model.id) ?? old?.context_window ?? model.context ?? 32768,
       capabilities: (() => {
         if (!model.capabilities) return old?.capabilities ?? null
         try {

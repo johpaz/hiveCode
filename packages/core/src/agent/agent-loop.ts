@@ -26,7 +26,7 @@ import { getHiveDb } from "../storage/hivedb"
 import { causalLogEnabled } from "../storage/causal-events"
 import type { HiveDB } from "@johpaz/hive-db"
 import { col, fromIndexable } from "../storage/hive"
-import type { AgentDoc, AgentRunDoc, AgentRunStatus, CodeConfigDoc, SkillDoc, ToolRunDoc } from "../storage/collections"
+import type { AgentDoc, AgentRunDoc, AgentRunStatus, CodeConfigDoc, ModelDoc, SkillDoc, ToolRunDoc } from "../storage/collections"
 import { callLLM, resolveProviderConfig, type LLMMessage } from "./llm-client"
 import { addMessage } from "./conversation-store"
 import { saveTrace, recordLLMUsage, capStoredPayload } from "./tracer"
@@ -53,6 +53,9 @@ import {
   type RepeatTrackerSnapshot,
 } from "./run-store"
 import { recordTaskUsage, taskBudgetBlocker } from "./task-budget"
+import { traceStep } from "./step-trace"
+import { chooseReasoningEffort, resolveReasoningPolicy, type ReasoningPolicy } from "./reasoning-effort"
+import { CORE_AGENT_DEFINITIONS, type CoreAgentType } from "./agent-profiles"
 import { broadcastThinking } from "../gateway/task-streaming"
 import { emitLoadout, emitToolCall, emitToolDone, emitWaiting, summarizeArgs } from "./tool-telemetry"
 
@@ -417,6 +420,8 @@ export interface AgentLoopOptions {
   approvalChannel?: string
   /** Per-run ceiling used by the harness to keep orchestration token-bounded. */
   maxSteps?: number
+  /** How hard a reasoning model thinks in this run: the harness's decision for its route and phase. */
+  reasoning?: ReasoningPolicy
   /** Answer tokens as the model produces them. Drives `assistant_chunk`. */
   onToken?: (token: string) => void
   /** Reasoning tokens as the model produces them. Drives `thought_chunk`. */
@@ -660,6 +665,16 @@ export async function* runAgent(
   const thinkingBudget = maxOutputTokens > 0
     ? Math.max(0, Math.min(requestedThinkingBudget, maxOutputTokens - 1024))
     : requestedThinkingBudget
+  // A reasoning model with no limit spends most of its output thinking (see reasoning-effort.ts).
+  // The harness decides how hard it thinks; the agent's TUI `effort` is only the last resort.
+  const reasoningPolicy = resolveReasoningPolicy({
+    run: opts.reasoning,
+    profile: agent.agent_type ? CORE_AGENT_DEFINITIONS[agent.agent_type as CoreAgentType]?.reasoning : undefined,
+    agentEffort: agent.effort,
+    capabilitiesJson: (await (await col<ModelDoc>("models")).get(modId))?.doc.capabilities,
+  })
+  // Whether the last tool batch failed: the next turn is the one that debugs, so it thinks harder.
+  let previousTurnFailed = false
   const profileCallOptions = {
     ...(maxOutputTokens > 0 ? { maxTokens: maxOutputTokens } : {}),
     ...(thinkingBudget > 0 ? { thinking: { enabled: true, budget_tokens: thinkingBudget } } : {}),
@@ -918,9 +933,12 @@ export async function* runAgent(
     }
 
     estimatedInputTokens += budgetTokens(JSON.stringify(prepareMessages(messages, ctx.tools))) + budgetTokens(JSON.stringify(ctx.tools))
+    const stepStartedAt = Date.now()
+    const turnReasoning = chooseReasoningEffort(reasoningPolicy, previousTurnFailed)
     const response = await withExecutionSlot(opts.codeSessionId ?? opts.threadId, opts.signal, () => callProfileLLM({
       ...providerCfg,
       ...profileCallOptions,
+      ...(turnReasoning ? { reasoningEffort: turnReasoning } : {}),
       messages: prepareMessages(messages, ctx.tools),
       tools: ctx.tools.length > 0 ? ctx.tools : undefined,
       signal: opts.signal,
@@ -938,6 +956,17 @@ export async function* runAgent(
       // The task's budget is shared with every other run of the task (BEE and its workers).
       recordTaskUsage(opts.codeTaskId, response.usage.input_tokens, response.usage.output_tokens)
     }
+    traceStep({
+      agent: opts.agentId,
+      turn: iterations,
+      ms: Date.now() - stepStartedAt,
+      reasoningEffort: turnReasoning ?? null,
+      inputTokens: response.usage?.input_tokens ?? 0,
+      outputTokens: response.usage?.output_tokens ?? 0,
+      reasoningChars: String((response as { reasoning_content?: string }).reasoning_content ?? "").length,
+      contentChars: response.content?.length ?? 0,
+      tools: (response.tool_calls ?? []).map((tc) => ({ name: tc.function.name, argChars: String(tc.function.arguments ?? "").length })),
+    })
 
     await updateRun({input_tokens: totalInputTokens, output_tokens: totalOutputTokens,
       context_metrics_json: JSON.stringify({...ctx.contextMetrics, model_context: latestModelContext, estimated_input_tokens: estimatedInputTokens})})
@@ -1325,6 +1354,7 @@ export async function* runAgent(
 
     // Phase 3: Post-execution (Traces, yielding, state updates)
     repeats.nextStep()
+    previousTurnFailed = results.some(r => toolResultFailed(r.toolResultLLM))
     for (const r of results) {
       log.info(`[agent-loop] Tool ${r.name} completed in ${r.ms}ms`)
       
@@ -1718,6 +1748,7 @@ export async function runAgentIsolated(opts: {
   approvalChannel?: string
   onStep?: (step: StepEvent) => Promise<void>
   maxSteps?: number
+  reasoning?: ReasoningPolicy
   signal?: AbortSignal
   onToken?: (token: string) => void
   onReasoningToken?: (token: string) => void
@@ -1745,6 +1776,7 @@ export async function runAgentIsolated(opts: {
     approvalChannel: opts.approvalChannel,
     onStep: opts.onStep,
     maxSteps: opts.maxSteps,
+    reasoning: opts.reasoning,
     signal: opts.signal,
     onToken: opts.onToken,
     onReasoningToken: opts.onReasoningToken,

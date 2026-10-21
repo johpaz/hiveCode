@@ -39,6 +39,8 @@ export interface RunReport {
     maxConcurrentTools: number
     toolCalls: number
     steps: number
+    /** Turnos por agente: dice si los pasos son de BEE, del builder o de un verificador. */
+    stepsByAgent: Record<string, number>
     toolCallsPerStep: number
   }
   delegations: { delegate: number; revise: number }

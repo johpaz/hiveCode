@@ -1,10 +1,29 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
+import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import path from "node:path"
+import { closeHiveDb } from "../storage/hivedb"
+import { ensureHiveDb } from "../storage/bootstrap"
 import { announceDelegation, awaitDelegation, delegationOutcome, resetDelegationBoard, settleDelegation } from "./delegation-board"
 import { ensureInstance, instanceId, parseInstanceId } from "./swarm-instances"
 import { filesInPatch, registerSwarmRuntime } from "./swarm-runtime"
 import { structuralParallelism } from "./swarm-capabilities"
 import { col } from "../storage/hive"
 import type { AgentDoc } from "../storage/collections"
+
+// The instance tests clone `builder#2` into the agents collection: that belongs in a scratch
+// database, not in the one the person's own session has open.
+const previousHiveDbPath = process.env.HIVE_DB_PATH
+beforeAll(async () => {
+  closeHiveDb()
+  process.env.HIVE_DB_PATH = path.join(mkdtempSync(path.join(tmpdir(), "hivecode-swarm-")), "hivedb")
+  await ensureHiveDb()
+})
+afterAll(() => {
+  closeHiveDb()
+  if (previousHiveDbPath === undefined) delete process.env.HIVE_DB_PATH
+  else process.env.HIVE_DB_PATH = previousHiveDbPath
+})
 
 afterEach(() => { resetDelegationBoard(); registerSwarmRuntime(null) })
 

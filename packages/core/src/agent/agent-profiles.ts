@@ -2,6 +2,7 @@ import { col, mutateDoc, toIndexable } from "../storage/hive"
 import type { AgentDoc } from "../storage/collections"
 import { SUBDIVISION_INSTRUCTIONS } from "./specialties"
 import { obscuraToolNames } from "../tools/web/obscura"
+import type { ReasoningPolicy } from "./reasoning-effort"
 
 /** Perfiles canónicos. `reviewer` se fusionó con `verifier`: los dos eran el
  *  mismo gate en dos momentos, y el de calidad hereda su `id` para que las
@@ -24,6 +25,8 @@ export interface CoreAgentDefinition {
   role: AgentDoc["role"]
   permissionProfile: AgentPermissionProfile
   maxTurns: number
+  /** How hard the model thinks, by turn (see reasoning-effort.ts). The route may override it for a run. */
+  reasoning: ReasoningPolicy
   tools: string[]
   skills: string[]
   systemPrompt: string
@@ -44,6 +47,8 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     role: "coordinator",
     permissionProfile: "orchestrate",
     maxTurns: 30,
+    // Juzga entregas y decide: el cambio pequeño lo baja a `low` la ruta, ver profile-harness.
+    reasoning: { base: "medium", onFailure: "high" },
     tools: [
       ...READ_TOOLS,
       // Delegación: varias llamadas task_delegate en un mismo paso corren a la vez.
@@ -82,6 +87,8 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     role: "worker",
     permissionProfile: "read_only",
     maxTurns: 18,
+    // Lee y resume: trabajo mecánico.
+    reasoning: { base: "low", onFailure: "medium" },
     tools: READ_TOOLS,
     skills: ["file_manager", "file_read_and_summarize", "code_analysis", "web_research"],
     systemPrompt: [
@@ -98,6 +105,8 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     role: "worker",
     permissionProfile: "read_only",
     maxTurns: 24,
+    // Spec, plan y tareas: la decisión que más pesa, pensar es lo que se paga.
+    reasoning: { base: "high", onFailure: "high" },
     tools: [
       ...READ_TOOLS,
       "speckit_init", "speckit_artifact_read", "speckit_artifact_write", "speckit_validate",
@@ -126,6 +135,8 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     role: "worker",
     permissionProfile: "write_workspace",
     maxTurns: 40,
+    // Escribe lo ya decidido; sube un escalón al depurar un fallo.
+    reasoning: { base: "low", onFailure: "medium" },
     tools: [
       ...READ_TOOLS,
       "fs_write", "fs_edit", "fs_delete", "shell_executor", "check_types",
@@ -154,6 +165,8 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     role: "worker",
     permissionProfile: "verify",
     maxTurns: 24,
+    // Juzga criterios de aceptación.
+    reasoning: { base: "medium", onFailure: "high" },
     tools: [
       ...READ_TOOLS,
       "shell_executor", "check_types", "code_test", "code_build", "run_script",
@@ -193,6 +206,8 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     role: "worker",
     permissionProfile: "web_automation",
     maxTurns: 30,
+    // Navega y extrae: trabajo mecánico.
+    reasoning: { base: "low", onFailure: "medium" },
     tools: [
       // Investigación ligera + APIs REST
       "web_search", "web_fetch", "api_request",

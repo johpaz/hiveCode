@@ -49,9 +49,12 @@ export interface ProviderProfile {
   stripAdditionalProperties: boolean
   /** Retry the call without tools when these HTTP status codes are returned */
   retryWithoutToolsOnCodes: number[]
+  /** Accepts `reasoning_effort` ("low" | "medium" | "high") in the request body */
+  reasoningEffort: boolean
 }
 
 const DEFAULT_PROFILE: ProviderProfile = {
+  reasoningEffort: false,
   normalizeToolNames: false,
   toolNameReplacement: "__",
   toolChoiceAuto: "auto",
@@ -70,7 +73,9 @@ export const PROVIDER_PROFILES: Record<string, ProviderProfile> = {
   nvidia: { ...DEFAULT_PROFILE, normalizeToolNames: true },
   qwen: { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
   codex: { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
-  "opencode-go": { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
+  // `reasoning_effort` verified against minimax-m3.1-flash-free: low/minimal/medium/high are accepted
+  // and change the reasoning spent; `thinking: {type: "disabled"}` is a 400 (the model must reason).
+  "opencode-go": { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422], reasoningEffort: true },
   minimax: { ...DEFAULT_PROFILE, normalizeToolNames: true, retryWithoutToolsOnCodes: [400, 422] },
   "hivecode-free": { ...DEFAULT_PROFILE, normalizeToolNames: true },
   hiveagents: { ...DEFAULT_PROFILE, retryWithoutToolsOnCodes: [400, 422] },

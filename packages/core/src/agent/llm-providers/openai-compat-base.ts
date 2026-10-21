@@ -179,6 +179,9 @@ export abstract class OpenAICompatBase implements LLMProvider {
     // merged last so they win over anything derived above.
     if (options.extraBody) Object.assign(body, options.extraBody)
     const profile = getProviderProfile(this.providerName)
+    if (options.reasoningEffort && profile.reasoningEffort && body.reasoning_effort === undefined) {
+      body.reasoning_effort = options.reasoningEffort
+    }
     const sendTools = modelSupportsTools(this.providerName, options.model) && !!(options.tools?.length)
 
     const toolNameMap = new Map<string, string>()

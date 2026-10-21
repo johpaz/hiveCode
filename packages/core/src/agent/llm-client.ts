@@ -84,6 +84,11 @@ export interface LLMCallOptions {
    * that does not know the field simply ignores it.
    */
   extraBody?: Record<string, unknown>
+  /**
+   * How hard a reasoning model thinks. Sent as `reasoning_effort` only to providers whose profile
+   * accepts it; an explicit `extraBody.reasoning_effort` wins.
+   */
+  reasoningEffort?: "low" | "medium" | "high"
   numGpu?: number
   onToken?: (token: string) => void
   /**

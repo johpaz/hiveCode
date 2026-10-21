@@ -11,6 +11,7 @@ import {
 } from "./adaptive-scheduler.ts"
 import { describeProjectFacts, estimateTaskWeight, type TaskTier } from "./task-weight.ts"
 import { clearTaskBudget, setTaskBudget, taskBudgetBlocker, taskBudgetUsage, type TaskBudgetLimit } from "../agent/task-budget.ts"
+import type { ReasoningPolicy } from "../agent/reasoning-effort.ts"
 import { checksFor, describeVerdict, verifyDeterministic } from "./deterministic-checks.ts"
 
 export type HarnessApprovalGate = "specification" | "convergence"
@@ -92,6 +93,8 @@ export type ProfileRunner = (opts: {
   approvedExecution?: boolean
   onStep?: (step: StepEvent) => Promise<void>
   maxSteps?: number
+  /** How hard a reasoning model thinks in this run; absent = the profile's own policy. */
+  reasoning?: ReasoningPolicy
 }) => Promise<string>
 
 /**
@@ -102,6 +105,17 @@ export type ProfileRunner = (opts: {
  * planning turn died on budget every time.
  */
 export const DEFAULT_MAX_HARNESS_STEPS = 40
+
+/**
+ * Cambio acotado: lo difícil —qué hacer— ya viene en el enunciado y los turnos son mecánicos
+ * (escribir lo decidido, correr las pruebas). Medido con minimax-m3.1 sobre `inventario`: sin
+ * límite 11,4 min y 59 K tokens de salida (81 % razonamiento); con `low`, 3,7 min y 13 K, ambas
+ * con 31/31. Tras un fallo sube un escalón: depurar sí es pensar.
+ */
+export const SCOPED_REASONING: ReasoningPolicy = { base: "low", onFailure: "medium" }
+
+/** Reparar una verificación que salió en rojo es depurar: ahí el razonamiento sí se paga. */
+export const REPAIR_REASONING: ReasoningPolicy = { base: "medium", onFailure: "high" }
 
 /**
  * Tokens que una tarea puede gastar entre todos sus runs, por ruta (`docs/rutas-por-costo.md` §6).
@@ -260,6 +274,7 @@ export class ProfileHarness {
       taskDescription: string,
       runKind: "worker" | "harness" | "verification" | "review" = "worker",
       approvedExecution = false,
+      reasoning?: ReasoningPolicy,
     ) => {
       options.signal?.throwIfAborted()
       options.onEvent?.({ type: "agent_activated", agent: agentId, message: taskDescription })
@@ -277,6 +292,7 @@ export class ProfileHarness {
           parentRunId: taskId,
           runKind,
           approvedExecution,
+          reasoning,
           // Never cap below what the profile declares it needs — the override is here to
           // bound orchestration cost, not to shrink a profile's own budget.
           maxSteps: runKind === "harness"
@@ -360,6 +376,8 @@ ${projectFacts ? `\n${projectFacts}\n` : ""}
 Objetivo:
 ${objective}`,
           "harness",
+          false,
+          SCOPED_REASONING,
         )
 
         // La verificación determinista: se ejecuta el proyecto. Cuesta segundos, no minutos, y su
@@ -382,6 +400,8 @@ ${failed.map(c => `- ${c.name}: ${c.detail}`).join("\n")}
 Objetivo original:
 ${objective}`,
             "harness",
+            false,
+            REPAIR_REASONING,
           )
           repairCycles = 1
           verdict = await verifyDeterministic(options.workspace, options.signal)
