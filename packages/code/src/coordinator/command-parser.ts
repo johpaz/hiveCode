@@ -10,6 +10,7 @@ import { hasProviderApiKey, storeProviderApiKey, encryptConfig, serializeConfig,
 import { col, ensureIndexes, nextId } from "@johpaz/hivecode-core/storage/hive"
 import { applyModelToAllAgents, describeApplied } from "@johpaz/hivecode-core/services/agent-models"
 import { repairKnownContextWindows } from "@johpaz/hivecode-core/services/model-windows"
+import { syncConfiguredProviderCatalog } from "@johpaz/hivecode-core/services/provider-catalog"
 import { DEFAULT_CONTEXT_WINDOW } from "@johpaz/hivecode-core/agent/context-budget"
 import { formatIdCandidates, resolveIdFragment, shortId } from "@johpaz/hivecode-core/storage/ids"
 import type {
@@ -521,7 +522,7 @@ async function runDoctor(_db: DbCompat): Promise<string> {
 
 const HELP_CATEGORIES: Record<string, { desc: string; commands: string[] }> = {
   provider:  { desc: "Configurar providers de IA", commands: ["/provider list", "/provider add", "/provider set", "/provider test", "/provider status"] },
-  modelo:    { desc: "Seleccionar modelo + contexto", commands: ["/modelo list", "/modelo set", "/modelo info"] },
+  modelo:    { desc: "Seleccionar modelo + contexto", commands: ["/modelo list", "/modelo set", "/modelo refresh", "/modelo info"] },
   mcp:       { desc: "Integrar servidores MCP", commands: ["/mcp list", "/mcp add", "/mcp enable", "/mcp disable", "/mcp test"] },
   skill:     { desc: "Cargar y activar skills", commands: ["/skill list", "/skill enable", "/skill disable", "/skill info", "/skill add"] },
   mode:      { desc: "Cambiar modo Plan/Approval/Auto", commands: ["/mode get", "/mode set", "/mode history"] },
@@ -918,6 +919,7 @@ async function handleModelCommand(
         "  \u00bfQu\u00e9 quieres hacer?",
         "  \u25b8 list      \u2014 lista modelos guardados en BD",
         "  \u00b7 set       \u2014 cambia modelo activo",
+        "  \u00b7 refresh   \u2014 actualiza modelos y ventanas del provider",
         "  \u00b7 add       \u2014 agrega modelo a la BD",
         "  \u00b7 delete    \u2014 elimina modelo de la BD",
         "  \u00b7 info      \u2014 detalles del modelo activo",
@@ -926,6 +928,7 @@ async function handleModelCommand(
       menu: [
         { label: "list",   cmd: "/modelo list",   desc: "lista modelos guardados en BD" },
         { label: "set",    cmd: "/modelo set",    desc: "cambia modelo activo" },
+        { label: "refresh", cmd: "/modelo refresh", desc: "actualiza modelos y ventanas del provider" },
         { label: "add",    cmd: "/modelo add",    desc: "agrega modelo a la BD" },
         { label: "delete", cmd: "/modelo delete", desc: "elimina modelo de la BD" },
         { label: "info",   cmd: "/modelo info",   desc: "detalles del modelo activo" },
@@ -934,6 +937,25 @@ async function handleModelCommand(
   }
 
   switch (action) {
+    case "refresh":
+    case "update": {
+      // The catalog — models and their context windows — is the provider's data. The scheduler brings
+      // it in on its own; this does it now, for the active provider or the one named.
+      const providerId = rest[0]?.trim() || ctx.activeProvider
+      if (!providerId) return { handled: true, output: "  No hay provider activo. Elige uno con: /provider set" }
+      try {
+        const result = await syncConfiguredProviderCatalog(providerId)
+        await repairKnownContextWindows()
+        if (result.skipped) return { handled: true, output: `  ${providerId}: ${result.skipped}` }
+        const lines = [`  \u2b22 Modelos de ${providerId} actualizados: ${result.synced} en el cat\u00e1logo${result.deprecated ? `, ${result.deprecated} retirados` : ""}`]
+        const active = providerId === ctx.activeProvider && ctx.activeModel ? (await (await col<ModelDoc>("models")).get(ctx.activeModel))?.doc : undefined
+        if (active) lines.push(`  Ventana de ${active.id}: ${active.context_window.toLocaleString()} tokens`)
+        return { handled: true, output: lines.join("\n") }
+      } catch (error) {
+        return { handled: true, output: `  No se pudo actualizar ${providerId}: ${(error as Error).message}` }
+      }
+    }
+
     case "list": {
       const providerId = rest[0] || ctx.activeProvider
       const activeModel = ctx.activeModel
@@ -1175,7 +1197,7 @@ async function handleModelCommand(
     }
 
     default:
-      return { handled: true, output: "opciones: list | set | add | delete | info\n\nEscribe /help /modelo" }
+      return { handled: true, output: "opciones: list | set | refresh | add | delete | info\n\nEscribe /help /modelo" }
   }
 }
 

@@ -10,6 +10,8 @@ import { logger } from "../utils/logger"
 const log = logger.child("provider-catalog")
 const WEEK = 7 * 24 * 60 * 60 * 1000
 const RETRY = 60 * 60 * 1000
+/** A provider's catalog is brought up to date when its last success is older than this. */
+export const MAX_CATALOG_AGE = 24 * 60 * 60 * 1000
 const locks = new Map<string, Promise<SyncResult>>()
 // Sunday 02:00 America/Bogota is Sunday 07:00 UTC. Colombia has no DST.
 const SUNDAY_ANCHOR = Date.UTC(1970, 0, 4, 7)
@@ -229,14 +231,18 @@ export async function runDueProviderCatalogSync(now = Date.now()): Promise<void>
     const provider = row.doc
     if (provider.category !== "llm" || (!provider.active && !selected.has(provider.id)) || !provider.enabled || provider.id === "hiveagents") continue
     const state = await readState(provider.id)
-    if ((state.completed_slot ?? 0) >= latestCatalogSlot(now)) continue
+    // Due when the weekly slot has not been done, or the last success is more than a day old: the
+    // catalog carries the context windows, and a week is too long to run on a stale one.
+    const slotDone = (state.completed_slot ?? 0) >= latestCatalogSlot(now)
+    const fresh = !!state.succeeded_at && now - state.succeeded_at < MAX_CATALOG_AGE
+    if (slotDone && fresh) continue
     if (state.attempted_at && now - state.attempted_at < RETRY) continue
     try { await syncProviderCatalog(provider, now) }
     catch (error) { log.warn((error as Error).message) }
   }
 }
 
-/** First boot/catch-up in background, then check the persisted weekly slot each minute. */
+/** First boot/catch-up in background, then check each minute whether the catalog is due (weekly slot or older than a day). */
 export function startProviderCatalogScheduler(): () => Promise<void> {
   let running: Promise<void> | undefined
   let stopped = false
@@ -248,6 +254,6 @@ export function startProviderCatalogScheduler(): () => Promise<void> {
   const timer = setInterval(tick, 60_000)
   timer.unref()
   tick()
-  log.info("Catálogo: domingos 02:00 America/Bogota; recuperación al arrancar")
+  log.info("Catálogo: al arrancar si tiene más de 24 h, y cada día; domingos 02:00 America/Bogota marca la semana")
   return async () => { stopped = true; clearInterval(timer); await running }
 }

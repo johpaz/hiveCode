@@ -92,11 +92,11 @@ pub fn render(canvas: &mut Canvas, full_area: Rect, state: &mut AppState, regist
         let hint_y = area.bottom().saturating_sub(2);
         canvas.print(area.x + 2, hint_y,
             if settings_tab == SettingsTab::Models {
-                "↑↓ o clic: seleccionar · Enter o Confirmar: aplicar · Esc cerrar"
+                "Enter: cambiar modelo · U: actualizar modelos · P: cambiar provider · Esc cerrar"
             } else if settings_tab == SettingsTab::Providers {
                 "↑↓/clic · Enter configurar/activar · E editar API key · Esc cerrar"
             } else if settings_tab == SettingsTab::Agents {
-                "Tab · ↑↓/clic · Enter modelo y límites · Esc cerrar"
+                "Tab · ↑↓/clic · Enter modelo del agente · Esc cerrar"
             } else { "Tab · ↑↓/clic · A añadir · D eliminar · Enter editar · Esc cerrar" },
             Style::new().fg(DIM));
         if let Some(hint) = footer_hint {
@@ -409,10 +409,18 @@ fn render_models(canvas: &mut Canvas, area: Rect, state: &mut AppState, register
             let button_y = area.bottom().saturating_sub(1);
             let button = "[ Cambiar modelo ]";
             canvas.print(area.x + 2, button_y, button, Style::new().fg(AMBER).bold());
+            // El catálogo (modelos y ventanas de contexto) viene del provider: se puede refrescar
+            // aquí sin esperar a la sincronización programada.
+            let refresh = "[ Actualizar modelos ]";
+            let refresh_x = area.x + 2 + button.chars().count() as u16 + 2;
+            canvas.print(refresh_x, button_y, refresh, Style::new().fg(AMBER).bold());
             if register_hits {
                 state.hit_map.push(MouseRegion::new("settings:change-model",
-                    Rect { x: area.x + 2, y: button_y, w: button.len() as u16, h: 1 }, HUB_Z,
+                    Rect { x: area.x + 2, y: button_y, w: button.chars().count() as u16, h: 1 }, HUB_Z,
                     HitAction::Custom("settings:change-model".into())));
+                state.hit_map.push(MouseRegion::new("settings:refresh-models",
+                    Rect { x: refresh_x, y: button_y, w: refresh.chars().count() as u16, h: 1 }, HUB_Z,
+                    HitAction::Custom("settings:refresh-models".into())));
             }
         }
     }

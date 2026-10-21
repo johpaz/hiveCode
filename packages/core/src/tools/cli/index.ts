@@ -109,9 +109,48 @@ function resolveSandboxConfig(config: any, workspace: string): SandboxConfig {
   }
 }
 
+/** How long to wait for the last of a command's output once its shell has exited. */
+const OUTPUT_DRAIN_MS = 500;
+
+/**
+ * Collects one output stream up to `MAX_OUTPUT_BYTES`, without waiting for it to close: a background
+ * process that inherited the pipe keeps it open long after the command is done. `finished` settles
+ * when the stream ends or the limit is hit; `stop` gives up on whatever is still pending.
+ */
+function collectOutput(stream: unknown, onExceeded: () => void) {
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  let exceeded = false;
+  const reader = stream && typeof stream === "object" && "getReader" in stream
+    ? (stream as ReadableStream<Uint8Array>).getReader()
+    : undefined;
+  const finished = (async () => {
+    if (!reader) return;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.length;
+        if (bytes > MAX_OUTPUT_BYTES) {
+          exceeded = true;
+          onExceeded();
+          break;
+        }
+        chunks.push(value);
+      }
+    } catch { /* the pipe was closed under us */ }
+  })();
+  return {
+    finished,
+    get exceeded() { return exceeded; },
+    text: () => new TextDecoder().decode(Buffer.concat(chunks)),
+    stop: () => { void reader?.cancel().catch(() => undefined); },
+  };
+}
+
 export const shellExecutorTool: Tool = {
   name: "shell_executor",
-  description: "Execute shell/bash commands in the agent workspace. NOTE: do NOT use for scheduling tasks, use cron.create instead. Spanish: ejecutar comando, terminal, bash, script, consola",
+  description: "Execute shell/bash commands in the agent workspace. The call returns when the shell exits: a command that starts a background process should redirect its output (`cmd > /tmp/out.log 2>&1 &`). NOTE: do NOT use for scheduling tasks, use cron.create instead. Spanish: ejecutar comando, terminal, bash, script, consola",
   parameters: {
     type: "object",
     properties: {
@@ -204,79 +243,47 @@ export const shellExecutorTool: Tool = {
 
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
       let proc: ReturnType<typeof Bun.spawn>;
+      // Its own process group: a timeout can then stop everything the command started, not only the
+      // shell. A server left running with `&` kept the output pipe open and the call never returned.
+      const spawnOptions = { env: sandboxEnv, signal: controller.signal, stdout: "pipe" as const, stderr: "pipe" as const, detached: true };
 
       if (useSandbox && sandboxResult) {
         // Execute with sandbox isolation
-        proc = spawnTaskProcess(sandboxResult.command, {
-          env: sandboxEnv,
-          signal: controller.signal,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
+        proc = spawnTaskProcess(sandboxResult.command, spawnOptions);
       } else {
         // Execute without sandbox (original behavior)
-        proc = spawnTaskProcess(["/bin/sh", "-c", command], {
-          cwd,
-          env: sandboxEnv,
-          signal: controller.signal,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
+        proc = spawnTaskProcess(["/bin/sh", "-c", command], { cwd, ...spawnOptions });
       }
 
+      const killGroup = (signal: NodeJS.Signals) => {
+        try { process.kill(-proc.pid, signal); } catch { /* already gone */ }
+      };
+      const timeoutId = setTimeout(() => { controller.abort(); killGroup("SIGKILL"); }, timeoutMs);
+
+      // Both streams are read at once: reading one to the end before the other can stall on a full pipe.
+      const out = collectOutput(proc.stdout, () => killGroup("SIGKILL"));
+      const err = collectOutput(proc.stderr, () => killGroup("SIGKILL"));
       let stdout = "";
       let stderr = "";
       let exitCode: number;
-      let outputExceeded = false;
 
       try {
-        // Read stdout with 10MB limit
-        const stdoutStream = proc.stdout;
-        if (stdoutStream && typeof stdoutStream === "object" && "getReader" in stdoutStream) {
-          const stdoutReader = (stdoutStream as ReadableStream<Uint8Array>).getReader();
-          const stdoutChunks: Uint8Array[] = [];
-          let stdoutBytes = 0;
-          while (true) {
-            const { done, value } = await stdoutReader.read();
-            if (done) break;
-            stdoutBytes += value.length;
-            if (stdoutBytes > MAX_OUTPUT_BYTES) {
-              outputExceeded = true;
-              break;
-            }
-            stdoutChunks.push(value);
-          }
-          stdout = new TextDecoder().decode(Buffer.concat(stdoutChunks));
-        }
+        const exited = await proc.exited;
+        // The shell is done. Whatever it left running may still hold the pipes open, so wait only a
+        // moment for the last of the output rather than for an end-of-file that may never come.
+        await Promise.race([Promise.all([out.finished, err.finished]), new Promise(resolve => setTimeout(resolve, OUTPUT_DRAIN_MS))]);
+        out.stop();
+        err.stop();
+        stdout = out.text();
+        stderr = err.text();
 
-        // Read stderr with 10MB limit
-        const stderrStream = proc.stderr;
-        if (stderrStream && typeof stderrStream === "object" && "getReader" in stderrStream) {
-          const stderrReader = (stderrStream as ReadableStream<Uint8Array>).getReader();
-          const stderrChunks: Uint8Array[] = [];
-          let stderrBytes = 0;
-          while (true) {
-            const { done, value } = await stderrReader.read();
-            if (done) break;
-            stderrBytes += value.length;
-            if (stderrBytes > MAX_OUTPUT_BYTES) {
-              outputExceeded = true;
-              break;
-            }
-            stderrChunks.push(value);
-          }
-          stderr = new TextDecoder().decode(Buffer.concat(stderrChunks));
-        }
-
-        if (outputExceeded) {
-          try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+        if (out.exceeded || err.exceeded) {
+          killGroup("SIGKILL");
           exitCode = -1;
           stderr = stderr || `Process killed: output exceeded ${MAX_OUTPUT_BYTES} bytes`;
         } else {
-          exitCode = await proc.exited;
+          exitCode = exited;
         }
 
         if (exitCode !== 0 && controller.signal.aborted) {
@@ -284,9 +291,11 @@ export const shellExecutorTool: Tool = {
           stderr = stderr || `Process killed after ${timeoutSecs}s timeout`;
         }
       } catch {
+        out.stop();
+        err.stop();
         exitCode = -1;
-        stdout = stdout || "";
-        stderr = stderr || `Process killed after ${timeoutSecs}s timeout`;
+        stdout = out.text();
+        stderr = err.text() || `Process killed after ${timeoutSecs}s timeout`;
       } finally {
         clearTimeout(timeoutId);
       }

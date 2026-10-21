@@ -146,6 +146,20 @@ describe("weekly catalog", () => {
     await runDueProviderCatalogSync(sunday)
     expect((await listCatalogModels("deepseek")).map(m => m.id)).toEqual(["legacy-new"])
   })
+  test("a catalog whose last success is over a day old is brought up to date, even inside the same weekly slot", async () => {
+    await (await col<ProviderDoc>("providers")).put("deepseek", provider())
+    let fetches = 0
+    globalThis.fetch = (async () => { fetches++; return Response.json({ data: [{ id: "m", context_length: 1000 }] }) }) as unknown as typeof fetch
+    const HOUR = 3600000
+    await runDueProviderCatalogSync(sunday)
+    expect(fetches).toBe(1)
+    await runDueProviderCatalogSync(sunday + 23 * HOUR) // fresh enough: nothing to do
+    expect(fetches).toBe(1)
+    await runDueProviderCatalogSync(sunday + 25 * HOUR) // same Sunday slot, but a day old: due
+    expect(fetches).toBe(2)
+    await runDueProviderCatalogSync(sunday + 26 * HOUR) // just refreshed
+    expect(fetches).toBe(2)
+  })
   test("boot seed preserves managed models and customized provider URLs", async () => {
     await (await col<ProviderDoc>("providers")).put("deepseek", provider())
     await reconcileProviderModels(provider(), [{ id: "dynamic-model" }], sunday)

@@ -95,6 +95,15 @@ pub fn handle_key_event(state: &mut AppState, key: KeyEvent) -> bool {
                     .unwrap_or(0);
                 hub.scroll_offset = 0;
             }
+            KeyCode::Char('u') | KeyCode::Char('U') if hub.active_tab == SettingsTab::Models => {
+                // Actualizar el catálogo del provider activo (modelos y ventanas de contexto) sin
+                // esperar a la sincronización programada.
+                let cmd = hub.active_provider().map(|p| format!("/modelo refresh {}", p.id));
+                if let Some(cmd) = cmd {
+                    keep_hub_loading(state);
+                    state.pending_ipc.push(TuiMessage::Submit { input: cmd });
+                }
+            }
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 let cmd = match hub.active_tab {
                     SettingsTab::Providers => "/provider add",
@@ -1402,6 +1411,10 @@ fn handle_hit_action(state: &mut AppState, action: HitAction) -> bool {
                 handle_key_event(state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                 return true;
             }
+            if id == "settings:refresh-models" {
+                handle_key_event(state, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+                return true;
+            }
             if let Some(tab_name) = id.strip_prefix("settings:tab:") {
                 if let ModalState::Settings(hub) = &mut state.modal {
                     hub.active_tab = match tab_name {
@@ -2235,6 +2248,41 @@ mod tests {
             column: button.x, row: button.y, modifiers: KeyModifiers::NONE });
         assert!(pending(&state).iter().any(|msg| matches!(msg, TuiMessage::Submit { input } if input == "/modelo set gemini")));
         assert!(matches!(&state.modal, ModalState::Settings(hub) if hub.loading));
+    }
+
+    #[test]
+    fn refresh_models_key_and_button_ask_to_update_the_active_provider() {
+        let mut p = provider_row("gemini", true, false);
+        p.is_active = true;
+        p.models = vec!["gemini-one".into()];
+        p.model = "gemini-one".into();
+        let mut state = hub_state(vec![p]);
+        if let ModalState::Settings(hub) = &mut state.modal { hub.active_tab = SettingsTab::Models; }
+
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        assert!(pending(&state).iter().any(|msg| matches!(msg, TuiMessage::Submit { input } if input == "/modelo refresh gemini")));
+        assert!(matches!(&state.modal, ModalState::Settings(hub) if hub.loading), "queda cargando hasta que llegue el snapshot");
+
+        // El botón visible hace lo mismo que la tecla.
+        state.pending_ipc.clear();
+        if let ModalState::Settings(hub) = &mut state.modal { hub.loading = false; }
+        let mut canvas = crate::term::Canvas::new(130, 40);
+        crate::renderer::render(&mut canvas, &mut state);
+        assert!(canvas.to_text_rows().join("\n").contains("Actualizar modelos"));
+        let button = state.hit_map.regions().iter().find(|r| r.id == "settings:refresh-models").unwrap().rect;
+        handle_mouse_event(&mut state, MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: button.x, row: button.y, modifiers: KeyModifiers::NONE });
+        assert!(pending(&state).iter().any(|msg| matches!(msg, TuiMessage::Submit { input } if input == "/modelo refresh gemini")));
+    }
+
+    #[test]
+    fn refresh_key_does_nothing_outside_the_models_tab() {
+        let mut p = provider_row("gemini", true, false);
+        p.is_active = true;
+        let mut state = hub_state(vec![p]);
+        if let ModalState::Settings(hub) = &mut state.modal { hub.active_tab = SettingsTab::Agents; }
+        handle_key_event(&mut state, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        assert!(pending(&state).is_empty());
     }
 
     #[test]
