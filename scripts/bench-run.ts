@@ -142,6 +142,22 @@ let tests = { pass: 0, fail: 0, files: 0, ran: false }
 }
 
 const leftoverWorktrees = git("worktree", "list", "--porcelain").split("\n").filter(l => l.startsWith("worktree ")).length - 1
+// Swarm: parallel instances, merges, waits, and the shell polling that wait_for replaces.
+const toolEvents = tools.flatMap(t => [[ms(t.started_at), 1], [ms(t.completed_at ?? t.started_at), -1]] as const).sort((a, b) => a[0] - b[0])
+let activeTools = 0, maxConcurrentTools = 0
+for (const [, delta] of toolEvents) { activeTools += delta; maxConcurrentTools = Math.max(maxConcurrentTools, activeTools) }
+const delegationResults = tools.filter(t => t.tool_name === "task_delegate" || t.tool_name === "task_revise").map(t => String(t.result_json ?? ""))
+const swarm = {
+  instancesUsed: [...new Set(runs.filter(r => /#\d+$/.test(String(r.agent_id))).map(r => r.agent_id))],
+  mergesOk: delegationResults.filter(r => /"merge":"(integrated|noop)"/.test(r)).length,
+  mergeConflicts: delegationResults.filter(r => /"merge":"(conflict|failed)"/.test(r)).length,
+  dependencyBlocks: delegationResults.filter(r => r.includes("blocked_by")).length,
+  waitFor: tools.filter(t => t.tool_name === "wait_for").length,
+  shellSleepPolling: tools.filter(t => t.tool_name === "shell_executor" && /\bsleep\b/.test(String(t.args_json ?? ""))).length,
+  maxConcurrentTools,
+  toolCallsPerStep: +(tools.length / Math.max(1, sum(runs, r => r.turn ?? 0))).toFixed(2),
+}
+
 const result = {
   task: values.task,
   minutes: +((finishedAt - startedAt) / 60000).toFixed(2),
@@ -162,6 +178,7 @@ const result = {
     total: +(sum(workers, dur) / 60).toFixed(1),
     revisions: +(sum(workers.filter(isRevision), dur) / 60).toFixed(1),
   },
+  swarm,
   delegations: { delegate: tools.filter(t => t.tool_name === "task_delegate").length, revise: tools.filter(t => t.tool_name === "task_revise").length },
   modelOddities: {
     markupDropped: raw.filter(r => r.parsed === 0 && !r.empty).length,
@@ -181,6 +198,7 @@ console.log([
   `  integrado     ${t.integrated ? "sí" : "NO"}   tests del proyecto: ${t.projectTests.pass} pasan / ${t.projectTests.fail} fallan (${t.projectTests.files} archivos)`,
   `  runs          ${t.runs.total}  bloqueados ${t.runs.blocked}  revisiones ${t.runs.revisions}  concurrencia máx. ${t.runs.maxConcurrentWorkers}`,
   `  tokens        ${(t.tokens.input / 1e6).toFixed(1)} M entrada / ${(t.tokens.output / 1e6).toFixed(2)} M salida`,
+  `  swarm         instancias ${t.swarm.instancesUsed.join(",") || "ninguna"}  fusiones ${t.swarm.mergesOk} ok / ${t.swarm.mergeConflicts} con conflicto  esperas ${t.swarm.waitFor}  sleep por shell ${t.swarm.shellSleepPolling}  herramientas simultáneas máx. ${t.swarm.maxConcurrentTools}  llamadas/paso ${t.swarm.toolCallsPerStep}`,
   `  rarezas       marcado perdido ${t.modelOddities.markupDropped}, respuestas vacías ${t.modelOddities.emptyResponses}`,
 ].join("\n"))
 process.exit(0)

@@ -161,6 +161,7 @@ export {
   agentArchiveTool,
   taskDelegateTool,
   taskReviseTool,
+  waitForTool,
   taskDelegateCodeTool,
   taskStatusTool,
   busPublishTool,

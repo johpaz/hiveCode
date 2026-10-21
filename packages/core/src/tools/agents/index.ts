@@ -539,6 +539,26 @@ async function findDelegatedTask(idOrRef: string): Promise<TaskDoc | null> {
   return matches.sort((a, b) => b.created_at - a.created_at)[0] ?? null;
 }
 
+/** The ref (e.g. T003) a delegated task was given, if any. */
+function meta_ref(task: TaskDoc): string | undefined {
+  try { const ref = JSON.parse(task.metadata ?? "{}").ref; return typeof ref === "string" && ref ? ref : undefined; } catch { return undefined; }
+}
+
+/** A task that already finished in an earlier step (or run) settles a dependency without waiting. */
+async function outcomeFromDb(idOrRef: string): Promise<import("../../agent/delegation-board.ts").BoardEntry | undefined> {
+  const task = await findDelegatedTask(idOrRef).catch(() => null);
+  if (!task || !["completed", "blocked", "failed"].includes(task.status)) return undefined;
+  return { taskId: task.id, status: task.status as "completed" | "blocked" | "failed", result: String(task.result ?? "") };
+}
+
+async function failEarlyTask(taskId: string, workerId: string, workerName: string, taskName: string, projectId: string, error: string, ref?: string) {
+  const { settleDelegation } = await import("../../agent/delegation-board.ts");
+  await updateTask(taskId, { status: "failed", result: error, error });
+  settleDelegation({ ref, taskId, status: "failed", result: error }, ref, taskId);
+  agentBus.notifyTaskFailed(workerId, workerName, Number(taskId) || 0, taskName, projectId, error);
+  return { ok: false, task_id: taskId, worker_id: workerId, error };
+}
+
 export const taskDelegateTool: Tool = {
   name: "task_delegate",
   description: "Delegate a bounded task to a worker agent and get its handoff plus evidence against acceptance criteria. Emit several task_delegate calls in ONE step to run distinct workers simultaneously (they run in parallel when their workspaces do not collide); you are the fan-in: judge the evidence, or send a task back with task_revise. Spanish: delegar tarea, asignar worker, ejecutar por agente, delegate_task",
@@ -550,7 +570,8 @@ export const taskDelegateTool: Tool = {
       workspace: { type: "string", description: "Project workspace" },
       paths: { type: "array", items: { type: "string" }, description: "Files assigned to this task" },
       context_refs: { type: "array", items: { type: "object" }, description: "Versioned code ranges from get_project_context" },
-      worker_id: { type: "string", description: "ID of the worker agent (scout, builder, verifier, spider, planner, ...)" },
+      worker_id: { type: "string", description: "ID of the worker agent (scout, builder, verifier, spider, planner, ...). To run the same profile twice at once use an instance: builder#2, builder#3 — each gets its own copy of the workspace and its work is merged back when it finishes." },
+      after: { type: "array", items: { type: "string" }, description: "Refs or task_ids this task depends on (e.g. [\"T001\"]). The worker does not start until they finish, costs no tokens while waiting, and receives their handoffs. If one of them fails you get blocked_by back instead." },
       task_description: { type: "string", description: "Clear, detailed instructions for the worker" },
       acceptance: {
         type: "array",
@@ -576,19 +597,51 @@ export const taskDelegateTool: Tool = {
     const taskDescription = params.task_description as string;
     const projectId = params.project_id as string | undefined;
     const ref = typeof params.ref === "string" && params.ref.trim() ? params.ref.trim() : undefined;
+    // Announced before the first await: a sibling call of the same batch may already be waiting for this ref.
+    const board = await import("../../agent/delegation-board.ts");
+    board.announceDelegation(ref);
     const { buildWorkerBrief, checkAcceptance, delegationThreadId, parseAcceptance, summarizeAcceptance } =
       await import("../../agent/delegation.ts");
+    const failEarly = (error: string, extra: Record<string, unknown> = {}) => {
+      board.settleDelegation({ ref, status: "failed", result: error }, ref);
+      return { ok: false, error, ...extra };
+    };
 
-    // Verify worker exists and is enabled
-    const worker = (await (await col<AgentDoc>("agents")).get(workerId))?.doc;
-    if (!worker) return { ok: false, error: `Worker not found: ${workerId}` };
-    if (!worker.enabled) return { ok: false, error: `Worker is disabled: ${worker.name}` };
+    // Verify worker exists and is enabled; builder#2 is cloned from builder on first use.
+    const { ensureInstance, parseInstanceId } = await import("../../agent/swarm-instances.ts");
+    const worker = await ensureInstance(workerId);
+    if (!worker) return failEarly(`Worker not found: ${workerId}`);
+    if (!worker.enabled) return failEarly(`Worker is disabled: ${worker.name}`);
 
     const scope = await resolveProjectScope(scopeFromConfig(params, config));
     const refs = Array.isArray(params.context_refs) ? params.context_refs as ContextReference[] : [];
     const paths = Array.isArray(params.paths) ? params.paths.filter((p): p is string => typeof p === "string") : [];
-    if (refs.length && !scope) return {ok: false, error: "References require an explicit project session"};
+    if (refs.length && !scope) return failEarly("References require an explicit project session");
     if (scope) await resolveContextReferences(scope, refs);
+
+    // Dependencies: park here (no run started, no slot held) until the tasks this one needs have finished.
+    const after = Array.isArray(params.after) ? params.after.filter((a): a is string => typeof a === "string" && !!a.trim()) : [];
+    let dependencyBrief = "";
+    if (after.length) {
+      const { emitWaiting } = await import("../../agent/tool-telemetry.ts");
+      emitWaiting({ agentId: workerId, waitingFor: after, reason: "dependencia" });
+      const handoffs: string[] = [];
+      for (const dep of after) {
+        const found = board.delegationOutcome(dep) ?? await outcomeFromDb(dep);
+        const settled: Awaited<ReturnType<typeof board.awaitDelegation>> = found
+          ? { ok: true, entry: found }
+          : await board.awaitDelegation(dep, { signal: config?.signal });
+        if (settled.ok === false) {
+          const why = settled.reason === "unknown" ? `${dep} was never delegated (delegate it first or in the same step)` : `${dep} did not finish in time`;
+          return failEarly(`Dependency not met — ${why}`, { blocked_by: [dep], worker_id: workerId, ref });
+        }
+        if (settled.entry.status !== "completed") {
+          return failEarly(`Dependency not met — ${dep} ${settled.entry.status}: ${settled.entry.result.slice(0, 300)}`, { blocked_by: [dep], worker_id: workerId, ref });
+        }
+        handoffs.push(`### ${dep}\n${settled.entry.result.slice(0, 3000)}`);
+      }
+      dependencyBrief = `\n\nEntregas de las tareas de las que depende esta (ya terminadas; construye sobre ellas):\n${handoffs.join("\n\n")}`;
+    }
     const specialty = typeof params.specialty === "string" ? params.specialty : undefined;
     const contextMetadata = { code_session_id: scope?.sessionId, code_task_id: scope?.taskId, workspace: scope?.workspace, specialty, paths, context_refs: refs };
     const tasksCol = await col<TaskDoc>("tasks");
@@ -624,32 +677,54 @@ export const taskDelegateTool: Tool = {
     }
     const resolvedProjectId = projectId ?? existing?.doc.project_id ?? "";
 
+    board.announceDelegation(ref, taskId);
     agentBus.notifyTaskStarted(workerId, worker.name, Number(taskId) || 0, taskName, resolvedProjectId);
     log.info(`[task_delegate] Delegating task ${taskId} to ${worker.name} (${workerId})`);
 
+    // A parallel instance writes in a private copy of the workspace and is merged back when it finishes.
+    const swarm = parseInstanceId(workerId).n >= 2 ? (await import("../../agent/swarm-runtime.ts")).getSwarmRuntime() : null;
+    const groupKey = scope?.taskId ?? scope?.sessionId ?? config?.configurable?.thread_id ?? "swarm";
+    let runWorkspace = scope?.workspace;
+    const baseWorkspace = scope?.workspace ?? (typeof config?.configurable?.workspace === "string" ? config.configurable.workspace : undefined);
+    if (swarm && baseWorkspace) {
+      try {
+        runWorkspace = await swarm.prepare({ taskId: groupKey, instanceId: workerId, baseWorkspace });
+      } catch (err) {
+        return failEarlyTask(taskId, workerId, worker.name, taskName, resolvedProjectId, `No pude preparar el workspace de ${workerId}: ${(err as Error).message}`, ref);
+      }
+    }
+
+    let partial = false;
     try {
       // Dynamic import to avoid circular dependency (agent-loop → tools → agent-loop)
       const { runAgentIsolated } = await import("../../agent/agent-loop.ts");
       const result = await runAgentIsolated({
         agentId: workerId,
-        taskDescription: buildWorkerBrief(taskDescription, acceptance),
-        codeSessionId: scope?.sessionId, codeTaskId: scope?.taskId, workspace: scope?.workspace,
+        taskDescription: buildWorkerBrief(taskDescription, acceptance) + dependencyBrief,
+        codeSessionId: scope?.sessionId, codeTaskId: scope?.taskId, workspace: runWorkspace,
         specialty, contextRefs: refs, contextPaths: paths,
         threadId: delegationThreadId(taskId, workerId),
         parentRunId: config?.configurable?.run_id,
         runKind: "worker",
         approvedExecution: config?.configurable?.approved_execution === true,
         signal: config?.signal,
+        onRun: run => { partial = run.status !== "completed"; },
       });
 
       const checks = await checkAcceptance(acceptance, result);
       const met = summarizeAcceptance(checks);
+      // Merge the instance's work into the task workspace now, while whoever wrote it still has context.
+      const merge = swarm ? await swarm.integrate({ taskId: groupKey, instanceId: workerId }) : null;
+      const merged = merge === null || merge.status === "integrated" || merge.status === "noop";
+      const status = !merged || met === false ? "blocked" : "completed";
       await updateTask(taskId, {
-        status: met === false ? "blocked" : "completed",
-        progress: met === false ? 80 : 100,
+        status,
+        progress: status === "completed" ? 100 : 80,
         result,
         completed_at: now(),
       });
+      // A worker that stopped short (budget, stall) handed back a partial: whoever depends on it must not build on it.
+      board.settleDelegation({ ref, taskId, status: partial && status === "completed" ? "blocked" : status, result }, ref, taskId);
       if (resolvedProjectId) await updateProjectProgress(resolvedProjectId);
       agentBus.notifyTaskCompleted(workerId, worker.name, Number(taskId) || 0, taskName, resolvedProjectId, result);
 
@@ -663,12 +738,48 @@ export const taskDelegateTool: Tool = {
         acceptance: checks,
         // true: all confirmed deterministically · false: a check failed (task_revise it) · null: you judge from the evidence
         acceptance_met: met,
+        ...(merge ? {
+          merge: merge.status,
+          merged_files: merge.files,
+          ...(merged ? {} : { merge_error: merge.error?.slice(0, 600), hint: `${workerId}'s changes could NOT be merged into the shared workspace (${merge.status}). Send it back with task_revise to resolve the overlap on those files.` }),
+        } : {}),
       };
     } catch (err) {
       await updateTask(taskId, { status: "failed", result: (err as Error).message, error: (err as Error).message });
+      board.settleDelegation({ ref, taskId, status: "failed", result: (err as Error).message }, ref, taskId);
       agentBus.notifyTaskFailed(workerId, worker.name, Number(taskId) || 0, taskName, resolvedProjectId, (err as Error).message);
       return { ok: false, task_id: taskId, worker_id: workerId, error: (err as Error).message };
     }
+  },
+};
+
+// ─── wait_for ────────────────────────────────────────────────────────────────
+
+export const waitForTool: Tool = {
+  name: "wait_for",
+  description: "Pause until another delegated task (its ref, e.g. T001, or its task_id) has finished, and get its handoff. Use it INSTEAD of polling with shell sleep loops: waiting here costs no tokens and shows as 'esperando' in the swarm. If the task failed you get that back, not a hang. Spanish: esperar tarea, esperar dependencia, esperar a que termine otro worker",
+  parameters: {
+    type: "object",
+    properties: {
+      ref: { type: "string", description: "Ref or task_id of the task to wait for" },
+      timeout_s: { type: "number", description: "Give up after this many seconds (default 1200)" },
+    },
+    required: ["ref"],
+  },
+  execute: async (params: Record<string, unknown>, config?: any) => {
+    const ref = String(params.ref ?? "").trim();
+    if (!ref) return { ok: false, error: "Provide ref." };
+    const board = await import("../../agent/delegation-board.ts");
+    const { emitWaiting } = await import("../../agent/tool-telemetry.ts");
+    const timeoutMs = Math.max(1, Number(params.timeout_s) || 1200) * 1000;
+    const done = board.delegationOutcome(ref) ?? await outcomeFromDb(ref);
+    if (done) return { ok: done.status === "completed", ref, status: done.status, handoff: done.result.slice(0, 6000) };
+    emitWaiting({ agentId: String(config?.configurable?.agent_id ?? "worker"), waitingFor: [ref], reason: "dependencia", taskId: config?.configurable?.thread_id });
+    const settled = await board.awaitDelegation(ref, { signal: config?.signal, timeoutMs });
+    if (settled.ok === false) {
+      return { ok: false, ref, status: settled.reason, error: settled.reason === "unknown" ? `${ref} has not been delegated (yet). Tell the coordinator, do not poll.` : `${ref} did not finish within ${Math.round(timeoutMs / 1000)}s.` };
+    }
+    return { ok: settled.entry.status === "completed", ref, status: settled.entry.status, handoff: settled.entry.result.slice(0, 6000) };
   },
 };
 
@@ -713,6 +824,22 @@ export const taskReviseTool: Tool = {
       await import("../../agent/delegation.ts");
     const acceptance = parseAcceptance(params.acceptance ?? meta.acceptance, task.description ?? task.name);
     await updateTask(resolvedId, { status: "in_progress", progress: 50 });
+    const board = await import("../../agent/delegation-board.ts");
+    board.announceDelegation(meta_ref(task), resolvedId);
+
+    // A revised instance gets a fresh private copy of the (by now further along) shared workspace.
+    const { parseInstanceId } = await import("../../agent/swarm-instances.ts");
+    const swarm = parseInstanceId(worker.id).n >= 2 ? (await import("../../agent/swarm-runtime.ts")).getSwarmRuntime() : null;
+    const baseWorkspace = config?.configurable?.workspace ?? meta.workspace;
+    const groupKey = (config?.configurable?.code_task_id ?? meta.code_task_id ?? config?.configurable?.code_session_id ?? meta.code_session_id ?? "swarm") as string;
+    let runWorkspace = baseWorkspace;
+    if (swarm && baseWorkspace) {
+      try { runWorkspace = await swarm.prepare({ taskId: groupKey, instanceId: worker.id, baseWorkspace }); }
+      catch (err) {
+        await updateTask(resolvedId, { status: "failed", error: (err as Error).message });
+        return { ok: false, task_id: resolvedId, error: `No pude preparar el workspace de ${worker.id}: ${(err as Error).message}` };
+      }
+    }
 
     try {
       const { runAgentIsolated } = await import("../../agent/agent-loop.ts");
@@ -729,7 +856,7 @@ export const taskReviseTool: Tool = {
         ),
         codeSessionId: config?.configurable?.code_session_id ?? meta.code_session_id,
         codeTaskId: config?.configurable?.code_task_id ?? meta.code_task_id,
-        workspace: config?.configurable?.workspace ?? meta.workspace,
+        workspace: runWorkspace,
         specialty: meta.specialty, contextPaths: meta.paths,
         threadId: delegationThreadId(resolvedId, worker.id),
         parentRunId: config?.configurable?.run_id,
@@ -739,15 +866,23 @@ export const taskReviseTool: Tool = {
       });
       const checks = await checkAcceptance(acceptance, result);
       const met = summarizeAcceptance(checks);
+      const merge = swarm ? await swarm.integrate({ taskId: groupKey, instanceId: worker.id }) : null;
+      const merged = merge === null || merge.status === "integrated" || merge.status === "noop";
+      const status = !merged || met === false ? "blocked" : "completed";
       await updateTask(resolvedId, {
-        status: met === false ? "blocked" : "completed",
-        progress: met === false ? 80 : 100,
+        status,
+        progress: status === "completed" ? 100 : 80,
         result,
         completed_at: now(),
       });
-      return { ok: true, task_id: resolvedId, worker_id: worker.id, result, acceptance: checks, acceptance_met: met };
+      board.settleDelegation({ ref: meta_ref(task), taskId: resolvedId, status, result }, meta_ref(task), resolvedId);
+      return {
+        ok: true, task_id: resolvedId, worker_id: worker.id, result, acceptance: checks, acceptance_met: met,
+        ...(merge ? { merge: merge.status, merged_files: merge.files, ...(merged ? {} : { merge_error: merge.error?.slice(0, 600) }) } : {}),
+      };
     } catch (err) {
       await updateTask(resolvedId, { status: "failed", error: (err as Error).message });
+      board.settleDelegation({ taskId: resolvedId, status: "failed", result: (err as Error).message }, meta_ref(task), resolvedId);
       return { ok: false, task_id: resolvedId, error: (err as Error).message };
     }
   },
@@ -1003,6 +1138,7 @@ export function createTools(): Tool[] {
     agentArchiveTool,
     taskDelegateTool,
     taskReviseTool,
+    waitForTool,
     taskDelegateCodeTool,
     taskStatusTool,
     busPublishTool,

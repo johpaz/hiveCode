@@ -47,6 +47,17 @@ Cada provider implementa `LLMProvider.call(options)` (`agent/llm-providers/inter
 
 `packages/core/src/gateway` expone rutas HTTP/WS (`routes/`: agentes, auth, canales, chat, config, cron, MCP, modelos, providers, skills, tareas, herramientas, usuarios, workspace…). Arranca dentro del mismo proceso que el REPL. Los canales externos (Telegram) viven en `channels/`.
 
+## El enjambre: instancias paralelas y dependencias
+
+BEE reparte el trabajo; el runtime lo hace posible sin perder contexto:
+
+- **Instancias**: `task_delegate({ worker_id: "builder#2" })` clona el perfil `builder` (máx. 3 por perfil). Cada instancia tiene su propio hilo, así que `task_revise` la reanuda con su contexto.
+- **Copia privada**: una instancia escribe en un worktree propio de la tarea (`hivecode/swarm-<tarea>-<instancia>`, sembrado con todo lo que la tarea ya produjo). Al terminar, su diff se fusiona en el worktree de la tarea (de una en una) y la copia se borra. Si hay conflicto, la copia queda para inspección, se avisa con `⚠` y `task_delegate` devuelve `merge: "conflict"` con los archivos para que BEE use `task_revise`.
+- **Dependencias**: `task_delegate({ after: ["T001"] })` espera a que T001 termine **antes de arrancar el run** (sin tokens ni slot) e inyecta su entrega. Si falla o queda a medias, vuelve `blocked_by`. `wait_for(ref)` hace lo mismo a mitad de un run y sustituye los `sleep` por shell.
+- **Dentro de un worker**: llamadas independientes en un mismo turno corren juntas (lecturas, y `fs_write`/`fs_edit` a archivos distintos). El bloqueo de escritura es por ruta: un shell bloquea todo el workspace, dos archivos distintos no se bloquean entre sí.
+
+Código: `core/src/agent/swarm-instances.ts`, `swarm-runtime.ts` (registro), `delegation-board.ts`, `tools/agents/index.ts`; la implementación git está en `code/src/workspace/swarm-workspaces.ts`. Se mide con `scripts/bench-run.ts` (campo `swarm` del JSON).
+
 ## Qué se probó y se quitó: los oráculos Jev/Kev
 
 Hubo modelos pequeños (Jev en OpenRouter, Kev en HiveAgents) que decidían qué contexto, qué herramientas y qué siguiente acción recibía cada llamada, y si un lote podía ir en paralelo. **Se eliminaron.** En una medición con la misma tarea (un CRUD de 6 tareas, tres corridas):

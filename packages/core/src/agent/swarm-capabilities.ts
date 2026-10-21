@@ -5,9 +5,12 @@
  * decides from the calls themselves (reads are always independent; delegations need distinct workers
  * and no two writers in the same workspace).
  */
+import path from "node:path"
 import { agentAlias, agentFunction, agentTierLevel } from "./agent-identity"
 import { col } from "../storage/hive"
 import type { AgentDoc, McpServerDoc } from "../storage/collections"
+import { getSwarmRuntime } from "./swarm-runtime"
+import { MAX_INSTANCES, parseInstanceId } from "./swarm-instances"
 
 /** "activo": connected now; "disponible": enabled, connects on first use; "apagado": disabled. */
 export type SwarmMcpState = "activo" | "disponible" | "apagado"
@@ -88,6 +91,9 @@ export async function describeSwarmCapabilities(
 /** Tools whose results do not depend on each other; safe to run concurrently. */
 const READ_ONLY_TOOLS = /^(fs_read|fs_list|fs_glob|fs_exists|web_search|web_fetch|memory_read|memory_search|artifact_read|artifact_inspect|task_status|agent_find)$/
 
+/** Tools that write one named file. */
+const FILE_WRITE_TOOLS = /^(fs_write|fs_edit)$/
+
 type ToolCallLike = { function: { name: string; arguments: unknown } }
 
 /** Workers that may write the workspace: two of them at once would collide. */
@@ -102,10 +108,28 @@ function mayWrite(agent: AgentDoc | undefined): boolean {
  * Returns undefined when the batch is neither all reads nor all delegations
  * (mixed or mutating batches stay sequential).
  */
-export async function structuralParallelism(calls: ToolCallLike[]): Promise<{ kind: "reads" | "delegations"; safe: boolean } | undefined> {
+export async function structuralParallelism(calls: ToolCallLike[]): Promise<{ kind: "reads" | "writes" | "delegations"; safe: boolean } | undefined> {
   if (calls.length < 2) return undefined
   const names = calls.map(c => c.function.name)
   if (names.every(n => READ_ONLY_TOOLS.test(n))) return { kind: "reads", safe: true }
+  // A worker's independent file edits: each call names a different file, and nothing in the batch reads one
+  // of them. (Shell, builds and tests may touch anything, so they never join a batch of writes.)
+  if (names.every(n => FILE_WRITE_TOOLS.test(n) || READ_ONLY_TOOLS.test(n)) && names.some(n => FILE_WRITE_TOOLS.test(n))) {
+    const target = (call: ToolCallLike): string | undefined => {
+      try {
+        const args = typeof call.function.arguments === "string" ? JSON.parse(call.function.arguments) : call.function.arguments
+        const value = args?.path ?? args?.file_path
+        return typeof value === "string" && value ? path.normalize(value) : undefined
+      } catch { return undefined }
+    }
+    const written = calls.filter(c => FILE_WRITE_TOOLS.test(c.function.name)).map(target)
+    const read = calls.filter(c => !FILE_WRITE_TOOLS.test(c.function.name))
+    const safe = written.every(Boolean)
+      && new Set(written).size === written.length
+      // fs_list / fs_glob / web reads name no file of the batch; fs_read of a written file is a dependency.
+      && read.every(c => !/^(fs_read|fs_list|fs_glob)$/.test(c.function.name) || (c.function.name === "fs_read" && !written.includes(target(c))))
+    return { kind: "writes", safe }
+  }
   if (names.every(n => n === "spawn_agent")) {
     const safe = calls.every(call => {
       try { return (typeof call.function.arguments === "string" ? JSON.parse(call.function.arguments) : call.function.arguments)?.parallel !== false } catch { return false }
@@ -124,10 +148,16 @@ export async function structuralParallelism(calls: ToolCallLike[]): Promise<{ ki
   })
   if (ids.some(id => !id) || new Set(ids).size !== ids.length) return { kind: "delegations", safe: false }
   const agentsCol = await col<AgentDoc>("agents")
-  const agents = (await Promise.all(ids.map(id => agentsCol.get(id)))).map(row => row?.doc)
-  if (agents.some(agent => !agent)) return { kind: "delegations", safe: false }
-  const writers = agents.filter(mayWrite)
+  // `builder#2` is cloned from `builder` when it is delegated to, so it may not exist yet: judge it by
+  // its base profile, and count it as a writer with a workspace of its own (it gets a private copy).
+  const resolved = await Promise.all(ids.map(async id => {
+    const { base, n } = parseInstanceId(id)
+    const doc = (await agentsCol.get(id))?.doc ?? (n >= 2 && n <= MAX_INSTANCES ? (await agentsCol.get(base))?.doc : undefined)
+    return doc ? { doc, own: n >= 2 && getSwarmRuntime() ? `instance:${id}` : doc.workspace } : undefined
+  }))
+  if (resolved.some(entry => !entry)) return { kind: "delegations", safe: false }
+  const writers = resolved.filter(entry => mayWrite(entry!.doc))
   if (writers.length <= 1) return { kind: "delegations", safe: true }
-  const workspaces = writers.map(agent => agent!.workspace)
+  const workspaces = writers.map(entry => entry!.own)
   return { kind: "delegations", safe: workspaces.every(Boolean) && new Set(workspaces).size === workspaces.length }
 }

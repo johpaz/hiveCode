@@ -366,9 +366,14 @@ ${objective}`,
 
 1. Lee tasks.md con speckit_artifact_read.
 2. Delega las tareas con task_delegate al worker de su lane (scout, builder, spider). Las tareas listas
-   que no comparten archivos ni dependencias se delegan EN EL MISMO PASO (varias llamadas task_delegate
-   juntas) para que corran en paralelo; las que dependen de otra esperan su resultado. Máximo ${MAX_PARALLEL_WORKERS}
-   workers a la vez y un solo builder por conjunto de archivos.
+   que no comparten archivos se delegan EN EL MISMO PASO (varias llamadas task_delegate juntas) para que
+   corran en paralelo. Para dos trabajos de código simultáneos usa instancias del mismo perfil: worker_id
+   "builder", "builder#2", "builder#3" (cada una trabaja en su copia del proyecto y su trabajo se fusiona al
+   terminar; no repartas el mismo archivo entre instancias). Una tarea que necesita el resultado de otra se
+   delega en el MISMO paso con after: ["T001"]: espera sola, sin gastar tokens, y recibe esa entrega. Si
+   una dependencia falla, la llamada vuelve con blocked_by: decide tú (task_revise a la que falló).
+   Máximo ${MAX_PARALLEL_WORKERS} workers a la vez. Reparte la ola completa de tareas listas en un solo paso
+   en vez de delegarlas de una en una.
 3. Cada delegación lleva criterios de aceptación tomados de la tarea. Juzga la evidencia de cada una; si
    no cumple, task_revise con feedback concreto antes de seguir.
 4. Cuando todas estén hechas, delega al worker "verifier" (Quality Gate): reproducir cada criterio de

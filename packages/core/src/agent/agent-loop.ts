@@ -1,3 +1,4 @@
+import nodePath from "node:path"
 import { eventBus } from "../events/event-bus"
 import { stringList } from "./ephemeral-agents"
 import { markSourceIndexStale, refreshSourceIndex } from "./source-index"
@@ -74,9 +75,15 @@ async function executeTool(
     const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args
     if (toolName === "search_knowledge" && config.code_session_id && parsedArgs?.mode === undefined) parsedArgs.mode = "compact"
     const invoke = () => runWithTaskSignal(config.signal, () => tool.execute(parsedArgs as Record<string, unknown>, { configurable: config, signal: config.signal }))
-    if (["task_delegate", "task_revise", "spawn_agent"].includes(toolName)) return await invoke()
-    return await withExecutionSlot(config.code_session_id ?? config.thread_id ?? "default", config.signal, invoke,
-      WORKSPACE_MUTATION_TOOLS.has(toolName) || ["shell_executor", "run_script", "code_test", "code_build"].includes(toolName) ? config.workspace ?? process.cwd() : undefined)
+    if (["task_delegate", "task_revise", "spawn_agent", "wait_for"].includes(toolName)) return await invoke()
+    // Whole-workspace lock for anything that may touch many files; a plain file write only locks its file,
+    // so a worker's independent writes can run side by side (see structuralParallelism).
+    const workspaceRoot = config.workspace ?? process.cwd()
+    const target = ["fs_write", "fs_edit", "fs_delete"].includes(toolName) ? (parsedArgs as any)?.path ?? (parsedArgs as any)?.file_path : undefined
+    const writer = typeof target === "string" && target
+      ? nodePath.resolve(workspaceRoot, target)
+      : WORKSPACE_MUTATION_TOOLS.has(toolName) || ["shell_executor", "run_script", "code_test", "code_build"].includes(toolName) ? workspaceRoot : undefined
+    return await withExecutionSlot(config.code_session_id ?? config.thread_id ?? "default", config.signal, invoke, writer)
   } catch (err) {
     return {
       error: true,
@@ -102,7 +109,7 @@ const SINGLE_TOOL_DOMINANCE_NUDGE = 3
 /** Calls of one tool with no other tool in between before we treat it as spinning. */
 const SINGLE_TOOL_DOMINANCE_LIMIT = 5
 /** Orchestration tools: calling them in a row is the job, not a loop. */
-const DOMINANCE_EXEMPT_TOOLS = new Set(["task_delegate", "task_revise", "task_status"])
+const DOMINANCE_EXEMPT_TOOLS = new Set(["task_delegate", "task_revise", "task_status", "wait_for"])
 /** Sampling temperature for the tool-calling loop. Matches the worker loop's 0.3. */
 const TOOL_CALLING_TEMPERATURE = 0.3
 /**
@@ -1653,6 +1660,8 @@ export async function runAgentIsolated(opts: {
   signal?: AbortSignal
   onToken?: (token: string) => void
   onReasoningToken?: (token: string) => void
+  /** Called with the final run record, also when the run ended short of its goal and returned a partial result. */
+  onRun?: (run: NonNullable<StreamChunk["run"]>) => void
 }): Promise<string> {
   let lastContent = ""
   let finalRun: StreamChunk["run"]
@@ -1683,6 +1692,7 @@ export async function runAgentIsolated(opts: {
     }
     if (chunk.run) finalRun = chunk.run
   }
+  if (finalRun) opts.onRun?.(finalRun)
   if (finalRun && finalRun.status !== "completed") {
     const summary = lastContent.trim()
     // Budget exhaustion and stalls are degraded outcomes, not failures — return the

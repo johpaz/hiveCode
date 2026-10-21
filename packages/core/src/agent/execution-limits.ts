@@ -4,6 +4,16 @@ interface Waiter { writer?: string; resolve: (release: () => void) => void; reje
 interface Queue { active: number; writers: Set<string>; pending: Waiter[] }
 const queues = new Map<string, Queue>()
 const workspaceWriters = new Set<string>()
+/**
+ * Writers collide when one path is the other or contains it: a shell command (locking its whole
+ * workspace) excludes a file write inside it, while two writes to different files may run together.
+ */
+function collides(writer: string): boolean {
+  for (const held of workspaceWriters) {
+    if (held === writer || held.startsWith(writer + path.sep) || writer.startsWith(held + path.sep)) return true
+  }
+  return false
+}
 export const DEFAULT_AGENT_CONCURRENCY = 4
 
 function limit(): number {
@@ -13,7 +23,7 @@ function limit(): number {
 function drain(key: string, queue: Queue): void {
   for (let i = 0; i < queue.pending.length && queue.active < limit();) {
     const job = queue.pending[i]
-    if (job.writer && workspaceWriters.has(job.writer)) { i++; continue }
+    if (job.writer && collides(job.writer)) { i++; continue }
     queue.pending.splice(i, 1)
     if (job.abort) job.signal?.removeEventListener("abort", job.abort)
     queue.active++

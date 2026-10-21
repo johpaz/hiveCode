@@ -43,6 +43,10 @@ import { fileURLToPath } from "@johpaz/hivecode-core/gateway/helpers/path"
 import { TaskSupervisor } from "../runtime/task-supervisor"
 import { WorkspaceLeaseManager, type WorkspaceLease, type WorkspaceLeaseOperation } from "../workspace/leases"
 import { WorkspaceManager, type WorkspaceAssignment } from "../workspace/manager"
+import { createSwarmWorkspaceRuntime } from "../workspace/swarm-workspaces"
+import { registerSwarmRuntime, getSwarmRuntime } from "@johpaz/hivecode-core/agent/swarm-runtime"
+import { resetDelegationBoard } from "@johpaz/hivecode-core/agent/delegation-board"
+import { purgeInstances } from "@johpaz/hivecode-core/agent/swarm-instances"
 import type {
   CoordinatorTask, CoordinatorResult, BeeDecision, ControlMessage,
   PhaseName, SessionMode, CoordinatorStatus,
@@ -252,6 +256,10 @@ export class CoordinatorManager extends CoordinatorBase {
 
     // Load and distribute secrets BEFORE creating workers
     await this.reloadSecrets()
+
+    // Parallel instances of a worker (builder#2…) work in private copies of the task worktree.
+    registerSwarmRuntime(createSwarmWorkspaceRuntime(this.workspaceManager, message =>
+      this.onIpcEvent?.("history_append", { role: "system", content: message, task_id: this.activeTaskId ?? undefined })))
 
     // Reconcile any task a previous process left mid-flight. Recovery and resume
     // reads go straight to HiveDB, so there is no hydration step.
@@ -629,6 +637,8 @@ export class CoordinatorManager extends CoordinatorBase {
 
   async stopAll(): Promise<void> {
     stopReflectorCron()
+    await getSwarmRuntime()?.cleanup().catch(() => {})
+    registerSwarmRuntime(null)
     for (const [name, worker] of this.workers) {
       worker.terminate()
       log.info(`[coordinator-manager] ${name} terminated`)
@@ -676,6 +686,10 @@ export class CoordinatorManager extends CoordinatorBase {
     ])).flat()
 
     setCancelled(false)
+    // Nothing of a previous task's swarm (sub-worktrees, who-finished-what) carries over.
+    await getSwarmRuntime()?.cleanup().catch(() => {})
+    await purgeInstances().catch(() => {})
+    resetDelegationBoard()
     this.activeTaskId = this.scribe.createTask(sessionId, description, mode)
     this.taskAborts.set(this.activeTaskId, new AbortController())
     this.taskSupervisor.createTask({
