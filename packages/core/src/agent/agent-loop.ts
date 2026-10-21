@@ -53,7 +53,7 @@ import {
   type RepeatTrackerSnapshot,
 } from "./run-store"
 import { recordTaskUsage, taskBudgetBlocker } from "./task-budget"
-import { traceStep } from "./step-trace"
+import { commandPreview, traceStep } from "./step-trace"
 import { chooseReasoningEffort, resolveReasoningPolicy, type ReasoningPolicy } from "./reasoning-effort"
 import { CORE_AGENT_DEFINITIONS, type CoreAgentType } from "./agent-profiles"
 import { broadcastThinking } from "../gateway/task-streaming"
@@ -965,7 +965,11 @@ export async function* runAgent(
       outputTokens: response.usage?.output_tokens ?? 0,
       reasoningChars: String((response as { reasoning_content?: string }).reasoning_content ?? "").length,
       contentChars: response.content?.length ?? 0,
-      tools: (response.tool_calls ?? []).map((tc) => ({ name: tc.function.name, argChars: String(tc.function.arguments ?? "").length })),
+      tools: (response.tool_calls ?? []).map((tc) => ({
+        name: tc.function.name,
+        argChars: String(tc.function.arguments ?? "").length,
+        ...(tc.function.name === "shell_executor" ? { preview: commandPreview(tc.function.arguments) } : {}),
+      })),
     })
 
     await updateRun({input_tokens: totalInputTokens, output_tokens: totalOutputTokens,

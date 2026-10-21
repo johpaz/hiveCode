@@ -11,6 +11,7 @@ import { col, ensureIndexes, nextId } from "@johpaz/hivecode-core/storage/hive"
 import { applyModelToAllAgents, describeApplied } from "@johpaz/hivecode-core/services/agent-models"
 import { repairKnownContextWindows } from "@johpaz/hivecode-core/services/model-windows"
 import { syncConfiguredProviderCatalog } from "@johpaz/hivecode-core/services/provider-catalog"
+import { isSelectableModel } from "@johpaz/hivecode-core/services/provider-catalog-read"
 import { DEFAULT_CONTEXT_WINDOW } from "@johpaz/hivecode-core/agent/context-budget"
 import { formatIdCandidates, resolveIdFragment, shortId } from "@johpaz/hivecode-core/storage/ids"
 import type {
@@ -1000,7 +1001,7 @@ async function handleModelCommand(
         if (!provider?.enabled || (!provider.active && providerId !== ctx.activeProvider)) {
           return { handled: true, output: "Activa el provider antes de seleccionar su modelo." }
         }
-        if (!model || model.provider_id !== providerId || !model.enabled || model.deprecated_at != null || model.model_type !== "llm") {
+        if (!model || model.provider_id !== providerId || !isSelectableModel(model)) {
           return { handled: true, output: "El modelo no está disponible para este provider." }
         }
         await setCodeConfig(`provider_model_${providerId}`, modelId)
@@ -1027,7 +1028,7 @@ async function handleModelCommand(
         // Modelos por provider, ya filtrados a los que están habilitados.
         const providerIds = new Set(providers.map(p => p.id))
         const dbModels = (await scanDocs<ModelDoc>("models"))
-          .filter((model) => model.enabled && model.deprecated_at == null && model.model_type === "llm" && providerIds.has(model.provider_id))
+          .filter((model) => isSelectableModel(model) && providerIds.has(model.provider_id))
           .sort((a, b) => a.provider_id.localeCompare(b.provider_id) || a.id.localeCompare(b.id))
         const modelsOf = (pid: string) => dbModels.filter(m => m.provider_id === pid).map(m => m.id)
 

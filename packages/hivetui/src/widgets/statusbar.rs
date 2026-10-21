@@ -28,7 +28,15 @@ pub fn render(canvas: &mut Canvas, area: Rect, state: &AppState) {
     let suggestion = state.pending_layout_suggestion();
     let typing = !state.input.value().is_empty();
 
-    let (right_content, style) = if state.dashboard.halt_confirm {
+    let notice = state
+        .clipboard_notice
+        .as_ref()
+        .filter(|(_, at)| at.elapsed() < std::time::Duration::from_secs(3));
+
+    let (right_content, style) = if let Some((msg, _)) = notice {
+        let color = if msg.starts_with('✗') { RED } else { GREEN };
+        (msg.clone(), Style::new().fg(color).bold())
+    } else if state.dashboard.halt_confirm {
         (
             "⚠ detener el enjambre · Enter confirma · Esc cancela".to_string(),
             Style::new().fg(RED).bold(),

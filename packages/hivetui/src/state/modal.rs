@@ -344,12 +344,11 @@ impl SettingsHubState {
         }
     }
 
-    /// Cuántas filas navega el tab Modelos (con provider activo, solo el modelo seleccionado).
+    /// Cuántas filas navega el tab Modelos.
     pub fn model_row_count(&self) -> usize {
         match self.model_rows() {
             ModelRows::NeedProvider { providers } => providers.len(),
-            // Solo se ve el modelo seleccionado: una fila.
-            ModelRows::Models { .. } => 1,
+            ModelRows::Models { models, .. } => models.len(),
         }
     }
 }

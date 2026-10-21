@@ -16,10 +16,11 @@
  *    hidden-test result, and whether the agent's own `bun test` passes. Models differ between agents and
  *    are recorded as they are.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, copyFileSync, statSync, symlinkSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync, copyFileSync, statSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { parseArgs } from "node:util"
+import { measureCodeQuality, type CodeQuality } from "./bench-code-quality"
 
 const ROOT = resolve(import.meta.dir, "..")
 const { values } = parseArgs({
@@ -213,6 +214,8 @@ const hivecode: Adapter = {
   async describe() { return `hivecode (${HIVECODE_PROVIDER} · ${HIVECODE_MODEL}, base de datos limpia)` },
   async run({ dir, prompt, logDir, maxMs }) {
     const resultPath = join(logDir, "hivecode-result.json")
+    const promptFile = join(logDir, "prompt.txt")
+    writeFileSync(promptFile, prompt)
     // A fresh state per run, like the other agents' stripped configuration; the API key comes from the OS keystore.
     const home = join(workRoot, `hivehome-${Date.now().toString(36)}`)
     mkdirSync(home, { recursive: true })
@@ -220,7 +223,7 @@ const hivecode: Adapter = {
     const seeded = Bun.spawnSync(["bun", join(ROOT, "scripts/bench-seed-hivecode.ts"), HIVECODE_PROVIDER, HIVECODE_MODEL], { cwd: ROOT, env: { ...process.env, ...env } as Record<string, string>, stdout: "pipe", stderr: "pipe" })
     if (seeded.exitCode !== 0) return { exitCode: seeded.exitCode, timedOut: false, usage: emptyUsage(), note: `no se pudo preparar hivecode: ${seeded.stderr.toString().slice(0, 200)}` }
     const { exitCode, timedOut } = await exec(
-      ["bun", join(ROOT, "scripts/bench-run.ts"), "--project", dir, "--task", prompt, "--out", resultPath,
+      ["bun", join(ROOT, "scripts/bench-run.ts"), "--project", dir, "--task-file", promptFile, "--out", resultPath,
         "--max-minutes", String(maxMs / 60_000), "--stall-minutes", "10"],
       // The run enforces its own limit and has a supervisor; this outer one only catches a wrapper that never returns.
       { cwd: ROOT, env, timeoutMs: maxMs + 6 * 60_000, stdoutPath: join(logDir, "stdout.log"), stderrPath: join(logDir, "stderr.log") },
@@ -332,6 +335,7 @@ async function evaluate(task: string, projectDir: string, runDir: string) {
     hidden: { ...hidden, total: hidden.pass + hidden.fail, ratio: hidden.pass + hidden.fail ? +(hidden.pass / (hidden.pass + hidden.fail)).toFixed(3) : 0 },
     ownTests: { pass: own.pass, fail: own.fail, green: own.ran && own.fail === 0 && own.pass > 0 },
     files: files.length,
+    quality: measureCodeQuality(projectDir, files),
   }
 }
 
@@ -352,6 +356,44 @@ function looksAtAnswers(logDir: string): boolean {
   return false
 }
 
+// ── A clean slate between runs ──────────────────────────────────────────────────────────────
+
+const WORKTREES = "/tmp/hivecode-worktrees"
+const listWorktrees = () => { try { return new Set(readdirSync(WORKTREES)) } catch { return new Set<string>() } }
+
+/**
+ * Kills what a run left behind and removes its temporary state, so the next agent starts from nothing.
+ *
+ * A server the agent started and never stopped keeps its port and the output pipe of whoever launched it; the
+ * task worktrees hivecode makes under /tmp outlive the run. Only what this benchmark made is touched: processes
+ * working inside its own directory, the worktrees that appeared since `worktreesBefore`, and its own leftover
+ * run directories. Another session's processes and worktrees are not.
+ */
+function cleanSlate(worktreesBefore: Set<string>, keepRuns: boolean): string {
+  const mine = [`${workRoot}/`, ...[...listWorktrees()].filter(w => !worktreesBefore.has(w)).map(w => `${WORKTREES}/${w}`)]
+  let killed = 0
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue
+    let cwd: string
+    try { cwd = readlinkSync(`/proc/${entry}/cwd`) } catch { continue }
+    if (!mine.some(prefix => cwd.startsWith(prefix))) continue
+    try { process.kill(Number(entry), "SIGKILL"); killed++ } catch { /* already gone */ }
+  }
+  let removed = 0
+  for (const name of listWorktrees()) {
+    if (worktreesBefore.has(name)) continue
+    try { rmSync(`${WORKTREES}/${name}`, { recursive: true, force: true }); removed++ } catch { /* best effort */ }
+  }
+  if (!keepRuns) {
+    const ours = [...tasks.map(t => `${t}-`), "hivehome-", "baseline-"]
+    for (const name of readdirSync(workRoot)) {
+      if (!ours.some(prefix => name.startsWith(prefix))) continue
+      try { rmSync(join(workRoot, name), { recursive: true, force: true }); removed++ } catch { /* best effort */ }
+    }
+  }
+  return `${killed} proceso(s) terminado(s), ${removed} directorio(s) temporal(es) borrado(s)`
+}
+
 // ── Run one cell ────────────────────────────────────────────────────────────────────────────
 
 interface RunResult {
@@ -366,6 +408,8 @@ interface RunResult {
   hidden: { pass: number; fail: number; total: number; ratio: number; ran: boolean }
   ownTests: { pass: number; fail: number; green: boolean }
   files: number
+  /** Measurable properties of the code it left (see bench-code-quality.ts). */
+  quality: CodeQuality
   /** The agent's own transcript mentions the benchmark's hidden material: the run does not count. */
   contaminated: boolean
   note?: string
@@ -373,6 +417,8 @@ interface RunResult {
 
 async function runCell(task: string, agentName: string, rep: number, prompt: string): Promise<RunResult> {
   const adapter = ADAPTERS[agentName]!
+  const worktreesBefore = listWorktrees()
+  say(`  limpieza previa: ${cleanSlate(worktreesBefore, !!values.keep)}`)
   const runDir = join(workRoot, `${task}-${agentName}-${rep}-${Date.now().toString(36)}`)
   const projectDir = join(runDir, "project")
   const logDir = join(out, task, `${agentName}-${rep}`)
@@ -396,12 +442,15 @@ async function runCell(task: string, agentName: string, rep: number, prompt: str
   const evaluation = await evaluate(task, projectDir, runDir)
   const result: RunResult = {
     task, agent: agentName, rep, model: run.usage.model ?? (await adapter.describe()), minutes, timedOut: run.timedOut, exitCode: run.exitCode,
-    usage: run.usage, hidden: { ...evaluation.hidden }, ownTests: evaluation.ownTests, files: evaluation.files, contaminated, note: [run.note, repoChanged ? "el repositorio cambió durante la corrida (no necesariamente por el agente)" : ""].filter(Boolean).join(" · ") || undefined,
+    usage: run.usage, hidden: { ...evaluation.hidden }, ownTests: evaluation.ownTests, files: evaluation.files, quality: evaluation.quality, contaminated, note: [run.note, repoChanged ? "el repositorio cambió durante la corrida (no necesariamente por el agente)" : ""].filter(Boolean).join(" · ") || undefined,
   }
   writeFileSync(join(logDir, "result.json"), JSON.stringify(result, null, 2))
   if (contaminated) say("  ⚠ CONTAMINADA: el registro del agente menciona el material oculto del benchmark; no cuenta")
   say(`  ocultas ${result.hidden.pass}/${result.hidden.total} · propias ${result.ownTests.green ? "verdes" : "NO verdes"} · ${(result.usage.promptTokens / 1e6).toFixed(2)} M prompt / ${(result.usage.outputTokens / 1e3).toFixed(0)} K salida${result.usage.costUsd != null ? ` · $${result.usage.costUsd.toFixed(2)}` : ""}`)
+  const q = result.quality
+  say(`  calidad: tipos strict ${q.strictErrors} · ${q.srcSloc} líneas en ${q.srcFiles} archivo(s) · ${q.tests} pruebas / ${q.assertions} aserciones · complejidad media ${q.ccAvg} (máx ${q.ccMax}) · duplicación ${(q.dupRatio * 100).toFixed(1)} %`)
   if (!values.keep) { try { rmSync(runDir, { recursive: true, force: true }) } catch { /* best effort */ } }
+  say(`  limpieza: ${cleanSlate(worktreesBefore, !!values.keep)}`)
   return result
 }
 
@@ -435,6 +484,12 @@ function summarize(allResults: RunResult[]) {
       const hidden = rs.map(r => r.hidden.ratio)
       const costs = rs.map(r => r.usage.costUsd).filter((c): c is number => c != null)
       lines.push(`| ${agent} | ${rs.length} | ${fmt(median(times))} · ${fmt(Math.min(...times))}–${fmt(Math.max(...times))} | ${fmt((median(rs.map(r => r.usage.promptTokens)) ?? 0) / 1e6, 2)} | ${fmt((median(rs.map(r => r.usage.outputTokens)) ?? 0) / 1e3, 0)} | ${costs.length ? fmt(median(costs), 2) : "—"} | ${fmt(median(rs.map(r => r.usage.steps).filter((x): x is number => x != null)), 0)} | ${fmt(median(rs.map(r => r.usage.toolCalls).filter((x): x is number => x != null)), 0)} | ${fmt((median(hidden) ?? 0) * 100, 0)} % | ${rs.filter(r => r.ownTests.green).length}/${rs.length} | ${rs.filter(r => r.timedOut).length} |`)
+    }
+    lines.push("", "| agente | n | tipos (errores strict) | líneas src | archivos | pruebas · aserciones | complejidad media · máx | funciones >10 | duplicación | any · ts-ignore | console | catch vacío | deps |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for (const agent of [...new Set(results.filter(r => r.task === task).map(r => r.agent))]) {
+      const qs = results.filter(r => r.task === task && r.agent === agent).map(r => r.quality).filter((q): q is CodeQuality => !!q)
+      const m = (pick: (q: CodeQuality) => number) => median(qs.map(pick))
+      lines.push(`| ${agent} | ${qs.length} | ${fmt(m(q => q.strictErrors), 0)} | ${fmt(m(q => q.srcSloc), 0)} | ${fmt(m(q => q.srcFiles), 0)} | ${fmt(m(q => q.tests), 0)} · ${fmt(m(q => q.assertions), 0)} | ${fmt(m(q => q.ccAvg), 2)} · ${fmt(m(q => q.ccMax), 0)} | ${fmt(m(q => q.ccOver10), 0)} | ${fmt((m(q => q.dupRatio) ?? 0) * 100, 1)} % | ${fmt(m(q => q.any), 0)} · ${fmt(m(q => q.tsIgnore), 0)} | ${fmt(m(q => q.consoleCalls), 0)} | ${fmt(m(q => q.emptyCatch), 0)} | ${fmt(m(q => q.deps), 0)} |`)
     }
   }
   return lines.join("\n")

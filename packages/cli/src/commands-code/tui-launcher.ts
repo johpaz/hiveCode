@@ -3,7 +3,7 @@ import { eventBus } from "@johpaz/hivecode-core/events/event-bus"
 import { syncConfiguredProviderCatalog } from "@johpaz/hivecode-core/services/provider-catalog"
 import { agentConfigFields, agentModelPatch } from "./agent-settings"
 import { ALL_COMMANDS } from "@johpaz/hivecode-code/coordinator/command-parser"
-import { listCatalogModels, listCatalogProviders } from "@johpaz/hivecode-core/services/provider-catalog-read"
+import { isSelectableModel, listCatalogModels, listCatalogProviders } from "@johpaz/hivecode-core/services/provider-catalog-read"
 import { startProviderCatalogScheduler } from "@johpaz/hivecode-core/services/provider-catalog"
 /**
  * Launch the Rust/crossterm TUI binary and handle IPC with the Bun process.
@@ -547,7 +547,7 @@ async function handleTuiMessage(
         // petición, así que se fija el primero habilitado del nuevo provider.
         const models = (await (await col<ModelDoc>("models")).findBy("provider_id", providerId))
           .map(entry => entry.doc)
-          .filter(m => m.model_type === "llm" && m.enabled && m.deprecated_at == null && m.catalog_missing_since_slot == null)
+          .filter(isSelectableModel)
           .sort((a, b) => a.id.localeCompare(b.id))
         const configuredModel = await getProviderModel(providerId)
         const model = models.find(m => m.id === configuredModel)?.id ?? models[0]?.id

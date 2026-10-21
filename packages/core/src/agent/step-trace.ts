@@ -20,7 +20,17 @@ export interface StepTrace {
   reasoningChars: number
   /** Characters of visible text. */
   contentChars: number
-  tools: Array<{ name: string; argChars: number }>
+  /** For a shell command, its text (clipped): the one thing worth reading when a run goes wrong. */
+  tools: Array<{ name: string; argChars: number; preview?: string }>
+}
+
+/** The command of a `shell_executor` call, clipped, for the trace. */
+export function commandPreview(args: unknown, max = 400): string {
+  try {
+    const parsed = typeof args === "string" ? JSON.parse(args) : args
+    const cmd = (parsed as { cmd?: unknown; command?: unknown })?.cmd ?? (parsed as { command?: unknown })?.command
+    return typeof cmd === "string" ? cmd.slice(0, max) : ""
+  } catch { return "" }
 }
 
 export function traceStep(step: StepTrace): void {

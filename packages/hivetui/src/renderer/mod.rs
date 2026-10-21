@@ -108,18 +108,10 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
     let content_area = content_area_for_popup(area, state);
     apply_selection_highlight(canvas, state, content_area);
 
-    // Handle pending copy request (controller sets this, renderer executes it with canvas access)
-    if state.pending_copy_request {
-        if let Some(ref sel) = state.selection {
-            let text = selected_text(canvas, sel, content_area);
-            if !text.trim().is_empty() {
-                #[cfg(not(test))]
-                {
-                    let _ = clipboard::copy_text(&text);
-                }
-            }
-        }
-        state.pending_copy_request = false;
+    // La bienvenida se pinta encima de todo: ahí la copia se resuelve después de dibujarla.
+    let welcome_active = state.show_welcome && state.history.entries.is_empty();
+    if !welcome_active {
+        run_pending_copy(canvas, state, content_area);
     }
 
     // Welcome fullscreen overlay — cubre todo (header, tabbar, contenido, input)
@@ -133,6 +125,7 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
         // Un modal abierto desde la bienvenida (F2, Ctrl+S) recibe las teclas: si no se dibuja,
         // la pantalla parece congelada y la siguiente tecla cierra algo que nadie ve.
         render_modal(canvas, area, state);
+        run_pending_copy(canvas, state, content_area);
         return (0, 0);
     }
 
@@ -160,6 +153,25 @@ pub fn render(canvas: &mut Canvas, state: &mut AppState) -> (u16, u16) {
     }
 
     cursor_position(state, input_area)
+}
+
+/// Ejecuta la copia pedida por el controlador (necesita el canvas ya dibujado para leer el texto).
+fn run_pending_copy(canvas: &Canvas, state: &mut AppState, content_area: Rect) {
+    if state.pending_copy_request {
+        if let Some(ref sel) = state.selection {
+            let text = selected_text(canvas, sel, content_area);
+            if !text.trim().is_empty() {
+                #[cfg(not(test))]
+                {
+                    state.clipboard_notice = Some((match clipboard::copy_text(&text) {
+                        Ok(()) => format!("✓ copiado ({} caracteres)", text.chars().count()),
+                        Err(e) => format!("✗ no se pudo copiar: {e}"),
+                    }, std::time::Instant::now()));
+                }
+            }
+        }
+        state.pending_copy_request = false;
+    }
 }
 
 /// Mensaje explícito en vez de dibujar un layout ilegible. Dice el tamaño actual y

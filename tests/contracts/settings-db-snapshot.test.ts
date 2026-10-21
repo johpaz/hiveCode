@@ -5,7 +5,6 @@ import { col } from "../../packages/core/src/storage/hive"
 import { closeHiveDb } from "../../packages/core/src/storage/hivedb"
 import type { CodeConfigDoc } from "../../packages/core/src/storage/collections"
 import { ensureHiveDb } from "../../packages/core/src/storage/bootstrap"
-import { storeProviderApiKey } from "../../packages/core/src/storage/crypto"
 import { sendSettingsSnapshot } from "../../packages/cli/src/commands-code/tui-launcher"
 import { startSession, waitForFrame, frameText } from "../../packages/hivetui/tests/e2e/harness"
 
@@ -39,22 +38,17 @@ test("DB-backed settings snapshot is accepted by the real TUI, including seeded 
     const model = snapshot.providers.find((p: any) => p.id === "gemini").models[0]
     const modelsFrame = await waitForFrame(session.iter, f => frameText(f).includes(model), 5000, "modelos de Gemini desde la BD")
     expect(frameText(modelsFrame)).toContain(model)
-    expect(frameText(modelsFrame)).toContain("Cambiar modelo")
+    expect(frameText(modelsFrame)).toContain("Confirmar modelo")
     session.type("\r")
     const command = await session.ipc.waitForMessage("submit")
-    // Only the selected model is shown; Enter opens the provider's picker rather than naming a model.
-    expect(command.input).toBe("/modelo set gemini")
+    // The tab lists the catalog's models; Enter on the highlighted one names it.
+    expect(command.input).toBe(`/modelo set gemini ${model}`)
     const ctx: ContextState = { sessionId: "test", activeProvider: "gemini", activeModel: "", activeMode: "approval", activeMcp: [], activeSkills: [], projectPath: "/tmp" }
-    // The picker lists this provider's models and what is picked becomes the session's model.
-    await storeProviderApiKey("gemini", "test-key")
     const result = await parseInternalCommand(String(command.input), undefined, ctx, {
-      showConfigModal: async (_id: string, _title: string, fields: Array<{ options?: string[] }>) => {
-        expect(fields[0].options).toContain(model)
-        return { model }
-      },
+      showConfigModal: async () => { throw new Error("An explicit choice must not reopen the selector") },
     })
     expect(result.newState?.activeModel).toBe(model)
-    expect(result.output).toContain(model)
+    expect(result.output).toContain("Modelo confirmado")
     expect((await (await col<CodeConfigDoc>("codeConfig")).get("provider_model_gemini"))!.doc.value).toBe(model)
     // The Agents tab reads the same snapshot: choosing the model reaches every agent, and the dead
     // limits are no longer sent.
@@ -64,8 +58,8 @@ test("DB-backed settings snapshot is accepted by the real TUI, including seeded 
     expect(after.agents.every((agent: any) => agent.provider === "gemini" && agent.model === model)).toBe(true)
     expect(Object.keys(after.agents[0]).sort()).toEqual(["id", "model", "name", "permission_profile", "provider"])
     await sendSettingsSnapshot(msg => session.ipc.send(msg as any))
-    const confirmed = await waitForFrame(session.iter, f => frameText(f).includes(model) && !frameText(f).includes("Cargando"), 5000, "modelo confirmado y visible")
-    expect(frameText(confirmed)).toContain(model)
+    const confirmed = await waitForFrame(session.iter, f => frameText(f).includes("Activo") && frameText(f).includes(model) && !frameText(f).includes("Cargando"), 5000, "modelo confirmado y visible")
+    expect(frameText(confirmed)).toContain("Activo")
 
   } finally { session.dispose() }
 }, 15000)

@@ -117,6 +117,8 @@ pub struct AppState {
     pub focused_worker: Option<String>,
     /// Mensaje de la barra de estado inferior (viene de Status.msg de Bun).
     pub status_msg: String,
+    /// Aviso efímero de copiar/pegar; la barra de estado lo muestra por encima de todo unos segundos.
+    pub clipboard_notice: Option<(String, std::time::Instant)>,
     /// true mientras Bun está procesando una petición.
     pub running: bool,
     /// Índice seleccionado en el popup de comandos `/`.

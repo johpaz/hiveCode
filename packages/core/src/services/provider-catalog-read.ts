@@ -9,11 +9,21 @@ export async function listCatalogProviders(): Promise<ProviderDoc[]> {
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
+/**
+ * A model a person may pick: a chat model that is enabled and that its provider still lists. A model
+ * the provider dropped is hidden from the first sync that misses it (`catalog_missing_since_slot`),
+ * well before it is retired — so every list, picker and check shares this one rule. Each used its own
+ * before, and the picker went on offering models the gateway no longer published.
+ */
+export function isSelectableModel(model: ModelDoc): boolean {
+  return model.model_type === "llm" && model.enabled && model.deprecated_at == null && model.catalog_missing_since_slot == null
+}
+
 export async function listCatalogModels(providerId: string): Promise<ModelDoc[]> {
   await ensureIndexes([["models", "provider_id"]])
   return (await (await col<ModelDoc>("models")).findBy("provider_id", providerId))
     .map(row => row.doc)
-    .filter(model => model.model_type === "llm" && model.enabled && model.deprecated_at == null && model.catalog_missing_since_slot == null)
+    .filter(isSelectableModel)
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 

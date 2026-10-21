@@ -13,7 +13,7 @@ unicode-width = "0.1"
 futures = "0.3"
 base64 = "0.22"
 chrono = "0.4"
-arboard = "3"
+arboard = { version = "3", features = ["wayland-data-control"] }
 
 [profile.release]
 strip = true

@@ -7,9 +7,10 @@ import { parseInternalCommand, type ContextState } from "../../packages/code/src
 import { closeHiveDb } from "../../packages/core/src/storage/hivedb"
 import { ensureHiveDb } from "../../packages/core/src/storage/bootstrap"
 import { col } from "../../packages/core/src/storage/hive"
-import type { ModelDoc, ProviderDoc } from "../../packages/core/src/storage/collections"
+import type { CodeConfigDoc, ModelDoc, ProviderDoc } from "../../packages/core/src/storage/collections"
 import { startSession, waitForFrame, frameText } from "../../packages/hivetui/tests/e2e/harness"
 import { sendSettingsSnapshot } from "../../packages/cli/src/commands-code/tui-launcher"
+import { storeProviderApiKey } from "../../packages/core/src/storage/crypto"
 
 const originalFetch = globalThis.fetch
 const previous = process.env.HIVE_DB_PATH
@@ -47,6 +48,57 @@ test("/modelo refresh names the provider when asked, and reports a failure witho
   const none = await parseInternalCommand("/modelo refresh", undefined, ctx({ activeProvider: "", activeModel: "" }))
   expect(none.output).toContain("No hay provider activo")
 })
+
+test("after a refresh the picker offers what the provider lists now — the new model in, the dropped one out", async () => {
+  await storeProviderApiKey("deepseek", "test-key") // the picker only offers providers that have a key
+  const models = await col<ModelDoc>("models")
+  const row = (id: string): ModelDoc => ({ id, provider_id: "deepseek", name: id, model_type: "llm", context_window: 1000, capabilities: null, enabled: true, active: false })
+  await models.put("keep", row("keep"))
+  await models.put("dropped", row("dropped"))
+  globalThis.fetch = (async () => Response.json({ data: [{ id: "keep", context_length: 1000 }, { id: "brand-new", context_length: 2000 }] })) as unknown as typeof fetch
+
+  await parseInternalCommand("/modelo refresh deepseek", undefined, ctx())
+
+  let options: string[] = []
+  await parseInternalCommand("/modelo set deepseek", undefined, ctx(), {
+    showConfigModal: async (_id: string, _title: string, fields: Array<{ options?: string[] }>) => { options = fields[0].options ?? []; return null },
+  } as any)
+  expect(options).toContain("keep")
+  expect(options).toContain("brand-new")
+  expect(options).not.toContain("dropped") // the provider no longer lists it
+
+  // Naming the dropped model directly is refused the same way.
+  const direct = await parseInternalCommand("/modelo set deepseek dropped", undefined, ctx())
+  expect(direct.output).toContain("no está disponible")
+})
+
+test("the Models tab of the real TUI lists what the refresh brought into the database", async () => {
+  await (await col<CodeConfigDoc>("codeConfig")).put("default_provider", { key: "default_provider", value: "deepseek", updated_at: Date.now() })
+  const models = await col<ModelDoc>("models")
+  const row = (id: string): ModelDoc => ({ id, provider_id: "deepseek", name: id, model_type: "llm", context_window: 1000, capabilities: null, enabled: true, active: false })
+  await models.put("model-kept", row("model-kept"))
+  await models.put("model-dropped", row("model-dropped"))
+  globalThis.fetch = (async () => Response.json({ data: [{ id: "model-kept", context_length: 1000 }, { id: "model-brand-new", context_length: 2000 }] })) as unknown as typeof fetch
+  await parseInternalCommand("/modelo refresh deepseek", undefined, ctx())
+
+  let snapshot: any
+  await sendSettingsSnapshot(msg => { snapshot = msg }) // what the TUI is sent right after the command
+  const listed: string[] = snapshot.providers.find((p: any) => p.id === "deepseek").models
+  expect(listed).toContain("model-brand-new")
+  expect(listed).not.toContain("model-dropped")
+
+  const session = await startSession("approval", { cols: 140, rows: 40 })
+  try {
+    session.type("\x1bOQ")
+    await session.ipc.waitForMessage("request_settings")
+    session.ipc.send(snapshot)
+    await waitForFrame(session.iter, f => !frameText(f).includes("Cargando") && frameText(f).toLowerCase().includes("deepseek"), 5000, "snapshot cargado")
+    session.type("\t") // Modelos
+    const frame = await waitForFrame(session.iter, f => frameText(f).includes("model-brand-new"), 5000, "la pestaña Modelos lista el modelo nuevo")
+    expect(frameText(frame)).toContain("model-kept")
+    expect(frameText(frame)).not.toContain("model-dropped")
+  } finally { session.dispose() }
+}, 20000)
 
 test("the TUI's refresh key asks for exactly that command", async () => {
   await sendSettingsSnapshot(() => {}) // the snapshot builder runs against this database

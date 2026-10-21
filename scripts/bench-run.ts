@@ -26,6 +26,9 @@ const { values } = parseArgs({
   options: {
     project: { type: "string" },
     task: { type: "string" },
+    // The prompt in a file instead of argv: the process list would otherwise carry the whole prompt, and an
+    // agent that runs `pkill -f server.ts` (or any pattern the prompt mentions) would kill this very process.
+    "task-file": { type: "string" },
     out: { type: "string" },
     reset: { type: "boolean", default: false },
     "max-minutes": { type: "string", default: "55" },
@@ -37,8 +40,9 @@ const { values } = parseArgs({
     "started-at": { type: "string" },
   },
 })
+if (values["task-file"] && !values.task) values.task = readFileSync(values["task-file"], "utf-8").trim()
 if (!values.project || !values.task || !values.out) {
-  console.error("uso: bun scripts/bench-run.ts --project <dir> --task <texto> --out <archivo.json> [--reset]")
+  console.error("uso: bun scripts/bench-run.ts --project <dir> (--task <texto> | --task-file <archivo>) --out <archivo.json> [--reset]")
   process.exit(2)
 }
 
