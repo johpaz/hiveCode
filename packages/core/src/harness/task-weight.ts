@@ -43,6 +43,32 @@ export interface ProjectFacts {
   hasDependencies: boolean
   hasPackageJson: boolean
   scripts: string[]
+  /** El gestor de paquetes que indica el lockfile, si hay uno. */
+  packageManager?: "bun" | "pnpm" | "yarn" | "npm"
+}
+
+const LOCKFILES: [string, NonNullable<ProjectFacts["packageManager"]>][] = [
+  ["bun.lock", "bun"], ["bun.lockb", "bun"], ["pnpm-lock.yaml", "pnpm"], ["yarn.lock", "yarn"], ["package-lock.json", "npm"],
+]
+
+/**
+ * Lo que el agente necesita saber del proyecto para no gastar turnos averiguándolo: cómo se
+ * ejecuta, qué hay y qué comprobará el harness al final. `checks` son las etiquetas de lo que
+ * el harness ejecutará solo (ver `checksFor`). Devuelve "" si no hay nada que decir.
+ */
+export function describeProjectFacts(facts: ProjectFacts | undefined, checks: string[] = []): string {
+  if (!facts || (facts.files === 0 && !facts.hasPackageJson)) return ""
+  const run = facts.packageManager === "bun" ? "bun run" : facts.packageManager === "pnpm" ? "pnpm run" : facts.packageManager === "yarn" ? "yarn" : facts.packageManager === "npm" ? "npm run" : undefined
+  const lines = [
+    "Proyecto (ya inspeccionado: no lo explores para averiguar esto):",
+    `- ${facts.files} ficheros, ${facts.modules} directorios de primer nivel con código`,
+  ]
+  if (facts.packageManager) lines.push(`- gestor de paquetes: ${facts.packageManager}`)
+  if (facts.scripts.length) lines.push(`- scripts de package.json: ${facts.scripts.map(s => (run ? `${run} ${s}` : s)).join(", ")}`)
+  lines.push(`- pruebas: ${facts.hasTests ? "sí" : "no hay"} · tsconfig: ${facts.hasTypescript ? "sí" : "no hay"} · dependencias instaladas: ${facts.hasPackageJson ? (facts.hasDependencies ? "sí" : "no") : "n/a"}`)
+  if (checks.length) lines.push(`- al terminar, el harness ejecuta solo (${checks.join(", ")}): corre antes tú solo lo que toca tu cambio, no el proyecto entero`)
+  else lines.push("- no hay nada que el harness pueda ejecutar solo al terminar (sin pruebas, tipos ni build): comprueba tu cambio tú")
+  return lines.join("\n")
 }
 
 export interface TaskWeight {
@@ -180,6 +206,7 @@ export function readProjectFacts(workspace: string): ProjectFacts {
   // Sin node_modules, una comprobación mide el entorno (tipos que no están instalados), no el
   // código: su rojo sería una evidencia inventada.
   facts.hasDependencies = existsSync(join(workspace, "node_modules"))
+  facts.packageManager = LOCKFILES.find(([file]) => existsSync(join(workspace, file)))?.[1]
 
   return facts
 }

@@ -11,7 +11,7 @@
  * inventado, y un fallo inventado dispara reparaciones que no arreglan nada.
  */
 import { createAllTools } from "../tools/index.ts"
-import { readProjectFacts } from "./task-weight.ts"
+import { readProjectFacts, type ProjectFacts } from "./task-weight.ts"
 
 export interface DeterministicCheck {
   name: string
@@ -43,16 +43,17 @@ const CHECKS: { tool: string; label: string }[] = [
  * disparaba una reparación inútil y gastaba el presupuesto arreglando un problema que no
  * existía.
  */
-function applicableChecks(workspace: string): { tool: string; label: string; why: string }[] {
-  const facts = readProjectFacts(workspace)
-  const applicable: { tool: string; label: string; why: string }[] = []
-  for (const check of CHECKS) {
-    if (check.tool === "code_test" && !facts.hasTests) continue
-    if (check.tool === "check_types" && (!facts.hasTypescript || (facts.hasPackageJson && !facts.hasDependencies))) continue
-    if (check.tool === "code_build" && !facts.scripts.includes("build")) continue
-    applicable.push({ ...check, why: "" })
-  }
-  return applicable
+export function checksFor(facts: ProjectFacts): { tool: string; label: string }[] {
+  return CHECKS.filter(check => {
+    if (check.tool === "code_test") return facts.hasTests
+    if (check.tool === "check_types") return facts.hasTypescript && !(facts.hasPackageJson && !facts.hasDependencies)
+    if (check.tool === "code_build") return facts.scripts.includes("build")
+    return true
+  })
+}
+
+function applicableChecks(workspace: string): { tool: string; label: string }[] {
+  return checksFor(readProjectFacts(workspace))
 }
 
 export async function verifyDeterministic(

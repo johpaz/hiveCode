@@ -9,9 +9,9 @@ import {
   DEFAULT_MAX_REPAIR_CYCLES,
   type TaskComplexity,
 } from "./adaptive-scheduler.ts"
-import { estimateTaskWeight, type TaskTier } from "./task-weight.ts"
+import { describeProjectFacts, estimateTaskWeight, type TaskTier } from "./task-weight.ts"
 import { clearTaskBudget, setTaskBudget, taskBudgetBlocker, taskBudgetUsage, type TaskBudgetLimit } from "../agent/task-budget.ts"
-import { describeVerdict, verifyDeterministic } from "./deterministic-checks.ts"
+import { checksFor, describeVerdict, verifyDeterministic } from "./deterministic-checks.ts"
 
 export type HarnessApprovalGate = "specification" | "convergence"
 export type HarnessApprovalDecision = "approve" | "cancel"
@@ -341,6 +341,9 @@ export class ProfileHarness {
           return { taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "ready", response, repairCycles: 0 }
         }
         await updateStage("executing")
+        // What BEE would otherwise spend turns finding out: how the project runs and what the harness
+        // will check by itself at the end.
+        const projectFacts = describeProjectFacts(weight.project, weight.project ? checksFor(weight.project).map(c => c.label) : [])
         let response = await invoke(
           "bee",
           `Cambio pequeño y localizado: no inicies Spec Kit. Hazlo tú directamente: busca y lee lo necesario
@@ -353,7 +356,7 @@ sobre el resultado y su veredicto va en el informe. Un gate por modelo aquí dup
 presupuesto de minutos, y medido el 21-oct-2026 se comía 19 turnos y el 27 % de los tokens de la tarea.
 Responde al usuario con un resumen compacto: archivos tocados y pruebas ejecutadas, sin repetir logs
 ni afirmar pruebas que no estén en la evidencia.
-
+${projectFacts ? `\n${projectFacts}\n` : ""}
 Objetivo:
 ${objective}`,
           "harness",

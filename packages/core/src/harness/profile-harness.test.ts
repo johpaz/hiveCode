@@ -177,6 +177,17 @@ describe("BEE-led execution", () => {
     expect(calls[0]!.task).not.toContain("en el PRIMER paso")
     expect(calls[0]!.task).toContain("no inicies Spec Kit")
   })
+
+  test("the scoped prompt carries the project facts, so BEE does not spend turns finding them out", async () => {
+    const { mkdtempSync: mk, writeFileSync: write } = await import("node:fs")
+    const ws = mk(path.join(tmpdir(), "hive-facts-"))
+    write(path.join(ws, "package.json"), JSON.stringify({ scripts: { test: "bun test" } }))
+    write(path.join(ws, "bun.lock"), "")
+    const { calls, runner } = scripted(["listo"])
+    await new ProfileHarness(runner).run({ objective: "corrige el typo en el README", sessionId: "session-facts", workspace: ws })
+    expect(calls[0]!.task).toContain("gestor de paquetes: bun")
+    expect(calls[0]!.task).toContain("bun run test")
+  })
 })
 
 describe("task token budget", () => {
