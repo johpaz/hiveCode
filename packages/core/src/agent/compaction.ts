@@ -35,6 +35,11 @@ const log = logger.child("compaction")
 const COMPACT_TOKEN_THRESHOLD = 6000   // ~60% of 10K context window
 const KEEP_LAST_N_MESSAGES = 5         // always keep most recent N messages
 const TOOL_RESULT_MAX_CHARS = 600      // max chars for old tool results after clearing
+/**
+ * Results that carry a worker's delivery. They are the coordinator's evidence for what to do next, and clipping them to a
+ * head of 600 chars made it read the code itself to recover what the scout had already reported.
+ */
+const DELIVERY_TOOLS = new Set(["task_delegate", "task_revise", "task_status"])
 const MAX_TRANSCRIPT_MSGS = 30         // cap messages sent to summarizer (avoids OOM on small models)
 const MAX_MSG_CHARS = 300              // chars per message in transcript
 
@@ -168,7 +173,7 @@ export async function compactThread(
  * Strategy: COMPRESS (Context Engineering)
  * - Replaces old tool results with short summaries
  * - Keeps the most recent `keepLastTurns` turns intact
- * - Never truncates the latest result of any given tool
+ * - Never truncates the latest result of any given tool, nor any delegation result (`DELIVERY_TOOLS`)
  *
  * The window is measured in **turns** (assistant messages), not raw messages. Counting
  * raw messages meant that a turn with several parallel tool calls consumed the whole
@@ -196,6 +201,7 @@ export function clearOldToolResults<T extends { role: string; content: string | 
     if (i >= cutoffIndex || protectedIndexes.has(i)) return msg
     if (msg.role !== "tool" || typeof msg.content !== "string") return msg
     if (msg.content.length <= TOOL_RESULT_MAX_CHARS) return msg
+    if (DELIVERY_TOOLS.has(toolNameForResult(messages, i))) return msg
 
     const head = msg.content.substring(0, TOOL_RESULT_MAX_CHARS)
     const looksStructured = msg.content.trim().startsWith("{") || msg.content.trim().includes(":")

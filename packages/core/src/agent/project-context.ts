@@ -6,7 +6,7 @@ import type { CodeSessionDoc, CodeGraphDoc, CodeProjectDoc, CodeTaskDoc, CodeDec
 import { searchCapabilities } from "./capability-search"
 import { budgetTokens, packetSnippetCount } from "./context-budget"
 import { checkoutRoot, projectIdentity, sessionProject, sessionsOfProject } from "./project-identity"
-import { areasNamedBy, describeFindings, findingsFor, findingsOf, freshnessOf } from "./findings"
+import { areasNamedBy, describeFindings, findingsFor, findingsOf, freshnessOf, recentScoutFindings, PLANNER_REPORT_CHARS } from "./findings"
 
 export interface ProjectScopeOptions {
   sessionId?: string
@@ -184,6 +184,8 @@ export function mentionedAreas(text: string, graphs: CodeGraphDoc[], perArea = 1
 
 export async function buildContextPacket(scope: ProjectScope, options: {
   query?: string; paths?: string[]; tokenBudget?: number; summaryOnly?: boolean; references?: ContextReference[]
+  /** The profile the packet is for: a planner receives the scouts' reports whole, not only those on areas its task names. */
+  forRole?: string
   /** Source files fetched from the query; defaults to what the token budget affords. */
   maxHits?: number
 } = {}): Promise<ContextPacket> {
@@ -227,8 +229,13 @@ export async function buildContextPacket(scope: ProjectScope, options: {
     const recent = await Promise.all((await findingsOf(scope.projectId)).slice(0, 5).map(async finding => ({ finding, freshness: await freshnessOf(finding) })))
     if (recent.length) append(`Saved findings (a current one already covers its areas: task_delegate returns it without running the worker; refresh: true reruns):\n${describeFindings(recent)}`)
   } else {
-    const known = await findingsFor(scope.projectId, areasNamedBy(options.query ?? ""), { limit: 2 })
-    if (known.length) append(`Earlier findings on the areas named by the task (trust the current ones; reread only what changed):\n${describeFindings(known, { withSummary: true, summaryChars: 1_500 })}`)
+    // The planner plans from what the scouts reported: it gets their latest reports whatever areas its task names (the
+    // objective is the user's wording, rarely a path), each clipped, so it validates specifics instead of exploring again.
+    const known = options.forRole === "planner"
+      ? await recentScoutFindings(scope.projectId, scope.sessionId)
+      : await findingsFor(scope.projectId, areasNamedBy(options.query ?? ""), { limit: 2 })
+    const reportChars = options.forRole === "planner" ? PLANNER_REPORT_CHARS : 1_500
+    if (known.length) append(`${options.forRole === "planner" ? "Scout reports for this project (plan from them; read a file only to check a specific they cite, and only the range)" : "Earlier findings on the areas named by the task (trust the current ones; reread only what changed)"}:\n${describeFindings(known, { withSummary: true, summaryChars: reportChars })}`)
   }
 
   /** The map of the project: what it is and where things live. Last for a task (evidence first), first for the coordinator. */

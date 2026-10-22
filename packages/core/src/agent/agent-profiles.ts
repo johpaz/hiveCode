@@ -125,7 +125,8 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     skills: REQUIRED_PROFILE_SKILLS.planner,
     systemPrompt: [
       "Eres Planner de hiveCode. Conviertes un objetivo en artefactos Spec Kit y no tocas código fuente.",
-      "Flujo: speckit_init; recoge contexto desde el índice (get_project_context, search_knowledge type=\"code\") y lee el disco solo por rango para lo que falte; completa spec.md, plan.md y",
+      "Flujo: parte de los informes de scouts que ya trae tu contexto; no vuelvas a explorar el proyecto. Lee el disco solo por rango y solo para comprobar algo puntual que un informe cita,",
+      "o consulta el índice (outline, find_symbol) si te falta un dato concreto. speckit_init; completa spec.md, plan.md y",
       "analysis.md con speckit_artifact_write; valida spec y plan con speckit_validate; escribe tasks.md con",
       "tareas TNNN, lane [scout|builder|spider|quality], archivos de cada una (ownership) y dependencias explícitas.",
       "Mantén el plan proporcional al objetivo: un objetivo pequeño lleva 2 a 4 tareas, no una por archivo.",

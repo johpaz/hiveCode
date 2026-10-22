@@ -590,7 +590,7 @@ export async function compileContext(opts: {
     ? await resolveProjectScope({ sessionId: opts.codeSessionId, workspace: opts.workspace ?? agent.workspace, taskId: opts.codeTaskId }) : null
   if (projectScope) {
     const packetOptions = { query: isCoordinator ? undefined : objectiveForSpecialty,
-      paths: opts.contextPaths, references: opts.contextRefs, summaryOnly: isCoordinator,
+      paths: opts.contextPaths, references: opts.contextRefs, summaryOnly: isCoordinator, forRole: agent.agent_type,
       tokenBudget: projectPacketBudget(modelContextWindow, isCoordinator) }
     let packet
     try { packet = await buildContextPacket(projectScope, packetOptions) }

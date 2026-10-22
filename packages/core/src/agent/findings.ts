@@ -146,6 +146,15 @@ export async function reusableFinding(projectId: string, role: string, taskText:
   return null
 }
 
+/** Each scout report handed to a planner is clipped to this: enough for the file:line list, not the whole narrative. */
+export const PLANNER_REPORT_CHARS = 4_000
+/** Reports of the current session first (they answer this very task), then the project's most recent; at most four. */
+export async function recentScoutFindings(projectId: string, sessionId: string, limit = 4): Promise<FindingMatch[]> {
+  const scouts = (await findingsOf(projectId)).filter(finding => finding.role === "scout" && finding.status === "completed")
+  scouts.sort((a, b) => Number(b.session_id === sessionId) - Number(a.session_id === sessionId) || b.created_at - a.created_at)
+  return Promise.all(scouts.slice(0, limit).map(async finding => ({ finding, freshness: await freshnessOf(finding) })))
+}
+
 const ago = (ms: number) => { const m = Math.round((Date.now() - ms) / 60_000); return m < 60 ? `hace ${m} min` : `hace ${Math.round(m / 60)} h` }
 
 /** A short line per finding, for a context packet. `withSummary` adds the report itself, clipped. */

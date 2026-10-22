@@ -8,7 +8,7 @@ import { closeHiveDb } from "../../packages/core/src/storage/hivedb"
 import { ensureHiveDb } from "../../packages/core/src/storage/bootstrap"
 import { ensureCoreAgentProfiles } from "../../packages/core/src/agent/agent-profiles"
 import { ensureProject, projectIdentity } from "../../packages/core/src/agent/project-identity"
-import { areasNamedBy, describeFindings, findingsFor, freshnessOf, reusableFinding, saveFinding, FINDING_TTL_MS } from "../../packages/core/src/agent/findings"
+import { areasNamedBy, describeFindings, findingsFor, freshnessOf, reusableFinding, saveFinding, recentScoutFindings, FINDING_TTL_MS } from "../../packages/core/src/agent/findings"
 import { buildContextPacket, resolveProjectScope } from "../../packages/core/src/agent/project-context"
 import { reconcileCodeIndex } from "../../packages/code/src/agent/code-indexer"
 import { taskDelegateTool } from "../../packages/core/src/tools/agents/index"
@@ -178,3 +178,19 @@ describe("where it shows up", () => {
     expect(coordinator.context).not.toContain("umbral fijo")
   })
 })
+
+describe("planner packet", () => {
+  test("a planner gets the scout reports whatever areas its task names; other roles only those on named areas", async () => {
+    await save({ summary: "REPORTE-DEL-SCOUT: route.ts decide por tamaño (route.ts:1)." })
+    expect((await recentScoutFindings(project.id, "s1")).length).toBe(1)
+
+    const scope = await resolveProjectScope({ sessionId: "s1", workspace: project.root })
+    const objective = "revisa el proyecto y planea mejoras"
+    const planner = await buildContextPacket(scope, { query: objective, forRole: "planner", tokenBudget: 6_000 })
+    const builder = await buildContextPacket(scope, { query: objective, forRole: "builder", tokenBudget: 6_000 })
+    expect(planner.context).toContain("REPORTE-DEL-SCOUT")
+    expect(planner.context).toContain("Scout reports for this project")
+    expect(builder.context).not.toContain("REPORTE-DEL-SCOUT")
+  })
+})
+
