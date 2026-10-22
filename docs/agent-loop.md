@@ -40,11 +40,11 @@ El tope de pasos es, en orden: `opts.maxSteps`, `HIVECODE_AGENT_MAX_STEPS`, `max
 `agent/context-compiler.ts` aplica cuatro estrategias:
 
 1. **Escribir** fuera del contexto: scratchpad por conversación, trazas (`code_traces`), notas (`save_note`).
-2. **Seleccionar**: *tool loadout* mínimo por turno, reglas del playbook ACE aplicables, historial selectivo (resumen más mensajes recientes).
+2. **Seleccionar**: *loadout* calculado por la base de datos al empezar el run, reglas del playbook ACE aplicables, historial selectivo (resumen más mensajes recientes).
 3. **Comprimir**: `compaction.ts` resume mensajes viejos cuando se supera un umbral y borra resultados antiguos de herramientas (`clearOldToolResults`).
 4. **Aislar**: cada worker recibe su propio contexto mínimo; BEE ve el panorama.
 
-El *loadout* inicial lo fija `minimal-loadout.ts`: `search_knowledge`, `notify`, `report_progress`, `save_note` para cualquiera, más `task_delegate`, `task_revise`, `task_status` para el coordinador. El resto se descubre en ejecución con `search_knowledge`, que añade al *loadout* la herramienta y su skill. Las skills que se cargan se derivan del conjunto de herramientas, para no anunciar capacidades que el modelo no tiene.
+El *loadout* inicial lo calcula `computeLoadout` (`agent/loadout.ts`) en `compileContext`, sin gastar un turno de LLM, con cuatro fuentes: el **núcleo del rol** (`loadout-core.ts`), la **ruta** del harness (coordinador) o la **especialidad** (workers), las herramientas cuyos **disparadores** aparecen en la tarea (`tool-metadata.ts`, indexados también en HiveDB) y las **skills que la BD puntúa** para la tarea (`rankSkills`: disparadores + BM25, filtradas por rol y con presupuesto de tokens). Todo se recorta al entorno del perfil: el loadout solo estrecha, nunca amplía. Lo que queda fuera se anuncia en una línea (manifiesto) y se trae con `search_knowledge`, sin tope de búsquedas; la herramienta y su skill llegan en el mensaje de resultado, no en el system prompt, para no invalidar la caché del prefijo. El loadout se fija al inicio del run: cambiarlo a mitad lo rompería. `HIVECODE_LOADOUT=full` restaura el comportamiento anterior (todo el entorno desde el turno 1) para comparar con `scripts/audit-loadouts.ts`. Qué se descubrió después de arrancar queda en `context_metrics_json.loadout.discovered`, y `scripts/loadout-report.ts` lo agrupa por rol, ruta y especialidad (con al menos 10 runs completados) para revisar los núcleos.
 
 `context-budget.ts` calcula presupuestos por ventana de contexto del modelo (`budgetTokens`, `fitLoopMessages`, `projectPacketBudget`). `project-context.ts` arma paquetes de contexto del proyecto con rangos de código versionados (`get_project_context`).
 

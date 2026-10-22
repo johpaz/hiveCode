@@ -1,3 +1,4 @@
+import { cachedTokens } from "./usage"
 import { appendFileSync } from "node:fs"
 import { logger } from "../../utils/logger"
 import {
@@ -289,6 +290,7 @@ export abstract class OpenAICompatBase implements LLMProvider {
       usage: response.usage ? {
         input_tokens: response.usage.prompt_tokens,
         output_tokens: response.usage.completion_tokens,
+        cached_tokens: cachedTokens(response.usage),
       } : undefined,
     }
 
@@ -339,6 +341,7 @@ export abstract class OpenAICompatBase implements LLMProvider {
     let finish_reason = "stop"
     const toolCallMap: Map<number, { id: string; name: string; arguments: string }> = new Map()
     let input_tokens = 0
+    let cached_tokens: number | undefined
     let output_tokens = 0
 
     for await (const chunk of stream) {
@@ -383,6 +386,7 @@ export abstract class OpenAICompatBase implements LLMProvider {
       if (chunk.usage) {
         input_tokens = chunk.usage.prompt_tokens ?? 0
         output_tokens = chunk.usage.completion_tokens ?? 0
+        cached_tokens = cachedTokens(chunk.usage)
       }
     }
 
@@ -426,7 +430,7 @@ export abstract class OpenAICompatBase implements LLMProvider {
       stop_reason: resolveStopReason(finish_reason, final_tool_calls),
       ...(droppedToolMarkup ? { droppedToolMarkup } : {}),
       usage: input_tokens > 0 || output_tokens > 0
-        ? { input_tokens, output_tokens }
+        ? { input_tokens, output_tokens, cached_tokens }
         : undefined,
     }
 

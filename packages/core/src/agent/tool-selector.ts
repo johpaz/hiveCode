@@ -38,6 +38,7 @@
  *    - core (notify, report_progress, save_note)
  */
 
+import { toolTriggers } from "./tool-metadata"
 import { col } from "../storage/hive"
 import type { ToolDoc } from "../storage/collections"
 import { logger } from "../utils/logger"
@@ -482,7 +483,8 @@ export async function syncToolCatalogToIndex(tools?: ToolDescriptor[]): Promise<
             rawId: tool.name,
             name: tool.name,
             body: enrichToolDescription(tool),
-            tags: tool.category,
+            // Category plus the triggers that make the tool relevant (tool-metadata.ts): the index can answer "bring the browser tools".
+            tags: [tool.category, ...toolTriggers(tool.name)].join(" "),
         }))
 
         await replaceCapabilityDocs("tool", docs)

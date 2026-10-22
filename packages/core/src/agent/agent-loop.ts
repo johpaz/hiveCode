@@ -55,7 +55,6 @@ import {
 import { argsPreview, traceResult, traceStep } from "./step-trace"
 import { checkoutRoot, projectOfSession } from "./project-identity"
 import { diskReadNudge } from "./read-mix"
-import { CAPABILITY_SEARCH_LIMIT_MESSAGE, chargeCapabilitySearch, isCapabilitySearch } from "./discovery-budget"
 import { chooseReasoningEffort, resolveReasoningPolicy, type ReasoningPolicy } from "./reasoning-effort"
 import { CORE_AGENT_DEFINITIONS, type CoreAgentType } from "./agent-profiles"
 import { broadcastThinking } from "../gateway/task-streaming"
@@ -964,6 +963,7 @@ export async function* runAgent(
       reasoningEffort: turnReasoning ?? null,
       inputTokens: response.usage?.input_tokens ?? 0,
       estimatedInputTokens: turnEstimate,
+      ...(response.usage?.cached_tokens !== undefined ? { cachedInputTokens: response.usage.cached_tokens } : {}),
       outputTokens: response.usage?.output_tokens ?? 0,
       reasoningChars: String((response as { reasoning_content?: string }).reasoning_content ?? "").length,
       contentChars: response.content?.length ?? 0,
@@ -1247,8 +1247,7 @@ export async function* runAgent(
       })
 
       opts.signal?.throwIfAborted()
-      const overDiscoveryBudget = opts.runKind === "worker" && isCapabilitySearch(toolName, tc.function.arguments) && !chargeCapabilitySearch(runId)
-      const toolResultJS = overDiscoveryBudget ? { ok: false, error: CAPABILITY_SEARCH_LIMIT_MESSAGE } : await executeTool(ctx.allTools, toolName, tc.function.arguments, {
+      const toolResultJS = await executeTool(ctx.allTools, toolName, tc.function.arguments, {
         signal: opts.signal,
         user_id: opts.userId,
         thread_id: opts.threadId,
@@ -1456,6 +1455,12 @@ export async function* runAgent(
       }
       // Dynamic tool injection: when search_knowledge finds tools, add them to ctx.tools
       if (r.name === "search_knowledge") {
+      // What the search added after the start, for the loadout report: these are the candidates to join a role's core.
+      const discovered = () => {
+        const loadout = (ctx.contextMetrics as any).loadout ?? ((ctx.contextMetrics as any).loadout = {})
+        return (loadout.discovered ??= { tools: [] as string[], skills: [] as string[] }) as { tools: string[]; skills: string[] }
+      }
+      const noteDiscovered = (kind: "tools" | "skills", name: string) => { const list = discovered()[kind]; if (!list.includes(name)) list.push(name) }
         try {
           const result = r.toolResultJS as any
           const foundTools: Array<{ name: string }> = result?.tools ?? []
@@ -1463,6 +1468,7 @@ export async function* runAgent(
           const currentToolNames = new Set(ctx.tools.map((t: any) => t.function?.name))
           const injectedTools: string[] = []
           const outsideRole: string[] = []
+          const unresolvedMcp: string[] = []
 
           for (const found of foundTools) {
             if (!currentToolNames.has(found.name)) {
@@ -1480,6 +1486,7 @@ export async function* runAgent(
                 log.info(`[agent-loop] Injected discovered native tool into loadout: ${nativeTool.name}`)
                 currentToolNames.add(found.name)
                 injectedTools.push(nativeTool.name)
+                noteDiscovered("tools", nativeTool.name)
               }
             }
           }
@@ -1500,8 +1507,10 @@ export async function* runAgent(
                 })
                 log.info(`[agent-loop] Injected discovered MCP tool into loadout: ${mcpTool.name}`)
                 currentToolNames.add(mcpFullName)
+                noteDiscovered("tools", mcpFullName)
               } else {
                 log.warn(`[agent-loop] MCP tool "${mcpFullName}" not found in allTools (available MCP: ${ctx.allTools.filter(t => t.name.includes('__')).map(t => t.name).join(', ')})`)
+                unresolvedMcp.push(found.tool_name)
               }
             }
           }
@@ -1510,7 +1519,15 @@ export async function* runAgent(
           if (outsideRole.length > 0) {
             const lastMsg = messages[messages.length - 1]
             if (lastMsg?.role === "tool" && typeof lastMsg.content === "string") {
-              lastMsg.content += `\n\n[Nota: ${outsideRole.join(", ")} existe pero tu rol no puede usarla. No la busques otra vez: resuélvelo con tus herramientas o devuelve en tu handoff qué necesitas para que BEE lo haga.]`
+              lastMsg.content += `\n\n[Nota: ${outsideRole.join(", ")} existe en el catálogo pero no está en el entorno de tu rol, así que no puedes usarla. No la busques otra vez: resuélvelo con lo que tienes o devuelve en tu handoff qué necesitas para que BEE lo haga.]`
+            }
+          }
+
+          // An MCP tool the index lists but the server did not expose: say so, or the model calls it and loops.
+          if (unresolvedMcp.length > 0) {
+            const lastMsg = messages[messages.length - 1]
+            if (lastMsg?.role === "tool" && typeof lastMsg.content === "string") {
+              lastMsg.content += `\n\n[Nota: ${unresolvedMcp.join(", ")} figura en el índice pero el servidor MCP no la expone ahora. No la llames.]`
             }
           }
 
@@ -1528,20 +1545,16 @@ export async function* runAgent(
                 })
 
               if (matchingSkills.length > 0) {
-                const systemMsg = messages.find(m => m.role === "system")
-                if (systemMsg && typeof systemMsg.content === "string") {
-                  const existingSkillNames = new Set(
-                    (systemMsg.content.match(/## Skill: ([^\n]+)/g) || [])
-                      .map(m => m.replace("## Skill: ", "").trim())
-                  )
-                  const newSkills = matchingSkills.filter(s => !existingSkillNames.has(s.name))
-                  if (newSkills.length > 0) {
-                    const newSkillSection = newSkills
-                      .map(s => `## Skill: ${s.name}\n${s.body}`)
-                      .join("\n\n")
-                    systemMsg.content += `\n\n--- SKILL INSTRUCTIONS (Auto-loaded) ---\n${newSkillSection}`
-                    log.info(`[agent-loop] Injected ${newSkills.length} skill(s) for tools: ${newSkills.map(s => s.name).join(", ")}`)
-                  }
+                // The text goes in the tool result, not the system prompt: the system prompt is the cached prefix and rewriting it
+                // would invalidate every token cached so far. It is also part of the history, so a resume from a checkpoint keeps it.
+                const lastMsg = messages[messages.length - 1]
+                const alreadyLoaded = (name: string) => messages.some(m => typeof m.content === "string" && m.content.includes(`## Skill: ${name}\n`))
+                const newSkills = matchingSkills.filter(s => !alreadyLoaded(s.name))
+                if (newSkills.length > 0 && lastMsg?.role === "tool" && typeof lastMsg.content === "string") {
+                  const newSkillSection = newSkills.map(s => `## Skill: ${s.name}\n${s.body}`).join("\n\n")
+                  lastMsg.content += `\n\n--- SKILL INSTRUCTIONS (de las herramientas que acabas de recibir) ---\n${newSkillSection}`
+                  for (const skill of newSkills) noteDiscovered("skills", skill.name)
+                  log.info(`[agent-loop] Injected ${newSkills.length} skill(s) for tools: ${newSkills.map(s => s.name).join(", ")}`)
                 }
               }
             } catch (skillErr) {
@@ -1566,6 +1579,7 @@ export async function* runAgent(
                 .filter((s: any) => s.body)
                 .map((s: any) => `## Skill: ${s.name}\n${s.body}`)
                 .join("\n\n")
+              for (const skill of foundSkills) if ((skill as any).body) noteDiscovered("skills", skill.name)
               extras.push(`\n\n--- SKILL INSTRUCTIONS ---\n${section}`)
             }
 

@@ -1,7 +1,7 @@
 ---
 name: busqueda_hivedb
-description: "Cómo usar el índice de HiveDB: entender el código antes de leer el disco y descubrir solo lo que no tienes"
-version: 1.2.0
+description: "Cómo usar la base de datos de HiveDB: entender el código por el índice antes que por el disco, y traer a tu contexto las herramientas y skills que te faltan"
+version: 1.3.0
 author: Hive Team
 icon: "🔍"
 category: core
@@ -21,13 +21,13 @@ triggers:
 
 ---
 
-# busqueda_hivedb — el índice antes que el disco
+# busqueda_hivedb — la base de datos es tu catálogo
 
-Las herramientas de tu rol ya están en tu contexto: úsalas directamente, no las busques.
+Arrancas con las herramientas y skills que tu rol y esta tarea necesitan, no con todo lo que tu rol podría usar. El resto vive en la base de datos y `search_knowledge` lo trae a tu contexto en el turno siguiente.
 
 ## Entender el código: índice primero
 
-El proyecto está indexado en HiveDB. Cada consulta al índice cuesta una fracción de leer archivos.
+Cada consulta al índice cuesta una fracción de leer archivos.
 
 1. `get_project_context` → mapa del proyecto y módulos más importados.
 2. `search_knowledge(type="code", query="<símbolo o concepto>")` → archivos con fragmento y líneas (`lines`).
@@ -36,12 +36,12 @@ El proyecto está indexado en HiveDB. Cada consulta al índice cuesta una fracci
 
 Si el resultado trae `stale: true`, el archivo cambió después de indexarse: confírmalo en disco antes de editar. Lo que vas a editar léelo siempre del disco.
 
-## Descubrir lo que no tienes
+## Traer lo que te falta
 
-Cada búsqueda de capacidades cuesta un turno entero. Máximo dos por tarea, y solo para:
+Cuando tu tarea necesita algo que no tienes cargado, búscalo en lugar de rodearlo:
 
-- `type="mcp"` → herramientas de servidores externos (GitHub, Slack, Airtable…).
-- `type="skills"` → instrucciones para un tipo de tarea.
-- `type="playbook"` → reglas y buenas prácticas.
+- `search_knowledge(type="tools", query="navegar una página")` → la herramienta, ya utilizable en tu siguiente turno. Si tu prompt lista herramientas "aún no cargadas", están en esta categoría.
+- `type="skills"` → instrucciones para un tipo de tarea. `type="playbook"` → reglas y buenas prácticas. `type="mcp"` → herramientas de servidores externos (GitHub, Slack, Airtable…).
+- `type="all"` para explorar; una palabra o una frase corta, en español o en inglés.
 
-Usa una palabra o frase corta (`"airtable"`, `"revisión de seguridad"`); acepta español e inglés. Si la herramienta existe pero tu rol no puede usarla, se te avisa: no la busques otra vez, dilo en tu handoff.
+Una búsqueda cuesta un turno: haz una buena (con lo que necesitas hacer, no con el nombre que crees que tiene) en vez de varias. Si la herramienta existe pero tu rol no puede usarla, se te avisa: dilo en tu handoff para que BEE lo resuelva.

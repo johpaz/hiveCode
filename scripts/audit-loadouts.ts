@@ -31,15 +31,22 @@ await reconcileCodeIndex(project.id, project.root)
 const tok = (s: string) => Math.round(s.length / 3.5)
 const task = "Revisa packages/core/src/harness y dime los riesgos."
 let grand = 0
-for (const agentId of ["bee", "scout", "planner", "builder", "verifier", "spider"]) {
+// The coordinator's loadout depends on the route the harness chose, so it is shown for each; a task with no route keeps everything.
+const cases: Array<{ agentId: string; route?: string }> = [
+  { agentId: "bee", route: "conversation" }, { agentId: "bee", route: "scoped" }, { agentId: "bee", route: "feature" }, { agentId: "bee" },
+  ...["scout", "planner", "builder", "verifier", "spider"].map(agentId => ({ agentId })),
+]
+for (const { agentId, route } of cases) {
   const isBee = agentId === "bee"
-  const ctx: any = await compileContext({ agentId, threadId: `audit-${agentId}`, userMessage: task, taskContext: isBee ? undefined : task, codeSessionId: "audit", workspace, isolated: !isBee })
+  const taskId = route ? `audit-${route}` : undefined
+  if (taskId) await ((await col("harnessTasks")) as any).put(taskId, { taskId, route })
+  const ctx: any = await compileContext({ agentId, threadId: `audit-${agentId}-${route ?? "none"}`, userMessage: task, taskContext: isBee ? undefined : task, codeSessionId: "audit", codeTaskId: taskId, workspace, isolated: !isBee })
   const tools = ctx.tools.map((t: any) => ({ name: t.function.name, tokens: tok(JSON.stringify(t)) })).sort((a: any, b: any) => b.tokens - a.tokens)
   const skills = (ctx.skills ?? []).map((s: any) => ({ name: s.name, tokens: tok(s.body ?? "") })).sort((a: any, b: any) => b.tokens - a.tokens)
   const toolTokens = tools.reduce((s: number, t: any) => s + t.tokens, 0)
   const skillTokens = skills.reduce((s: number, t: any) => s + t.tokens, 0)
   grand += toolTokens + skillTokens
-  console.log(`\n## ${agentId} · total del contexto ≈ ${ctx.contextMetrics.total} tok · herramientas ${tools.length} = ${toolTokens} tok · skills ${skills.length} = ${skillTokens} tok · paquete de proyecto ${ctx.contextMetrics.project} tok`)
+  console.log(`\n## ${agentId}${isBee ? ` (ruta: ${route ?? "ninguna"})` : ""} · total del contexto ≈ ${ctx.contextMetrics.total} tok · herramientas ${tools.length} = ${toolTokens} tok · skills ${skills.length} = ${skillTokens} tok · paquete de proyecto ${ctx.contextMetrics.project} tok`)
   console.log(`   herramientas: ${tools.map((t: any) => `${t.name}(${t.tokens})`).join(" ")}`)
   console.log(`   skills:       ${skills.map((s: any) => `${s.name}(${s.tokens})`).join(" ") || "—"}`)
   console.log(`   search_knowledge presente: ${tools.some((t: any) => t.name === "search_knowledge") ? "sí" : "NO"}`)

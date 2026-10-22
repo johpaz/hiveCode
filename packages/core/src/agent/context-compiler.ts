@@ -1,4 +1,4 @@
-import { isProjectIndexed, omittedAtStart } from "./loadout"
+import { DISK_WALK_TOOLS, computeLoadout, isProjectIndexed, isReaderAgent, type ComputedLoadout } from "./loadout"
 import { projectOfSession } from "./project-identity"
 import { buildContextPacket, resolveProjectScope, type ContextReference, type ProjectScope } from "./project-context"
 import { selectSpecialty, REQUIRED_PROFILE_SKILLS, FACTORY_SPECIALTIES } from "./specialties"
@@ -45,7 +45,7 @@ import { syncMCPToolsToDB, syncMCPToolsToIndex } from "../mcp/tool-sync"
 import { getUserDate, getUserTime } from "../utils/date"
 import { col, fromIndexable } from "../storage/hive"
 import { COMPACT_RATIO, budgetTokens, fitMessagesToBudget, projectPacketBudget, resolveWindow } from "./context-budget"
-import type { AgentDoc, CodePlaybookDoc, McpServerDoc, ModelDoc, ProjectDoc, SkillDoc, TaskDoc } from "../storage/collections"
+import type { AgentDoc, CodePlaybookDoc, HarnessTaskDoc, McpServerDoc, ModelDoc, ProjectDoc, SkillDoc, TaskDoc } from "../storage/collections"
 
 const log = logger.child("context-compiler")
 
@@ -79,7 +79,7 @@ export interface ContextTool {
 export interface CompiledContext {
   systemPrompt: string
   projectScope?: ProjectScope | null
-  contextMetrics?: { system: number; skills: number; tools: number; history: number; project: number; total: number; loadout?: { tools: string[]; skills: string[] } }
+  contextMetrics?: { system: number; skills: number; tools: number; history: number; project: number; total: number; loadout?: { source?: "bd" | "perfil"; tools: string[]; skills: string[]; manifest?: number } }
   /**
    * The `# RESUMEN DE LA CONVERSACIÓN` block already folded into `systemPrompt`.
    * Exposed so a caller-supplied `systemPromptOverride` can compose it in instead
@@ -134,6 +134,19 @@ function formatCausalContextItem(item: AgentContextItemShape): string | null {
  *   3. COMPRESS - Use summaries, clear old tool results
  *   4. ISOLATE - Worker gets minimal context
  */
+/**
+ * Tool names for the prompt, with a family collapsed to `prefix_*(n)` once it has several members: a role whose envelope has
+ * forty `browser_*` tools should not pay forty names to say "there is a browser".
+ */
+export function compactNames(names: string[]): string {
+  const families = new Map<string, string[]>()
+  for (const name of names) {
+    const prefix = /^([a-z]+)_/.exec(name)?.[1]
+    families.set(prefix ?? name, [...(families.get(prefix ?? name) ?? []), name])
+  }
+  return [...families].map(([key, members]) => (members.length >= 4 ? `${key}_* (${members.length})` : members.join(", "))).join(", ")
+}
+
 export async function compileContext(opts: {
   agentId: string
   threadId: string
@@ -171,7 +184,7 @@ export async function compileContext(opts: {
     tools: string[]
     skills: string[]
     /** De dónde salió el conjunto de herramientas. */
-    origen: "perfil"
+    origen: "perfil" | "bd"
     /** Las skills que están en la carga mínima: no dependen de descubrir nada. */
     minimal: string[]
   }) => void
@@ -338,26 +351,37 @@ export async function compileContext(opts: {
   const isCoordinator = agent.agent_type === "bee"
   const isSpecialistProfile = (isCoreProfile || agent.ephemeral === true) && !isCoordinator
 
-  const initialToolNames = new Set(MINIMAL_TOOLS)
-  if (isCoordinator) {
-    for (const name of configuredToolNames) {
-      if (name === "spawn_agent" || name === "get_project_context" || name.startsWith("speckit_") || COORDINATOR_PINNED_TOOLS.has(name) || COORDINATOR_WORK_TOOLS.has(name)) initialToolNames.add(name)
+  // The database composes the loadout of a core profile (see computeLoadout): a small core for the role, plus what the route,
+  // the specialty, the task's wording and the ranked skills call for, always inside the envelope. HIVECODE_LOADOUT=full
+  // restores the previous behaviour (every tool of the envelope from turn 1), to measure the two against each other.
+  const fullLoadout = process.env.HIVECODE_LOADOUT === "full"
+  let computedLoadout: ComputedLoadout | undefined
+  let initialToolNames = new Set(MINIMAL_TOOLS)
+  if (isCoreProfile && !fullLoadout) {
+    const harnessTask = opts.codeTaskId ? (await (await col<HarnessTaskDoc>("harnessTasks")).get(opts.codeTaskId).catch(() => undefined))?.doc : undefined
+    const project = opts.codeSessionId ? await projectOfSession(opts.codeSessionId) : null
+    computedLoadout = await computeLoadout({
+      role: agent.agent_type!, envelope: new Set(allTools.map(tool => tool.name)), specialtyId: specialty?.id, specialtySkills: specialty?.skills,
+      route: harnessTask?.route, taskText: objectiveForSpecialty, indexed: project ? await isProjectIndexed(project.id) : false,
+    })
+    initialToolNames = computedLoadout.tools
+  } else {
+    if (isCoordinator) {
+      for (const name of configuredToolNames) {
+        if (name === "spawn_agent" || name === "get_project_context" || name.startsWith("speckit_") || COORDINATOR_PINNED_TOOLS.has(name) || COORDINATOR_WORK_TOOLS.has(name)) initialToolNames.add(name)
+      }
+    } else if (isSpecialistProfile) {
+      for (const name of configuredToolNames) initialToolNames.add(name)
     }
-  } else if (isSpecialistProfile) {
-    for (const name of configuredToolNames) initialToolNames.add(name)
-  }
-  if (specialty?.id === "repository") {
-    initialToolNames.delete("web_search")
-    initialToolNames.delete("web_fetch")
-  }
-  if (specialty && ["backend", "frontend", "data", "integration", "devops"].includes(specialty.id)) {
-    initialToolNames.delete("web_search")
-    initialToolNames.delete("web_fetch")
-  }
-  // Readers explore through the index when there is one; the tree-walking tools stay one search away.
-  if (isSpecialistProfile && opts.codeSessionId) {
-    const project = await projectOfSession(opts.codeSessionId)
-    for (const name of omittedAtStart(agent.agent_type, project ? await isProjectIndexed(project.id) : false)) initialToolNames.delete(name)
+    if (specialty?.id === "repository" || (specialty && ["backend", "frontend", "data", "integration", "devops"].includes(specialty.id))) {
+      initialToolNames.delete("web_search")
+      initialToolNames.delete("web_fetch")
+    }
+    // Readers explore through the index when there is one; the tree-walking tools stay one search away.
+    if (isSpecialistProfile && isReaderAgent(agent.agent_type) && opts.codeSessionId) {
+      const project = await projectOfSession(opts.codeSessionId)
+      if (project && await isProjectIndexed(project.id)) for (const name of DISK_WALK_TOOLS) initialToolNames.delete(name)
+    }
   }
   const filteredNativeTools: ContextTool[] = allTools.filter(t => initialToolNames.has(t.name))
 
@@ -388,12 +412,13 @@ export async function compileContext(opts: {
   let configuredSkills: SkillDescriptor[] = []
 
   try {
-    // Load minimal skills (always available)
-    minimalSkills = await getMinimalSkills()
+    // Load minimal skills (always available). A database-composed loadout already decides its skills.
+    minimalSkills = computedLoadout ? [] : await getMinimalSkills()
     log.info(`[context-compiler] [STEP-8b] ✅ Loaded ${minimalSkills.length} minimal skills`)
 
     // A profile's duplicate (scout#2) is ephemeral but still a core profile: it loads what its base loads. Spawned children have no agent_type and keep their own subset.
-    const configuredSkillNames = new Set(isCoreProfile ? [...(REQUIRED_PROFILE_SKILLS[agent.agent_type!] ?? parseStringList(agent.skills_json)), ...(specialty?.skills ?? [])] : parseStringList(agent.skills_json))
+    configuredSkills = computedLoadout ? computedLoadout.skills : []
+    const configuredSkillNames = new Set(computedLoadout ? [] : isCoreProfile ? [...(REQUIRED_PROFILE_SKILLS[agent.agent_type!] ?? parseStringList(agent.skills_json)), ...(specialty?.skills ?? [])] : parseStringList(agent.skills_json))
     if (configuredSkillNames.size > 0) {
       const skillsCol = await col<SkillDoc>("skills")
       configuredSkills = (await skillsCol.scan())
@@ -628,6 +653,7 @@ export async function compileContext(opts: {
       `1. Si ya recibiste PROJECT CONTEXT, úsalo. Consulta get_project_context solo para ampliar información faltante, con query, paths y scope="task".\n` +
       `2. Tienes además estas herramientas nativas en tu contexto: ${filteredNativeTools.map(t => t.name).join(", ") || "—"}.\n` +
       `   Úsalas directamente. Buscar "herramienta para hacer X" cuando X ya es una de ellas gasta un turno entero.\n` +
+      (computedLoadout && computedLoadout.manifest.length ? `   Existen además, sin cargar hasta que hagan falta: ${compactNames(computedLoadout.manifest)}. \`search_knowledge(type="tools")\` las trae.\n` : "") +
       `3. Si necesitas algo que de verdad no esté en tu contexto (MCP, skills, playbook, código del proyecto) → \`search_knowledge\`:\n` +
       `   - Herramientas nativas: \`search_knowledge(type="tools", query="<qué necesitas>")\`\n` +
       `   - Herramientas MCP (externas): \`search_knowledge(type="mcp", query="<qué necesitas>")\`\n` +
@@ -688,23 +714,21 @@ export async function compileContext(opts: {
 
   // For isolated workers, add task context + tool discovery instruction
   if (isWorker && opts.taskContext) {
-    // The worker already has its profile's tools in the request. Saying "you start with basic
-    // tools" made weaker models go looking for a shell runner they were already holding: seven
-    // `search_knowledge` calls before the first line of code, each one a full context round-trip.
+    // The tools in the request are the role's core plus what the task called for. The rest of the role's envelope exists and
+    // `search_knowledge` brings it in; saying "you have everything" would be false, and "do not search" would strand the worker.
     const inHand = toolsForLLM.map(t => t.function.name).filter(Boolean)
-    systemPrompt += `\n\n# HERRAMIENTAS DISPONIBLES\n` +
-      `Ya tienes estas herramientas en tu contexto: ${inHand.join(", ")}.\n` +
-      `Úsalas directamente. NO busques herramientas que ya están aquí: buscar "cómo ejecutar un comando" ` +
-      `o "herramienta para escribir un archivo" gasta un turno entero y no devuelve nada nuevo.\n` +
-      `Usa \`search_knowledge\` sólo para lo que de verdad no está en la lista: herramientas MCP externas, ` +
-      `skills, playbook o código del proyecto.\n` +
+    const others = computedLoadout ? compactNames(computedLoadout.manifest) : ""
+    systemPrompt += `\n\n# HERRAMIENTAS\n` +
+      `En tu contexto: ${inHand.join(", ")}.\n` +
+      (others ? `También puedes usar, y aún no están cargadas: ${others}. Si una te hace falta, \`search_knowledge\` con type="tools" y lo que necesitas hacer la trae a tu contexto; no la des por perdida ni la sustituyas con shell.\n` : "") +
+      `\`search_knowledge\` también encuentra skills, reglas del playbook, herramientas MCP y el código del proyecto.\n` +
       `\n# CÓMO SE USA CADA COSA\n` +
       (inHand.some(n => n === "fs_write" || n === "fs_edit")
-        ? `- Entender el código: \`search_knowledge\` con type="code" (fragmento y líneas) y \`get_project_context\` primero; lo que vas a editar léelo con \`fs_read\` (por rango con offset/limit si el archivo es grande) · listar: \`fs_list\` · buscar texto exacto: \`search_in_files\`\n`
-        : `- Entender el código: \`search_knowledge\` con type="code" (fragmento y líneas) y \`get_project_context\` ANTES que el disco. Solo si el índice no responde, lee con \`fs_read\` por rango (offset/limit), no el archivo entero; \`fs_list\`/\`search_in_files\` son el último recurso\n`) +
+        ? `- Entender el código: \`search_knowledge\` con type="code" (fragmento y líneas) y \`get_project_context\` primero; lo que vas a editar léelo con \`fs_read\` (por rango con offset/limit si el archivo es grande) · buscar texto exacto: \`search_in_files\`\n`
+        : `- Entender el código: \`search_knowledge\` con type="code" (fragmento y líneas), \`outline\` y \`get_project_context\` ANTES que el disco. Solo si el índice no responde, lee con \`fs_read\` por rango (offset/limit), no el archivo entero\n`) +
       `- Escribir o cambiar un archivo: \`fs_write\` / \`fs_edit\` (no con redirecciones de shell)\n` +
       `- **Correr las pruebas: \`code_test\`. Revisar tipos: \`check_types\`. Compilar: \`code_build\`.**\n` +
-      `  Estas tres herramientas ya hacen el trabajo: no reproduzcas \`bun test\`, \`tsc --noEmit\` ni \`bun build\` a mano con \`shell_executor\`.\n` +
+      `  Estas herramientas ya hacen el trabajo: no reproduzcas \`bun test\`, \`tsc --noEmit\` ni \`bun build\` a mano con \`shell_executor\`.\n` +
       `- \`shell_executor\` es para lo que no hay herramienta: instalar dependencias, git, procesos.\n` +
       `- Antes de repetir un comando que falló: lee el error y corrige la causa. Probar variantes del mismo comando no converge.\n` +
       `\n# CURRENT TASK\n${opts.taskContext}\n\nFocus ONLY on this task. Do not deviate.`
@@ -725,7 +749,7 @@ export async function compileContext(opts: {
       opts.onLoadout({
         tools: finalTools.map(t => t.function.name).filter(Boolean),
         skills: allSkills.map(s => s.name),
-        origen: "perfil",
+        origen: computedLoadout ? "bd" : "perfil",
         minimal: minimalSkills.map(s => s.name),
       })
     } catch (err) {
@@ -800,7 +824,7 @@ export async function compileContext(opts: {
   return {
     systemPrompt,
     projectScope,
-    contextMetrics: {system: Math.max(0, systemTokens - projectTokens - Math.ceil(skillBodyChars / 3.5)), skills: Math.ceil(skillBodyChars / 3.5), tools: toolTokens, history: messageTokenTotal, project: projectTokens, total: estimatedTotal, loadout: {tools: finalTools.map(t => t.function.name).filter(Boolean), skills: allSkills.map(s => s.name ?? s.id)}},
+    contextMetrics: {system: Math.max(0, systemTokens - projectTokens - Math.ceil(skillBodyChars / 3.5)), skills: Math.ceil(skillBodyChars / 3.5), tools: toolTokens, history: messageTokenTotal, project: projectTokens, total: estimatedTotal, loadout: {source: computedLoadout ? "bd" : "perfil", ...(computedLoadout ? { route: computedLoadout.route ?? null, specialty: specialty?.id ?? null } : {}), tools: finalTools.map(t => t.function.name).filter(Boolean), skills: allSkills.map(s => s.name ?? s.id), ...(computedLoadout ? { manifest: computedLoadout.manifest.length } : {})}},
     conversationSummarySection,
     messages,
     tools: finalTools,

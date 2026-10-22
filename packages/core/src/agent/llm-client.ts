@@ -122,7 +122,7 @@ export interface LLMResponse {
    * nothing to run it with), and the markup was removed from `content`. The call did not happen.
    */
   droppedToolMarkup?: boolean
-  usage?: { input_tokens: number; output_tokens: number; thinking_tokens?: number }
+  usage?: { input_tokens: number; output_tokens: number; thinking_tokens?: number; cached_tokens?: number }
   /** Kimi K2 / DeepSeek thinking mode — must be round-tripped in assistant messages. */
   reasoning_content?: string
   /** Anthropic extended thinking content (not sent to LLM, for display only). */

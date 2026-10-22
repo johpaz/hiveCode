@@ -8,7 +8,7 @@
  * the signal that a tool belongs in the starting set.
  */
 import { col } from "../packages/core/src/storage/hive"
-import { reportLoadouts } from "../packages/core/src/harness/loadout-learning"
+import { reportLoadouts, MIN_SAMPLE } from "../packages/core/src/harness/loadout-learning"
 
 const runs = (await (await col<any>("agentRuns")).scan()).map((e: any) => e.doc)
 const tools = (await (await col<any>("toolRuns")).scan()).map((e: any) => e.doc)
@@ -20,5 +20,7 @@ for (const r of reports) {
   console.log(`  sin usar: ${r.unused.length ? r.unused.join(", ") : "—"}`)
   console.log(`  usadas:   ${r.used.slice(0, 10).map(u => `${u.tool}×${u.runs}`).join(", ") || "—"}`)
   console.log(`  runs con búsqueda de capacidades: ${r.discoveryRuns}/${r.runs}${r.diskShare == null ? "" : ` · lecturas a disco: ${Math.round(r.diskShare * 100)} %`}`)
+  console.log(`  grupos (ruta/especialidad): ${r.groups.map(g => `${g.route}/${g.specialty}×${g.runs}${g.enough ? "" : `*`}`).join(", ") || "—"}${r.groups.some(g => !g.enough) ? `  (* menos de ${MIN_SAMPLE} runs: sin evidencia, vale el núcleo por defecto)` : ""}`)
+  console.log(`  descubiertas tras arrancar: ${r.discovered.slice(0, 10).map(d => `${d.name}(${d.kind})×${d.runs}`).join(", ") || "—"}`)
 }
 process.exit(0)

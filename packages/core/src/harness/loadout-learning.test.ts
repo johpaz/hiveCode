@@ -42,4 +42,26 @@ describe("reportLoadouts", () => {
     expect(old.startTokens).toBeNull()
     expect(old.diskShare).toBeNull()
   })
+
+  test("groups by route and specialty, flags thin samples, and lists what had to be searched for", () => {
+    const withMeta = (id: string, status: string, extra: object) => ({
+      id, agent_id: "scout", status,
+      context_metrics_json: JSON.stringify({ loadout: { tools: ["fs_read"], skills: [], route: "scoped", specialty: "backend", ...extra } }),
+    })
+    const rows = [
+      ...Array.from({ length: 10 }, (_, i) => withMeta(`ok${i}`, "completed", i < 4 ? { discovered: { tools: ["git_diff"], skills: ["code_review"] } } : {})),
+      withMeta("bad", "failed", { discovered: { tools: ["web_fetch"], skills: [] } }),
+      { ...withMeta("other", "completed", { route: "feature", specialty: "-" }) },
+    ]
+    const [role] = reportLoadouts(rows, [])
+    expect(role.runs).toBe(11)
+    expect(role.groups).toEqual([
+      { route: "scoped", specialty: "backend", runs: 10, enough: true },
+      { route: "feature", specialty: "-", runs: 1, enough: false },
+    ])
+    expect(role.discovered).toEqual([
+      { name: "code_review", kind: "skill", runs: 4 },
+      { name: "git_diff", kind: "tool", runs: 4 },
+    ])
+  })
 })

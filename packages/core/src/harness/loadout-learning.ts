@@ -7,7 +7,7 @@
  */
 import { classifyRead } from "../agent/read-mix"
 
-interface RunRow { id: string; agent_id: string; context_metrics_json?: string }
+interface RunRow { id: string; agent_id: string; context_metrics_json?: string; status?: string }
 interface ToolRow { run_id?: string; tool_name: string }
 
 export interface RoleLoadoutReport {
@@ -23,22 +23,40 @@ export interface RoleLoadoutReport {
   discoveryRuns: number
   /** Share of the role's reads that went to disk rather than the index, 0..1 (null when it read nothing). */
   diskShare: number | null
+  /** Runs by (route, specialty). A group below `MIN_SAMPLE` runs is not evidence: the role's default core stands. */
+  groups: Array<{ route: string; specialty: string; runs: number; enough: boolean }>
+  /** Capabilities the model had to search for after starting, by how many runs needed each: candidates to join the core. */
+  discovered: Array<{ name: string; kind: "tool" | "skill"; runs: number }>
   /** Average prompt tokens of tools / skills at the start of a run, when the run recorded them. */
   startTokens: { tools: number; skills: number } | null
 }
 
+/** Fewest completed runs of a group before its usage says anything about what its loadout should be. */
+export const MIN_SAMPLE = 10
+
 /** `scout#2` is a duplicate of `scout`: the role is the base profile. */
 const roleOf = (agentId: string) => agentId.replace(/#\d+$/, "")
 
-function loadoutOf(run: RunRow): { tools: string[]; tokens?: { tools: number; skills: number } } | null {
+interface LoadoutRecord { tools: string[]; route: string; specialty: string; discovered: { tools: string[]; skills: string[] }; tokens?: { tools: number; skills: number } }
+
+function loadoutOf(run: RunRow): LoadoutRecord | null {
   try {
     const metrics = JSON.parse(run.context_metrics_json || "{}")
     if (!Array.isArray(metrics.loadout?.tools)) return null
-    return { tools: metrics.loadout.tools, tokens: typeof metrics.tools === "number" ? { tools: metrics.tools, skills: metrics.skills ?? 0 } : undefined }
+    const found = metrics.loadout.discovered
+    return {
+      tools: metrics.loadout.tools, route: metrics.loadout.route ?? "-", specialty: metrics.loadout.specialty ?? "-",
+      discovered: { tools: Array.isArray(found?.tools) ? found.tools : [], skills: Array.isArray(found?.skills) ? found.skills : [] },
+      tokens: typeof metrics.tools === "number" ? { tools: metrics.tools, skills: metrics.skills ?? 0 } : undefined,
+    }
   } catch { return null }
 }
 
-export function reportLoadouts(runs: RunRow[], tools: ToolRow[]): RoleLoadoutReport[] {
+/** Runs that ended without finishing say little about what the role needed; rows without a status are older records and count. */
+const counts = (run: RunRow) => !run.status || run.status === "completed"
+
+export function reportLoadouts(allRuns: RunRow[], tools: ToolRow[]): RoleLoadoutReport[] {
+  const runs = allRuns.filter(counts)
   const byRun = new Map<string, Set<string>>()
   for (const call of tools) {
     if (!call.run_id) continue
@@ -52,8 +70,23 @@ export function reportLoadouts(runs: RunRow[], tools: ToolRow[]): RoleLoadoutRep
     const usedBy = new Map<string, number>()
     let discoveryRuns = 0, disk = 0, index = 0
     const tokens: Array<{ tools: number; skills: number }> = []
+    const grouped = new Map<string, { route: string; specialty: string; runs: number }>()
+    const found = new Map<string, { name: string; kind: "tool" | "skill"; runs: number }>()
     for (const run of mine) {
       const loadout = loadoutOf(run)
+      if (loadout) {
+        const key = `${loadout.route}|${loadout.specialty}`
+        const group = grouped.get(key) ?? { route: loadout.route, specialty: loadout.specialty, runs: 0 }
+        group.runs++
+        grouped.set(key, group)
+        for (const [kind, names] of [["tool", loadout.discovered.tools], ["skill", loadout.discovered.skills]] as const) {
+          for (const name of names) {
+            const entry = found.get(`${kind}:${name}`) ?? { name, kind, runs: 0 }
+            entry.runs++
+            found.set(`${kind}:${name}`, entry)
+          }
+        }
+      }
       for (const name of loadout?.tools ?? []) loaded.add(name)
       if (loadout?.tokens) tokens.push(loadout.tokens)
       const called = byRun.get(run.id) ?? new Set<string>()
@@ -73,6 +106,8 @@ export function reportLoadouts(runs: RunRow[], tools: ToolRow[]): RoleLoadoutRep
       unused: [...loaded].filter(name => !usedBy.has(name)).sort(),
       used: [...usedBy].map(([tool, count]) => ({ tool, runs: count })).sort((a, b) => b.runs - a.runs || a.tool.localeCompare(b.tool)),
       discoveryRuns,
+      groups: [...grouped.values()].map(group => ({ ...group, enough: group.runs >= MIN_SAMPLE })).sort((a, b) => b.runs - a.runs),
+      discovered: [...found.values()].sort((a, b) => b.runs - a.runs || a.name.localeCompare(b.name)),
       diskShare: disk + index ? disk / (disk + index) : null,
       startTokens: tokens.length ? { tools: avg(t => t.tools), skills: avg(t => t.skills) } : null,
     }

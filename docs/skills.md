@@ -52,7 +52,7 @@ El límite de tamaño por skill es `skills.maxSkillSizeKB` (256 KB por defecto).
 
 ## Selección en ejecución
 
-`agent/skill-selector.ts` sincroniza las skills a un índice (`syncSkillsToIndex`) y elige cuáles entran en el prompt de cada turno (`selectSkills`; `getMinimalSkills` para el arranque). El conjunto mínimo se deriva del de herramientas (`minimal-loadout.ts`), así una skill sobre herramientas no cargadas no gasta contexto. Cuando el modelo descubre una herramienta con `search_knowledge`, su skill se añade con ella. Cada perfil declara las suyas en `agent-profiles.ts` (`skills`) y `REQUIRED_PROFILE_SKILLS` en `specialties.ts` fija las imprescindibles.
+`agent/skill-selector.ts` sincroniza las skills a un índice (`syncSkillsToIndex`) y las puntúa para cada tarea (`rankSkills`): disparadores más BM25, ponderadas por `preferred_agents` y con un presupuesto de tokens. `computeLoadout` (`agent/loadout.ts`) usa ese ranking al empezar el run, tanto para el coordinador como para los workers, y solo conserva las skills cuyas herramientas el rol puede llamar. Las skills de una especialidad son candidatas a ese ranking, no se cargan siempre. Cuando el modelo descubre una herramienta con `search_knowledge`, su skill llega en el mensaje de resultado. `REQUIRED_PROFILE_SKILLS` en `specialties.ts` fija las imprescindibles de cada rol.
 
 ## Skills empaquetadas
 

@@ -154,7 +154,7 @@ export interface EventMap {
     tools: string[];
     skills: string[];
     /** De dónde salió el conjunto de herramientas. */
-    origen: "perfil";
+    origen: "perfil" | "bd";
     /** Skills en la carga mínima: no dependen de descubrir nada. */
     minimal: string[];
     at: number;

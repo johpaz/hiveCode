@@ -52,7 +52,7 @@ export interface SkillDescriptor {
     active: boolean
 }
 
-function toSkillDescriptor(doc: SkillDoc): SkillDescriptor {
+export function toSkillDescriptor(doc: SkillDoc): SkillDescriptor {
     return {
         id: doc.id,
         name: doc.name,
@@ -150,112 +150,82 @@ function isConversational(message: string): boolean {
     return false
 }
 
-/**
- * Check if message matches explicit triggers from a skill
- */
-function matchTriggers(message: string, triggersJson: string | null): boolean {
-    if (!triggersJson) return false
-
-    try {
-        // Triggers are stored as comma-separated string in DB (e.g., "trigger1,trigger2")
-        const triggers: string[] = triggersJson.split(",").map(t => t.trim()).filter(t => t.length > 0)
-        if (triggers.length === 0) return false
-
-        const lowerMessage = message.toLowerCase()
-        return triggers.some(trigger =>
-            lowerMessage.includes(trigger.toLowerCase())
-        )
-    } catch (err) {
-        log.warn(`[skill-selector] Failed to parse triggers: ${(err as Error).message}`)
-        return false
-    }
-}
-
 // ─── Main Selection Function ─────────────────────────────────────────────────
 
-/**
- * Select skills for a given user message using hybrid matching:
- * 1. First check explicit triggers (high confidence match)
- * 2. Fallback to HiveDB BM25 scoring for semantic matching
- *
- * @param userMessage - The raw user message
- * @returns Array of 0-5 selected skills with scores
- *
- * ALGORITHM:
- * 1. If conversational → return []
- * 2. Check explicit triggers from all enabled skills
- * 3. If trigger match found → return matching skill immediately
- * 4. Query the HiveDB capability index with the raw message
- * 5. Keep hits scoring at least RELEVANCE_RATIO of the top hit
- * 6. Hydrate skill details from HiveDB and return top MAX_SKILLS_PER_TURN
- */
-export async function selectSkills(userMessage: string): Promise<SkillDescriptor[]> {
-    const startTime = performance.now()
+/** Tokens of a skill's body as it would sit in the system prompt (the harness's 3.5 chars per token). */
+export const skillTokens = (skill: Pick<SkillDescriptor, "body">): number => Math.ceil((skill.body ?? "").length / 3.5)
 
-    log.debug(`[skill-selector] Processing user message: "${userMessage.substring(0, 100)}"`)
+/** Triggers of a skill that appear in the text, counted (not just "any"): three matches say more than one. */
+function triggerHits(message: string, triggers: string | null): number {
+    if (!triggers) return 0
+    const lower = message.toLowerCase()
+    return triggers.split(",").map(t => t.trim().toLowerCase()).filter(Boolean).filter(t => lower.includes(t)).length
+}
 
-    // Step 1: Check if conversational
-    if (isConversational(userMessage)) {
-        log.debug(`[skill-selector] Conversational message, returning empty array`)
-        return []
-    }
-
-    // Step 2: Check explicit triggers first (high priority)
-    const skillsCol = await col<SkillDoc>("skills")
-    const allSkills = (await skillsCol.scan({}))
-        .filter(e => e.doc.active)
-        .map(e => toSkillDescriptor(e.doc))
-
-    // Check trigger match - if found, return immediately with high confidence
-    for (const skill of allSkills) {
-        if (skill.triggers && matchTriggers(userMessage, skill.triggers)) {
-            log.info(`[skill-selector] Trigger match found: ${skill.name}`)
-            return [skill]
-        }
-    }
-
-    // Step 3: Semantic matching via the HiveDB capability index
-    let hits
+/** Roles a skill was written for (`preferred_agents` is a JSON list or empty). */
+function preferredRoles(skill: Pick<SkillDescriptor, "preferred_agents">): string[] {
     try {
-        hits = await searchCapabilities(userMessage, { types: ["skill"], k: 20 })
+        const value = JSON.parse(skill.preferred_agents || "[]")
+        return Array.isArray(value) ? value.map(String) : []
+    } catch { return [] }
+}
+
+export interface RankOptions {
+    /** The agent profile asking (`scout`, `builder`…): skills written for other roles score lower, for this one higher. */
+    role?: string
+    limit?: number
+    /** Most tokens of skill bodies to return; the best skill is always kept, even if it alone exceeds it. */
+    tokenBudget?: number
+}
+
+/**
+ * Skills that fit a text, best first. Three signals, all from the database:
+ *  - triggers: each trigger found in the text counts (before, the first match returned ONE skill and stopped);
+ *  - the capability index (BM25 over name, description and body), relative to the best hit;
+ *  - the role: `preferred_agents` boosts a skill for its roles and mutes it for the others.
+ * A skill needs a trigger or a relevant hit to be considered. The result respects a token budget, because a skill is
+ * not free: its whole body rides in the prompt of every turn.
+ */
+export async function rankSkills(text: string, options: RankOptions = {}): Promise<SkillDescriptor[]> {
+    const limit = options.limit ?? MAX_SKILLS_PER_TURN
+    if (isConversational(text)) return []
+    const skills = (await (await col<SkillDoc>("skills")).scan({})).filter(e => e.doc.active).map(e => toSkillDescriptor(e.doc))
+    const byId = new Map(skills.map(skill => [skill.id, skill]))
+
+    let relevance = new Map<string, number>()
+    try {
+        const hits = await searchCapabilities(text, { types: ["skill"], k: 20 })
+        const top = hits.reduce((max, hit) => Math.max(max, hit.score), 0)
+        if (top > 0) relevance = new Map(applyRelativeCutoff(hits, RELEVANCE_RATIO).map(hit => [hit.rawId, hit.score / top]))
     } catch (err) {
         log.error(`[skill-selector] Capability search failed:`, err)
-        return []
     }
 
-    if (hits.length === 0) {
-        log.debug(`[skill-selector] No matches, returning empty array`)
-        return []
+    const ranked = skills.flatMap(skill => {
+        const triggers = Math.min(3, triggerHits(text, skill.triggers))
+        const semantic = relevance.get(skill.id) ?? 0
+        if (triggers === 0 && semantic === 0) return []
+        const roles = preferredRoles(skill)
+        const fit = options.role && roles.length ? (roles.includes(options.role) ? 1.25 : 0.5) : 1
+        return [{ skill, score: (triggers + semantic) * fit }]
+    }).sort((a, b) => b.score - a.score)
+
+    const chosen: SkillDescriptor[] = []
+    let spent = 0
+    for (const { skill } of ranked) {
+        if (chosen.length >= limit) break
+        const cost = skillTokens(skill)
+        if (chosen.length > 0 && options.tokenBudget !== undefined && spent + cost > options.tokenBudget) continue
+        chosen.push(skill)
+        spent += cost
     }
+    log.debug(`[skill-selector] ${chosen.length} skills for "${text.slice(0, 60)}": ${chosen.map(s => s.name).join(", ")}`)
+    return chosen
+}
 
-    log.info(`[skill-selector] Raw scores: ${hits.slice(0, 10).map(h => `id=${h.rawId}, score=${h.score.toFixed(2)}`).join(", ")}`)
-
-    const relevantHits = applyRelativeCutoff(hits, RELEVANCE_RATIO)
-    if (relevantHits.length === 0) {
-        log.debug(`[skill-selector] All results below ratio cutoff, returning empty`)
-        return []
-    }
-
-    const skillMap = new Map(allSkills.map(s => [s.id, s]))
-    const result: SkillDescriptor[] = []
-    for (const hit of relevantHits) {
-        const skill = skillMap.get(hit.rawId)
-        if (skill) {
-            result.push(skill)
-            if (result.length === MAX_SKILLS_PER_TURN) break
-        }
-    }
-
-    const timing = performance.now() - startTime
-
-    if (result.length > 0) {
-        log.info(`[skill-selector] Selected ${result.length} skills in ${timing.toFixed(2)}ms:`,
-            result.map(s => ({ name: s.name, category: s.category })))
-    } else {
-        log.debug(`[skill-selector] No skills selected, returning empty array in ${timing.toFixed(2)}ms`)
-    }
-
-    return result
+/** Skills for a user message (coordinator turns): the same ranking, no role and no token budget. */
+export async function selectSkills(userMessage: string): Promise<SkillDescriptor[]> {
+    return rankSkills(userMessage, { limit: MAX_SKILLS_PER_TURN })
 }
 
 // ─── Minimal Skills Loader ───────────────────────────────────────────────────

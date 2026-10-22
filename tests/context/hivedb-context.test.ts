@@ -115,21 +115,29 @@ test("compact discovery returns references, without injecting skill bodies", asy
 
 test("compiler automatically supplies a task packet and a factory specialty", async () => {
   const compiled = await compileContext({agentId: "builder", threadId: "task-a", userMessage: "Mejorar la interfaz TUI render_office",
-    codeSessionId: "a", workspace: scope.workspace, isolated: true, contextPaths: ["src/lib.rs"]})
+    taskContext: "Mejorar la interfaz TUI render_office", codeSessionId: "a", workspace: scope.workspace, isolated: true, contextPaths: ["src/lib.rs"]})
   expect(compiled.systemPrompt).toContain("RUST_PROJECT_A")
   expect(compiled.systemPrompt).toContain("ESPECIALIDAD frontend")
-  expect(compiled.tools.some(tool => tool.function.name === "spawn_agent")).toBe(true)
+  const loaded = compiled.tools.map(tool => tool.function.name)
+  expect(loaded).toEqual(expect.arrayContaining(["fs_edit", "fs_write", "fs_read", "code_test"]))
+  // Not loaded at the start, but the model is told it exists and how to bring it.
+  expect(loaded).not.toContain("spawn_agent")
+  expect(compiled.systemPrompt).toContain("aún no están cargadas")
+  expect(compiled.systemPrompt).toContain("spawn_agent")
   expect(compiled.contextMetrics!.project).toBeGreaterThan(0)
 })
 
-test("an indexed project starts a scout without the tree-walking tools, a builder with them", async () => {
+test("an indexed project starts a scout without the tree-walking tools, and a builder only gets them when the task asks", async () => {
   const names = async (agentId: string) => (await compileContext({agentId, threadId: `t-${agentId}`, userMessage: "Revisar render_office",
     codeSessionId: "a", workspace: scope.workspace, isolated: true})).tools.map(tool => tool.function.name)
   const scout = await names("scout")
   expect(scout).not.toContain("fs_list")
   expect(scout).not.toContain("fs_glob")
   expect(scout).toEqual(expect.arrayContaining(["fs_read", "search_in_files", "get_project_context", "outline", "find_symbol"]))
-  expect(await names("builder")).toEqual(expect.arrayContaining(["fs_list", "fs_glob"]))
+  expect(await names("builder")).not.toContain("fs_list")
+  const asking = (await compileContext({agentId: "builder", threadId: "t-list", userMessage: "Lista los archivos de src y arréglalo",
+    codeSessionId: "a", workspace: scope.workspace, isolated: true})).tools.map(tool => tool.function.name)
+  expect(asking).toEqual(expect.arrayContaining(["fs_list", "fs_glob"]))
 })
 
 test("children keep parent permissions, metadata and full durable evidence", async () => {

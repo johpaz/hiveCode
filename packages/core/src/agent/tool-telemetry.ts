@@ -127,7 +127,7 @@ export function emitLoadout(input: {
   agentId: string
   tools: string[]
   skills: string[]
-  origen: "perfil"
+  origen: "perfil" | "bd"
   minimal: string[]
 }): void {
   try {

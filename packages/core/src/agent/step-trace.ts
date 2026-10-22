@@ -17,6 +17,8 @@ export interface StepTrace {
   inputTokens: number
   /** What the harness estimated for this request (messages + tools). Real / estimated is the estimator's error. */
   estimatedInputTokens: number
+  /** Tokens the provider served from its prompt cache this turn; absent when it does not report it. */
+  cachedInputTokens?: number
   outputTokens: number
   /** Characters of reasoning the model produced; they count as output tokens too. */
   reasoningChars: number

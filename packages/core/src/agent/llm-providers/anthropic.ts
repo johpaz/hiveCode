@@ -1,3 +1,4 @@
+import { cachedTokens } from "./usage"
 import { logger } from "../../utils/logger"
 import { splitSystemPrompt } from "../prompt-cache"
 import { resolveMaxTokens } from "./interface"
@@ -189,6 +190,7 @@ export class AnthropicProvider implements LLMProvider {
           input_tokens: usage.input_tokens,
           output_tokens: usage.output_tokens,
           thinking_tokens: (usage as any).thinking_tokens ?? 0,
+          cached_tokens: cachedTokens(usage),
         },
       }
     }
@@ -221,6 +223,7 @@ export class AnthropicProvider implements LLMProvider {
       usage: {
         input_tokens: response.usage.input_tokens,
         output_tokens: response.usage.output_tokens,
+        cached_tokens: cachedTokens(response.usage),
       },
     }
   }
