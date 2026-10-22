@@ -34,7 +34,7 @@ import { maybeCompact, clearOldToolResults } from "./compaction"
 import { capToolResult, fitLoopMessages, messageBudget, messageTokens } from "./context-budget"
 import type { MCPClientManager } from "@johpaz/hivecode-mcp"
 import { compileContext } from "./context-compiler"
-import { structuralParallelism } from "./swarm-capabilities"
+import { spreadReaderInstances, structuralParallelism } from "./swarm-capabilities"
 import { formatToolResult } from "../utils/llm-text"
 import { getAverageTokenCost } from "../storage/usage"
 import type { ContentPart } from "./llm-client"
@@ -1190,6 +1190,8 @@ export async function* runAgent(
 
     let runConcurrently = false
     if (approvedTools.length > 1) {
+      // The same reader delegated twice in one batch becomes scout, scout#2…: one agent id runs one thing at a time.
+      spreadReaderInstances(approvedTools.map(tc => tc.function as { name: string; arguments: unknown }).map(fn => ({ function: fn })))
       // Structural rule, no model involved: independent reads, and distinct, non-colliding delegations.
       runConcurrently = (await structuralParallelism(
         approvedTools.map(tc => ({ function: { name: tc.function.name, arguments: tc.function.arguments } })),

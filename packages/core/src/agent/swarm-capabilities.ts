@@ -10,7 +10,8 @@ import { agentAlias, agentFunction, agentTierLevel } from "./agent-identity"
 import { col } from "../storage/hive"
 import type { AgentDoc, McpServerDoc } from "../storage/collections"
 import { getSwarmRuntime } from "./swarm-runtime"
-import { MAX_INSTANCES, parseInstanceId } from "./swarm-instances"
+import { MAX_INSTANCES, instanceId, parseInstanceId } from "./swarm-instances"
+import { isReaderAgent } from "./loadout"
 
 /** "activo": connected now; "disponible": enabled, connects on first use; "apagado": disabled. */
 export type SwarmMcpState = "activo" | "disponible" | "apagado"
@@ -102,6 +103,37 @@ type ToolCallLike = { function: { name: string; arguments: unknown } }
 /** Workers that may write the workspace: two of them at once would collide. */
 function mayWrite(agent: AgentDoc | undefined): boolean {
   return agent?.permission_profile === "write_workspace" || agent?.permission_profile === undefined
+}
+
+/**
+ * A batch that delegates to the same reader (`scout` three times) would run one after another, because one agent id is one
+ * agent. A reader writes nothing, so each repeated delegation is moved to the next free instance (`scout#2`, `scout#3`),
+ * which `structuralParallelism` then runs side by side. Past `MAX_INSTANCES` the extra calls keep their id and stay sequential.
+ * Rewrites the calls in place.
+ */
+export function spreadReaderInstances(calls: ToolCallLike[]): void {
+  const parsed = calls.map(call => {
+    if (call.function.name !== "task_delegate") return null
+    try {
+      const args = typeof call.function.arguments === "string" ? JSON.parse(call.function.arguments) : { ...(call.function.arguments as object) }
+      return typeof args?.worker_id === "string" && isReaderAgent(args.worker_id) ? args as Record<string, unknown> & { worker_id: string } : null
+    } catch { return null }
+  })
+  const taken = new Set(parsed.filter((a): a is NonNullable<typeof a> => !!a).map(a => a.worker_id))
+  const seen = new Set<string>()
+  parsed.forEach((args, i) => {
+    if (!args) return
+    if (!seen.has(args.worker_id)) { seen.add(args.worker_id); return }
+    const { base } = parseInstanceId(args.worker_id)
+    for (let n = 1; n <= MAX_INSTANCES; n++) {
+      const candidate = instanceId(base, n)
+      if (taken.has(candidate)) continue
+      taken.add(candidate); seen.add(candidate)
+      args.worker_id = candidate
+      calls[i].function.arguments = typeof calls[i].function.arguments === "string" ? JSON.stringify(args) : args
+      return
+    }
+  })
 }
 
 /**

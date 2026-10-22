@@ -208,8 +208,8 @@ export function clearOldToolResults<T extends { role: string; content: string | 
     return {
       ...msg,
       content: looksStructured
-        ? `[Tool result summarized: ${head}...]`
-        : `[Result truncated: ${head}...]`,
+        ? `[Resultado antiguo recortado (si algo de él importaba, debió quedar en tus notas): ${head}...]`
+        : `[Resultado antiguo recortado: ${head}...]`,
     }
   })
 }

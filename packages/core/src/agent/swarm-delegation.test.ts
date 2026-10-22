@@ -7,7 +7,7 @@ import { ensureHiveDb } from "../storage/bootstrap"
 import { announceDelegation, awaitDelegation, delegationOutcome, resetDelegationBoard, settleDelegation } from "./delegation-board"
 import { ensureInstance, instanceId, parseInstanceId } from "./swarm-instances"
 import { filesInPatch, registerSwarmRuntime } from "./swarm-runtime"
-import { structuralParallelism } from "./swarm-capabilities"
+import { spreadReaderInstances, structuralParallelism } from "./swarm-capabilities"
 import { col } from "../storage/hive"
 import type { AgentDoc } from "../storage/collections"
 
@@ -81,7 +81,7 @@ describe("instances", () => {
     expect(clone?.id).toBe("builder#2")
     expect(clone?.ephemeral).toBe(true)
     expect(clone?.tools_json).toBe(base.tools_json)
-    expect(await ensureInstance("builder#9")).toBeNull()
+    expect(await ensureInstance("builder#99")).toBeNull()
     expect(await ensureInstance("nope#2")).toBeNull()
     await agents.delete("builder#2")
   })
@@ -103,6 +103,27 @@ describe("structuralParallelism with instances", () => {
     expect((await structuralParallelism([call("zz_builder#2"), call("zz_builder#2")]))?.safe).toBe(false) // same instance twice
     const agents = await col<AgentDoc>("agents")
     await agents.delete("zz_builder")
+  })
+})
+
+describe("spreadReaderInstances", () => {
+  const call = (worker_id: string, task = "x") => ({ function: { name: "task_delegate", arguments: JSON.stringify({ worker_id, task_description: task }) } })
+  const ids = (calls: Array<{ function: { arguments: unknown } }>) => calls.map(c => JSON.parse(c.function.arguments as string).worker_id)
+
+  test("repeated readers become instances; a writer or a different reader is left alone", () => {
+    const calls = [call("scout"), call("scout"), call("scout"), call("planner"), call("builder"), call("builder")]
+    spreadReaderInstances(calls)
+    expect(ids(calls)).toEqual(["scout", "scout#2", "scout#3", "planner", "builder", "builder"])
+    expect(JSON.parse(calls[1].function.arguments as string).task_description).toBe("x")
+  })
+
+  test("as many instances as repeated calls; explicit instances are respected", () => {
+    const four = [call("scout"), call("scout"), call("scout"), call("scout")]
+    spreadReaderInstances(four)
+    expect(ids(four)).toEqual(["scout", "scout#2", "scout#3", "scout#4"])
+    const explicit = [call("scout#2"), call("scout"), call("scout")]
+    spreadReaderInstances(explicit)
+    expect(ids(explicit)).toEqual(["scout#2", "scout", "scout#3"])
   })
 })
 

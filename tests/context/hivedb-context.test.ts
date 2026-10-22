@@ -169,12 +169,12 @@ test("timeout cancels the child before removing its executor", async () => {
   expect((await (await col<TaskDoc>("tasks")).get(result.task_id))!.doc.status).toBe("failed")
 })
 
-test("bounds active execution to four and serializes workspace mutations", async () => {
+test("does not bound active execution, and still serializes workspace mutations", async () => {
   let active = 0, max = 0
   await Promise.all(Array.from({length: 9}, () => withExecutionSlot("session", undefined, async () => {
     active++; max = Math.max(max, active); await Bun.sleep(5); active--
   })))
-  expect(max).toBe(4)
+  expect(max).toBe(9)
   active = 0; max = 0
   await Promise.all(Array.from({length: 5}, () => withExecutionSlot("session", undefined, async () => {
     active++; max = Math.max(max, active); await Bun.sleep(5); active--

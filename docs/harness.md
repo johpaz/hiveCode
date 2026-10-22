@@ -84,7 +84,7 @@ Cuando un worker no termina, el harness emite `agent_blocked` (o `agent_failed` 
 
 ### Concurrencia
 
-`agent/execution-limits.ts`: `withExecutionSlot` limita las llamadas activas a modelo/herramienta **por sesión** (por defecto 4; `HIVE_MAX_AGENT_CONCURRENCY`, de 1 a 32). Esperar a un hijo no consume plaza. Además, un solo *writer* por workspace a la vez.
+`agent/execution-limits.ts`: `withExecutionSlot` limita las llamadas activas a modelo/herramienta **por sesión** (sin tope por defecto; `HIVE_MAX_AGENT_CONCURRENCY`, de 1 a 32, lo fija si tu proveedor limita la tasa). Esperar a un hijo no consume plaza. Además, un solo *writer* por workspace a la vez.
 
 ### Especialidades
 

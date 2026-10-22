@@ -121,7 +121,7 @@ export const REPAIR_REASONING: ReasoningPolicy = { base: "medium", onFailure: "h
  * de hallazgos y «siguiente paso: entregar a planner un roadmap», sin el roadmap.
  */
 export const PLAN_AFTER_READING = `Te piden un plan, no sólo hallazgos. Hazlo en este orden y no te saltes el final:
-1. Investiga con a lo sumo 3 scouts a la vez, cada uno con un área y rutas concretas (un scout por módulo, no "todo el repo"). Pide hallazgos con ruta:línea.
+1. Investiga con tantos scouts como módulos independientes haya, todos en el mismo paso, cada uno con un área y rutas concretas (un scout por módulo, no "todo el repo"). Pide hallazgos con ruta:línea.
 2. Cuando vuelvan, delega en el worker "planner" el roadmap priorizado (P0/P1/P2) con archivos afectados, pruebas de aceptación y dependencias. Es lo que se te pidió. Hazlo de inmediato: el planner recibe los informes de los scouts en su contexto, así que no los releas ni los verifiques tú leyendo código, y no abras otra ronda de scouts para completar criterios: una entrega que cubre lo esencial se acepta aunque no cumpla todos los criterios que pusiste.
 3. Si no llegas a cubrir todo, entrega igualmente el plan con lo ya encontrado y di qué quedó sin revisar.`
 
@@ -132,8 +132,6 @@ export const DB_FIRST_READING = `Lee con el índice de HiveDB, no recorriendo el
 3. Reparte por módulo: un scout por área, con rutas concretas, no "todo el repo". Cada scout entrega hallazgos con ruta:línea, no listados.
 Cada turno reenvía todo el contexto: lo que no necesitas leer, no lo leas.`
 
-/** Workers BEE may run at once; mutating ones are serialized per file set by its own instructions. */
-export const MAX_PARALLEL_WORKERS = 3
 
 const PASS_RE = /\b(?:VERDICT|VEREDICTO|STATUS|ESTADO)\s*:\s*(?:PASS|PASSED|APPROVED|APROBADO|CUMPLE)\b/i
 const FAIL_RE = /\b(?:VERDICT|VEREDICTO|STATUS|ESTADO)\s*:\s*(?:FAIL|FAILED|REJECTED|RECHAZADO|NO CUMPLE)\b/i
@@ -474,7 +472,7 @@ ${objective}`,
    terminar; no repartas el mismo archivo entre instancias). Una tarea que necesita el resultado de otra se
    delega en el MISMO paso con after: ["T001"]: espera sola, sin gastar tokens, y recibe esa entrega. Si
    una dependencia falla, la llamada vuelve con blocked_by: decide tú (task_revise a la que falló).
-   Máximo ${MAX_PARALLEL_WORKERS} workers a la vez. Reparte la ola completa de tareas listas en un solo paso
+   Reparte la ola completa de tareas listas en un solo paso
    en vez de delegarlas de una en una.
 3. Cada delegación lleva criterios de aceptación tomados de la tarea. Si el resultado trae
    acceptance_met: true, la tarea ya está verificada: no la revises, sigue. Si es null, juzga la evidencia; si

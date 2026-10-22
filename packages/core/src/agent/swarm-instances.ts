@@ -8,7 +8,7 @@ import { col } from "../storage/hive"
 import type { AgentDoc } from "../storage/collections"
 
 /** Instances of one profile that may run at once, the base one included. */
-export const MAX_INSTANCES = 3
+export const MAX_INSTANCES = 32
 
 /** `builder#2` → `{ base: "builder", n: 2 }`; a plain id is instance 1. */
 export function parseInstanceId(id: string): { base: string; n: number } {

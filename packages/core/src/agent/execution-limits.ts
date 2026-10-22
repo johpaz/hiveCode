@@ -14,7 +14,8 @@ function collides(writer: string): boolean {
   }
   return false
 }
-export const DEFAULT_AGENT_CONCURRENCY = 4
+/** No limit unless HIVE_MAX_AGENT_CONCURRENCY sets one (a provider's rate limit is the user's to configure). */
+export const DEFAULT_AGENT_CONCURRENCY = Infinity
 
 function limit(): number {
   const value = Number(process.env.HIVE_MAX_AGENT_CONCURRENCY)
