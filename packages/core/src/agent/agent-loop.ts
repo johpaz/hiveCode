@@ -520,13 +520,13 @@ export async function* runAgent(
 
   const agentName = agent.name || opts.agentId
   const checkpointEvery = Math.min(parsePositiveInt(agent.max_iterations, DEFAULT_CHECKPOINT_EVERY), DEFAULT_CHECKPOINT_EVERY)
-  const maxSteps = parsePositiveInt(
-    opts.maxSteps
-      ?? process.env.HIVECODE_AGENT_MAX_STEPS
-      ?? ((agent as AgentDoc & { max_steps?: number }).max_steps)
-      ?? agent.max_iterations,
-    DEFAULT_HARNESS_MAX_STEPS,
-  )
+  const configuredSteps = opts.maxSteps
+    ?? process.env.HIVECODE_AGENT_MAX_STEPS
+    ?? ((agent as AgentDoc & { max_steps?: number }).max_steps)
+    ?? agent.max_iterations
+  // 0 is "no limit": a run ends when it answers, is aborted, or loop/stall detection stops it.
+  const unlimitedSteps = Number(configuredSteps) === 0
+  const maxSteps = unlimitedSteps ? Number.MAX_SAFE_INTEGER : parsePositiveInt(configuredSteps, DEFAULT_HARNESS_MAX_STEPS)
   const maxInputTokens = Number(agent.max_input_tokens || 0)
   const maxOutputTokens = Number(agent.max_output_tokens || 0)
   const objective = opts.rawUserMessage || textFromMessage(opts.userMessage)
@@ -605,7 +605,7 @@ export async function* runAgent(
         objective,
         status: "running",
         turn: 0,
-        max_turns: maxSteps,
+        max_turns: unlimitedSteps ? 0 : maxSteps,
         input_tokens: 0,
         output_tokens: 0,
         cost_usd: 0,

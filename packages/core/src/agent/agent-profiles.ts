@@ -24,6 +24,7 @@ export interface CoreAgentDefinition {
   description: string
   role: AgentDoc["role"]
   permissionProfile: AgentPermissionProfile
+  /** Steps a run may take; 0 means no limit (a stalled or looping run is caught by loop and stall detection, not by a count). */
   maxTurns: number
   /** How hard the model thinks, by turn (see reasoning-effort.ts). The route may override it for a run. */
   reasoning: ReasoningPolicy
@@ -39,6 +40,12 @@ const READ_TOOLS = [
   "search_knowledge", "get_project_context", "outline", "find_symbol", "dependents", "tests_for", "web_search", "web_fetch",
 ]
 
+/**
+ * What `maxTurns` was before the limits were raised. A profile still holding one of these was never customised, so it
+ * follows the new default; any other value is the user's and stays.
+ */
+const PREVIOUS_MAX_TURNS: Record<string, number> = { bee: 30, scout: 18, planner: 24, builder: 40, verifier: 24, spider: 30 }
+
 export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> = {
   bee: {
     id: "bee",
@@ -46,7 +53,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     description: "Lead del objetivo: decide, delega a workers en paralelo y consolida la evidencia.",
     role: "coordinator",
     permissionProfile: "orchestrate",
-    maxTurns: 30,
+    maxTurns: 0,
     // Juzga entregas y decide: el cambio pequeño lo baja a `low` la ruta, ver profile-harness.
     reasoning: { base: "medium", onFailure: "high" },
     tools: [
@@ -93,7 +100,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     description: "Exploración e investigación read-only con handoff compacto y basado en evidencia.",
     role: "worker",
     permissionProfile: "read_only",
-    maxTurns: 18,
+    maxTurns: 0,
     // Lee y resume: trabajo mecánico.
     reasoning: { base: "low", onFailure: "medium" },
     tools: READ_TOOLS,
@@ -114,7 +121,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     description: "Convierte un objetivo complejo en spec, plan y tareas con dueño usando Spec Kit; no implementa.",
     role: "worker",
     permissionProfile: "read_only",
-    maxTurns: 24,
+    maxTurns: 0,
     // Spec, plan y tareas: la decisión que más pesa, pensar es lo que se paga.
     reasoning: { base: "high", onFailure: "high" },
     tools: [
@@ -145,7 +152,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     description: "Ingeniero generalista que implementa una tarea acotada del DAG.",
     role: "worker",
     permissionProfile: "write_workspace",
-    maxTurns: 40,
+    maxTurns: 0,
     // Escribe lo ya decidido; sube un escalón al depurar un fallo.
     reasoning: { base: "low", onFailure: "medium" },
     tools: [
@@ -175,7 +182,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     description: "Gate único de calidad: verifica los criterios de aceptación y revisa el código.",
     role: "worker",
     permissionProfile: "verify",
-    maxTurns: 24,
+    maxTurns: 0,
     // Juzga criterios de aceptación.
     reasoning: { base: "medium", onFailure: "high" },
     tools: [
@@ -214,7 +221,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     description: "Especialista web: búsqueda, scraping y automatización de navegador con Obscura vía MCP directo.",
     role: "worker",
     permissionProfile: "web_automation",
-    maxTurns: 30,
+    maxTurns: 0,
     // Navega y extrae: trabajo mecánico.
     reasoning: { base: "low", onFailure: "medium" },
     tools: [
@@ -304,7 +311,7 @@ export async function ensureCoreAgentProfiles(userId = "default"): Promise<void>
         user_instructions: existing?.doc.user_instructions ?? "",
         config_version: (existing?.doc.config_version ?? 0) + (existing ? 0 : 1),
         parent_id: type === "bee" ? toIndexable(null) : "bee",
-        max_iterations: existing?.doc.max_iterations ?? definition.maxTurns,
+        max_iterations: existing && existing.doc.max_iterations !== PREVIOUS_MAX_TURNS[type] ? existing.doc.max_iterations : definition.maxTurns,
         workspace: existing?.doc.workspace ?? null,
         lastTraceAt: existing?.doc.lastTraceAt,
         created_at: existing?.doc.created_at ?? now,

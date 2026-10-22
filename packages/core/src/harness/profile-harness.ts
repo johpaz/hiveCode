@@ -5,7 +5,6 @@ import type { AgentDoc, HarnessTaskDoc } from "../storage/collections.ts"
 import { CORE_AGENT_DEFINITIONS, ensureCoreAgentProfiles, type CoreAgentType } from "../agent/agent-profiles.ts"
 import { runAgentIsolated } from "../agent/agent-loop.ts"
 import { purgeInstances } from "../agent/swarm-instances.ts"
-import { clearLaunches } from "../agent/worker-slots.ts"
 import type { StepEvent } from "../agent/agent-loop.ts"
 import {
   DEFAULT_MAX_REPAIR_CYCLES,
@@ -123,7 +122,7 @@ export const REPAIR_REASONING: ReasoningPolicy = { base: "medium", onFailure: "h
  */
 export const PLAN_AFTER_READING = `Te piden un plan, no sólo hallazgos. Hazlo en este orden y no te saltes el final:
 1. Investiga con a lo sumo 3 scouts a la vez, cada uno con un área y rutas concretas (un scout por módulo, no "todo el repo"). Pide hallazgos con ruta:línea.
-2. Cuando vuelvan, delega en el worker "planner" el roadmap priorizado (P0/P1/P2) con archivos afectados, pruebas de aceptación y dependencias. Es lo que se te pidió.
+2. Cuando vuelvan, delega en el worker "planner" el roadmap priorizado (P0/P1/P2) con archivos afectados, pruebas de aceptación y dependencias. Es lo que se te pidió. Hazlo de inmediato: el planner recibe los informes de los scouts en su contexto, así que no los releas ni los verifiques tú leyendo código, y no abras otra ronda de scouts para completar criterios: una entrega que cubre lo esencial se acepta aunque no cumpla todos los criterios que pusiste.
 3. Si no llegas a cubrir todo, entrega igualmente el plan con lo ya encontrado y di qué quedó sin revisar.`
 
 /** Cómo se lee el proyecto sin recorrerlo: el índice en HiveDB ya tiene la estructura y el código. */
@@ -527,7 +526,6 @@ ${quality}`,
       await updateStage(options.signal?.aborted ? "cancelled" : "failed", { blocker: (error as Error).message, nextAction: "inspect_or_resume" })
       throw error
     } finally {
-      clearLaunches(taskId)
       // The duplicates (scout#2, builder#2…) were cloned for this task; retire them now instead of at the next task's start.
       await purgeInstances().catch(() => {})
     }

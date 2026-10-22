@@ -88,7 +88,7 @@ export async function runEphemeralAgent(params: Record<string, unknown>, config?
       skills_json: JSON.stringify(caps.skills), workspace: scope?.workspace ?? c.workspace ?? parent.workspace,
       provider_id: typeof params.providerId === "string" ? params.providerId : parent.provider_id,
       model_id: typeof params.modelId === "string" ? params.modelId : parent.model_id,
-      max_iterations: Math.min(parent.max_iterations || 12, 24), created_at: started, updated_at: started })
+      max_iterations: parent.max_iterations ?? 0, created_at: started, updated_at: started })
     finishCollaboration = trackCollaboration({ from: parentId, to: id, taskId: scope?.taskId, sessionId: scope?.sessionId, summary: purpose })
     eventBus.emit("agent:lifecycle", {agentId: id, parentId, name, specialty: String(params.specialty ?? "especialista"), status: "running", activity: purpose, sessionId: scope?.sessionId, at: Date.now()})
     agentBus.notifyTaskStarted(id, name, 0, purpose.slice(0, 80), scope?.sessionId ?? "")

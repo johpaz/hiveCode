@@ -296,6 +296,10 @@ describeIfBinary("the real TUI binary through the real launcher", () => {
       expect(after.rows.join("\n")).not.toContain("↩ CONFIRMAR")
       // And the task id travelled the whole way: keystroke → binary → socket →
       // launchTui → the runtime callback.
+      // El frame se redibuja antes de que el mensaje llegue por el socket, así
+      // que el callback se espera en vez de leerlo en el acto.
+      const deadline = Date.now() + 10_000
+      while (resumed.length === 0 && Date.now() < deadline) await Bun.sleep(25)
       expect(resumed).toEqual(["task-interrumpida"])
     } finally {
       child.kill()

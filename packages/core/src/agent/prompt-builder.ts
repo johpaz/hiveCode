@@ -52,7 +52,7 @@ export async function buildSystemPrompt(opts: BuildSystemPromptOpts): Promise<st
   agentSection += `**Rol**: ${agent.role}\n`
   if (agent.description) agentSection += `**Descripción**: ${agent.description}\n`
   if (agent.tone) agentSection += `**Tono**: ${agent.tone}\n`
-  agentSection += `**Iteraciones máximas**: ${agent.max_iterations}\n\n`
+  agentSection += `**Iteraciones máximas**: ${agent.max_iterations || "sin límite"}\n\n`
 
   const workspacePath = agent.workspace || null
   if (workspacePath) {

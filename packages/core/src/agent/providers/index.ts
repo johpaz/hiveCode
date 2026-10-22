@@ -21,7 +21,7 @@ export type Provider = "openai" | "anthropic" | "gemini" | "mistral" | "kimi" | 
  * loop's 200 default. Now that the value is honored, 15 would be a hard cut for real
  * coding work — this is the deliberate number, defined once instead of repeated.
  */
-export const DEFAULT_INTERACTIVE_MAX_STEPS = 60
+export const DEFAULT_INTERACTIVE_MAX_STEPS = 0 // 0: no step limit (see agent-loop)
 
 export interface StepEvent {
   type: "text" | "plan" | "tool_call" | "tool_result"

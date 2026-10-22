@@ -69,7 +69,7 @@ export async function agentInspect(name?: string): Promise<void> {
   console.log(`  \x1b[1mParent:\x1b[0m       ${fromIndexable(row.parent_id) || "—"}`)
   console.log(`  \x1b[1mModelo:\x1b[0m       ${fromIndexable(row.model_id) || "default"}`)
   console.log(`  \x1b[1mHabilitado:\x1b[0m   ${row.enabled ? "Sí" : "No"}`)
-  console.log(`  \x1b[1mMax iter:\x1b[0m     ${row.max_iterations || 10}`)
+  console.log(`  \x1b[1mMax iter:\x1b[0m     ${row.max_iterations || "sin límite"}`)
   console.log(``)
 
   if (row.system_prompt) {

@@ -679,15 +679,6 @@ export const taskDelegateTool: Tool = {
         return { ok: true, reused: true, finding_id: hit.finding.id, worker_id: workerId, ref, result, acceptance_met: null };
       }
     }
-    // A task gets a few readers in total, however many run at once: the rest of the work is folded into them or answered from their reports.
-    if (scope?.taskId && isReaderAgent(workerId)) {
-      const { reserveLaunch } = await import("../../agent/worker-slots.ts");
-      const { roleOf } = await import("../../agent/findings.ts");
-      const launch = reserveLaunch(scope.taskId, roleOf(workerId));
-      if (!launch.ok) {
-        return failEarly(`Esta tarea ya lanzó ${launch.launched} ${roleOf(workerId)}s (el tope es ${launch.max}). Trabaja con los informes que ya tienes (task_status) o con los hallazgos guardados, y si falta un área, agrúpala en una sola delegación sobre un worker que ya terminó con task_revise.`, { worker_id: workerId, ref, launched: launch.launched, max: launch.max });
-      }
-    }
     const specialty = typeof params.specialty === "string" ? params.specialty : undefined;
     const contextMetadata = { code_session_id: scope?.sessionId, code_task_id: scope?.taskId, workspace: scope?.workspace, specialty, paths, context_refs: refs };
     const tasksCol = await col<TaskDoc>("tasks");
@@ -784,7 +775,10 @@ export const taskDelegateTool: Tool = {
       const merged = merge === null || merge.status === "integrated" || merge.status === "noop";
       // The merged files are new to the index: reconcile them on the next read.
       if (merge?.status === "integrated" && scope) await markSourceIndexStale(scope.projectId).catch(() => {});
-      const status = !merged || met === false ? "blocked" : "completed";
+      // A reader's report is judged by whoever reads it: unmet criteria are information for BEE, not a reason to block the task
+      // and rerun the reader (that rerun repeated the whole exploration).
+      const advisory = isReaderAgent(workerId) && met === false;
+      const status = !merged || (met === false && !advisory) ? "blocked" : "completed";
       await updateTask(taskId, {
         status,
         progress: status === "completed" ? 100 : 80,
@@ -807,7 +801,8 @@ export const taskDelegateTool: Tool = {
         result,
         acceptance: checks,
         // true: all confirmed deterministically · false: a check failed (task_revise it) · null: you judge from the evidence
-        acceptance_met: met,
+        acceptance_met: advisory ? null : met,
+        ...(advisory ? { hint: "Entrega de lector: algunos criterios no se confirmaron (ver acceptance). No la repitas por eso: si cubre lo esencial, úsala y pasa al siguiente paso; delega solo lo que falte de verdad." } : {}),
         ...(merge ? {
           merge: merge.status,
           merged_files: merge.files,
@@ -966,7 +961,8 @@ export const taskReviseTool: Tool = {
         const project = sessionId ? await projectOfSession(sessionId).catch(() => null) : null;
         if (project) await markSourceIndexStale(project.id).catch(() => {});
       }
-      const status = !merged || met === false ? "blocked" : "completed";
+      const advisory = isReaderAgent(worker.id) && met === false;
+      const status = !merged || (met === false && !advisory) ? "blocked" : "completed";
       await updateTask(resolvedId, {
         status,
         progress: status === "completed" ? 100 : 80,
@@ -977,7 +973,7 @@ export const taskReviseTool: Tool = {
       await recordOutcome(resolvedId, { acceptance_met: met, revisions: revisions + 1 });
       finishCollaboration(status === "completed", result);
       return {
-        ok: true, task_id: resolvedId, worker_id: worker.id, result, acceptance: checks, acceptance_met: met,
+        ok: true, task_id: resolvedId, worker_id: worker.id, result, acceptance: checks, acceptance_met: advisory ? null : met,
         ...(merge ? { merge: merge.status, merged_files: merge.files, ...(merged ? {} : { merge_error: merge.error?.slice(0, 600) }) } : {}),
       };
     } catch (err) {
