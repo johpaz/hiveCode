@@ -12,7 +12,6 @@ import {
   type TaskComplexity,
 } from "./adaptive-scheduler.ts"
 import { describeProjectFacts, estimateTaskWeight, type TaskTier } from "./task-weight.ts"
-import { clearTaskBudget, setTaskBudget, taskBudgetBlocker, taskBudgetUsage, type TaskBudgetLimit } from "../agent/task-budget.ts"
 import type { ReasoningPolicy } from "../agent/reasoning-effort.ts"
 import { describeVerdict, planChecks, verifyDeterministic } from "./deterministic-checks.ts"
 
@@ -78,8 +77,6 @@ export interface ProfileHarnessResult {
   response: string
   featureDir?: string
   repairCycles: number
-  /** The task stopped on its token budget (`task_input_tokens:N`): bigger than its route expected, not a quality verdict. */
-  budgetExceeded?: string
 }
 
 export type ProfileRunner = (opts: {
@@ -120,62 +117,21 @@ export const SCOPED_REASONING: ReasoningPolicy = { base: "low", onFailure: "medi
 export const REPAIR_REASONING: ReasoningPolicy = { base: "medium", onFailure: "high" }
 
 /**
- * Tokens que una tarea puede gastar entre todos sus runs, por ruta (`docs/rutas-por-costo.md` §6).
- *
- * El doc fija como objetivo 50 K / 1,5 M / 12 M de entrada. El tope es el doble: se corta cuando
- * la tarea es el doble de grande de lo que la ruta esperaba, no cuando acaba de pasar el objetivo
- * (el banco midió 1,53 M en `inventario` con la ruta acotada, así que el objetivo a secas habría
- * cortado una tarea que terminó bien). Ajustar con la mediana del banco.
- */
-/** Lo que se guarda para BEE y el planner: los workers se detienen antes (ver `TaskBudgetLimit.reserveShare`). */
-export const RESERVE_SHARE = 0.2
-
-export const ROUTE_TOKEN_BUDGETS: Record<TaskTier, TaskBudgetLimit> = {
-  conversation: { maxInputTokens: 100_000, maxOutputTokens: 20_000, reserveShare: RESERVE_SHARE },
-  scoped: { maxInputTokens: 3_000_000, maxOutputTokens: 400_000, reserveShare: RESERVE_SHARE },
-  feature: { maxInputTokens: 24_000_000, maxOutputTokens: 3_000_000, reserveShare: RESERVE_SHARE },
-}
-
-/**
- * Investigar o auditar el código no muta nada, pero cuesta turnos de lectura: cada turno reenvía
- * el contexto, así que 100 K se agotan en una decena de turnos de un solo scout. Tope propio, por
- * encima de `conversation` y por debajo de `scoped`; no es un objetivo, es la red de seguridad.
- */
-export const READING_TOKEN_BUDGET: TaskBudgetLimit = { maxInputTokens: 1_500_000, maxOutputTokens: 150_000, reserveShare: RESERVE_SHARE }
-
-/**
  * Pidieron un plan, no sólo hallazgos. El caso que lo motivó: «revisa el proyecto y planea mejoras» lanzó cinco
  * scouts a la vez, que se gastaron el tope leyendo, y BEE murió antes de llegar al planner: se entregó un listado
  * de hallazgos y «siguiente paso: entregar a planner un roadmap», sin el roadmap.
  */
 export const PLAN_AFTER_READING = `Te piden un plan, no sólo hallazgos. Hazlo en este orden y no te saltes el final:
 1. Investiga con a lo sumo 3 scouts a la vez, cada uno con un área y rutas concretas (un scout por módulo, no "todo el repo"). Pide hallazgos con ruta:línea.
-2. Cuando vuelvan, delega en el worker "planner" el roadmap priorizado (P0/P1/P2) con archivos afectados, pruebas de aceptación y dependencias. Es lo que se te pidió: reserva presupuesto para este paso.
-3. Si el presupuesto se agota antes, entrega igualmente el plan con lo ya encontrado y di qué quedó sin revisar.`
+2. Cuando vuelvan, delega en el worker "planner" el roadmap priorizado (P0/P1/P2) con archivos afectados, pruebas de aceptación y dependencias. Es lo que se te pidió.
+3. Si no llegas a cubrir todo, entrega igualmente el plan con lo ya encontrado y di qué quedó sin revisar.`
 
 /** Cómo se lee el proyecto sin recorrerlo: el índice en HiveDB ya tiene la estructura y el código. */
 export const DB_FIRST_READING = `Lee con el índice de HiveDB, no recorriendo el disco:
 1. get_project_context da el mapa del proyecto (módulos, archivos clave, ADRs); no uses fs_list/fs_glob recursivos para averiguarlo.
 2. search_knowledge con el símbolo o tema trae los fragmentos de código ya indexados; fs_read solo con rango (offset/limit) sobre lo que ese resultado señale.
 3. Reparte por módulo: un scout por área, con rutas concretas, no "todo el repo". Cada scout entrega hallazgos con ruta:línea, no listados.
-El presupuesto de tokens es de la tarea entera y se comparte entre todos los workers.`
-
-/** `HIVECODE_BUDGET_SCALE`: multiplica los topes (2 = el doble) o los quita (0). Para bancos y depuración. */
-export function routeBudget(tier: TaskTier, env: Record<string, string | undefined> = process.env, reading = false): TaskBudgetLimit {
-  const raw = env.HIVECODE_BUDGET_SCALE
-  const scale = raw === undefined || raw.trim() === "" ? 1 : Number(raw)
-  const base = reading && tier === "conversation" ? READING_TOKEN_BUDGET : ROUTE_TOKEN_BUDGETS[tier]
-  if (!Number.isFinite(scale) || scale < 0) return base
-  if (scale === 0) return { maxInputTokens: 0, maxOutputTokens: 0 }
-  return { ...base, maxInputTokens: Math.round(base.maxInputTokens * scale), maxOutputTokens: Math.round(base.maxOutputTokens * scale) }
-}
-
-/** La tarea agotó su presupuesto de tokens: se detiene con lo hecho hasta ese punto. */
-class BudgetExceededError extends Error {
-  constructor(readonly blocker: string, readonly partial: string) {
-    super(`budget_exceeded: ${blocker}`)
-  }
-}
+Cada turno reenvía todo el contexto: lo que no necesitas leer, no lo leas.`
 
 /** Workers BEE may run at once; mutating ones are serialized per file set by its own instructions. */
 export const MAX_PARALLEL_WORKERS = 3
@@ -348,10 +304,6 @@ export class ProfileHarness {
         if (blockedReason && agentId === "bee" && !output.trim()) {
           throw new Error(`BEE quedó bloqueado: ${blockedReason}`)
         }
-        // BEE and its workers spent the task's whole budget: the runs already stopped on their own;
-        // stop the route too, instead of planning, verifying and converging on top of a cut-off run.
-        const exhausted = taskBudgetBlocker(taskId)
-        if (exhausted) throw new BudgetExceededError(exhausted, output)
         options.onEvent?.({ type: "agent_completed", agent: agentId, message: output.slice(0, 160) })
         return output
       } catch (error) {
@@ -366,8 +318,6 @@ export class ProfileHarness {
       }
     }
 
-    // The budget belongs to the task: BEE and every worker it launches spend from the same one.
-    setTaskBudget(taskId, routeBudget(weight.tier, process.env, weight.statement.reading || weight.statement.planning))
     try {
       if (complexity === "conversation") {
         const reading = weight.statement.reading || weight.statement.planning
@@ -574,23 +524,9 @@ ${quality}`,
       await updateStage("completed", { nextAction: undefined })
       return { taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "completed", response: convergence, featureDir, repairCycles }
     } catch (error) {
-      if (error instanceof BudgetExceededError) {
-        // Not a quality failure: the task is bigger than its route expected. Report what was done.
-        await updateStage("failed", { blocker: error.message, nextAction: "inspect_or_resume" })
-        options.onEvent?.({ type: "budget_exceeded", message: error.blocker })
-        const usage = taskBudgetUsage(taskId)
-        const spent = usage ? `${Math.round(usage.inputTokens / 1000)} K de entrada y ${Math.round(usage.outputTokens / 1000)} K de salida` : "su presupuesto"
-        return {
-          taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "failed",
-          response: `${error.partial}\n\nPresupuesto agotado (budget_exceeded): la tarea gastó ${spent} de tokens y se detuvo en el tope de la ruta ${weight.tier} (${error.blocker}). Es más grande de lo que parecía: lo hecho hasta aquí queda en el proyecto, sin verificar. Reintenta con un objetivo más acotado o con HIVECODE_BUDGET_SCALE mayor.`.trim(),
-          repairCycles: 0,
-          budgetExceeded: error.blocker,
-        }
-      }
       await updateStage(options.signal?.aborted ? "cancelled" : "failed", { blocker: (error as Error).message, nextAction: "inspect_or_resume" })
       throw error
     } finally {
-      clearTaskBudget(taskId)
       clearLaunches(taskId)
       // The duplicates (scout#2, builder#2…) were cloned for this task; retire them now instead of at the next task's start.
       await purgeInstances().catch(() => {})

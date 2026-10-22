@@ -52,8 +52,7 @@ import {
   type RunCheckpoint,
   type RepeatTrackerSnapshot,
 } from "./run-store"
-import { recordTaskUsage, taskBudgetBlocker } from "./task-budget"
-import { commandPreview, traceResult, traceStep } from "./step-trace"
+import { argsPreview, traceResult, traceStep } from "./step-trace"
 import { checkoutRoot, projectOfSession } from "./project-identity"
 import { diskReadNudge } from "./read-mix"
 import { CAPABILITY_SEARCH_LIMIT_MESSAGE, chargeCapabilitySearch, isCapabilitySearch } from "./discovery-budget"
@@ -878,16 +877,6 @@ export async function* runAgent(
 
     iterations++
 
-    // The whole task ran out of budget, whichever run spent it: stop here and say so, rather than
-    // keep spending until the time limit.
-    // Workers stop short of the cap, so the coordinator keeps what it needs to bring the task home.
-    const taskBlocker = taskBudgetBlocker(opts.codeTaskId, opts.runKind === "worker" ? "worker" : "coordinator")
-    if (taskBlocker) {
-      runStatus = "needs_budget"
-      blocker = taskBlocker
-      break
-    }
-
     if ((maxInputTokens > 0 && totalInputTokens >= maxInputTokens)
       || (maxOutputTokens > 0 && totalOutputTokens >= maxOutputTokens)
       || (Number(agent.max_cost_usd || 0) > 0 && totalCostUsd >= Number(agent.max_cost_usd))) {
@@ -967,8 +956,6 @@ export async function* runAgent(
       totalCostUsd += (
         response.usage.input_tokens + response.usage.output_tokens
       ) * getAverageTokenCost(providerCfg.model)
-      // The task's budget is shared with every other run of the task (BEE and its workers).
-      recordTaskUsage(opts.codeTaskId, response.usage.input_tokens, response.usage.output_tokens)
     }
     traceStep({
       agent: opts.agentId,
@@ -980,10 +967,11 @@ export async function* runAgent(
       outputTokens: response.usage?.output_tokens ?? 0,
       reasoningChars: String((response as { reasoning_content?: string }).reasoning_content ?? "").length,
       contentChars: response.content?.length ?? 0,
+      assistantText: String(response.content ?? "").slice(0, 300),
       tools: (response.tool_calls ?? []).map((tc) => ({
         name: tc.function.name,
         argChars: String(tc.function.arguments ?? "").length,
-        ...(tc.function.name === "shell_executor" ? { preview: commandPreview(tc.function.arguments) } : {}),
+        ...(argsPreview(tc.function.name, tc.function.arguments) ? { preview: argsPreview(tc.function.name, tc.function.arguments) } : {}),
       })),
     })
 

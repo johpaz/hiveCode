@@ -23,9 +23,9 @@ export interface RunReport {
     total: number
     byAgent: Record<string, number>
     blocked: number
-    /** Runs that stopped on the task's token budget (`needs_budget`): neither blocked nor completed. */
+    /** Runs that stopped on their own agent's token limit (`max_input_tokens`/`max_output_tokens`): neither blocked nor completed. There is no task-wide cap. */
     needsBudget: number
-    /** The coordinator (the harness run) is one of them: the task did not finish, whatever the rest delivered. */
+    /** The coordinator (the harness run) is one of them: it stopped on its limit, whatever the rest delivered. */
     budgetExceeded: boolean
     blockers: Record<string, number>
     revisions: number

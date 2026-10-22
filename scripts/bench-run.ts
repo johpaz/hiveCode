@@ -176,11 +176,10 @@ let tests = { pass: 0, fail: 0, files: 0, ran: false }
   }
 }
 
-// A task that ran out of its token budget did not finish, even if the process exited cleanly and no worker was "blocked".
-// It used to show as `error: null` and "bloqueados 0": the one failure the benchmark most needs to say out loud.
-const budgetWarning = warnings.find(w => /budget_exceeded/.test(w))
-const budgetExceeded = report.runs.budgetExceeded || !!budgetWarning
-const budgetError = budgetExceeded ? `budget_exceeded: la tarea agotó su presupuesto de tokens${budgetWarning ? ` (${(/task_[a-z_]+:\d+/.exec(budgetWarning) ?? [""])[0]})` : ""} y no entregó` : null
+// A coordinator that stopped on its own agent's token limit (there is no task-wide cap) did not finish, even if the process
+// exited cleanly and no worker was "blocked". It used to show as `error: null`: the failure the benchmark most needs to say out loud.
+const budgetExceeded = report.runs.budgetExceeded
+const budgetError = budgetExceeded ? "tope de tokens del agente alcanzado: el coordinador se detuvo y no entregó" : null
 
 const result = {
   task: values.task,

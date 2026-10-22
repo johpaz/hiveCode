@@ -129,7 +129,7 @@ Propuesta: presupuesto por ruta y por tarea, con **corte y reporte** al agotarlo
 | R1 | 1,5 M | 200 K | 12 min | 3 |
 | R2 | 12 M | 1,5 M | 45 min | 12 |
 
-**Decidido: el tope es duro.** Al agotarlo la tarea se detiene y se reporta como **`budget_exceeded`**, con lo hecho hasta ese punto (ficheros, pruebas, evidencia). Nunca se sigue gastando hasta el tope de tiempo. Es un resultado distinto del éxito y del fallo de calidad: significa «esta tarea es más grande de lo que parecía», que es información accionable y además señala que el estimador de alcance se equivocó.
+**Revocado (2026-10-22): no hay tope por tarea.** Se había decidido un tope duro que detenía la tarea y la reportaba como `budget_exceeded`, con lo hecho hasta ese punto (ficheros, pruebas, evidencia). Nunca se sigue gastando hasta el tope de tiempo. Es un resultado distinto del éxito y del fallo de calidad: significa «esta tarea es más grande de lo que parecía», que es información accionable y además señala que el estimador de alcance se equivocó.
 
 ## 7. Cómo lo medimos
 
@@ -187,7 +187,7 @@ Implementado y medido el 21-oct-2026 (F0–F3). F4 (presupuestos) y P1 (trabajo 
 | F1 | hecha | `packages/core/src/harness/task-weight.ts`: estimador de alcance con señales del enunciado **y** del proyecto; sustituye a las regex y al tope de 600 caracteres |
 | F2 | hecha | `packages/core/src/harness/deterministic-checks.ts`: verificación determinista (pruebas, tipos, build) consciente del proyecto, con **1** ciclo de reparación en la ruta acotada |
 | F3 | hecha (lite) | el prompt del worker lista las herramientas que ya tiene y cómo se usa cada una; se acabaron las búsquedas de herramientas que ya estaban en la mano |
-| F4 | hecha (sin medir) | `packages/core/src/agent/task-budget.ts`: presupuesto de tokens **por tarea**, compartido por BEE y sus workers (se identifican por `codeTaskId`); `ROUTE_TOKEN_BUDGETS` en `profile-harness.ts` fija el tope por ruta, al **doble** del objetivo de §6 (100 K / 3 M / 24 M de entrada) porque `inventario` midió 1,53 M con la ruta acotada. Al agotarlo el bucle corta (`needs_budget`) y el harness devuelve `status: "failed"` con `budgetExceeded`. `HIVECODE_BUDGET_SCALE` escala los topes (0 los quita). Pendiente: calibrar con la mediana del banco; sólo cuenta tokens (no tiempo ni número de runs) |
+| F4 | **eliminado** (2026-10-22) | El presupuesto de tokens por tarea (`task-budget.ts`, topes por ruta, reserva del 20 %, `budget_exceeded`, `HIVECODE_BUDGET_SCALE`) se quitó del todo. Mató dos intentos seguidos de «revisa el proyecto y planea mejoras» (3 M en total, sin plan) y el reintento costó el doble que haber dejado terminar el primero; además la reserva para BEE no servía al planner, que es un worker y se detenía antes. El gasto lo acotan los turnos máximos por perfil, los workers simultáneos, los scouts por tarea y el detector de llamadas repetidas. Siguen existiendo los límites **opcionales por agente** (`max_input_tokens`, `max_output_tokens`, `max_cost_usd`), a 0 = sin límite. |
 | P1 | hecha (sin medir) | BEE hace los cambios acotados él mismo (tiene `fs_edit`/`fs_write`/`shell_executor` fijados), `fs_edit` con `edits[]`, `fs_read` sin bloqueo en archivos grandes, `search_in_files` con `glob`/`context`, y lotes de lectura en paralelo |
 | F5 | pendiente | tercera tarea (grande real) y cuarta (mediana) en el banco |
 
