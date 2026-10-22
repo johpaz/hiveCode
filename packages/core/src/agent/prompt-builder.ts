@@ -12,7 +12,7 @@ import { col } from "../storage/hive"
 import type { AgentDoc, EthicsDoc, UserDoc } from "../storage/collections"
 import { resolveUserId } from "../storage/onboarding"
 import { logger } from "../utils/logger"
-import { formatContext } from "../utils/toon"
+import { formatContext } from "../utils/llm-text"
 
 const log = logger.child("prompt-builder")
 

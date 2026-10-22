@@ -24,7 +24,7 @@ import {
   toAPIMessages,
   getMessageCount,
 } from "./conversation-store"
-import { estimateTokens } from "../utils/toon"
+import { estimateTokens } from "../utils/llm-text"
 import { callLLM, resolveProviderConfig, type ContentPart } from "./llm-client"
 import { col, fromIndexable } from "../storage/hive"
 import type { AgentDoc, CodeConfigDoc } from "../storage/collections"
@@ -247,7 +247,7 @@ export function summarizeToolResult(content: string, toolName?: string): string 
   const isError = content.includes('error') || content.includes('failed') || content.startsWith('[Tool Error]')
   const isSuccess = content.includes('ok') || content.includes('success') || content.includes('true')
   
-  // Try to extract key result field from JSON/TOON
+  // Try to extract key result field from the rendered result
   let keyInfo = ""
   try {
     // Simple extraction of first key value

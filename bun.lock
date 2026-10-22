@@ -11,7 +11,6 @@
         "@modelcontextprotocol/sdk": "^1.26.0",
         "grammy": "latest",
         "openai": "^6.18.0",
-        "toon-format-parser": "^1.1.0",
         "zod": "latest",
       },
       "devDependencies": {
@@ -28,7 +27,6 @@
       "dependencies": {
         "@johpaz/hivecode-code": "workspace:*",
         "@johpaz/hivecode-core": "workspace:*",
-        "toon-format-parser": "1.1.3",
       },
       "devDependencies": {
         "@types/bun": "^1.4.1",
@@ -58,7 +56,6 @@
         "@modelcontextprotocol/sdk": "latest",
         "grammy": "latest",
         "openai": "^6.18.0",
-        "toon-format-parser": "1.1.4",
         "zod": "latest",
       },
       "devDependencies": {
@@ -378,8 +375,6 @@
 
     "toidentifier": ["toidentifier@1.0.1", "", {}, "sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA=="],
 
-    "toon-format-parser": ["toon-format-parser@1.1.4", "", {}, "sha512-lTodOrlxvJosbFo8czuf3WF/g3A0L74jiMiktOhnGEARy6zposADNjTwOO35lLk5TW5JDevFhaWcSudKZSRf+w=="],
-
     "tr46": ["tr46@0.0.3", "", {}, "sha512-N3WMsuqV66lT30CrXNbEjx4GEwlow3v6rr4mCcv6prnfwhS01rkgyFdjPNBYd9br7LpXV1+Emh01fHnq2Gdgrw=="],
 
     "ts-algebra": ["ts-algebra@2.0.0", "", {}, "sha512-FPAhNPFMrkwz76P7cdjdmiShwMynZYN6SgOujD1urY4oNm80Ou9oMdmbR45LotcKOXoy7wSmHkRFE6Mxbrhefw=="],
@@ -409,8 +404,6 @@
     "zod": ["zod@4.6.5", "", {}, "sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q=="],
 
     "zod-to-json-schema": ["zod-to-json-schema@3.25.2", "", { "peerDependencies": { "zod": "^3.25.28 || ^4" } }, "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA=="],
-
-    "@johpaz/hivecode/toon-format-parser": ["toon-format-parser@1.1.3", "", {}, "sha512-jLsz1NK0JPyg+1OZw26khudDmT2jqaJNMAk5jfNea1pYi+RptZBGeM8FLgQvq6RYHv7P3bxS5ZKMNMpR5Op/UA=="],
 
     "body-parser/content-type": ["content-type@2.1.0", "", {}, "sha512-mj7UPXE0jaqaOsukNZRUEfEi2AcL7C/vwmwcHV0O97eO1E1pxBZuyjlZrx5seTaNBg1U6+o35wpa35Qfcc+7ag=="],
 

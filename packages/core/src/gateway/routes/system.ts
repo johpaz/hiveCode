@@ -290,37 +290,12 @@ export async function handleGetUsageStats(req: Request, addCorsHeaders: (r: Resp
     .map((entry) => entry.doc)
     .filter((record) => record.created_at >= since)
 
-  const normal = records.filter((record) => record.provider !== "toon")
-  const toon = records.filter((record) => record.provider === "toon")
+  const normal = records
   const totals = normal.reduce((acc, record) => ({
     inputTokens: acc.inputTokens + record.input_tokens,
     outputTokens: acc.outputTokens + record.output_tokens,
     costUsd: acc.costUsd + record.cost_usd,
   }), { inputTokens: 0, outputTokens: 0, costUsd: 0 })
-
-  const toonTotals = toon.reduce((acc, record) => ({
-    toonSavedTokens: acc.toonSavedTokens + record.toon_saved_tokens,
-    toonSavedCost: acc.toonSavedCost + record.toon_saved_cost,
-    toonSavedBytes: acc.toonSavedBytes + record.toon_saved_bytes,
-    toonSavedPercent: acc.toonSavedPercent + record.toon_saved_percent,
-    toonJsonTokens: acc.toonJsonTokens + record.toon_json_tokens,
-    toonToonTokens: acc.toonToonTokens + record.toon_toon_tokens,
-    toonJsonBytes: acc.toonJsonBytes + record.toon_json_bytes,
-    toonSavedTokensPct: acc.toonSavedTokensPct + record.toon_saved_tokens_pct,
-  }), {
-    toonSavedTokens: 0,
-    toonSavedCost: 0,
-    toonSavedBytes: 0,
-    toonSavedPercent: 0,
-    toonJsonTokens: 0,
-    toonToonTokens: 0,
-    toonJsonBytes: 0,
-    toonSavedTokensPct: 0,
-  })
-  if (toon.length > 0) {
-    toonTotals.toonSavedPercent /= toon.length
-    toonTotals.toonSavedTokensPct /= toon.length
-  }
 
   const byProviderRows = aggregateUsage(normal, "provider")
   const byModelRows = aggregateUsage(normal, "model")
@@ -328,32 +303,11 @@ export async function handleGetUsageStats(req: Request, addCorsHeaders: (r: Resp
   const totalTokens = (totals.inputTokens || 0) + (totals.outputTokens || 0)
   const totalCostUsd = totals.costUsd || 0
 
-  // Use TOON totals directly from DB - no calculations needed
-  const toonSavedTokens = toonTotals?.toonSavedTokens || 0
-  const toonSavedCost = toonTotals?.toonSavedCost || 0
-  const toonSavedBytes = toonTotals?.toonSavedBytes || 0
-  const toonJsonBytes = toonTotals?.toonJsonBytes || 0
-  const toonJsonTokens = toonTotals?.toonJsonTokens || 0
-  const toonToonTokens = toonTotals?.toonToonTokens || 0
-
-  // Use saved_percent directly from DB (calculated at record time by toon-format-parser)
-  const toonSavedBytesPercent = toonTotals?.toonSavedPercent || 0
-
-  // Use saved_tokens_pct directly from DB (calculated at record time by toon-format-parser)
-  const toonSavingsPercent = toonTotals?.toonSavedTokensPct || 0
-
   const stats: UsageStats = {
     totalTokens,
     totalInputTokens: totals.inputTokens || 0,
     totalOutputTokens: totals.outputTokens || 0,
     totalCostUsd,
-    toonSavedTokens,
-    toonSavedCost,
-    toonSavedBytes,
-    toonSavedBytesPercent,
-    toonJsonTokens,
-    toonToonTokens,
-    toonSavingsPercent,
     byProvider: Object.fromEntries(
       byProviderRows.map(r => [r.provider, {
         tokens: (r.inputTokens || 0) + (r.outputTokens || 0),
@@ -398,13 +352,6 @@ interface UsageStats {
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCostUsd: number;
-  toonSavedTokens: number;
-  toonSavedCost: number;
-  toonSavedBytes: number;
-  toonSavedBytesPercent: number;
-  toonJsonTokens: number;
-  toonToonTokens: number;
-  toonSavingsPercent: number;
   byProvider: Record<string, { tokens: number; costUsd: number; inputTokens: number; outputTokens: number }>;
   byModel: Record<string, { tokens: number; costUsd: number; provider: string; inputTokens: number; outputTokens: number }>;
 }

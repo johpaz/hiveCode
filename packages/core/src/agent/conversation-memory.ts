@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { getHiveDb } from "../storage/hivedb";
-import { estimateTokens } from "../utils/toon";
+import { estimateTokens } from "../utils/llm-text";
 import type { IndexDoc } from "@johpaz/hive-db";
 import type { SummaryDoc } from "../storage/collections";
 

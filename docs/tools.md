@@ -55,7 +55,7 @@ Con `sandbox.enabled: true` y sin proveedor, el comando corre **sin aislamiento*
 
 ## Resultados
 
-Los resultados de las herramientas se acotan (`capToolResult`) y se formatean en TOON (`utils/toon.ts`) antes de volver al modelo. Telemetría: cada llamada emite `tool_call` y `tool_done` por IPC (`agent/tool-telemetry.ts`); `args_summary` se trunca a 120 caracteres.
+Los resultados de las herramientas se acotan (`capToolResult`) y se escriben como texto (`utils/llm-text.ts`) antes de volver al modelo: las herramientas cuyo resultado es texto (`fs_read`, `search_in_files`, `outline`…) tienen su propio formato en `utils/tool-render.ts` y el resto pasa por `renderText`, sin comillas ni escapes. TOON se probó y se descartó: ahorraba 0-15 % en estos resultados frente a 40-47 % del texto plano. Telemetría: cada llamada emite `tool_call` y `tool_done` por IPC (`agent/tool-telemetry.ts`); `args_summary` se trunca a 120 caracteres.
 
 ## Llamadas a herramientas escritas como texto
 

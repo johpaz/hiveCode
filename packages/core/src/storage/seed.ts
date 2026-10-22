@@ -560,11 +560,6 @@ const INITIAL_PLAYBOOK_RULES = [
     applicable_to: null,
   },
   {
-    rule: "Para tareas de análisis de datos, usa formato estructurado TOON para la salida y reducir uso de tokens",
-    category: "optimization",
-    applicable_to: JSON.stringify(["data", "analysis"]),
-  },
-  {
     rule: "Al delegar a workers, proporciona descripciones claras de tareas con resultados esperados",
     category: "agent_creation",
     applicable_to: JSON.stringify(["delegation", "workers"]),

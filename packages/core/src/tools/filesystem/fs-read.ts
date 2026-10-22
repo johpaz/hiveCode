@@ -9,6 +9,8 @@
 import type { Tool } from "../types.ts";
 import { logger } from "../../utils/logger.ts";
 import { resolveInWorkspace, getWorkspace } from "./workspace-guard.ts";
+import { isReaderAgent } from "../../agent/loadout.ts";
+import { extractSymbols } from "../../agent/source-symbols.ts";
 
 const log = logger.child("fs-read");
 
@@ -17,6 +19,15 @@ const MAX_READ_CHARS = 20_000;
 
 /** Lines returned when a larger file is read without offset/limit. */
 const LARGE_FILE_LINES = 500;
+
+/**
+ * Same, for a reader (scout, planner). They explore: what they need from a big file is its shape and the
+ * lines they then ask for, not 500 lines of its start (4.6K tokens a call, measured, and they never passed a range).
+ */
+const READER_LARGE_FILE_LINES = 120;
+
+/** Entries of a file's structure listed with a bounded read. */
+const MAX_STRUCTURE = 60;
 
 export const fsReadTool: Tool = {
   name: "fs_read",
@@ -59,8 +70,10 @@ export const fsReadTool: Tool = {
 
       // A large file read without offset/limit still returns its first lines (never an empty turn),
       // with the way to continue.
-      const bounded = totalLines > LARGE_FILE_LINES && rawOffset === undefined && (params.limit as number | undefined) === undefined;
-      const effectiveLimit = bounded ? LARGE_FILE_LINES : limit;
+      const reader = isReaderAgent(config?.configurable?.agent_id);
+      const boundedLines = reader ? READER_LARGE_FILE_LINES : LARGE_FILE_LINES;
+      const bounded = totalLines > boundedLines && rawOffset === undefined && (params.limit as number | undefined) === undefined;
+      const effectiveLimit = bounded ? boundedLines : limit;
 
       // Support negative offset: -20 → last 20 lines
       const resolvedOffset = rawOffset === undefined ? 1 : rawOffset;
@@ -98,7 +111,10 @@ export const fsReadTool: Tool = {
         ...(!truncated && bounded && {
           truncated: true,
           nextOffset: start + selected.length + 1,
-          note: `Archivo grande (${totalLines} líneas): se devolvieron las primeras ${selected.length}. Continúa con fs_read offset=${start + selected.length + 1}, o usa parse_ast para ver su estructura.`,
+          // The shape of the whole file, so the next read can be a range instead of "the rest".
+          structure: extractSymbols(content, (filePath.split(".").pop() ?? "ts").toLowerCase()).slice(0, MAX_STRUCTURE)
+            .map(s => `${s.startLine}-${s.endLine} ${s.kind} ${s.signature ?? s.name}`),
+          note: `Archivo grande (${totalLines} líneas): se devolvieron las primeras ${selected.length}. Lee el resto por rango (fs_read offset=<línea> limit=<n>) guiándote por la estructura.`,
         }),
       };
     } catch (error) {

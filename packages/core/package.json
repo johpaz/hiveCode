@@ -24,7 +24,6 @@
     "@modelcontextprotocol/sdk": "latest",
     "grammy": "latest",
     "openai": "^6.18.0",
-    "toon-format-parser": "1.1.4",
     "zod": "latest"
   },
   "devDependencies": {

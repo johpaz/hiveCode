@@ -891,15 +891,6 @@ export interface UsageRecordDoc {
   output_tokens: number;
   cost_usd: number;
   latency_ms: number | null;
-  toon_saved_tokens: number;
-  toon_saved_cost: number;
-  toon_json_bytes: number;
-  toon_toon_bytes: number;
-  toon_saved_bytes: number;
-  toon_saved_percent: number;
-  toon_json_tokens: number;
-  toon_toon_tokens: number;
-  toon_saved_tokens_pct: number;
   created_at: number;
 }
 
@@ -907,12 +898,6 @@ export interface UsageRollupDoc {
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
-  toonSavedTokens: number;
-  toonSavedCost: number;
-  toonSavedBytes: number;
-  toonJsonTokens: number;
-  toonToonTokens: number;
-  toonJsonBytes: number;
   byProvider: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }>;
   byModel: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }>;
 }

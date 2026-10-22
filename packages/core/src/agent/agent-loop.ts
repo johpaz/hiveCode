@@ -35,7 +35,7 @@ import { capToolResult, fitLoopMessages, messageBudget, messageTokens } from "./
 import type { MCPClientManager } from "@johpaz/hivecode-mcp"
 import { compileContext } from "./context-compiler"
 import { structuralParallelism } from "./swarm-capabilities"
-import { formatToolResult } from "../utils/toon"
+import { formatToolResult } from "../utils/llm-text"
 import { getAverageTokenCost } from "../storage/usage"
 import type { ContentPart } from "./llm-client"
 import { getExecutionMode, canExecuteTool, callRequiresConfirmation, canPromptForConfirmation, getBlockReason, shellCommandMutates } from "./execution-mode"
@@ -104,6 +104,9 @@ async function executeTool(
 const log = logger.child("agent-loop")
 
 const DEFAULT_HARNESS_MAX_STEPS = 200
+/** Turns of tool results kept whole, per kind of run; `HIVECODE_KEEP_TURNS` overrides the worker's. */
+const COORDINATOR_KEEP_TURNS = 4
+const WORKER_KEEP_TURNS = (() => { const n = Number(process.env.HIVECODE_KEEP_TURNS); return Number.isInteger(n) && n >= 1 ? n : 3 })()
 const DEFAULT_CHECKPOINT_EVERY = 10
 /** Identical call count that earns a corrective nudge in the tool result. */
 const REPEAT_TOOL_CALL_NUDGE = 2
@@ -795,7 +798,10 @@ export async function* runAgent(
   // `messages` itself stays complete for persistence and checkpoints.
   const prepareMessages = (all: LLMMessage[], tools: unknown): LLMMessage[] => {
     const budget = messageBudget(providerCfg.contextWindow, tools)
-    let prepared = clearOldToolResults(all) as LLMMessage[]
+    // Results older than this many turns are cut to a few hundred characters. A worker's results are the bulk of its
+    // context (the freshest result of each tool always stays whole), so it keeps fewer turns than the coordinator.
+    const keepTurns = opts.runKind === "worker" ? WORKER_KEEP_TURNS : COORDINATOR_KEEP_TURNS
+    let prepared = clearOldToolResults(all, keepTurns) as LLMMessage[]
     if (prepared.reduce((sum, m) => sum + messageTokens(m), 0) > budget * 0.7) {
       prepared = clearOldToolResults(all, 2) as LLMMessage[]
     }
@@ -1124,7 +1130,7 @@ export async function* runAgent(
       if (!canExecuteTool(toolName)) {
         const denyMsg = getBlockReason(toolName)
         const toolResultJS = { ok: false, error: denyMsg, hint: `Cambia a modo approval o auto con: hivecode mode set approval|auto` }
-        const toolResultLLM = formatToolResult(toolResultJS, cleanModel)
+        const toolResultLLM = formatToolResult(toolResultJS)
         results.push({
           toolResultLLM, id: tc.id, name: toolName, ms: 0,
           sig: toolCallSignature(toolName, tc.function.arguments),
@@ -1144,7 +1150,7 @@ export async function* runAgent(
         if (!approved) {
           const toolResultJS = { ok: false, error: `[CANCELADO] Usuario canceló '${toolName}'`, hint: "El usuario rechazó esta acción. No la repitas ni busques otra vía para hacer lo mismo; pregunta qué prefiere." }
           results.push({
-            toolResultLLM: formatToolResult(toolResultJS, cleanModel), id: tc.id, name: toolName, ms: 0,
+            toolResultLLM: formatToolResult(toolResultJS), id: tc.id, name: toolName, ms: 0,
             sig: toolCallSignature(toolName, tc.function.arguments),
           })
           continue
@@ -1160,7 +1166,7 @@ export async function* runAgent(
           hint: "No reintentes. Informa al usuario que esta acción espera su aprobación (o que cambie a modo auto).",
         }
         results.push({
-          toolResultLLM: formatToolResult(toolResultJS, cleanModel), id: tc.id, name: toolName, ms: 0,
+          toolResultLLM: formatToolResult(toolResultJS), id: tc.id, name: toolName, ms: 0,
           sig: toolCallSignature(toolName, tc.function.arguments),
         })
         continue
@@ -1174,7 +1180,7 @@ export async function* runAgent(
         if (confirmed !== "y" && confirmed !== "yes") {
           const toolResultJS = { ok: false, error: `[CANCELADO] Usuario canceló '${toolName}'`, hint: "Ejecución cancelada" }
           results.push({
-            toolResultLLM: formatToolResult(toolResultJS, cleanModel), id: tc.id, name: toolName, ms: 0,
+            toolResultLLM: formatToolResult(toolResultJS), id: tc.id, name: toolName, ms: 0,
             sig: toolCallSignature(toolName, tc.function.arguments),
           })
           continue
@@ -1270,7 +1276,7 @@ export async function* runAgent(
       // One result never gets to take the window: an fs_list of a whole repo used
       // to go in whole and the next call died with a 400.
       const readNudge = diskReadNudge(runId, agent.agent_type, toolName)
-      const toolResultLLM = capToolResult(formatToolResult(toolResultJS, cleanModel), providerCfg.contextWindow) + (readNudge ?? "")
+      const toolResultLLM = capToolResult(formatToolResult(toolResultJS, { name: toolName, root: opts.workspace ?? agent.workspace }), providerCfg.contextWindow) + (readNudge ?? "")
       const toolError = !!(
         toolResultJS
         && typeof toolResultJS === "object"

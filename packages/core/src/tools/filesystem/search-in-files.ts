@@ -10,9 +10,15 @@ import { stat } from "node:fs/promises";
 import type { Tool } from "../types.ts";
 import { logger } from "../../utils/logger.ts";
 import { resolveInWorkspace, getWorkspace } from "./workspace-guard.ts";
+import { isReaderAgent } from "../../agent/loadout.ts";
+import { isGeneratedFile } from "../../agent/source-index.ts";
 
 const log = logger.child("search-in-files");
 const DEFAULT_MAX_MATCHES = 100;
+/** A reader explores: thirty matches say where a thing lives, a hundred only fill the context (4.6K tokens a call). */
+const READER_MAX_MATCHES = 30;
+/** Longest line of a match shown; a minified or data line would otherwise be the whole answer. */
+const MAX_MATCH_CHARS = 240;
 const HARD_MAX_MATCHES = 500;
 const MAX_CONTEXT = 5;
 const DEFAULT_GLOB = "**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yaml,yml,toml,rs,py,go}";
@@ -80,7 +86,8 @@ export const searchInFilesTool: Tool = {
 
     const context = Math.min(MAX_CONTEXT, Math.max(0, Math.floor(Number(params.context) || 0)));
     const filesOnly = params.output === "files";
-    const maxMatches = Math.min(HARD_MAX_MATCHES, Math.max(1, Math.floor(Number(params.limit) || DEFAULT_MAX_MATCHES)));
+    const reader = isReaderAgent(config?.configurable?.agent_id);
+    const maxMatches = Math.min(reader ? READER_MAX_MATCHES * 2 : HARD_MAX_MATCHES, Math.max(1, Math.floor(Number(params.limit) || (reader ? READER_MAX_MATCHES : DEFAULT_MAX_MATCHES))));
     const globPattern = typeof params.glob === "string" && params.glob ? params.glob : DEFAULT_GLOB;
 
     log.debug(`Searching "${pattern}" in ${targetPath}`);
@@ -99,7 +106,8 @@ export const searchInFilesTool: Tool = {
           if (!regex.test(lines[i])) continue;
           perFile.set(filePath, (perFile.get(filePath) ?? 0) + 1);
           if (filesOnly) { matches.push({ file: filePath, line: i + 1, content: "" }); continue; }
-          const match: Match = { file: filePath, line: i + 1, content: lines[i].trim() };
+          const text = lines[i].trim();
+          const match: Match = { file: filePath, line: i + 1, content: text.length > MAX_MATCH_CHARS ? `${text.slice(0, MAX_MATCH_CHARS)}…` : text };
           if (context > 0) {
             match.before = lines.slice(Math.max(0, i - context), i).map(l => l.trimEnd());
             match.after = lines.slice(i + 1, i + 1 + context).map(l => l.trimEnd());
@@ -121,7 +129,7 @@ export const searchInFilesTool: Tool = {
         const glob = new Bun.Glob(globPattern);
         for await (const entry of glob.scan({ cwd: targetPath, onlyFiles: true })) {
           if (matches.length >= maxMatches) break;
-          if (SKIPPED_DIR.test(`/${entry}`)) continue;
+          if (SKIPPED_DIR.test(`/${entry}`) || isGeneratedFile(entry)) continue;
           await searchFile(`${targetPath}/${entry}`);
         }
       }

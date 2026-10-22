@@ -5,7 +5,7 @@ import os from "node:os";
 import { getHiveDb, closeHiveDb } from "../../packages/core/src/storage/hivedb";
 import { saveSummary, getSummary } from "../../packages/core/src/agent/conversation-store";
 import { relevantConversationMemory, rememberConversationSummary } from "../../packages/core/src/agent/conversation-memory";
-import { estimateTokens } from "../../packages/core/src/utils/toon";
+import { estimateTokens } from "../../packages/core/src/utils/llm-text";
 
 test("historical summaries are searchable within session/project with bounded context", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "hive-conversation-memory-"));

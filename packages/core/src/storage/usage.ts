@@ -101,12 +101,6 @@ function emptyRollup(): UsageRollupDoc {
     inputTokens: 0,
     outputTokens: 0,
     costUsd: 0,
-    toonSavedTokens: 0,
-    toonSavedCost: 0,
-    toonSavedBytes: 0,
-    toonJsonTokens: 0,
-    toonToonTokens: 0,
-    toonJsonBytes: 0,
     byProvider: {},
     byModel: {},
   };
@@ -166,15 +160,6 @@ export interface UsageRecord {
   output_tokens: number;
   cost_usd: number;
   latency_ms: number | null;
-  toon_saved_tokens: number;
-  toon_saved_cost: number;
-  toon_json_bytes: number;
-  toon_toon_bytes: number;
-  toon_saved_bytes: number;
-  toon_saved_percent: number;
-  toon_json_tokens: number;
-  toon_toon_tokens: number;
-  toon_saved_tokens_pct: number;
   created_at: number;
 }
 
@@ -183,13 +168,6 @@ export interface UsageSummary {
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCostUsd: number;
-  toonSavedTokens: number;
-  toonSavedCost: number;
-  toonSavedBytes: number;
-  toonSavedBytesPercent: number;
-  toonJsonTokens: number;
-  toonToonTokens: number;
-  toonSavingsPercent: number;
   byProvider: Record<string, { tokens: number; costUsd: number; inputTokens: number; outputTokens: number }>;
   byModel: Record<string, { tokens: number; costUsd: number; provider: string; inputTokens: number; outputTokens: number }>;
   recentRecords: UsageRecord[];
@@ -217,15 +195,6 @@ export function recordUsage(options: {
         output_tokens: options.outputTokens,
         cost_usd: costUsd,
         latency_ms: options.latencyMs || null,
-        toon_saved_tokens: 0,
-        toon_saved_cost: 0,
-        toon_json_bytes: 0,
-        toon_toon_bytes: 0,
-        toon_saved_bytes: 0,
-        toon_saved_percent: 0,
-        toon_json_tokens: 0,
-        toon_toon_tokens: 0,
-        toon_saved_tokens_pct: 0,
         created_at: now,
       }, { expectedVersion: 0 });
 
@@ -263,12 +232,6 @@ export async function getUsageStats(hours: number = 24): Promise<UsageSummary> {
   let totalInput = 0;
   let totalOutput = 0;
   let totalCost = 0;
-  let toonSavedTokens = 0;
-  let toonSavedCost = 0;
-  let toonSavedBytes = 0;
-  let toonJsonTokens = 0;
-  let toonToonTokens = 0;
-  let toonJsonBytes = 0;
   const providerMap: UsageSummary["byProvider"] = {};
   const modelMap: UsageSummary["byModel"] = {};
 
@@ -276,12 +239,6 @@ export async function getUsageStats(hours: number = 24): Promise<UsageSummary> {
     totalInput += doc.inputTokens;
     totalOutput += doc.outputTokens;
     totalCost += doc.costUsd;
-    toonSavedTokens += doc.toonSavedTokens;
-    toonSavedCost += doc.toonSavedCost;
-    toonSavedBytes += doc.toonSavedBytes;
-    toonJsonTokens += doc.toonJsonTokens;
-    toonToonTokens += doc.toonToonTokens;
-    toonJsonBytes += doc.toonJsonBytes;
 
     for (const [provider, providerStats] of Object.entries(doc.byProvider ?? {})) {
       const current = providerMap[provider] ?? { tokens: 0, costUsd: 0, inputTokens: 0, outputTokens: 0 };
@@ -309,27 +266,11 @@ export async function getUsageStats(hours: number = 24): Promise<UsageSummary> {
     .filter((record) => record.created_at >= sinceMs);
 
   const totalTokens = totalInput + totalOutput;
-  const totalIncludingSaved = totalTokens + toonSavedTokens;
-  const toonSavingsPercent = totalIncludingSaved > 0
-    ? (toonSavedTokens / totalIncludingSaved) * 100
-    : 0;
-
-  const toonSavedBytesPercent = toonJsonBytes > 0
-    ? (toonSavedBytes / toonJsonBytes) * 100
-    : 0;
-
   return {
     totalTokens,
     totalInputTokens: totalInput,
     totalOutputTokens: totalOutput,
     totalCostUsd: totalCost,
-    toonSavedTokens,
-    toonSavedCost,
-    toonSavedBytes,
-    toonSavedBytesPercent,
-    toonJsonTokens,
-    toonToonTokens,
-    toonSavingsPercent,
     byProvider: providerMap,
     byModel: modelMap,
     recentRecords
@@ -375,66 +316,3 @@ export function getAverageTokenCost(model: string): number {
   return (pricing.inputPer1M + pricing.outputPer1M) / 2 / 1_000_000;
 }
 
-/**
- * Record TOON savings for metrics tracking
- * This updates HiveDB usage records with complete TOON compression metrics.
- */
-export function recordToonSavings(
-  analysis: {
-    jsonBytes: number;
-    toonBytes: number;
-    savedBytes: number;
-    savedPercent: number;
-    jsonTokens: number;
-    toonTokens: number;
-    savedTokens: number;
-    savedTokensPercent: number;
-  },
-  costSaved: number, 
-  category: string
-): void {
-  // Fire-and-forget to avoid blocking
-  Promise.resolve().then(async () => {
-    try {
-      const now = Date.now();
-      const savedTokens = Math.max(0, analysis.savedTokens);
-      const savedPercent = Math.max(0, analysis.savedPercent);
-      const savedTokensPct = Math.max(0, analysis.savedTokensPercent);
-      const id = await nextId("usageRecords");
-      const records = await col<UsageRecordDoc>("usageRecords");
-
-      await records.put(id, {
-        id,
-        provider: "toon",
-        model: category,
-        input_tokens: 0,
-        output_tokens: 0,
-        cost_usd: 0,
-        latency_ms: null,
-        toon_saved_tokens: savedTokens,
-        toon_saved_cost: costSaved,
-        toon_json_bytes: analysis.jsonBytes,
-        toon_toon_bytes: analysis.toonBytes,
-        toon_saved_bytes: analysis.savedBytes,
-        toon_saved_percent: savedPercent,
-        toon_json_tokens: analysis.jsonTokens,
-        toon_toon_tokens: analysis.toonTokens,
-        toon_saved_tokens_pct: savedTokensPct,
-        created_at: now,
-      }, { expectedVersion: 0 });
-
-      await bumpRollup("usageRollups", hourBucket(now), {
-        toonSavedTokens: savedTokens,
-        toonSavedCost: costSaved,
-        toonSavedBytes: analysis.savedBytes,
-        toonJsonTokens: analysis.jsonTokens,
-        toonToonTokens: analysis.toonTokens,
-        toonJsonBytes: analysis.jsonBytes,
-      });
-
-      log.debug(`[TOON] Recorded ${analysis.savedTokens} tokens ($${costSaved.toFixed(6)}) saved for ${category}`)
-    } catch (error) {
-      log.warn(`[TOON] Failed to record savings:`, error)
-    }
-  })
-}

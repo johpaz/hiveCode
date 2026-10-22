@@ -22,7 +22,7 @@ import { selectSpecialty, REQUIRED_PROFILE_SKILLS, FACTORY_SPECIALTIES } from ".
  *    - Cada worker recibe su propio contexto mínimo
  *    - El Coordinador ve el panorama completo
  * 
- * TODOS los datos se formatean en TOON para ahorro de tokens.
+ * Los datos de contexto se escriben como texto (utils/llm-text.ts).
  */
 
 import { logger } from "../utils/logger"
@@ -37,7 +37,7 @@ import { syncPlaybookToIndex } from "./playbook-selector"
 import { getRecentMessages, getSummary, getScratchpad, toAPIMessages } from "./conversation-store"
 import { relevantConversationMemory } from "./conversation-memory"
 import { PROMPT_VOLATILE_MARKER } from "./prompt-cache"
-import { formatContext, estimateTokens } from "../utils/toon"
+import { formatContext, estimateTokens } from "../utils/llm-text"
 import { buildSystemPromptWithProjects } from "./prompt-builder"
 import { createAllTools } from "../tools/index"
 import { getMCPManager as getSingletonMCPManager } from "../mcp/singleton"
@@ -258,8 +258,8 @@ export async function compileContext(opts: {
               description: mcpTool.description || `Tool from ${server.name}`,
               parameters: mcpTool.inputSchema || { type: "object", properties: {} },
               execute: async (params: Record<string, unknown>) => {
-                // Return raw JS value — agent-loop will TOON-encode via formatToolResult.
-                // Never pre-stringify here: formatToolResult(string) double-encodes.
+                // Return raw JS value — agent-loop renders it as text via formatToolResult.
+                // Never pre-stringify here: the loop would send the JSON text as it is.
                 return await effectiveMcpManager.callTool(server.id, mcpTool.name, params)
               },
             })
@@ -546,7 +546,7 @@ export async function compileContext(opts: {
   systemPrompt += `\n\n# ENTORNO ACTUAL\n${workspaceLine}\n`
 
 
-  // Inject scratchpad (Strategy: WRITE) — usando TOON para ahorro de tokens.
+  // Inject scratchpad (Strategy: WRITE).
   // Changes every turn, so it is appended after the prompt-cache marker below
   // together with the summary and retrieved memory, not here.
   let scratchpadSection = ""
@@ -555,7 +555,7 @@ export async function compileContext(opts: {
     for (const n of scratchpadNotes) {
       scratchpadData[n.key] = n.value
     }
-    // TOON comprime el formato clave-valor
+    // Clave: valor, una línea por nota.
     const scratchpadContent = formatContext(scratchpadData)
     scratchpadSection = `\n\n# SCRATCHPAD (Persistent Notes)\n${scratchpadContent}\n`
   }

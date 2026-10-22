@@ -15,6 +15,11 @@ import type { CodeGraphDoc } from "../storage/collections"
 
 /** Profiles that explore and never edit. */
 const READER_PROFILES = new Set(["scout", "planner"])
+/** Whether an agent id (`scout`, `scout#2`, `spawn-…`) is a reader: it explores and never edits. */
+export function isReaderAgent(agentId?: string | null): boolean {
+  return !!agentId && READER_PROFILES.has(agentId.replace(/#\d+$/, ""))
+}
+
 /** Tools that list the tree; the index (`get_project_context`, `outline`) answers the same. */
 export const DISK_WALK_TOOLS: readonly string[] = ["fs_list", "fs_glob"]
 /** Below this many indexed files the index is not worth trusting over a directory listing. */

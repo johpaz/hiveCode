@@ -9,7 +9,7 @@ import { bumpRollup, col, nextId } from "../storage/hive"
 import type { ConversationDoc, ScratchpadDoc, SummaryDoc } from "../storage/collections"
 import { logger } from "../utils/logger"
 import type { ContentPart, LLMMessage } from "./llm-client"
-import { estimateTokens } from "../utils/toon"
+import { estimateTokens } from "../utils/llm-text"
 import { rememberConversationSummary } from "./conversation-memory"
 
 const log = logger.child("conv-store")

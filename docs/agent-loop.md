@@ -29,7 +29,7 @@ mensaje ─▶ compilar contexto ─▶ llamada al modelo ─▶ ¿herramientas?
    - Modo: `canExecuteTool` (bloqueos de `plan`) y confirmación (`approval`), ver [modes.md](./modes.md).
    - Se escribe un checkpoint **antes** de ejecutar, para que un fallo a mitad no repita llamadas ya hechas.
    - Un lote puede correr en paralelo si `structuralParallelism` lo permite (lecturas independientes, o delegaciones a workers distintos que no escriben el mismo workspace); las que tocan el mismo archivo se serializan.
-   - Cada resultado se acota (`capToolResult`), se formatea en TOON para ahorrar tokens y se registra en telemetría (`tool_call`/`tool_done` por IPC).
+   - Cada resultado se acota (`capToolResult`), se escribe como texto (`utils/llm-text.ts`) y se registra en telemetría (`tool_call`/`tool_done` por IPC).
 7. **Detección de bucles** tras cada resultado (ver abajo) y checkpoint posterior (`post-tool`).
 9. **Salida.** Si el modelo responde sin herramientas, ese texto es la respuesta. Si se agotan los pasos sin texto, hace una llamada final de síntesis; el estado queda `max_steps:<n>`.
 

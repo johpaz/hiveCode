@@ -23,7 +23,7 @@
 import { compileContext } from "@johpaz/hivecode-core/agent/context-compiler"
 import { closeHiveDb } from "@johpaz/hivecode-core/storage/hivedb"
 import { col } from "@johpaz/hivecode-core/storage/hive"
-import { estimateTokens } from "@johpaz/hivecode-core/utils/toon"
+import { estimateTokens } from "@johpaz/hivecode-core/utils/llm-text"
 import type { AgentDoc } from "@johpaz/hivecode-core/storage/collections"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 

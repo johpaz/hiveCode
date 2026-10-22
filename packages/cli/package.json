@@ -17,8 +17,7 @@
   },
   "dependencies": {
     "@johpaz/hivecode-core": "workspace:*",
-    "@johpaz/hivecode-code": "workspace:*",
-    "toon-format-parser": "1.1.3"
+    "@johpaz/hivecode-code": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "^1.4.1",
