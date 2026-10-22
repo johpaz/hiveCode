@@ -245,7 +245,14 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
   },
 }
 
-for (const definition of Object.values(CORE_AGENT_DEFINITIONS)) definition.tools.push("spawn_agent")
+/**
+ * Profiles that explore and never create agents: how many run, and on what, is the coordinator's call (it sizes the
+ * team and the shared budget). A scout that spawns its own children bypasses that, and `spawn_agent` plus its
+ * instructions cost it ~700 tokens in every turn.
+ */
+export const NO_SPAWN_PROFILES: ReadonlySet<string> = new Set(["scout", "planner"])
+
+for (const [type, definition] of Object.entries(CORE_AGENT_DEFINITIONS)) if (!NO_SPAWN_PROFILES.has(type)) definition.tools.push("spawn_agent")
 
 export async function ensureCoreAgentProfiles(userId = "default"): Promise<void> {
   const agents = await col<AgentDoc>("agents")
@@ -271,7 +278,7 @@ export async function ensureCoreAgentProfiles(userId = "default"): Promise<void>
         user_id: existing?.doc.user_id ?? userId,
         name: definition.name,
         description: definition.description,
-        system_prompt: `${definition.systemPrompt}\n\n${SUBDIVISION_INSTRUCTIONS}`,
+        system_prompt: NO_SPAWN_PROFILES.has(type) ? definition.systemPrompt : `${definition.systemPrompt}\n\n${SUBDIVISION_INSTRUCTIONS}`,
         tone: existing?.doc.tone ?? "direct",
         role: definition.role,
         agent_type: type,
@@ -287,7 +294,7 @@ export async function ensureCoreAgentProfiles(userId = "default"): Promise<void>
         max_input_tokens: existing?.doc.max_input_tokens ?? 0,
         max_output_tokens: existing?.doc.max_output_tokens ?? 0,
         max_cost_usd: existing?.doc.max_cost_usd ?? 0,
-        tools_json: JSON.stringify([...new Set([...definition.tools, "spawn_agent"])]),
+        tools_json: JSON.stringify([...new Set([...definition.tools, ...(NO_SPAWN_PROFILES.has(type) ? [] : ["spawn_agent"])])]),
         skills_json: JSON.stringify(definition.skills),
         permission_profile: definition.permissionProfile,
         user_instructions: existing?.doc.user_instructions ?? "",

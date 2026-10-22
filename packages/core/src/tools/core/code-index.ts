@@ -22,16 +22,17 @@ const list = <T,>(raw: string | null | undefined): T[] => {
 }
 
 async function projectGraphs(scope: ProjectScope): Promise<CodeGraphDoc[]> {
-  await ensureIndexes([["codeGraph", "session_id"]])
-  return (await (await col<CodeGraphDoc>("codeGraph")).findBy("session_id", scope.sessionId)).map(entry => entry.doc)
+  await ensureIndexes([["codeGraph", "project_id"]])
+  return (await (await col<CodeGraphDoc>("codeGraph")).findBy("project_id", scope.projectId)).map(entry => entry.doc)
 }
 
 const relativeTo = (scope: ProjectScope, file: string) => (path.isAbsolute(file) ? path.relative(scope.workspace, file) : file)
 
 /** The graph row of a file given as relative or absolute path, or as a unique path suffix. */
 function findGraph(graphs: CodeGraphDoc[], scope: ProjectScope, target: string): CodeGraphDoc | undefined {
-  const wanted = path.normalize(target)
-  const exact = graphs.find(g => g.file_path === path.resolve(scope.workspace, wanted) || path.normalize(relativeTo(scope, g.file_path)) === wanted)
+  // Index paths are relative to the project root; a worktree has the same layout.
+  const wanted = path.isAbsolute(target) ? path.relative(scope.workspace, target) : path.normalize(target)
+  const exact = graphs.find(g => path.normalize(g.file_path) === wanted)
   if (exact) return exact
   const tails = graphs.filter(g => g.file_path.endsWith(path.sep + wanted))
   return tails.length === 1 ? tails[0] : undefined
@@ -40,7 +41,8 @@ function findGraph(graphs: CodeGraphDoc[], scope: ProjectScope, target: string):
 /** True when the file on disk changed after it was indexed (or is gone). */
 function isStale(scope: ProjectScope, graph: CodeGraphDoc): boolean {
   try {
-    const onDisk = fs.statSync(path.isAbsolute(graph.file_path) ? graph.file_path : path.join(scope.workspace, graph.file_path))
+    // The index is the project's; compare with the project's file, not a worktree's private copy.
+    const onDisk = fs.statSync(path.join(scope.root, graph.file_path))
     return !!graph.last_modified && onDisk.mtime.toISOString() !== graph.last_modified
   } catch { return true }
 }

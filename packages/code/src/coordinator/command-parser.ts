@@ -1509,6 +1509,64 @@ async function handleSkillCommand(
   }
 }
 
+/** /project: what hivecode knows about this project, and the notes every agent receives about it. */
+async function handleProjectCommand(
+  args: string[],
+  ctx: ContextState,
+  ui?: UiCallbacks,
+): Promise<CommandResult> {
+  const { ensureProject, setProjectNotes, MAX_PROJECT_NOTES } = await import("@johpaz/hivecode-core/agent/project-identity")
+  const project = await ensureProject(ctx.projectPath || process.cwd())
+  const [action, ...rest] = args
+
+  if (!action || action === "info") {
+    const paths: string[] = JSON.parse(project.paths || "[]")
+    const lines = [
+      "",
+      `  Proyecto: ${project.name}`,
+      `  Raíz:     ${project.root_path}`,
+      `  Abierto desde: ${paths.length} ruta(s)`,
+      `  Indexado: ${project.indexed_at ?? "aún no"}`,
+      "",
+      project.notes ? `  Notas para los agentes:\n${project.notes.split("\n").map(l => `    ${l}`).join("\n")}` : "  Sin notas. Escribe lo que los agentes deben saber de este proyecto: /project notes <texto>",
+      "",
+      "  · notes <texto>   — fijar las notas (reemplaza las anteriores)",
+      "  · notes --clear   — borrar las notas",
+      "  · reindex         — reconciliar el índice con el disco",
+      "",
+    ]
+    return { handled: true, output: lines.join("\n") }
+  }
+
+  if (action === "notes" || action === "nota" || action === "notas") {
+    let text = rest.join(" ").trim()
+    if (text === "--clear") text = ""
+    else if (!text && ui?.showConfigModal) {
+      const values = await ui.showConfigModal("project_notes", `Notas de ${project.name}`, [
+        { key: "notes", label: `Lo que los agentes deben saber (máx. ${MAX_PROJECT_NOTES} caracteres)`, placeholder: project.notes ? project.notes.slice(0, 80) : "Convenciones, objetivos, qué no tocar…", required: false, secret: false, field_type: "text" },
+      ])
+      if (!values) return { handled: true, output: "  Edición cancelada" }
+      text = values.notes ?? ""
+    } else if (!text) {
+      return { handled: true, output: "uso: /project notes <texto>   (o --clear para borrarlas)" }
+    }
+    try {
+      const saved = await setProjectNotes(project.id, text)
+      return { handled: true, output: saved.notes ? `  ✓ Notas de ${saved.name} guardadas (${saved.notes.length} caracteres). Las verán los agentes desde su próxima llamada.` : `  ✓ Notas de ${saved.name} borradas` }
+    } catch (err) {
+      return { handled: true, output: `  ✗ ${(err as Error).message}` }
+    }
+  }
+
+  if (action === "reindex") {
+    const { reconcileCodeIndex } = await import("../agent/code-indexer")
+    const result = await reconcileCodeIndex(project.id, project.root_path)
+    return { handled: true, output: `  ✓ Índice al día: ${result.reindexed} reindexado(s), ${result.removed} quitado(s) en ${result.durationMs} ms` }
+  }
+
+  return { handled: true, output: "opciones: info | notes | reindex\n\nEscribe /help /project" }
+}
+
 async function handleModeCommand(
   args: string[],
   _db: DbCompat,
@@ -2438,6 +2496,9 @@ export async function parseInternalCommand(
       return handleMcpCommand(args, db, ctxState, ui)
     case "skill":
       return handleSkillCommand(args, db, ui)
+    case "project":
+    case "proyecto":
+      return handleProjectCommand(args, ctxState, ui)
     case "mode":
       return handleModeCommand(args, db, ctxState)
     case "task":

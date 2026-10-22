@@ -220,7 +220,7 @@ export const searchKnowledgeTool: Tool = {
           result.code_scope_error = (error as Error).message;
         }
       }
-      const activeSessionId = scope?.sessionId ?? "";
+      const activeProjectId = scope?.projectId ?? "";
 
       const coreCatalog = new Map(CORE_TOOL_CATALOG.map(t => [t.name, t]));
       const toolsCol = await col<ToolDoc>("tools");
@@ -234,10 +234,10 @@ export const searchKnowledgeTool: Tool = {
         if (nonCodeTypes.length > 0) {
           groups.push(searchCapabilities(text, { types: nonCodeTypes, k: limit * 4 }));
         }
-        if (wantsCode && activeSessionId) {
+        if (wantsCode && activeProjectId) {
           groups.push(searchCapabilities(text, {
             types: ["code"],
-            filters: [{ field: "session_id", value: activeSessionId }],
+            filters: [{ field: "project_id", value: activeProjectId }],
             k: limit * 4,
           }));
         }
@@ -303,7 +303,7 @@ export const searchKnowledgeTool: Tool = {
         const entry = await codeFilesCol.get(hit.rawId);
         const c = entry?.doc;
         if (!c) return null;
-        let content = c.content;
+        let content = c.content ?? "";
         try { if (scope) content = await readProjectSource(scope, c.file_path); } catch { return null; }
         // Compact mode trims skill bodies; a code hit without its snippet and lines only sends the reader to fs_read.
         const { snippet, startLine, endLine } = buildSnippetWithRange(content, normalizedQuery, compact ? 240 : 420);
@@ -311,7 +311,7 @@ export const searchKnowledgeTool: Tool = {
           file_path: c.file_path,
           snippet,
           lines: `${startLine}-${endLine}`,
-          reference: scope ? { kind: "code", sessionId: scope.sessionId, id: c.id, filePath: c.file_path, hash: fingerprint(content) } : undefined,
+          reference: scope ? { kind: "code", projectId: scope.projectId, id: c.id, filePath: c.file_path, hash: fingerprint(content) } : undefined,
           rank: hit.score,
         };
       }

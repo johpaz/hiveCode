@@ -3,6 +3,7 @@ import path from "node:path"
 import fs from "node:fs"
 import { createHash } from "node:crypto"
 import { col, ensureIndexes } from "../storage/hive"
+import { getHiveDb } from "../storage/hivedb"
 import type { CodeFileDoc, CodeGraphDoc } from "../storage/collections"
 import { upsertCapabilityDocs, deleteCapabilitiesByFilter } from "./capability-search"
 import { logger } from "../utils/logger"
@@ -113,7 +114,10 @@ export async function indexFile(filePath: string, workspace: string): Promise<Fi
       functions.push(...symbols.filter(s => s.kind === "fn").map(s => s.name))
       classes.push(...symbols.filter(s => ["struct", "enum", "trait"].includes(s.kind)).map(s => s.name))
     }
-    return { filePath, imports, exports, functions, classes, complexity, lastModified, content: source,
+    // Everything stored is relative to the project root: the same file is the same row from the project or any worktree.
+    const toRelative = (abs: string) => path.relative(workspace, abs)
+    const relativeImports = [...new Set(imports.map(toRelative).filter(rel => rel && !rel.startsWith("..") && !path.isAbsolute(rel)))]
+    return { filePath: toRelative(filePath), imports: relativeImports, exports, functions, classes, complexity, lastModified, content: source,
       contentHash: createHash("sha256").update(source).digest("hex"), symbols, relationsComplete: JS_EXTENSIONS.has(ext) }
 
   } catch (err) {
@@ -122,20 +126,22 @@ export async function indexFile(filePath: string, workspace: string): Promise<Fi
   }
 }
 
-export function codeFileId(sessionId: string, filePath: string): string {
-  return `${sessionId}:${filePath}`
+export function codeFileId(projectId: string, relPath: string): string {
+  return `${projectId}:${relPath}`
 }
 
-export async function upsertFileGraphIndex(sessionId: string, index: FileIndex): Promise<void> {
-  const codeGraph = await col<CodeGraphDoc>("codeGraph")
-  const id = codeFileId(sessionId, index.filePath)
-  const existing = await codeGraph.get(id)
-  await codeGraph.put(id, {
-    id,
-    session_id: sessionId,
+/** Documents per commit. One commit per file is what made indexing 665 files take 26 s; batched it takes under one. */
+const WRITE_BATCH = 100
+
+type GraphRow = CodeGraphDoc
+
+function graphRow(projectId: string, index: FileIndex, exportedBy: string): GraphRow {
+  return {
+    id: codeFileId(projectId, index.filePath),
+    project_id: projectId,
     file_path: index.filePath,
     imports: JSON.stringify(index.imports),
-    exported_by: existing?.doc.exported_by ?? "[]",
+    exported_by: exportedBy,
     exports: JSON.stringify(index.exports),
     functions: JSON.stringify(index.functions),
     classes: JSON.stringify(index.classes),
@@ -145,110 +151,157 @@ export async function upsertFileGraphIndex(sessionId: string, index: FileIndex):
     content_hash: index.contentHash,
     symbols_json: JSON.stringify(index.symbols),
     relations_complete: index.relationsComplete,
-  }, { expectedVersion: existing?.version ?? 0 })
+  }
 }
 
-export async function upsertFileSearchIndex(sessionId: string, index: FileIndex): Promise<void> {
-  const codeFiles = await col<CodeFileDoc>("codeFiles")
-  const id = codeFileId(sessionId, index.filePath)
-  const importSymbols = index.imports.join(" ")
-  const exportedSymbols = index.exports.join(" ")
-  const functionSymbols = index.functions.join(" ")
-  const classSymbols = index.classes.join(" ")
-
-  await codeFiles.put(id, {
-    id,
-    session_id: sessionId,
-    file_path: index.filePath,
-    content: index.content,
-    content_hash: index.contentHash,
-    symbols_json: JSON.stringify(index.symbols),
-    imports: importSymbols,
-    exports: exportedSymbols,
-    functions: functionSymbols,
-    classes: classSymbols,
-    updated_at: Math.floor(Date.now() / 1000),
-  })
-
-  await upsertCapabilityDocs([{
-    type: "code",
-    rawId: id,
-    name: path.basename(index.filePath),
-    body: index.content,
-    tags: [index.filePath, importSymbols, exportedSymbols, functionSymbols, classSymbols].filter(Boolean).join(" "),
-    extraFilters: [
-      { field: "session_id", value: sessionId },
-      { field: "code_file_id", value: id },
-    ],
-  }])
+/** Puts documents in one atomic commit per chunk. */
+async function putMany(collection: string, entries: Array<{ id: string; doc: unknown }>): Promise<void> {
+  const db = await getHiveDb()
+  for (let i = 0; i < entries.length; i += WRITE_BATCH) {
+    await db.batch(entries.slice(i, i + WRITE_BATCH).map(({ id, doc }) => ({ op: "put" as const, collection, id, doc })))
+  }
 }
 
-export async function upsertFileIndex(sessionId: string, index: FileIndex): Promise<void> {
-  await upsertFileGraphIndex(sessionId, index)
-  await upsertFileSearchIndex(sessionId, index)
+/** Graph rows for several files at once; a file already indexed keeps its `exported_by`. */
+export async function upsertFileGraphIndexBatch(projectId: string, indexes: FileIndex[]): Promise<void> {
+  if (!indexes.length) return
+  const codeGraph = await col<CodeGraphDoc>("codeGraph")
+  const existing = await Promise.all(indexes.map(index => codeGraph.get(codeFileId(projectId, index.filePath))))
+  await putMany("codeGraph", indexes.map((index, i) => ({ id: codeFileId(projectId, index.filePath), doc: graphRow(projectId, index, existing[i]?.doc.exported_by ?? "[]") })))
 }
 
-export async function deleteFileSearchIndex(sessionId: string, filePath: string): Promise<void> {
+export async function upsertFileGraphIndex(projectId: string, index: FileIndex): Promise<void> {
+  await upsertFileGraphIndexBatch(projectId, [index])
+}
+
+/**
+ * Search side of the index: a row per file in `codeFiles` and one document for `search_knowledge`.
+ * The document's text is the file's name, path and symbols, not its contents: agents read the code from
+ * disk, and storing it here only made the index three times the size of the project.
+ */
+export async function upsertFileSearchIndexBatch(projectId: string, indexes: FileIndex[]): Promise<void> {
+  if (!indexes.length) return
+  await putMany("codeFiles", indexes.map(index => ({
+    id: codeFileId(projectId, index.filePath),
+    doc: {
+      id: codeFileId(projectId, index.filePath), project_id: projectId, file_path: index.filePath, content_hash: index.contentHash,
+      symbols_json: JSON.stringify(index.symbols), imports: index.imports.join(" "), exports: index.exports.join(" "),
+      functions: index.functions.join(" "), classes: index.classes.join(" "), updated_at: Math.floor(Date.now() / 1000),
+    } satisfies CodeFileDoc,
+  })))
+  for (let i = 0; i < indexes.length; i += WRITE_BATCH) {
+    await upsertCapabilityDocs(indexes.slice(i, i + WRITE_BATCH).map(index => {
+      const id = codeFileId(projectId, index.filePath)
+      const symbols = [...index.exports, ...index.functions, ...index.classes]
+      return {
+        type: "code" as const,
+        rawId: id,
+        name: path.basename(index.filePath),
+        body: [index.filePath, ...symbols].join(" "),
+        tags: [index.filePath, index.imports.join(" "), symbols.join(" ")].filter(Boolean).join(" "),
+        extraFilters: [
+          { field: "project_id", value: projectId },
+          { field: "code_file_id", value: id },
+        ],
+      }
+    }))
+  }
+}
+
+export async function upsertFileSearchIndex(projectId: string, index: FileIndex): Promise<void> {
+  await upsertFileSearchIndexBatch(projectId, [index])
+}
+
+export async function upsertFileIndex(projectId: string, index: FileIndex): Promise<void> {
+  await upsertFileGraphIndex(projectId, index)
+  await upsertFileSearchIndex(projectId, index)
+}
+
+export async function deleteFileSearchIndex(projectId: string, relPath: string): Promise<void> {
   const codeFiles = await col<CodeFileDoc>("codeFiles")
   const codeGraph = await col<CodeGraphDoc>("codeGraph")
-  const id = codeFileId(sessionId, filePath)
+  const id = codeFileId(projectId, relPath)
   await codeFiles.delete(id)
   await codeGraph.delete(id)
   await deleteCapabilitiesByFilter("code_file_id", id)
 }
 
-export async function buildExportedByIndex(sessionId: string): Promise<void> {
-  const codeGraph = await col<CodeGraphDoc>("codeGraph")
-  const rows = await codeGraph.findBy("session_id", sessionId)
+/** Drops everything indexed for a project (before a full rebuild). */
+export async function clearProjectIndex(projectId: string): Promise<void> {
+  await deleteCapabilitiesByFilter("project_id", projectId)
+  for (const name of ["codeFiles", "codeGraph"] as const) {
+    const collection = await col<{ id: string }>(name)
+    const db = await getHiveDb()
+    const rows = await collection.findBy("project_id", projectId)
+    for (let i = 0; i < rows.length; i += WRITE_BATCH) {
+      await db.batch(rows.slice(i, i + WRITE_BATCH).map(row => ({ op: "delete" as const, collection: name, id: row.id })))
+    }
+  }
+}
 
-  // Build reverse map: for each file, who imports it?
+/**
+ * Rebuilds who-imports-whom for the project. Only rows whose list actually changed are written: after an
+ * edit that is a handful of files, and on a project that was just indexed it is all of them in a few commits.
+ */
+export async function buildExportedByIndex(projectId: string): Promise<void> {
+  const codeGraph = await col<CodeGraphDoc>("codeGraph")
+  const rows = await codeGraph.findBy("project_id", projectId)
+
   const importedBy = new Map<string, string[]>()
-  for (const row of rows.map((entry) => entry.doc)) {
-    const imports: string[] = JSON.parse(row.imports ?? "[]")
-    for (const dep of imports) {
+  for (const { doc } of rows) {
+    for (const dep of parseList(doc.imports)) {
       if (!importedBy.has(dep)) importedBy.set(dep, [])
-      importedBy.get(dep)!.push(row.file_path)
+      importedBy.get(dep)!.push(doc.file_path)
     }
   }
 
-  // Update exported_by for all files in batch
+  const changed: Array<{ id: string; doc: unknown }> = []
   for (const entry of rows) {
-    const importers = importedBy.get(entry.doc.file_path) ?? []
-    await codeGraph.put(entry.id, { ...entry.doc, exported_by: JSON.stringify(importers) }, { expectedVersion: entry.version })
+    const next = JSON.stringify([...(importedBy.get(entry.doc.file_path) ?? [])].sort())
+    if (next !== entry.doc.exported_by) changed.push({ id: entry.id, doc: { ...entry.doc, exported_by: next } })
   }
+  await putMany("codeGraph", changed)
 }
 
 
 /**
- * Sessions whose workspace was mutated by a tool that does not name its target
- * (shell, scripts, git). The index cannot be patched file-by-file for those, so
- * the next context read reconciles by mtime instead.
+ * Projects whose workspace was mutated by a tool that does not name its target (shell, scripts, git) or by a
+ * worktree that was merged back. The index cannot be patched file-by-file for those, so the next context
+ * read reconciles by mtime instead.
  */
-const staleSessions = new Set<string>()
+const staleProjects = new Set<string>()
 
-export async function markSourceIndexStale(sessionId: string): Promise<void> {
-  staleSessions.add(sessionId)
-  await (await col("codeContextCache")).delete(`project_context:${sessionId}`)
+export async function markSourceIndexStale(projectId: string): Promise<void> {
+  staleProjects.add(projectId)
+  await (await col("codeContextCache")).delete(`project_context:${projectId}`)
 }
 
 /** True once per mark: the caller that sees it owns the reconcile. */
-export function consumeStaleSourceIndex(sessionId: string): boolean {
-  return staleSessions.delete(sessionId)
+export function consumeStaleSourceIndex(projectId: string): boolean {
+  return staleProjects.delete(projectId)
 }
 
-export async function refreshSourceIndex(sessionId: string, workspace: string, filePath: string): Promise<void> {
-  await ensureIndexes([["codeGraph", "session_id"], ["codeFiles", "session_id"]])
+/**
+ * Brings one edited file up to date. `root` is the project root; `workspace` is where the edit happened. An edit
+ * inside a worktree is NOT written here: the worktree is a private copy, and its files reach the project only when
+ * it is merged back, which marks the index stale. Returns whether the index was touched.
+ */
+export async function refreshSourceIndex(projectId: string, root: string, workspace: string, filePath: string): Promise<boolean> {
+  if (fs.realpathSync(workspace) !== fs.realpathSync(root)) return false
+  await ensureIndexes([["codeGraph", "project_id"], ["codeFiles", "project_id"]])
   const absolute = path.resolve(workspace, filePath)
-  if (!shouldIndexFile(absolute, workspace)) return
-  const before = await (await col<CodeGraphDoc>("codeGraph")).get(codeFileId(sessionId, absolute))
-  const source = await indexFile(absolute, workspace)
-  if (source) await upsertFileIndex(sessionId, source)
-  else await deleteFileSearchIndex(sessionId, absolute)
+  if (!shouldIndexFile(absolute, root)) return false
+  const rel = path.relative(root, absolute)
+  const before = await (await col<CodeGraphDoc>("codeGraph")).get(codeFileId(projectId, rel))
+  const source = await indexFile(absolute, root)
+  if (source) await upsertFileIndex(projectId, source)
+  else await deleteFileSearchIndex(projectId, rel)
   // A new file may already be imported by others (their import did not resolve until now): that needs the whole map.
   // Any other edit only moves the edges of the file itself, which is a handful of rows, not one write per file.
-  if (!before && source) await buildExportedByIndex(sessionId)
-  else await patchExportedBy(sessionId, absolute, parseList(before?.doc.imports), source?.imports ?? [])
-  await (await col("codeContextCache")).delete(`project_context:${sessionId}`)
+  if (!before && source) await buildExportedByIndex(projectId)
+  else await patchExportedBy(projectId, rel, parseList(before?.doc.imports), source?.imports ?? [])
+  await (await col("codeContextCache")).delete(`project_context:${projectId}`)
+  return true
 }
 
 const parseList = (raw: string | null | undefined): string[] => {
@@ -259,7 +312,7 @@ const parseList = (raw: string | null | undefined): string[] => {
  * Moves one file's edges in the reverse import map: `exported_by` of every file it stopped importing loses it,
  * of every file it started importing gains it. An edit that leaves the imports as they were writes nothing.
  */
-export async function patchExportedBy(sessionId: string, file: string, oldImports: string[], newImports: string[]): Promise<void> {
+export async function patchExportedBy(projectId: string, file: string, oldImports: string[], newImports: string[]): Promise<void> {
   const before = new Set(oldImports)
   const after = new Set(newImports)
   const touched = [
@@ -269,10 +322,10 @@ export async function patchExportedBy(sessionId: string, file: string, oldImport
   if (!touched.length) return
   const codeGraph = await col<CodeGraphDoc>("codeGraph")
   for (const { dep, add } of touched) {
-    const entry = await codeGraph.get(codeFileId(sessionId, dep))
+    const entry = await codeGraph.get(codeFileId(projectId, dep))
     if (!entry) continue // not indexed (a dependency, a generated file): nothing to keep
     const importers = new Set(parseList(entry.doc.exported_by))
     if (add) importers.add(file); else importers.delete(file)
-    await codeGraph.put(entry.doc.id, { ...entry.doc, exported_by: JSON.stringify([...importers]) }, { expectedVersion: entry.version })
+    await codeGraph.put(entry.doc.id, { ...entry.doc, exported_by: JSON.stringify([...importers].sort()) }, { expectedVersion: entry.version })
   }
 }

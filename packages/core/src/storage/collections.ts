@@ -668,7 +668,9 @@ export interface CodeContextCacheDoc {
 
 export interface CodeGraphDoc {
   id: string;
-  session_id: string;
+  /** The code project (`CodeProjectDoc.id`) this file belongs to: the index is shared by every session of it. */
+  project_id: string;
+  /** Relative to the project root. */
   file_path: string;
   imports: string;
   exported_by: string;
@@ -757,9 +759,11 @@ export interface CodeBridgeConfigDoc {
 
 export interface CodeFileDoc {
   id: string;
-  session_id: string;
+  project_id: string;
+  /** Relative to the project root. */
   file_path: string;
-  content: string;
+  /** Not stored by the indexer any more: the text lives on disk and the index keeps symbols. Legacy rows may carry it. */
+  content?: string;
   imports: string;
   exports: string;
   functions: string;
@@ -767,6 +771,26 @@ export interface CodeFileDoc {
   updated_at: number;
   content_hash?: string;
   symbols_json?: string;
+}
+
+/**
+ * A code project: the repository (or folder) agents work on, independent of any session. Everything derived
+ * from its files (graph, symbols, search documents, context cache) hangs from `id`, so opening the project
+ * again, from another session or a worktree, reuses it instead of indexing it a second time.
+ */
+export interface CodeProjectDoc {
+  /** Stable key derived from the repository's root (the git common dir; the real path without git). */
+  id: string;
+  name: string;
+  /** The project's root: files in the index are relative to it. */
+  root_path: string;
+  /** Every path this project has been opened from (subfolders, clones that share the root, worktrees). */
+  paths: string;
+  /** Written by the user: conventions, goals, what the agents should know. Versioned with the document. */
+  notes: string;
+  indexed_at: string | null;
+  created_at: number;
+  updated_at: number;
 }
 
 export interface ProjectDoc {

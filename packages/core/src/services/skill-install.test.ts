@@ -80,7 +80,7 @@ describe("toSkillDoc", () => {
     const parsed = toSkillDoc({ dir: "skills/demo-finder", content: FIND_SKILLS, origin: "https://x/SKILL.md" }, "vercel-labs") as any
     expect(parsed.doc).toMatchObject({ id: "demo-finder", name: "demo-finder", author: "vercel-labs", active: true, catalog_managed: false })
     expect(parsed.doc.description).toContain("discover and install")
-    expect(parsed.doc.body.startsWith("# Demo Finder")).toBe(true)
+    expect(parsed.doc.body.trimStart().startsWith("# Demo Finder")).toBe(true)
   })
 
   test("rejects an invalid name and an empty body", () => {
@@ -88,8 +88,9 @@ describe("toSkillDoc", () => {
     expect((toSkillDoc({ dir: "x", content: "---\nname: ok\n---\n", origin: "o" }, "a") as any).error).toContain("no tiene contenido")
   })
 
-  test("a skill with no frontmatter takes its folder name", () => {
-    expect((toSkillDoc({ dir: "pdf-tools", content: "# PDF\nDo pdfs", origin: "o" }, "a") as any).doc.id).toBe("pdf-tools")
+  test("a skill with no frontmatter name takes its first heading, then its folder", () => {
+    expect((toSkillDoc({ dir: "pdf-tools", content: "# My PDF Skill\nDo pdfs", origin: "o" }, "a") as any).doc.id).toBe("my_pdf_skill")
+    expect((toSkillDoc({ dir: "pdf-tools", content: "Do pdfs", origin: "o" }, "a") as any).doc.id).toBe("pdf-tools")
   })
 })
 

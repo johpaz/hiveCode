@@ -10,12 +10,12 @@ import { codeFileId, consumeStaleSourceIndex, markSourceIndexStale, refreshSourc
 
 const previous = process.env.HIVE_DB_PATH
 let workspace = ""
-const SESSION = "session-writeback"
+const PROJECT = "project-writeback"
 
 async function seedContextRow() {
   const cache = await col<CodeContextCacheDoc>("codeContextCache")
-  await cache.put(`project_context:${SESSION}`, {
-    cache_key: `project_context:${SESSION}`,
+  await cache.put(`project_context:${PROJECT}`, {
+    cache_key: `project_context:${PROJECT}`,
     compiled: "ctx",
     expires_at: new Date(Date.now() + 60_000).toISOString(),
     created_at: new Date().toISOString(),
@@ -41,26 +41,37 @@ describe("source index write-back", () => {
   test("markSourceIndexStale is consumed exactly once and drops the cached context", async () => {
     const cache = await seedContextRow()
 
-    await markSourceIndexStale(SESSION)
+    await markSourceIndexStale(PROJECT)
 
-    expect(await cache.get(`project_context:${SESSION}`)).toBeFalsy()
-    expect(consumeStaleSourceIndex(SESSION)).toBe(true)
-    expect(consumeStaleSourceIndex(SESSION)).toBe(false)
+    expect(await cache.get(`project_context:${PROJECT}`)).toBeFalsy()
+    expect(consumeStaleSourceIndex(PROJECT)).toBe(true)
+    expect(consumeStaleSourceIndex(PROJECT)).toBe(false)
   })
 
-  test("consume is false for a session that was never marked", () => {
+  test("consume is false for a project that was never marked", () => {
     expect(consumeStaleSourceIndex("never-marked")).toBe(false)
   })
 
   test("refreshSourceIndex indexes an edited file and drops the cached context", async () => {
-    const file = path.join(workspace, "src", "a.ts")
-    writeFileSync(file, "export const a = 1\n")
+    writeFileSync(path.join(workspace, "src", "a.ts"), "export const a = 1\n")
     const cache = await seedContextRow()
 
-    await refreshSourceIndex(SESSION, workspace, "src/a.ts")
+    expect(await refreshSourceIndex(PROJECT, workspace, workspace, "src/a.ts")).toBe(true)
 
-    const indexed = await (await col<CodeFileDoc>("codeFiles")).get(codeFileId(SESSION, file))
+    const indexed = await (await col<CodeFileDoc>("codeFiles")).get(codeFileId(PROJECT, "src/a.ts"))
     expect(indexed).toBeTruthy()
-    expect(await cache.get(`project_context:${SESSION}`)).toBeFalsy()
+    expect(indexed!.doc.file_path).toBe("src/a.ts")
+    // The index keeps symbols, not the text of the file.
+    expect(indexed!.doc.content).toBeUndefined()
+    expect(await cache.get(`project_context:${PROJECT}`)).toBeFalsy()
+  })
+
+  test("an edit made in a worktree does not touch the project's index", async () => {
+    const other = mkdtempSync(path.join(tmpdir(), "hivecode-worktree-"))
+    mkdirSync(path.join(other, "src"))
+    writeFileSync(path.join(other, "src", "a.ts"), "export const a = 2\n")
+
+    expect(await refreshSourceIndex(PROJECT, workspace, other, "src/a.ts")).toBe(false)
+    expect(await (await col<CodeFileDoc>("codeFiles")).get(codeFileId(PROJECT, "src/a.ts"))).toBeUndefined()
   })
 })

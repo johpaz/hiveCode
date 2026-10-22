@@ -4,7 +4,7 @@
 
 `hivecode` es un harness de ingeniería de software que corre en tu terminal. Un coordinador, **BEE**, recibe tu tarea y delega en seis perfiles estables —**BEE**, **Planner**, **Scout**, **Builder**, **Quality Gate** (`verifier`) y **Spider**—, activa ejecuciones y especialistas temporales bajo demanda, limita por defecto a cuatro las llamadas activas a modelos o herramientas por sesión y usa Spec Kit nativo para features, arquitectura, migraciones y refactors amplios.
 
-> **Runtime:** Bun >= 1.4.2 (los binarios de GitHub Releases lo traen embebido)
+> **Runtime:** Bun >= 1.4.4 (los binarios de GitHub Releases lo traen embebido)
 > **Base de datos:** HiveDB WAL — única fuente de verdad
 > **TUI:** Rust + crossterm, renderer custom (`packages/hivetui/`)
 > **Licencia:** hivecode-NC-1.0 (no comercial)
@@ -31,7 +31,7 @@ Hay tres formas. Elige según tu sistema.
 ### Con npm (Linux x64)
 
 ```bash
-# 1. Bun >= 1.4.2 (el CLI se ejecuta sobre Bun aunque lo instales con npm)
+# 1. Bun >= 1.4.4 (el CLI se ejecuta sobre Bun aunque lo instales con npm)
 curl -fsSL https://bun.sh/install | bash
 
 # 2. hivecode
@@ -458,7 +458,7 @@ El tag dispara `release.yml`: verifica, compila los binarios de cada plataforma,
 |-------|-----------|
 | Usar el binario de Releases | Nada más. |
 | Instalar con npm | [Bun](https://bun.sh) >= 1.4.2 y Node/npm. Linux x64. |
-| Compilar desde el código fuente | Bun >= 1.4.2, [Rust](https://rustup.rs) y Git. |
+| Compilar desde el código fuente | Bun >= 1.4.4, [Rust](https://rustup.rs) y Git. |
 
 Un llavero del sistema (libsecret/D-Bus en Linux, Keychain en macOS, Credential Manager en Windows) para guardar las API keys. Sin él, `hivecode doctor` lo reporta como error.
 

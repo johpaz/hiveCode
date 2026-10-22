@@ -1,6 +1,8 @@
 import { trackCollaboration } from "../../agent/collaboration-telemetry";
 import { getSwarmUsage } from "../../agent/swarm-usage";
 import { runEphemeralAgent } from "../../agent/ephemeral-agents";
+import { markSourceIndexStale } from "../../agent/source-index";
+import { projectOfSession } from "../../agent/project-identity";
 import { resolveProjectScope, scopeFromConfig, resolveContextReferences, type ContextReference } from "../../agent/project-context";
 /**
  * Agents Tools - 14 tools
@@ -750,6 +752,8 @@ export const taskDelegateTool: Tool = {
       // Merge the instance's work into the task workspace now, while whoever wrote it still has context.
       const merge = swarm ? await swarm.integrate({ taskId: groupKey, instanceId: workerId }) : null;
       const merged = merge === null || merge.status === "integrated" || merge.status === "noop";
+      // The merged files are new to the index: reconcile them on the next read.
+      if (merge?.status === "integrated" && scope) await markSourceIndexStale(scope.projectId).catch(() => {});
       const status = !merged || met === false ? "blocked" : "completed";
       await updateTask(taskId, {
         status,
@@ -927,6 +931,11 @@ export const taskReviseTool: Tool = {
       const met = summarizeAcceptance(checks);
       const merge = swarm ? await swarm.integrate({ taskId: groupKey, instanceId: worker.id }) : null;
       const merged = merge === null || merge.status === "integrated" || merge.status === "noop";
+      if (merge?.status === "integrated") {
+        const sessionId = config?.configurable?.code_session_id ?? meta.code_session_id;
+        const project = sessionId ? await projectOfSession(sessionId).catch(() => null) : null;
+        if (project) await markSourceIndexStale(project.id).catch(() => {});
+      }
       const status = !merged || met === false ? "blocked" : "completed";
       await updateTask(resolvedId, {
         status,

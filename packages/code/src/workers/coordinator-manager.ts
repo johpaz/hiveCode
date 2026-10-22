@@ -68,7 +68,8 @@ import { broadcastNarrative, broadcastPhase, broadcastMode, broadcastPhaseStart,
 import { validateCommand } from "@johpaz/hivecode-core/tools/code/command-validator"
 import { incrementTaskCounter, shouldRunReflector, runReflector, startReflectorCron, stopReflectorCron } from "../agent/reflector"
 import { updateFileIndex, reconcileCodeIndex, flushIndexRebuild } from "../agent/code-indexer"
-import { consumeStaleSourceIndex } from "@johpaz/hivecode-core/agent/source-index"
+import { consumeStaleSourceIndex, markSourceIndexStale } from "@johpaz/hivecode-core/agent/source-index"
+import { checkoutRoot, ensureProject, projectOfSession, sessionProject } from "@johpaz/hivecode-core/agent/project-identity"
 import { recordCompletedToolRun } from "@johpaz/hivecode-core/agent/tracer"
 import { loadProjectContext, buildProjectContext } from "../agent/context-retriever"
 import { existsSync } from "node:fs"
@@ -471,9 +472,11 @@ export class CoordinatorManager extends CoordinatorBase {
     this.loadProjectAdrs(projectPath)
     // Index the project in the background: detect external edits and new files,
     // then build the global project context the agents are primed with.
-    const indexing = reconcileCodeIndex(sessionId, projectPath).then(async () => {
-      if (!(await loadProjectContext(sessionId))) {
-        return buildProjectContext(sessionId, projectPath)
+    // The index belongs to the project: a second session on it finds it indexed and only reconciles what changed.
+    const project = sessionProject({ project_path: projectPath })
+    const indexing = ensureProject(projectPath).then(() => reconcileCodeIndex(project.id, project.root)).then(async () => {
+      if (!(await loadProjectContext(project.id))) {
+        return buildProjectContext(project.id, project.root)
       }
     }).catch((err) => {
       log.debug(`[coordinator-manager] Project indexing failed: ${(err as Error).message}`)
@@ -1626,6 +1629,11 @@ export class CoordinatorManager extends CoordinatorBase {
     }
 
     const result = await this.workspaceManager.integrate(workspace)
+    // What the task changed is now in the project: let the index pick it up on the next read.
+    if (result.status === "integrated") {
+      const project = this.activeSessionId ? await projectOfSession(this.activeSessionId).catch(() => null) : null
+      if (project) await markSourceIndexStale(project.id).catch(() => {})
+    }
     if (result.status === "conflict" || result.status === "failed") {
       const errorMsg = result.error || "unknown integration failure"
       this.scribe.updateTaskStatus(taskId, "paused")
@@ -2431,15 +2439,16 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
         .map((entry) => entry.doc)
         .sort((a, b) => b.last_active.localeCompare(a.last_active))[0]
       if (activeSession?.id) {
-        await flushIndexRebuild(activeSession.id)
+        const project = sessionProject(activeSession)
+        await flushIndexRebuild(project.id)
         // shell/git changed files the index never heard about: catch up by mtime.
-        if (consumeStaleSourceIndex(activeSession.id) && activeSession.project_path) {
-          await reconcileCodeIndex(activeSession.id, activeSession.project_path)
+        if (consumeStaleSourceIndex(project.id)) {
+          await reconcileCodeIndex(project.id, project.root)
         }
-        let projectCtx = await loadProjectContext(activeSession.id)
-        if (!projectCtx && activeSession.project_path) {
-          await buildProjectContext(activeSession.id, activeSession.project_path)
-          projectCtx = await loadProjectContext(activeSession.id)
+        let projectCtx = await loadProjectContext(project.id)
+        if (!projectCtx) {
+          await buildProjectContext(project.id, project.root)
+          projectCtx = await loadProjectContext(project.id)
         }
         if (projectCtx) {
           sections.push(projectCtx)
@@ -2929,7 +2938,11 @@ const effectiveModel = phase === "quality" ? (await this.getHighestCapabilityMod
         // Sync code search index after successful write/edit (fire-and-forget)
         if (this.activeSessionId) {
           const absolutePath = this.workspacePath(riskFilePath, workspaceRoot)
-          updateFileIndex(this.activeSessionId, absolutePath, workspaceRoot).catch((err) => {
+          // A task worktree is a private copy; only edits in the project's own checkout are written to its index.
+          projectOfSession(this.activeSessionId).then(project => {
+            if (!project || checkoutRoot(workspaceRoot) !== project.root) return
+            return updateFileIndex(project.id, absolutePath, project.root)
+          }).catch((err) => {
             log.debug(`[coordinator-manager] code search sync failed for ${absolutePath}: ${(err as Error).message}`)
           })
         }

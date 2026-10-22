@@ -24,15 +24,15 @@ const READY_CACHE_MS = 60_000
 const readyCache = new Map<string, { ready: boolean; at: number }>()
 
 /** Whether the project has an index worth exploring through. Cached briefly: a run asks once per context compile. */
-export async function isProjectIndexed(sessionId: string, now = Date.now()): Promise<boolean> {
-  const cached = readyCache.get(sessionId)
+export async function isProjectIndexed(projectId: string, now = Date.now()): Promise<boolean> {
+  const cached = readyCache.get(projectId)
   if (cached && now - cached.at < READY_CACHE_MS) return cached.ready
   let ready = false
   try {
-    await ensureIndexes([["codeGraph", "session_id"]])
-    ready = (await (await col<CodeGraphDoc>("codeGraph")).findBy("session_id", sessionId)).length >= MIN_INDEXED_FILES
+    await ensureIndexes([["codeGraph", "project_id"]])
+    ready = (await (await col<CodeGraphDoc>("codeGraph")).findBy("project_id", projectId)).length >= MIN_INDEXED_FILES
   } catch { /* no index yet: keep the listing tools */ }
-  readyCache.set(sessionId, { ready, at: now })
+  readyCache.set(projectId, { ready, at: now })
   return ready
 }
 

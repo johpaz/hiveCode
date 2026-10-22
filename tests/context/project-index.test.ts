@@ -1,0 +1,128 @@
+import { afterAll, beforeEach, describe, expect, test } from "bun:test"
+import { execFileSync } from "node:child_process"
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs"
+import path from "node:path"
+import { tmpdir } from "node:os"
+import { col } from "../../packages/core/src/storage/hive"
+import { closeHiveDb } from "../../packages/core/src/storage/hivedb"
+import { ensureHiveDb } from "../../packages/core/src/storage/bootstrap"
+import { ensureProject, projectIdentity, sessionsOfProject } from "../../packages/core/src/agent/project-identity"
+import { buildContextPacket, resolveProjectScope } from "../../packages/core/src/agent/project-context"
+import { searchCapabilities } from "../../packages/core/src/agent/capability-search"
+import { reconcileCodeIndex } from "../../packages/code/src/agent/code-indexer"
+import type { CodeGraphDoc, CodeProjectDoc, CodeSessionDoc } from "../../packages/core/src/storage/collections"
+
+const previous = process.env.HIVE_DB_PATH
+let root: string
+let workspace: string
+
+const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, stdio: "pipe" })
+const session = async (id: string, projectPath: string) => (await col<CodeSessionDoc>("codeSessions")).put(id, { id, project_path: projectPath, status: "active", created_at: "2026-10-10", last_active: `2026-10-1${id.length}` })
+const graphRows = async () => (await (await col<CodeGraphDoc>("codeGraph")).scan()).map(e => e.doc)
+
+beforeEach(async () => {
+  closeHiveDb()
+  root = mkdtempSync(path.join(tmpdir(), "hive-project-"))
+  process.env.HIVE_DB_PATH = path.join(root, "db")
+  await ensureHiveDb()
+  workspace = path.join(root, "repo")
+  mkdirSync(path.join(workspace, "src"), { recursive: true })
+  writeFileSync(path.join(workspace, "package.json"), JSON.stringify({ name: "fixture-app" }))
+  writeFileSync(path.join(workspace, "src/a.ts"), "export function alpha() { return 'UNIQUE_BODY_TEXT' }\n")
+  writeFileSync(path.join(workspace, "src/b.ts"), "import { alpha } from './a'\nexport const b = alpha()\n")
+  git(workspace, "init", "-q", "-b", "main")
+  git(workspace, "add", "-A")
+  git(workspace, "commit", "-q", "-m", "init")
+})
+afterAll(() => {
+  closeHiveDb()
+  if (previous === undefined) delete process.env.HIVE_DB_PATH
+  else process.env.HIVE_DB_PATH = previous
+})
+
+describe("one index per project", () => {
+  test("a second session on the same project reuses the index: no new rows, nothing reindexed", async () => {
+    const project = projectIdentity(workspace)
+    await session("s1", workspace)
+    expect((await reconcileCodeIndex(project.id, project.root)).reindexed).toBe(3)
+    const rows = (await graphRows()).length
+
+    await session("s22", workspace)
+    const again = await reconcileCodeIndex(projectIdentity(workspace).id, project.root)
+    expect(again).toMatchObject({ reindexed: 0, removed: 0 })
+    expect((await graphRows()).length).toBe(rows)
+    expect((await sessionsOfProject(project.id)).sort()).toEqual(["s1", "s22"])
+  })
+
+  test("two reconciles at once are one job", async () => {
+    const project = projectIdentity(workspace)
+    const [first, second] = await Promise.all([reconcileCodeIndex(project.id, project.root), reconcileCodeIndex(project.id, project.root)])
+    expect(second).toBe(first)
+    expect((await graphRows()).length).toBe(3)
+  })
+
+  test("paths are relative to the root and the graph links them", async () => {
+    const project = projectIdentity(workspace)
+    await reconcileCodeIndex(project.id, project.root)
+    const rows = await graphRows()
+    expect(rows.map(r => r.file_path).sort()).toEqual(["package.json", "src/a.ts", "src/b.ts"])
+    expect(JSON.parse(rows.find(r => r.file_path === "src/a.ts")!.exported_by)).toEqual(["src/b.ts"])
+    expect(JSON.parse(rows.find(r => r.file_path === "src/b.ts")!.imports)).toEqual(["src/a.ts"])
+  })
+
+  test("a git worktree is the same project, with its own checkout to read", async () => {
+    const wt = path.join(mkdtempSync(path.join(tmpdir(), "hive-project-wt-")), "task")
+    git(workspace, "worktree", "add", "-q", "-B", "hivecode/task-x", wt)
+    expect(projectIdentity(wt).id).toBe(projectIdentity(workspace).id)
+    expect(projectIdentity(wt).root).toBe(realpathSync(workspace))
+
+    await session("s1", workspace)
+    const scope = await resolveProjectScope({ sessionId: "s1", workspace: wt })
+    expect(scope).toMatchObject({ workspace: realpathSync(wt), root: realpathSync(workspace) })
+  })
+
+  test("the index keeps symbols and names, not the text of the files", async () => {
+    const project = projectIdentity(workspace)
+    await reconcileCodeIndex(project.id, project.root)
+    const filters = [{ field: "project_id", value: project.id }]
+    expect((await searchCapabilities("alpha", { types: ["code"], filters, k: 5 })).length).toBeGreaterThan(0)
+    expect(await searchCapabilities("UNIQUE_BODY_TEXT", { types: ["code"], filters, k: 5 })).toHaveLength(0)
+  })
+
+  test("another project's files never show up in this project's search", async () => {
+    const project = projectIdentity(workspace)
+    await reconcileCodeIndex(project.id, project.root)
+    const elsewhere = path.join(root, "elsewhere")
+    mkdirSync(elsewhere)
+    writeFileSync(path.join(elsewhere, "alpha.ts"), "export const alphaElsewhere = 1\n")
+    const other = projectIdentity(elsewhere)
+    await reconcileCodeIndex(other.id, other.root)
+    expect(other.id).not.toBe(project.id)
+    const hits = await searchCapabilities("alpha", { types: ["code"], filters: [{ field: "project_id", value: project.id }], k: 10 })
+    expect(hits.every(h => h.rawId.startsWith(`${project.id}:`))).toBe(true)
+  })
+})
+
+describe("the project record and its notes", () => {
+  test("is created once, named from the manifest, and learns every path it is opened from", async () => {
+    const first = await ensureProject(workspace)
+    expect(first).toMatchObject({ name: "fixture-app", root_path: realpathSync(workspace) })
+    const sub = path.join(workspace, "src")
+    const again = await ensureProject(sub)
+    expect(again.id).toBe(first.id)
+    expect(JSON.parse(again.paths)).toEqual(expect.arrayContaining([realpathSync(workspace), realpathSync(sub)]))
+    expect((await (await col<CodeProjectDoc>("codeProjects")).scan())).toHaveLength(1)
+  })
+
+  test("what the user wrote reaches the context packet of every session", async () => {
+    const project = await ensureProject(workspace)
+    const projects = await col<CodeProjectDoc>("codeProjects")
+    const row = (await projects.get(project.id))!
+    await projects.put(project.id, { ...row.doc, notes: "Siempre responde en español. No toques packages/legacy." }, { expectedVersion: row.version })
+    await session("s1", workspace)
+    const scope = (await resolveProjectScope({ sessionId: "s1", workspace }))!
+    const packet = await buildContextPacket(scope, { summaryOnly: true, tokenBudget: 2_000 })
+    expect(packet.context).toContain("Project notes (written by the user)")
+    expect(packet.context).toContain("No toques packages/legacy")
+  })
+})

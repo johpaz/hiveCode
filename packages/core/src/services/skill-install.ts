@@ -124,15 +124,23 @@ const asList = (value: unknown): string[] =>
   Array.isArray(value) ? value.map(String).map(s => s.trim()).filter(Boolean)
     : typeof value === "string" ? value.split(",").map(s => s.trim()).filter(Boolean) : []
 
+/**
+ * The name a found SKILL.md goes by: its frontmatter `name`; without one, its first `# heading` (`# My Skill` →
+ * `my_skill`); without that, its folder. Frontmatter wins because that is what skill repositories define.
+ */
+export function skillNameOf(found: FoundSkill): string {
+  const { frontmatter: fm, body } = parseFrontmatter(found.content)
+  if (typeof fm.name === "string" && fm.name.trim()) return fm.name.trim()
+  const heading = /^#\s+(.+)$/m.exec(body)?.[1]?.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "")
+  return heading || path.basename(found.dir)
+}
+
 /** A found SKILL.md as a skill document, or the reason it is not one. */
 export function toSkillDoc(found: FoundSkill, fallbackAuthor: string, now = Date.now()): { ok: true; doc: SkillDoc } | { ok: false; error: string } {
   const { frontmatter: fm, body } = parseFrontmatter(found.content)
-  const heading = /^#\s+(.+)$/m.exec(body)?.[1]?.trim()
-  const raw = String(fm.name ?? path.basename(found.dir) ?? heading ?? "").trim()
-  const name = raw || heading?.replace(/[^A-Za-z0-9._-]+/g, "_") || ""
+  const name = skillNameOf(found)
   if (!SKILL_NAME.test(name)) return { ok: false, error: `${found.origin}: nombre de skill no válido ("${name}"). Usa letras, números, punto, guion o guion bajo.` }
-  const text = body.trim()
-  if (!text) return { ok: false, error: `${found.origin}: la skill "${name}" no tiene contenido` }
+  if (!body.trim()) return { ok: false, error: `${found.origin}: la skill "${name}" no tiene contenido` }
   const version = String(fm.version ?? "0.0.1")
   return {
     ok: true,
@@ -141,7 +149,7 @@ export function toSkillDoc(found: FoundSkill, fallbackAuthor: string, now = Date
       author: String(fm.author ?? fallbackAuthor), icon: String(fm.icon ?? "skill"), category: String(fm.category ?? "custom"),
       permissions: JSON.stringify(asList(fm.permissions)), dependencies: JSON.stringify(asList(fm.dependencies)),
       tools: asList(fm.tools).join(","), triggers: asList(fm.triggers).join(","), preferred_agents: JSON.stringify(asList(fm.preferred_agents)),
-      body: text, version_num: Number.parseInt(version, 10) || 1, active: true,
+      body, version_num: Number.parseInt(version, 10) || 1, active: true,
       metadata: JSON.stringify({ installed_from: found.origin, installed_at: new Date(now).toISOString(), frontmatter: fm }),
       source_path: found.origin, catalog_managed: false, created_at: now, updated_at: now,
     },
@@ -196,10 +204,7 @@ export async function installSkills(found: FoundSkill[], fallbackAuthor: string)
 
 /** Picks the skills the user named (by name or by folder) among the ones found; all of them when none is named and there is one. */
 export function selectSkills(found: FoundSkill[], wanted: string[]): { chosen: FoundSkill[]; missing: string[]; available: string[] } {
-  const nameOf = (item: FoundSkill) => {
-    const fm = parseFrontmatter(item.content).frontmatter
-    return String(fm.name ?? path.basename(item.dir) ?? "").trim()
-  }
+  const nameOf = skillNameOf
   const available = found.map(nameOf).filter(Boolean).sort()
   if (!wanted.length) return { chosen: found.length === 1 ? found : [], missing: [], available }
   const lower = wanted.map(w => w.toLowerCase())

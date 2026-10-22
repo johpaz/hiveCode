@@ -1,4 +1,5 @@
 import { isProjectIndexed, omittedAtStart } from "./loadout"
+import { projectOfSession } from "./project-identity"
 import { buildContextPacket, resolveProjectScope, type ContextReference, type ProjectScope } from "./project-context"
 import { selectSpecialty, REQUIRED_PROFILE_SKILLS, FACTORY_SPECIALTIES } from "./specialties"
 /**
@@ -355,7 +356,8 @@ export async function compileContext(opts: {
   }
   // Readers explore through the index when there is one; the tree-walking tools stay one search away.
   if (isSpecialistProfile && opts.codeSessionId) {
-    for (const name of omittedAtStart(agent.agent_type, await isProjectIndexed(opts.codeSessionId))) initialToolNames.delete(name)
+    const project = await projectOfSession(opts.codeSessionId)
+    for (const name of omittedAtStart(agent.agent_type, project ? await isProjectIndexed(project.id) : false)) initialToolNames.delete(name)
   }
   const filteredNativeTools: ContextTool[] = allTools.filter(t => initialToolNames.has(t.name))
 

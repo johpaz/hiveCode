@@ -1,18 +1,19 @@
 /**
- * Code Indexer — builds and maintains the HiveDB code graph.
+ * Code Indexer — builds and maintains the HiveDB code graph of a PROJECT.
  *
- * - Full index: called at `hive-code init`, scans all code files via Bun.Glob
- * - Incremental: called after each fs_edit / fs_write to update affected files only
+ * The index belongs to the project (see `agent/project-identity.ts`), not to a session: opening the same
+ * project again, from a new session or a worktree, finds it already there and only reconciles what changed.
+ * Paths in the index are relative to the project root.
+ *
+ * - Full index: scans all code files via Bun.Glob, in batches
+ * - Incremental: after each fs_edit / fs_write only the affected file is re-indexed
  *
  * Uses Bun.Transpiler for lightweight AST analysis (no tsc needed).
  */
 
 import { createHash } from "node:crypto"
 import { col } from "@johpaz/hivecode-core/storage/hive"
-import type { CodeFileDoc, CodeGraphDoc, CodeSessionDoc } from "@johpaz/hivecode-core/storage/collections"
-import {
-  deleteCapabilitiesByFilter,
-} from "@johpaz/hivecode-core/agent/capability-search"
+import type { CodeGraphDoc, CodeProjectDoc, CodeSessionDoc } from "@johpaz/hivecode-core/storage/collections"
 import { logger } from "@johpaz/hivecode-core/utils/logger"
 import * as path from "node:path"
 import * as fs from "node:fs"
@@ -20,136 +21,136 @@ import { buildProjectContext } from "./context-retriever"
 
 const log = logger.child("code-indexer")
 
-import { CODE_EXTENSIONS, SKIP_DIRS, indexFile, upsertFileGraphIndex, upsertFileSearchIndex, upsertFileIndex,
-  deleteFileSearchIndex, buildExportedByIndex, codeFileId, shouldIndexFile, type FileIndex } from "@johpaz/hivecode-core/agent/source-index"
+import { CODE_EXTENSIONS, SKIP_DIRS, indexFile, upsertFileGraphIndexBatch, upsertFileSearchIndexBatch, upsertFileIndex,
+  deleteFileSearchIndex, buildExportedByIndex, clearProjectIndex, codeFileId, shouldIndexFile, type FileIndex } from "@johpaz/hivecode-core/agent/source-index"
+
 export { shouldIndexFile } from "@johpaz/hivecode-core/agent/source-index"
 
+/** Files per parse batch. */
+const PARSE_BATCH = 50
+
+/** Every indexable file under `root`, as absolute paths. */
+async function scanProjectFiles(root: string): Promise<string[]> {
+  const glob = new Bun.Glob(`**/*.{${CODE_EXTENSIONS.join(",")}}`)
+  const files: string[] = []
+  for await (const relPath of glob.scan({ cwd: root, onlyFiles: true })) {
+    if (relPath.split(path.sep).some(part => SKIP_DIRS.has(part)) || !shouldIndexFile(path.resolve(root, relPath), root)) continue
+    files.push(path.resolve(root, relPath))
+  }
+  return files
+}
+
+/** Parses the files and writes them in batches; returns how many were indexed and how many were skipped. */
+async function indexFiles(projectId: string, root: string, files: string[]): Promise<{ indexed: number; skipped: number }> {
+  let indexed = 0
+  let skipped = 0
+  for (let i = 0; i < files.length; i += PARSE_BATCH) {
+    const results = await Promise.all(files.slice(i, i + PARSE_BATCH).map(file => indexFile(file, root)))
+    const ok = results.filter((result): result is FileIndex => !!result)
+    skipped += results.length - ok.length
+    await upsertFileGraphIndexBatch(projectId, ok)
+    await upsertFileSearchIndexBatch(projectId, ok)
+    indexed += ok.length
+  }
+  return { indexed, skipped }
+}
+
+async function markIndexed(projectId: string): Promise<void> {
+  const projects = await col<CodeProjectDoc>("codeProjects")
+  const row = await projects.get(projectId)
+  if (row) await projects.put(projectId, { ...row.doc, indexed_at: new Date().toISOString(), updated_at: Date.now() }, { expectedVersion: row.version }).catch(() => {})
+}
+
 /**
- * Full index: scan all code files in workspace and populate codeGraph.
+ * Full index: scan all code files in the project and populate codeGraph.
  * Called at `hive-code init`.
  */
-export async function buildFullIndex(sessionId: string, workspace: string): Promise<{
+export async function buildFullIndex(projectId: string, root: string): Promise<{
   indexed: number
   skipped: number
   durationMs: number
 }> {
   const t0 = performance.now()
-  log.info(`[code-indexer] Building full index for session ${sessionId} in ${workspace}`)
-
-  const glob = new Bun.Glob(`**/*.{${CODE_EXTENSIONS.join(",")}}`)
-  const files: string[] = []
-
-  for await (const relPath of glob.scan({ cwd: workspace, onlyFiles: true })) {
-    // Skip ignored dirs
-    const parts = relPath.split(path.sep)
-    if (parts.some(p => SKIP_DIRS.has(p)) || !shouldIndexFile(path.resolve(workspace, relPath), workspace)) continue
-    files.push(path.resolve(workspace, relPath))
-  }
-
+  log.info(`[code-indexer] Building full index for project ${projectId} in ${root}`)
+  const files = await scanProjectFiles(root)
   log.info(`[code-indexer] Found ${files.length} files to index`)
 
-  let indexed = 0
-  let skipped = 0
+  // Clear the previous index of this project so removed files do not linger.
+  await clearProjectIndex(projectId)
+  const { indexed, skipped } = await indexFiles(projectId, root, files)
 
-  // Clear previous HiveDB search index for this session to avoid stale entries
-  await deleteCapabilitiesByFilter("session_id", sessionId)
-  const codeFiles = await col<CodeFileDoc>("codeFiles")
-  const existingCodeFiles = await codeFiles.findBy("session_id", sessionId)
-  for (const e of existingCodeFiles) await codeFiles.delete(e.id)
-  const codeGraph = await col<CodeGraphDoc>("codeGraph")
-  const existingGraph = await codeGraph.findBy("session_id", sessionId)
-  for (const e of existingGraph) await codeGraph.delete(e.id)
-
-  // Index in batches of 50 to avoid blocking
-  const BATCH = 50
-  for (let i = 0; i < files.length; i += BATCH) {
-    const batch = files.slice(i, i + BATCH)
-    const results = await Promise.all(batch.map(f => indexFile(f, workspace)))
-    for (const result of results) {
-      if (result) {
-        await upsertFileGraphIndex(sessionId, result)
-        indexed++
-      } else {
-        skipped++
-      }
-    }
-    await Promise.all(results.filter((r): r is FileIndex => !!r).map(r => upsertFileSearchIndex(sessionId, r)))
-  }
-
-  // Build reverse dependency map
-  await buildExportedByIndex(sessionId)
-
-  // Build global project context summary for Bee (async, non-blocking)
-  await buildProjectContext(sessionId, workspace)
+  await buildExportedByIndex(projectId)
+  await buildProjectContext(projectId, root)
+  await markIndexed(projectId)
 
   const durationMs = Math.round(performance.now() - t0)
   log.info(`[code-indexer] Full index complete: ${indexed} indexed, ${skipped} skipped in ${durationMs}ms`)
-
   return { indexed, skipped, durationMs }
 }
 
-/** Debounce window for the session-wide rebuild that follows file edits. */
+/** Debounce window for the project-wide rebuild that follows file edits. */
 const REBUILD_DEBOUNCE_MS = 750
 
-interface PendingRebuild { timer: ReturnType<typeof setTimeout>; workspace: string }
+interface PendingRebuild { timer: ReturnType<typeof setTimeout>; root: string }
 const pendingRebuilds = new Map<string, PendingRebuild>()
 
-async function runSessionRebuild(sessionId: string, workspace: string): Promise<void> {
-  await buildExportedByIndex(sessionId)
-  await buildProjectContext(sessionId, workspace)
+async function runProjectRebuild(projectId: string, root: string): Promise<void> {
+  await buildExportedByIndex(projectId)
+  await buildProjectContext(projectId, root)
 }
 
 /**
- * Run any scheduled session-wide rebuild now. Readers of derived data
+ * Run any scheduled project-wide rebuild now. Readers of derived data
  * (exported_by, project context) call this so they never see a stale graph.
  */
-export async function flushIndexRebuild(sessionId: string): Promise<void> {
-  const pending = pendingRebuilds.get(sessionId)
+export async function flushIndexRebuild(projectId: string): Promise<void> {
+  const pending = pendingRebuilds.get(projectId)
   if (!pending) return
   clearTimeout(pending.timer)
-  pendingRebuilds.delete(sessionId)
-  await runSessionRebuild(sessionId, pending.workspace)
+  pendingRebuilds.delete(projectId)
+  await runProjectRebuild(projectId, pending.root)
 }
 
-function scheduleSessionRebuild(sessionId: string, workspace: string): void {
-  const existing = pendingRebuilds.get(sessionId)
+function scheduleProjectRebuild(projectId: string, root: string): void {
+  const existing = pendingRebuilds.get(projectId)
   if (existing) clearTimeout(existing.timer)
   const timer = setTimeout(() => {
-    pendingRebuilds.delete(sessionId)
-    runSessionRebuild(sessionId, workspace).catch((err) => {
+    pendingRebuilds.delete(projectId)
+    runProjectRebuild(projectId, root).catch((err) => {
       log.warn(`[code-indexer] Deferred rebuild failed: ${(err as Error).message}`)
     })
   }, REBUILD_DEBOUNCE_MS)
   // Do not keep the process alive just to refresh a cache.
   ;(timer as { unref?: () => void }).unref?.()
-  pendingRebuilds.set(sessionId, { timer, workspace })
+  pendingRebuilds.set(projectId, { timer, root })
 }
 
 /**
  * Incremental update: re-index a single file after it's been edited.
- * The file's own rows are written immediately; the session-wide derived data
+ * The file's own rows are written immediately; the project-wide derived data
  * (exported_by, project context) is coalesced so a burst of N edits costs one
- * session scan instead of N.
+ * scan instead of N. `filePath` may be absolute or relative to `root`.
  */
-export async function updateFileIndex(sessionId: string, filePath: string, workspace: string): Promise<void> {
-  const result = await indexFile(filePath, workspace)
+export async function updateFileIndex(projectId: string, filePath: string, root: string): Promise<void> {
+  const absolute = path.resolve(root, filePath)
+  const result = await indexFile(absolute, root)
   if (!result) {
-    await deleteFileSearchIndex(sessionId, filePath)
-    scheduleSessionRebuild(sessionId, workspace)
+    await deleteFileSearchIndex(projectId, path.relative(root, absolute))
+    scheduleProjectRebuild(projectId, root)
     return
   }
 
-  await upsertFileIndex(sessionId, result)
-  scheduleSessionRebuild(sessionId, workspace)
-  log.info(`[code-indexer] Updated index for ${path.relative(workspace, filePath)}`)
+  await upsertFileIndex(projectId, result)
+  scheduleProjectRebuild(projectId, root)
+  log.info(`[code-indexer] Updated index for ${result.filePath}`)
 }
 
 /**
  * Query: who imports this file? Returns file paths that depend on it.
  */
-export async function getDependents(sessionId: string, filePath: string): Promise<string[]> {
-  await flushIndexRebuild(sessionId)
-  const row = await (await col<CodeGraphDoc>("codeGraph")).get(codeFileId(sessionId, filePath))
+export async function getDependents(projectId: string, relPath: string): Promise<string[]> {
+  await flushIndexRebuild(projectId)
+  const row = await (await col<CodeGraphDoc>("codeGraph")).get(codeFileId(projectId, relPath))
   if (!row) return []
   return JSON.parse(row.doc.exported_by ?? "[]")
 }
@@ -157,8 +158,8 @@ export async function getDependents(sessionId: string, filePath: string): Promis
 /**
  * Query: what does this file import? Returns file paths it depends on.
  */
-export async function getDependencies(sessionId: string, filePath: string): Promise<string[]> {
-  const row = await (await col<CodeGraphDoc>("codeGraph")).get(codeFileId(sessionId, filePath))
+export async function getDependencies(projectId: string, relPath: string): Promise<string[]> {
+  const row = await (await col<CodeGraphDoc>("codeGraph")).get(codeFileId(projectId, relPath))
   if (!row) return []
   return JSON.parse(row.doc.imports ?? "[]")
 }
@@ -166,25 +167,20 @@ export async function getDependencies(sessionId: string, filePath: string): Prom
 /**
  * Query: most imported files (highest centrality = most critical).
  */
-export async function getMostCriticalFiles(sessionId: string, limit = 20): Promise<Array<{
+export async function getMostCriticalFiles(projectId: string, limit = 20): Promise<Array<{
   filePath: string
   importCount: number
   complexity: number
 }>> {
-  await flushIndexRebuild(sessionId)
-  const rows = (await (await col<CodeGraphDoc>("codeGraph")).findBy("session_id", sessionId))
+  await flushIndexRebuild(projectId)
+  const rows = (await (await col<CodeGraphDoc>("codeGraph")).findBy("project_id", projectId))
     .map((entry) => entry.doc)
-    .sort((a, b) => b.exported_by.length - a.exported_by.length)
-    .slice(0, 50)
-
-  return rows
     .map((row) => ({
       filePath: row.file_path,
       importCount: (JSON.parse(row.exported_by ?? "[]") as string[]).length,
       complexity: row.complexity ?? 0,
     }))
-    .sort((a, b) => b.importCount - a.importCount)
-    .slice(0, limit)
+  return rows.sort((a, b) => b.importCount - a.importCount).slice(0, limit)
 }
 
 /**
@@ -198,94 +194,67 @@ export async function getActiveSessionId(): Promise<string | null> {
   return rows[0]?.id ?? null
 }
 
+export interface ReconcileResult { reindexed: number; removed: number; durationMs: number }
+
+/** One reconcile per project at a time: a second caller (another session, a stale mark) waits for the running one. */
+const reconciling = new Map<string, Promise<ReconcileResult>>()
+
 /**
- * Reconcile: scan files whose mtime changed since last index and re-index them.
- * Call this on startup or periodically to catch external edits.
+ * Reconcile: bring the project's index in line with the disk. Files whose mtime moved are re-hashed and
+ * re-indexed only if their content changed; new files are added; deleted ones are dropped. On a project that
+ * is already indexed and untouched this reads the tree and writes nothing.
  */
-export async function reconcileCodeIndex(sessionId: string, workspace: string): Promise<{
-  reindexed: number
-  removed: number
-  durationMs: number
-}> {
+export function reconcileCodeIndex(projectId: string, root: string): Promise<ReconcileResult> {
+  const running = reconciling.get(projectId)
+  if (running) return running
+  const job = reconcileOnce(projectId, root).finally(() => { reconciling.delete(projectId) })
+  reconciling.set(projectId, job)
+  return job
+}
+
+async function reconcileOnce(projectId: string, root: string): Promise<ReconcileResult> {
   const t0 = performance.now()
-
-  // 1. Find files in DB that no longer exist on disk → remove from both tables
   const codeGraph = await col<CodeGraphDoc>("codeGraph")
-  const dbFiles = (await codeGraph.findBy("session_id", sessionId)).map((entry) => entry.doc)
+  const dbFiles = (await codeGraph.findBy("project_id", projectId)).map((entry) => entry.doc)
+  const onDisk = (rel: string) => path.join(root, rel)
 
+  // 1. Files in the index that no longer exist (or no longer qualify) → remove.
   let removed = 0
-  for (const { file_path } of dbFiles) {
-    if (!shouldIndexFile(file_path, workspace) || !await Bun.file(file_path).exists()) {
-      await deleteFileSearchIndex(sessionId, file_path)
+  const survivors: CodeGraphDoc[] = []
+  for (const row of dbFiles) {
+    if (!shouldIndexFile(onDisk(row.file_path), root) || !await Bun.file(onDisk(row.file_path)).exists()) {
+      await deleteFileSearchIndex(projectId, row.file_path)
       removed++
-    }
+    } else survivors.push(row)
   }
 
-  // 2. Find files whose mtime differs from last_modified in DB
-  const staleRows = (await codeGraph.findBy("session_id", sessionId)).map((entry) => entry.doc)
-
+  // 2. Files whose mtime moved. Only those are hashed: a touch or a checkout that left the content alone just
+  //    records the new mtime instead of re-parsing the file.
   const toReindex: string[] = []
-  for (const row of staleRows) {
+  for (const row of survivors) {
     try {
-      const stat = fs.statSync(row.file_path)
-      const dbTime = new Date(row.last_modified ?? 0).getTime()
-      const fsTime = stat.mtime.getTime()
-      // lastModified is stored as the file's mtime, so a match means unchanged.
-      // Hashing every file here read the whole repo on each reconcile.
-      if (dbTime !== fsTime) {
-        // Only files whose mtime moved are hashed. A touch or a checkout that left the content alone just
-        // records the new mtime, instead of re-parsing and re-indexing the file.
-        const hash = row.content_hash ? createHash("sha256").update(await Bun.file(row.file_path).text()).digest("hex") : undefined
-        if (hash && hash === row.content_hash) {
-          await codeGraph.put(row.id, { ...row, last_modified: stat.mtime.toISOString() })
-        } else {
-          toReindex.push(row.file_path)
-        }
-      }
-    } catch {
-      // file missing — already handled above
-    }
+      const stat = fs.statSync(onDisk(row.file_path))
+      if (new Date(row.last_modified ?? 0).getTime() === stat.mtime.getTime()) continue
+      const hash = row.content_hash ? createHash("sha256").update(await Bun.file(onDisk(row.file_path)).text()).digest("hex") : undefined
+      if (hash && hash === row.content_hash) await codeGraph.put(row.id, { ...row, last_modified: stat.mtime.toISOString() })
+      else toReindex.push(onDisk(row.file_path))
+    } catch { /* gone between the two checks: the next reconcile drops it */ }
   }
 
-  // 3. Also find new files not yet in DB
-  const glob = new Bun.Glob(`**/*.{${CODE_EXTENSIONS.join(",")}}`)
-  const dbPaths = new Set(dbFiles.map(r => r.file_path))
-  for await (const relPath of glob.scan({ cwd: workspace, onlyFiles: true })) {
-    const parts = relPath.split(path.sep)
-    if (parts.some(p => SKIP_DIRS.has(p)) || !shouldIndexFile(path.resolve(workspace, relPath), workspace)) continue
-    const absPath = path.resolve(workspace, relPath)
-    if (!dbPaths.has(absPath)) {
-      toReindex.push(absPath)
-    }
+  // 3. New files not yet in the index.
+  const known = new Set(survivors.map(row => row.file_path))
+  for (const absolute of await scanProjectFiles(root)) {
+    if (!known.has(path.relative(root, absolute))) toReindex.push(absolute)
   }
 
-  // 4. Re-index stale/new files
-  let reindexed = 0
-  const BATCH = 50
-  for (let i = 0; i < toReindex.length; i += BATCH) {
-    const batch = toReindex.slice(i, i + BATCH)
-    const results = await Promise.all(batch.map(f => indexFile(f, workspace)))
-    for (const result of results) {
-      if (result) {
-        await upsertFileGraphIndex(sessionId, result)
-        reindexed++
-      }
-    }
-    await Promise.all(results.filter((r): r is FileIndex => !!r).map(r => upsertFileSearchIndex(sessionId, r)))
-  }
+  // 4. Re-index the changed and the new, in batches.
+  const { indexed: reindexed } = await indexFiles(projectId, root, toReindex)
 
-  // Rebuild reverse dependency map after reconciliation
   if (reindexed > 0 || removed > 0) {
-    await buildExportedByIndex(sessionId)
+    await buildExportedByIndex(projectId)
+    await buildProjectContext(projectId, root)
   }
-
-  // Rebuild project context if anything changed (async, non-blocking)
-  if (reindexed > 0 || removed > 0) {
-    const sessionRow = (await (await col<CodeSessionDoc>("codeSessions")).get(sessionId))?.doc
-    if (sessionRow?.project_path) {
-      await buildProjectContext(sessionId, sessionRow.project_path)
-    }
-  }
+  await markIndexed(projectId)
 
   const durationMs = Math.round(performance.now() - t0)
   log.info(`[code-indexer] Reconcile complete: ${reindexed} reindexed, ${removed} removed in ${durationMs}ms`)

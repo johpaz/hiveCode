@@ -54,6 +54,7 @@ import {
 } from "./run-store"
 import { recordTaskUsage, taskBudgetBlocker } from "./task-budget"
 import { commandPreview, traceStep } from "./step-trace"
+import { checkoutRoot, projectOfSession } from "./project-identity"
 import { diskReadNudge } from "./read-mix"
 import { CAPABILITY_SEARCH_LIMIT_MESSAGE, chargeCapabilitySearch, isCapabilitySearch } from "./discovery-budget"
 import { chooseReasoningEffort, resolveReasoningPolicy, type ReasoningPolicy } from "./reasoning-effort"
@@ -1280,15 +1281,19 @@ export async function* runAgent(
       // Write-back: keep the HiveDB code index in step with the workspace. Tools
       // that name their file are patched in place; shell/git mutate blindly, so
       // they only mark the session stale and the next context read reconciles.
+      // The index is the project's: an edit inside a worktree is a private copy and reaches the index only when it is
+      // merged back (which marks the index stale), so only work done in the project's own checkout is written back.
       if (!toolError && opts.codeSessionId && opts.workspace) {
-        if (["fs_write", "fs_edit", "fs_delete"].includes(toolName)) {
+        const project = await projectOfSession(opts.codeSessionId).catch(() => null)
+        const inProject = !!project && checkoutRoot(opts.workspace) === project.root
+        if (project && inProject && ["fs_write", "fs_edit", "fs_delete"].includes(toolName)) {
           try {
             const args = typeof tc.function.arguments === "string" ? JSON.parse(tc.function.arguments) : tc.function.arguments
             const sourcePath = args?.path ?? args?.file_path
-            if (typeof sourcePath === "string") await refreshSourceIndex(opts.codeSessionId, opts.workspace, sourcePath)
+            if (typeof sourcePath === "string") await refreshSourceIndex(project.id, project.root, opts.workspace, sourcePath)
           } catch (error) { log.warn(`[agent-loop] Source index refresh failed: ${(error as Error).message}`) }
-        } else if (UNTARGETED_WORKSPACE_MUTATORS.has(toolName)) {
-          await markSourceIndexStale(opts.codeSessionId).catch((error) => {
+        } else if (project && inProject && UNTARGETED_WORKSPACE_MUTATORS.has(toolName)) {
+          await markSourceIndexStale(project.id).catch((error) => {
             log.warn(`[agent-loop] Source index stale mark failed: ${(error as Error).message}`)
           })
         }

@@ -5,8 +5,9 @@ import { spawnTaskProcess } from "../../runtime/task-execution";
 import type { Tool } from "../types.ts"
 import { validateCommand } from "./command-validator.ts"
 import * as nodePath from "node:path"
-import { col } from "../../storage/hive.ts"
-import type { CodeFileDoc, CodeFileSnapshotDoc, CodeTaskDoc } from "../../storage/collections.ts"
+import { col, ensureIndexes } from "../../storage/hive.ts"
+import { resolveProjectScope, scopeFromConfig } from "../../agent/project-context.ts"
+import type { CodeFileDoc, CodeFileSnapshotDoc, CodeGraphDoc, CodeTaskDoc } from "../../storage/collections.ts"
 import { getWorkspace, resolveInWorkspace } from "../filesystem/workspace-guard.ts"
 
 /**
@@ -722,26 +723,25 @@ const findImportsTool: Tool = {
         type: "string",
         description: "Module path to find importers for (e.g. 'src/auth/jwt.ts' or './jwt')",
       },
-      sessionId: {
+      session_id: {
         type: "string",
-        description: "Optional code session id. If omitted, searches all indexed code files.",
+        description: "Optional code session id; the search is limited to that session's project. Defaults to the current project.",
       },
     },
     required: ["path"],
   },
-  async execute(params) {
+  async execute(params, config) {
     const targetPath = params.path as string
     if (!targetPath) return { ok: false, error: "path is required" }
     try {
-      const codeFiles = await col<CodeFileDoc>("codeFiles")
-      const sessionId = typeof params.sessionId === "string" && params.sessionId.trim()
-        ? params.sessionId.trim()
-        : null
-      const entries = sessionId
-        ? await codeFiles.findBy("session_id", sessionId)
-        : await codeFiles.scan()
+      // The graph holds each file's resolved imports (relative to the project root); no file text is read.
+      const scope = await resolveProjectScope(scopeFromConfig(params as Record<string, unknown>, config))
+      if (!scope) return { ok: false, error: "No project session found. Supply session_id and workspace." }
+      await ensureIndexes([["codeGraph", "project_id"]])
+      const entries = await (await col<CodeGraphDoc>("codeGraph")).findBy("project_id", scope.projectId)
       const importers = [...new Set(entries.flatMap(entry => {
-        const imports = parseCodeFileImports(entry.doc)
+        let imports: string[] = []
+        try { imports = JSON.parse(entry.doc.imports || "[]") } catch { /* unreadable row */ }
         return imports.some(importPath => importMatchesTarget(importPath, targetPath))
           ? [entry.doc.file_path]
           : []
@@ -749,7 +749,7 @@ const findImportsTool: Tool = {
       return {
         ok: true,
         path: targetPath,
-        sessionId,
+        projectId: scope.projectId,
         importers,
         count: importers.length,
       }

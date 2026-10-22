@@ -11,7 +11,7 @@ import { flushIndexRebuild, getDependents, updateFileIndex } from "./code-indexe
 import { loadProjectContext } from "./context-retriever"
 
 const previous = process.env.HIVE_DB_PATH
-const SESSION = "session-code-writeback"
+const SESSION = "project-code-writeback"
 let workspace = ""
 
 beforeEach(async () => {
@@ -71,13 +71,13 @@ describe("updateFileIndex", () => {
     await updateFileIndex(SESSION, dep, workspace)
     await updateFileIndex(SESSION, user, workspace)
 
-    // The file rows are written, but exported_by has not been recomputed yet.
+    // The file rows are written (with paths relative to the root), but exported_by has not been recomputed yet.
     const graph = await col<CodeGraphDoc>("codeGraph")
-    const before = await graph.get(codeFileId(SESSION, dep))
+    const before = await graph.get(codeFileId(SESSION, "src/dep.ts"))
     expect(before).toBeTruthy()
     expect(JSON.parse(before!.doc.exported_by || "[]")).toEqual([])
 
     // Reading dependents forces the pending rebuild, so the answer is never stale.
-    expect(await getDependents(SESSION, dep)).toEqual([user])
+    expect(await getDependents(SESSION, "src/dep.ts")).toEqual(["src/user.ts"])
   })
 })

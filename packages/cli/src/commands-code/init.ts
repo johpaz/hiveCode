@@ -148,7 +148,10 @@ export async function init(pathArg?: string): Promise<void> {
     sessionId = await getOrCreateSession(cwd)
 
     const { buildFullIndex } = await import("@johpaz/hivecode-code/agent/code-indexer" as any)
-    indexResult = await buildFullIndex(sessionId, cwd)
+    // The index belongs to the project, so `init` on an already-opened project refreshes it instead of copying it.
+    const { ensureProject } = await import("@johpaz/hivecode-core/agent/project-identity")
+    const project = await ensureProject(cwd)
+    indexResult = await buildFullIndex(project.id, project.root_path)
 
     indexSpinner.stop(`Indexados ${indexResult.indexed} archivos (${indexResult.skipped} omitidos) en ${indexResult.durationMs}ms`)
   } catch (err) {

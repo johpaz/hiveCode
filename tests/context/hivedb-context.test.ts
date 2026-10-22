@@ -7,8 +7,9 @@ import { closeHiveDb } from "../../packages/core/src/storage/hivedb"
 import { ensureHiveDb } from "../../packages/core/src/storage/bootstrap"
 import { ensureCoreAgentProfiles } from "../../packages/core/src/agent/agent-profiles"
 import { buildFullIndex, reconcileCodeIndex, updateFileIndex } from "../../packages/code/src/agent/code-indexer"
-import { buildContextPacket, resolveProjectScope, resolveContextReferences } from "../../packages/core/src/agent/project-context"
+import { buildContextPacket, resolveProjectScope, resolveContextReferences, type ProjectScope } from "../../packages/core/src/agent/project-context"
 import { getProjectContextTool, searchKnowledgeTool } from "../../packages/core/src/tools/core"
+import { projectIdentity } from "../../packages/core/src/agent/project-identity"
 import { compileContext } from "../../packages/core/src/agent/context-compiler"
 import { childCapabilities, runEphemeralAgent } from "../../packages/core/src/agent/ephemeral-agents"
 import { getSwarmUsage } from "../../packages/core/src/agent/swarm-usage"
@@ -17,7 +18,7 @@ import type { AgentDoc, CodeSessionDoc, CodeGraphDoc, TaskDoc } from "../../pack
 
 const previous = process.env.HIVE_DB_PATH
 let root: string
-let scope: {sessionId: string; workspace: string}
+let scope: ProjectScope
 beforeEach(async () => {
   closeHiveDb()
   root = mkdtempSync(path.join(tmpdir(), "hive-context-"))
@@ -31,8 +32,9 @@ beforeEach(async () => {
   writeFileSync(path.join(workspace, "schema.sql"), "CREATE TABLE agents (id TEXT PRIMARY KEY);")
   writeFileSync(path.join(workspace, "README.md"), "# Context fixture")
   await (await col<CodeSessionDoc>("codeSessions")).put("a", {id: "a", project_path: workspace, status: "active", created_at: "2026-10-10", last_active: "2026-10-10"})
-  scope = {sessionId: "a", workspace}
-  await buildFullIndex("a", workspace)
+  const project = projectIdentity(workspace)
+  scope = {projectId: project.id, sessionId: "a", workspace: project.root, root: project.root}
+  await buildFullIndex(project.id, project.root)
 })
 afterEach(async () => { await Bun.sleep(10) })
 afterAll(() => {
@@ -42,7 +44,7 @@ afterAll(() => {
 })
 
 test("indexes Rust symbols and returns fresh, bounded ranges instead of a full project", async () => {
-  const graph = (await (await col<CodeGraphDoc>("codeGraph")).get(`a:${path.join(scope.workspace, "src/lib.rs")}`))!.doc
+  const graph = (await (await col<CodeGraphDoc>("codeGraph")).get(`${scope.projectId}:src/lib.rs`))!.doc
   expect(JSON.parse(graph.symbols_json!)).toEqual(expect.arrayContaining([expect.objectContaining({name: "render_office", startLine: 2})]))
   expect(graph.relations_complete).toBe(false)
   const packet = await buildContextPacket(scope, {query: "render_office", tokenBudget: 900})
@@ -56,13 +58,14 @@ test("does not choose the most recently active project or accept foreign referen
   mkdirSync(other)
   writeFileSync(path.join(other, "private.ts"), "export const PRIVATE_PROJECT_B = 1")
   await (await col<CodeSessionDoc>("codeSessions")).put("b", {id: "b", project_path: other, status: "active", created_at: "2026-10-11", last_active: "2026-10-11"})
-  await buildFullIndex("b", other)
+  const otherProject = projectIdentity(other)
+  await buildFullIndex(otherProject.id, otherProject.root)
   await expect(resolveProjectScope({})).rejects.toThrow("Ambiguous")
   await expect(resolveProjectScope({sessionId: "b", workspace: scope.workspace})).rejects.toThrow("do not match")
   const packet = await buildContextPacket(scope, {query: "PRIVATE_PROJECT_B"})
   expect(packet.context).not.toContain("PRIVATE_PROJECT_B =")
-  const otherPacket = await buildContextPacket({sessionId: "b", workspace: other}, {paths: ["private.ts"]})
-  await expect(resolveContextReferences(scope, otherPacket.references)).rejects.toThrow("another session")
+  const otherPacket = await buildContextPacket({projectId: otherProject.id, sessionId: "b", workspace: otherProject.root, root: otherProject.root}, {paths: ["private.ts"]})
+  await expect(resolveContextReferences(scope, otherPacket.references)).rejects.toThrow("another project")
   const response = await getProjectContextTool.execute({}, {configurable: {code_session_id: "a", workspace: scope.workspace}}) as any
   expect(response.scope.sessionId).toBe("a")
 })
@@ -83,9 +86,9 @@ test("invalidates packets on uncommitted edits, same-mtime edits and deletion", 
   writeFileSync(source, "pub fn render_office() { println!(\"MTIME_SOURCE\"); }")
   const later = new Date(Date.now() + 5_000)
   utimesSync(source, later, later)
-  expect((await reconcileCodeIndex("a", scope.workspace)).reindexed).toBeGreaterThan(0)
+  expect((await reconcileCodeIndex(scope.projectId, scope.root)).reindexed).toBeGreaterThan(0)
   unlinkSync(source)
-  await updateFileIndex("a", source, scope.workspace)
+  await updateFileIndex(scope.projectId, source, scope.root)
   expect((await buildContextPacket(scope, {paths: ["src/lib.rs"]})).omitted.join(" ")).toContain("src/lib.rs")
 })
 
@@ -95,7 +98,7 @@ test("excludes ignored directories, secrets and escaping symlinks", async () => 
   writeFileSync(path.join(scope.workspace, ".env.json"), '{"SECRET": "fixture"}')
   writeFileSync(path.join(root, "outside.rs"), "fn OUTSIDE() {}")
   symlinkSync(path.join(root, "outside.rs"), path.join(scope.workspace, "escape.rs"))
-  await reconcileCodeIndex("a", scope.workspace)
+  await reconcileCodeIndex(scope.projectId, scope.root)
   const packet = await buildContextPacket(scope, {paths: ["escape.rs", ".env.json"]})
   expect(packet.context).not.toContain("OUTSIDE")
   expect(packet.context).not.toContain("SECRET")

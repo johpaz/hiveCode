@@ -27,3 +27,13 @@ describe("core profiles declare the skills they load", () => {
     }
   })
 })
+
+import { NO_SPAWN_PROFILES } from "./agent-profiles"
+
+describe("who may create agents", () => {
+  test("scout and planner cannot, the coordinator and the writers can", () => {
+    expect([...NO_SPAWN_PROFILES].sort()).toEqual(["planner", "scout"])
+    for (const id of ["scout", "planner"] as const) expect(CORE_AGENT_DEFINITIONS[id].tools).not.toContain("spawn_agent")
+    for (const id of ["bee", "builder", "verifier", "spider"] as const) expect(CORE_AGENT_DEFINITIONS[id].tools).toContain("spawn_agent")
+  })
+})
