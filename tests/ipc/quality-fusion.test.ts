@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test"
 import { CORE_AGENT_TYPES, CORE_AGENT_DEFINITIONS } from "@johpaz/hivecode-core/agent/agent-profiles"
+import { FACTORY_SPECIALTIES } from "@johpaz/hivecode-core/agent/specialties"
 import { agentAlias, isKnownRole } from "@johpaz/hivecode-core/agent/agent-identity"
 
 // ─── El gate de calidad es uno, no dos ─────────────────────────────────────────
@@ -33,13 +34,17 @@ describe("quality gate fusion", () => {
   })
 
   it("neither half lost its skills", () => {
+    // El perfil base lleva lo que siempre necesita: entender y juzgar el código.
     const skills = CORE_AGENT_DEFINITIONS.verifier.skills
-    // Del verifier: reproducir en navegador y entender el código.
-    expect(skills).toContain("browser_automate")
     expect(skills).toContain("code_analysis")
-    // Del reviewer: juzgar calidad y seguridad.
     expect(skills).toContain("code_review")
-    expect(skills).toContain("code_security_audit")
+    // Reproducir en navegador y auditar seguridad llegan como especialidades
+    // del gate (loadout), no como skills residentes.
+    const byId = (id: string) => FACTORY_SPECIALTIES.find((s) => s.id === id)
+    expect(byId("acceptance")?.owner).toBe("verifier")
+    expect(byId("acceptance")?.skills).toContain("browser_automate")
+    expect(byId("security")?.owner).toBe("verifier")
+    expect(byId("security")?.skills).toContain("code_security_audit")
   })
 
   it("neither half lost its speckit reads", () => {
