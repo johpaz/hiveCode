@@ -6,6 +6,7 @@ import type { CodeSessionDoc, CodeGraphDoc, CodeProjectDoc, CodeTaskDoc, CodeDec
 import { searchCapabilities } from "./capability-search"
 import { budgetTokens, packetSnippetCount } from "./context-budget"
 import { checkoutRoot, projectIdentity, sessionProject, sessionsOfProject } from "./project-identity"
+import { areasNamedBy, describeFindings, findingsFor, findingsOf, freshnessOf } from "./findings"
 
 export interface ProjectScopeOptions {
   sessionId?: string
@@ -218,6 +219,16 @@ export async function buildContextPacket(scope: ProjectScope, options: {
   }
   for (const decision of decisions.filter(row => !scope.taskId || row.task_id === scope.taskId).slice(-5)) {
     append(`Decision: ${decision.title}\n${decision.decision}`, { kind: "decision", projectId: scope.projectId, id: decision.id, hash: fingerprint(JSON.stringify(decision)) })
+  }
+
+  // What earlier readers already reported. For the coordinator, which areas are covered (so it does not delegate them again);
+  // for a worker, the reports on the areas its task names (so it reads only what changed).
+  if (options.summaryOnly) {
+    const recent = await Promise.all((await findingsOf(scope.projectId)).slice(0, 5).map(async finding => ({ finding, freshness: await freshnessOf(finding) })))
+    if (recent.length) append(`Saved findings (a current one already covers its areas: task_delegate returns it without running the worker; refresh: true reruns):\n${describeFindings(recent)}`)
+  } else {
+    const known = await findingsFor(scope.projectId, areasNamedBy(options.query ?? ""), { limit: 2 })
+    if (known.length) append(`Earlier findings on the areas named by the task (trust the current ones; reread only what changed):\n${describeFindings(known, { withSummary: true, summaryChars: 1_500 })}`)
   }
 
   /** The map of the project: what it is and where things live. Last for a task (evidence first), first for the coordinator. */

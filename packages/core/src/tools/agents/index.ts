@@ -1,6 +1,7 @@
 import { trackCollaboration } from "../../agent/collaboration-telemetry";
 import { getSwarmUsage } from "../../agent/swarm-usage";
 import { runEphemeralAgent } from "../../agent/ephemeral-agents";
+import { isReaderAgent } from "../../agent/loadout";
 import { markSourceIndexStale } from "../../agent/source-index";
 import { projectOfSession } from "../../agent/project-identity";
 import { resolveProjectScope, scopeFromConfig, resolveContextReferences, type ContextReference } from "../../agent/project-context";
@@ -606,6 +607,7 @@ export const taskDelegateTool: Tool = {
         },
       },
       ref: { type: "string", description: "Optional label of this task in your plan (e.g. the Spec Kit id T003). task_revise accepts it in place of the task_id." },
+      refresh: { type: "boolean", description: "Run the worker even if a current finding already covers the areas the task names. By default a scout/planner whose areas were already reported, with their files unchanged, is not run again: its saved report comes back instead." },
       task_id: { type: "string", description: "Optional existing task ID to update automatically" },
       project_id: { type: "string", description: "Optional project ID for progress tracking" },
     },
@@ -665,6 +667,17 @@ export const taskDelegateTool: Tool = {
         handoffs.push(`### ${dep}\n${settled.entry.result.slice(0, 3000)}`);
       }
       dependencyBrief = `\n\nEntregas de las tareas de las que depende esta (ya terminadas; construye sobre ellas):\n${handoffs.join("\n\n")}`;
+    }
+    // A reader whose areas were already reported, over files that have not changed, is not run again: the saved report is the answer.
+    if (scope && params.refresh !== true && isReaderAgent(workerId)) {
+      const { reusableFinding, roleOf } = await import("../../agent/findings.ts");
+      const hit = await reusableFinding(scope.projectId, roleOf(workerId), taskDescription).catch(() => null);
+      if (hit) {
+        const age = Math.max(1, Math.round((Date.now() - hit.finding.created_at) / 60_000));
+        const result = `[Hallazgo guardado reutilizado (${hit.finding.role}, hace ${age} min): los archivos en los que se basa no han cambiado, así que no se volvió a leer nada. Pasa refresh: true para rehacerlo.]\n${hit.finding.summary}`;
+        board.settleDelegation({ ref, status: "completed", result }, ref);
+        return { ok: true, reused: true, finding_id: hit.finding.id, worker_id: workerId, ref, result, acceptance_met: null };
+      }
     }
     const specialty = typeof params.specialty === "string" ? params.specialty : undefined;
     const contextMetadata = { code_session_id: scope?.sessionId, code_task_id: scope?.taskId, workspace: scope?.workspace, specialty, paths, context_refs: refs };
@@ -730,6 +743,7 @@ export const taskDelegateTool: Tool = {
     const finishCollaboration = trackCollaboration({ from: config?.configurable?.agent_id ?? "bee", to: workerId,
       taskId: scope?.taskId, sessionId: scope?.sessionId, summary: taskDescription });
     let partial = false;
+    let finishedRunId: string | undefined;
     try {
       // Dynamic import to avoid circular dependency (agent-loop → tools → agent-loop)
       const { runAgentIsolated } = await import("../../agent/agent-loop.ts");
@@ -744,8 +758,15 @@ export const taskDelegateTool: Tool = {
         approvedExecution: config?.configurable?.approved_execution === true,
         approvalChannel: config?.configurable?.approval_channel,
         signal: config?.signal,
-        onRun: run => { partial = run.status !== "completed"; },
+        onRun: run => { partial = run.status !== "completed"; finishedRunId = run.id; },
       });
+
+      // Saved the moment the worker delivers, not when the coordinator gets to read it: if the coordinator dies first, the report survives.
+      if (scope && isReaderAgent(workerId)) {
+        const { saveFinding } = await import("../../agent/findings.ts");
+        await saveFinding({ projectId: scope.projectId, sessionId: scope.sessionId, agentId: workerId, runId: finishedRunId,
+          workspace: runWorkspace ?? scope.workspace, objective: taskDescription, summary: result, partial }).catch(() => {});
+      }
 
       const checks = await checkAcceptance(acceptance, result);
       const met = summarizeAcceptance(checks);

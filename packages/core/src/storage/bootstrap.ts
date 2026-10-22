@@ -105,6 +105,7 @@ const INDEXES: IndexSpec[] = [
   { collection: "codeSessions", field: "status" },
   { collection: "codeFiles", field: "project_id" },
   { collection: "codeProjects", field: "root_path" },
+  { collection: "codeFindings", field: "project_id" },
   { collection: "codeFiles", field: "file_path" },
   { collection: "codeTurns", field: "session_id" },
   { collection: "codeTurns", field: "task_id" },

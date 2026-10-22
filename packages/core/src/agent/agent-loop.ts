@@ -496,7 +496,7 @@ export interface StreamChunk {
   agent?: { messages: any[] }
   tools?: { messages: any[] }
   usage?: { input_tokens: number; output_tokens: number }
-  run?: { status: AgentRunStatus; blocker: string | null }
+  run?: { status: AgentRunStatus; blocker: string | null; id?: string }
 }
 
 // ─── Main agent loop ──────────────────────────────────────────────────────────
@@ -1729,7 +1729,7 @@ export async function* runAgent(
     }),
     completed_at: nowSec(),
   })
-  yield { run: { status: runStatus, blocker } }
+  yield { run: { status: runStatus, blocker, id: runId } }
 
   // Last line of defense. The body above can throw, and a consumer can abandon
   // the generator without draining it — in both cases the run would be left

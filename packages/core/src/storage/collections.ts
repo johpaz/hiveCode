@@ -774,6 +774,28 @@ export interface CodeFileDoc {
 }
 
 /**
+ * What a reader (scout, planner) found out about part of a project, kept for the next time that part is asked about.
+ * It is valid while the files it was based on are unchanged: `files_json` holds each file's hash when it was read.
+ */
+export interface CodeFindingDoc {
+  id: string;
+  project_id: string;
+  /** The profile that wrote it (`scout`, `planner`); an instance `scout#2` is a `scout`. */
+  role: string;
+  /** Areas the task named (directories or files, relative to the project root). */
+  areas_json: string;
+  /** `{ path: content_hash }` of every indexed file the run read, at the time it read them. */
+  files_json: string;
+  objective: string;
+  /** The handoff the worker delivered, as it delivered it. */
+  summary: string;
+  /** `completed`, or `partial` when the run stopped short (budget, steps). */
+  status: "completed" | "partial";
+  session_id: string;
+  created_at: number;
+}
+
+/**
  * A code project: the repository (or folder) agents work on, independent of any session. Everything derived
  * from its files (graph, symbols, search documents, context cache) hangs from `id`, so opening the project
  * again, from another session or a worktree, reuses it instead of indexing it a second time.
