@@ -80,6 +80,39 @@ export function acquireWorkerSlot(taskKey: string, options: { readOnly?: boolean
   })
 }
 
+// ── How many a task may launch in total ───────────────────────────────────────────────────────────────────
+// Slots bound how many run AT ONCE; they say nothing about how many a task starts. One review launched six scouts in two
+// rounds and spent its budget on the second round redoing the first. A task gets a few readers; the rest of the work
+// has to be folded into them or answered from their reports.
+
+const DEFAULT_MAX_SCOUTS = 4
+const DEFAULT_MAX_PLANNERS = 2
+
+/** Most delegations of `role` one task may start; Infinity for roles with no limit (writers are bounded by their plan). */
+export function maxLaunches(role: string): number {
+  if (role === "scout") return limit("HIVECODE_MAX_SCOUTS", DEFAULT_MAX_SCOUTS)
+  if (role === "planner") return limit("HIVECODE_MAX_PLANNERS", DEFAULT_MAX_PLANNERS)
+  return Infinity
+}
+
+const launches = new Map<string, Map<string, number>>()
+
+/** Counts a delegation of `role` against the task; ok=false (and nothing counted) when the task has used its share. */
+export function reserveLaunch(taskKey: string, role: string): { ok: boolean; launched: number; max: number } {
+  const max = maxLaunches(role)
+  const perRole = launches.get(taskKey) ?? new Map<string, number>()
+  const launched = perRole.get(role) ?? 0
+  if (launched >= max) return { ok: false, launched, max }
+  perRole.set(role, launched + 1)
+  launches.set(taskKey, perRole)
+  return { ok: true, launched: launched + 1, max }
+}
+
+/** Forgets a finished task's count. */
+export function clearLaunches(taskKey: string): void {
+  launches.delete(taskKey)
+}
+
 /** Workers running and waiting for a task; for tests and diagnostics. */
 export function workerSlotUsage(taskKey: string): { active: number; waiting: number } {
   const slots = tasks.get(taskKey)

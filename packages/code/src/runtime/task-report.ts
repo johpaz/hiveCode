@@ -23,6 +23,10 @@ export interface RunReport {
     total: number
     byAgent: Record<string, number>
     blocked: number
+    /** Runs that stopped on the task's token budget (`needs_budget`): neither blocked nor completed. */
+    needsBudget: number
+    /** The coordinator (the harness run) is one of them: the task did not finish, whatever the rest delivered. */
+    budgetExceeded: boolean
     blockers: Record<string, number>
     revisions: number
     maxConcurrentWorkers: number
@@ -114,6 +118,8 @@ export async function collectRunReport(options: ReportOptions): Promise<RunRepor
       total: runs.length,
       byAgent: Object.fromEntries([...new Set(runs.map(r => r.agent_id))].map(a => [a, runs.filter(r => r.agent_id === a).length])),
       blocked: runs.filter(r => r.status === "blocked").length,
+      needsBudget: runs.filter(r => r.status === "needs_budget").length,
+      budgetExceeded: runs.some(r => r.kind === "harness" && r.status === "needs_budget"),
       blockers,
       revisions: workers.filter(isRevision).length,
       maxConcurrentWorkers: peakConcurrency(workerEvents),

@@ -53,7 +53,7 @@ import {
   type RepeatTrackerSnapshot,
 } from "./run-store"
 import { recordTaskUsage, taskBudgetBlocker } from "./task-budget"
-import { commandPreview, traceStep } from "./step-trace"
+import { commandPreview, traceResult, traceStep } from "./step-trace"
 import { checkoutRoot, projectOfSession } from "./project-identity"
 import { diskReadNudge } from "./read-mix"
 import { CAPABILITY_SEARCH_LIMIT_MESSAGE, chargeCapabilitySearch, isCapabilitySearch } from "./discovery-budget"
@@ -942,7 +942,9 @@ export async function* runAgent(
       log.info(`[agent-loop] Wrap-up signal sent: run=${runId} iteration=${iterations}/${maxSteps}`)
     }
 
-    estimatedInputTokens += budgetTokens(JSON.stringify(prepareMessages(messages, ctx.tools))) + budgetTokens(JSON.stringify(ctx.tools))
+    const sentMessages = prepareMessages(messages, ctx.tools)
+    const turnEstimate = budgetTokens(JSON.stringify(sentMessages)) + budgetTokens(JSON.stringify(ctx.tools))
+    estimatedInputTokens += turnEstimate
     const stepStartedAt = Date.now()
     const turnReasoning = chooseReasoningEffort(reasoningPolicy, previousTurnFailed)
     // Observing a worker must not change whether its provider uses streaming transport.
@@ -951,7 +953,7 @@ export async function* runAgent(
       ...providerCfg,
       ...profileCallOptions,
       ...(turnReasoning ? { reasoningEffort: turnReasoning } : {}),
-      messages: prepareMessages(messages, ctx.tools),
+      messages: sentMessages,
       tools: ctx.tools.length > 0 ? ctx.tools : undefined,
       signal: opts.signal,
       onToken: output && opts.onToken ? token => { output.narrative(token); opts.onToken!(token) } : opts.onToken,
@@ -974,6 +976,7 @@ export async function* runAgent(
       ms: Date.now() - stepStartedAt,
       reasoningEffort: turnReasoning ?? null,
       inputTokens: response.usage?.input_tokens ?? 0,
+      estimatedInputTokens: turnEstimate,
       outputTokens: response.usage?.output_tokens ?? 0,
       reasoningChars: String((response as { reasoning_content?: string }).reasoning_content ?? "").length,
       contentChars: response.content?.length ?? 0,
@@ -1277,6 +1280,7 @@ export async function* runAgent(
       // to go in whole and the next call died with a 400.
       const readNudge = diskReadNudge(runId, agent.agent_type, toolName)
       const toolResultLLM = capToolResult(formatToolResult(toolResultJS, { name: toolName, root: opts.workspace ?? agent.workspace }), providerCfg.contextWindow) + (readNudge ?? "")
+      traceResult({ agent: opts.agentId, turn: iterations, tool: toolName, chars: toolResultLLM.length })
       const toolError = !!(
         toolResultJS
         && typeof toolResultJS === "object"

@@ -15,6 +15,8 @@ export interface StepTrace {
   /** The `reasoning_effort` this turn asked for, or null when none was sent. */
   reasoningEffort: string | null
   inputTokens: number
+  /** What the harness estimated for this request (messages + tools). Real / estimated is the estimator's error. */
+  estimatedInputTokens: number
   outputTokens: number
   /** Characters of reasoning the model produced; they count as output tokens too. */
   reasoningChars: number
@@ -31,6 +33,22 @@ export function commandPreview(args: unknown, max = 400): string {
     const cmd = (parsed as { cmd?: unknown; command?: unknown })?.cmd ?? (parsed as { command?: unknown })?.command
     return typeof cmd === "string" ? cmd.slice(0, max) : ""
   } catch { return "" }
+}
+
+/** One tool answer as the model received it: how big it was, so a run's context can be read back by tool. */
+export interface ResultTrace {
+  agent: string
+  turn: number
+  tool: string
+  chars: number
+}
+
+export function traceResult(result: ResultTrace): void {
+  const file = process.env.HIVE_STEP_LOG
+  if (!file) return
+  try {
+    appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), kind: "result", ...result }) + "\n")
+  } catch { /* a diagnostic must never break a call */ }
 }
 
 export function traceStep(step: StepTrace): void {

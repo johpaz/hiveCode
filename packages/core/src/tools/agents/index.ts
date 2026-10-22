@@ -679,6 +679,15 @@ export const taskDelegateTool: Tool = {
         return { ok: true, reused: true, finding_id: hit.finding.id, worker_id: workerId, ref, result, acceptance_met: null };
       }
     }
+    // A task gets a few readers in total, however many run at once: the rest of the work is folded into them or answered from their reports.
+    if (scope?.taskId && isReaderAgent(workerId)) {
+      const { reserveLaunch } = await import("../../agent/worker-slots.ts");
+      const { roleOf } = await import("../../agent/findings.ts");
+      const launch = reserveLaunch(scope.taskId, roleOf(workerId));
+      if (!launch.ok) {
+        return failEarly(`Esta tarea ya lanzó ${launch.launched} ${roleOf(workerId)}s (el tope es ${launch.max}). Trabaja con los informes que ya tienes (task_status) o con los hallazgos guardados, y si falta un área, agrúpala en una sola delegación sobre un worker que ya terminó con task_revise.`, { worker_id: workerId, ref, launched: launch.launched, max: launch.max });
+      }
+    }
     const specialty = typeof params.specialty === "string" ? params.specialty : undefined;
     const contextMetadata = { code_session_id: scope?.sessionId, code_task_id: scope?.taskId, workspace: scope?.workspace, specialty, paths, context_refs: refs };
     const tasksCol = await col<TaskDoc>("tasks");

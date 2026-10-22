@@ -176,15 +176,23 @@ let tests = { pass: 0, fail: 0, files: 0, ran: false }
   }
 }
 
+// A task that ran out of its token budget did not finish, even if the process exited cleanly and no worker was "blocked".
+// It used to show as `error: null` and "bloqueados 0": the one failure the benchmark most needs to say out loud.
+const budgetWarning = warnings.find(w => /budget_exceeded/.test(w))
+const budgetExceeded = report.runs.budgetExceeded || !!budgetWarning
+const budgetError = budgetExceeded ? `budget_exceeded: la tarea agotó su presupuesto de tokens${budgetWarning ? ` (${(/task_[a-z_]+:\d+/.exec(budgetWarning) ?? [""])[0]})` : ""} y no entregó` : null
+
 const result = {
   task: values.task,
   minutes: report.minutes,
-  error: error ?? null,
+  error: error ?? budgetError,
+  budgetExceeded,
   integrated: report.integrated,
   hasPackageJson: report.hasPackageJson,
   leftoverWorktrees: report.leftoverWorktrees,
   projectTests: tests,
   runs: report.runs,
+  reads: report.reads,
   tokens: report.tokens,
   costUsd: report.costUsd,
   workerMinutes: report.workerMinutes,
@@ -203,7 +211,7 @@ say(`resultado → ${out}`)
 console.log([
   `  tiempo        ${t.minutes} min${t.error ? `  ⚠ ${t.error}` : ""}`,
   `  integrado     ${t.integrated ? "sí" : "NO"}   tests del proyecto: ${t.projectTests.pass} pasan / ${t.projectTests.fail} fallan (${t.projectTests.files} archivos)`,
-  `  runs          ${t.runs.total}  bloqueados ${t.runs.blocked}  revisiones ${t.runs.revisions}  concurrencia máx. ${t.runs.maxConcurrentWorkers}`,
+  `  runs          ${t.runs.total}  bloqueados ${t.runs.blocked}  sin presupuesto ${t.runs.needsBudget}  revisiones ${t.runs.revisions}  concurrencia máx. ${t.runs.maxConcurrentWorkers}`,
   `  tokens        ${(t.tokens.input / 1e6).toFixed(1)} M entrada / ${(t.tokens.output / 1e6).toFixed(2)} M salida`,
   `  swarm         instancias ${t.swarm.instancesUsed.join(",") || "ninguna"}  fusiones ${t.swarm.mergesOk} ok / ${t.swarm.mergeConflicts} con conflicto  esperas ${t.swarm.waitFor}  sleep por shell ${t.swarm.shellSleepPolling}  herramientas simultáneas máx. ${t.swarm.maxConcurrentTools}  llamadas/paso ${t.swarm.toolCallsPerStep}`,
   `  rarezas       marcado perdido ${t.modelOddities.markupDropped}, respuestas vacías ${t.modelOddities.emptyResponses}`,

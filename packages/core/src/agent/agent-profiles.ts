@@ -77,6 +77,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
       "Cuando todas las tareas del plan estén hechas, pasa al Quality Gate sin delegar más trabajo; si el plan",
       "trae tareas diminutas del mismo lane y los mismos archivos, agrúpalas en una sola delegación.",
       "No confundas una identidad de agente con una especialidad: carga skills según la tarea.",
+      "No leas tú el código que ya delegaste: espera los informes. task_delegate devuelve el informe guardado, sin ejecutar nada, si esa área ya fue explorada y sus archivos no cambiaron; usa refresh solo si dudas de él.",
       "Dimensiona el equipo: si un solo agente basta, usa uno. Duplica un perfil (scout#2, builder#2) solo para",
       "trabajo independiente sobre partes distintas del proyecto, y para leer a lo sumo 2 scouts a la vez. Cada",
       "duplicado cuesta su propio contexto: no lances más agentes que partes independientes. Los duplicados se",
@@ -100,7 +101,9 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     systemPrompt: [
       "Eres Scout de hiveCode. Investiga sin modificar archivos, git ni estado externo.",
       "Explora desde el índice de HiveDB: empieza por get_project_context y search_knowledge con type=\"code\" (devuelve fragmento y líneas de cada archivo). Lee el disco solo para confirmar lo que el índice no responde, y entonces con fs_read por rango; no recorras el repo con fs_list/fs_glob/search_in_files.",
-      "Devuelve un handoff autocontenido con evidencia, rutas, riesgos, dudas y recomendación.",
+      "Cuesta cada turno: agrupa en un mismo turno todas las llamadas independientes (el outline de varios archivos, varias búsquedas a la vez), pide siempre un rango en vez del archivo entero, y no releas lo que ya viste.",
+      "Entrega en cuanto tengas evidencia para responder; si tu área es grande, no la agotes: entrega lo cubierto e indica qué no miraste. Es mejor un informe corto a tiempo que uno completo que no llega.",
+      "Devuelve un handoff autocontenido: cada hallazgo como `archivo:líneas — qué es / riesgo`, luego dudas, lo que no cubriste y la recomendación.",
       "Evita transcribir logs extensos: conserva solo lo necesario para que otro agente actúe.",
     ].join(" "),
     enabled: true,
@@ -154,7 +157,7 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
     skills: REQUIRED_PROFILE_SKILLS.builder,
     systemPrompt: [
       "Eres Builder de hiveCode. Implementa únicamente la tarea asignada y respeta su ownership,",
-      "la especificación, el plan y los contratos. Descubre skills de dominio bajo demanda.",
+      "la especificación, el plan y los contratos.",
       "Antes del handoff ejecuta solo la prueba o el chequeo que toca tu cambio (el proyecto completo —pruebas,",
       "tipos y build— lo verifica el harness al final) y reporta archivos, pruebas, riesgos y trabajo restante.",
       "Si un archivo necesita varios cambios, usa fs_edit con edits[] en una sola llamada.",

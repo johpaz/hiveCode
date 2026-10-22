@@ -62,3 +62,36 @@ describe("worker slots", () => {
     a(); b()
   })
 })
+
+import { clearLaunches, maxLaunches, reserveLaunch } from "./worker-slots"
+
+describe("launches per task", () => {
+  afterEach(() => { delete process.env.HIVECODE_MAX_SCOUTS; delete process.env.HIVECODE_MAX_PLANNERS; clearLaunches("t1"); clearLaunches("t2") })
+
+  test("a task gets four scouts and two planners, and is told when it is out", () => {
+    for (let i = 1; i <= 4; i++) expect(reserveLaunch("t1", "scout")).toMatchObject({ ok: true, launched: i, max: 4 })
+    expect(reserveLaunch("t1", "scout")).toMatchObject({ ok: false, launched: 4, max: 4 })
+    expect(reserveLaunch("t1", "planner").ok).toBe(true)
+    expect(reserveLaunch("t1", "planner").ok).toBe(true)
+    expect(reserveLaunch("t1", "planner").ok).toBe(false)
+  })
+
+  test("a refused launch is not counted, and other tasks and roles are unaffected", () => {
+    process.env.HIVECODE_MAX_SCOUTS = "1"
+    expect(reserveLaunch("t1", "scout").ok).toBe(true)
+    expect(reserveLaunch("t1", "scout").ok).toBe(false)
+    expect(reserveLaunch("t1", "scout").launched).toBe(1)
+    expect(reserveLaunch("t2", "scout").ok).toBe(true)
+    for (let i = 0; i < 20; i++) expect(reserveLaunch("t1", "builder").ok).toBe(true)
+  })
+
+  test("a finished task starts from zero, and the limits can be set", () => {
+    process.env.HIVECODE_MAX_SCOUTS = "2"
+    expect(maxLaunches("scout")).toBe(2)
+    reserveLaunch("t1", "scout"); reserveLaunch("t1", "scout")
+    expect(reserveLaunch("t1", "scout").ok).toBe(false)
+    clearLaunches("t1")
+    expect(reserveLaunch("t1", "scout").ok).toBe(true)
+    expect(maxLaunches("builder")).toBe(Infinity)
+  })
+})
