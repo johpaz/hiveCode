@@ -10,6 +10,8 @@ hot = true
 coverage = false
 timeout = 30000
 smol = true
+# Deletes the temp dirs the tests create (see the file).
+preload = ["./tests/preload-tmp-cleanup.ts"]
 # Real API integration tests require explicit invocation (use --tsconfig-override tests/tsconfig.json)
 # Excluded here so agent worktrees don't auto-discover and run them without proper module resolution
 # `bench/tasks/tareas/` is the fixture of another benchmark task: it expects a server project
