@@ -1,6 +1,7 @@
 import { cachedTokens } from "./usage"
 import { appendFileSync } from "node:fs"
 import { logger } from "../../utils/logger"
+import { runWithIdleGuard, type Heartbeat } from "./idle-guard"
 import {
   sanitizeMessages, requiresTemperature1, OPENAI_COMPAT_BASE_URLS,
   getProviderProfile, modelSupportsTools, normalizeToolName, normalizeToolSchema,
@@ -69,14 +70,6 @@ function compactBodyForContextOverflow(body: any, err: any): void {
   } else if (body.max_tokens) {
     body.max_tokens = Math.min(body.max_tokens, 4096)
   }
-}
-
-/** Silence after which a streaming connection counts as dead; HIVECODE_LLM_IDLE_MS overrides it. */
-function llmIdleMs(): { between: number; first: number } {
-  const raw = Number(process.env.HIVECODE_LLM_IDLE_MS)
-  const between = Number.isFinite(raw) && raw >= 1000 ? raw : 120_000
-  // The first data may take long when the model reasons without streaming it, so it gets a wider window.
-  return { between, first: Math.max(between, Number.isFinite(raw) && raw >= 1000 ? raw : 300_000) }
 }
 
 export abstract class OpenAICompatBase implements LLMProvider {
@@ -307,47 +300,12 @@ export abstract class OpenAICompatBase implements LLMProvider {
 
   // ─── Streaming ──────────────────────────────────────────────────────────────
 
-  /**
-   * A stream that stops sending is a dead connection, not a slow model: without this the SDK waits its 10 minutes per request
-   * and the agent stands still. After `idle` ms with no data the request is aborted; if nothing had arrived yet it is sent again
-   * (twice at most), and if the answer was already under way the error reaches the loop, because replaying would duplicate text.
-   * This bounds the silence of one connection, not how long or how much an agent works.
-   */
-  private async _streamWithIdleGuard(
+  private _streamWithIdleGuard(
     client: any, body: any, options: LLMCallOptions, toolNameMap: Map<string, string>, sendTools: boolean,
     profile: ReturnType<typeof getProviderProfile>, knownToolNames: Set<string>,
   ): Promise<LLMResponse> {
-    const idleMs = llmIdleMs()
-    for (let attempt = 0; ; attempt++) {
-      const controller = new AbortController()
-      const forward = () => controller.abort(options.signal?.reason)
-      if (options.signal?.aborted) forward()
-      else options.signal?.addEventListener("abort", forward, { once: true })
-      let timer: ReturnType<typeof setTimeout> | undefined
-      let activity = 0
-      let timedOut = false
-      const arm = () => {
-        activity++
-        clearTimeout(timer)
-        timer = setTimeout(() => { timedOut = true; controller.abort() }, activity <= 2 ? idleMs.first : idleMs.between)
-      }
-      arm()
-      try {
-        const response = await this._streamCall(client, body, { ...options, signal: controller.signal }, toolNameMap, sendTools, profile, knownToolNames, arm)
-        // The SDK ends the stream quietly when it is aborted midway: a cut answer must not pass for a finished one.
-        if (timedOut) throw new Error("idle")
-        return response
-      } catch (err) {
-        if (!timedOut) throw err
-        // activity 1 = the request opened, 2+ = chunks arrived
-        const started = activity > 2
-        log.warn(`[llm-client] ${this.providerName}: no data for ${Math.round((started ? idleMs.between : idleMs.first) / 1000)}s${started ? " mid-answer" : ""}`)
-        if (started || attempt >= 2) throw new Error(`El modelo (${this.providerName}) dejó de enviar datos durante ${Math.round((started ? idleMs.between : idleMs.first) / 1000)} s${started ? " a mitad de la respuesta" : ""}`)
-      } finally {
-        clearTimeout(timer)
-        options.signal?.removeEventListener("abort", forward)
-      }
-    }
+    return runWithIdleGuard(this.providerName, options.signal, (signal, beat) =>
+      this._streamCall(client, body, { ...options, signal }, toolNameMap, sendTools, profile, knownToolNames, beat))
   }
 
   private async _streamCall(
@@ -358,7 +316,7 @@ export abstract class OpenAICompatBase implements LLMProvider {
     sendTools: boolean,
     profile: ReturnType<typeof getProviderProfile>,
     knownToolNames: Set<string>,
-    onActivity: () => void = () => {},
+    beat: Heartbeat = { open() {}, data() {} },
   ): Promise<LLMResponse> {
     // llama.cpp and other local servers only report usage when explicitly asked.
     // Without it the loop's token/cost ceilings never see anything to measure.
@@ -396,9 +354,9 @@ export abstract class OpenAICompatBase implements LLMProvider {
     let cached_tokens: number | undefined
     let output_tokens = 0
 
-    onActivity()
+    beat.open()
     for await (const chunk of stream) {
-      onActivity()
+      beat.data()
       const choice = chunk.choices?.[0]
       if (!choice) continue
 

@@ -2,7 +2,7 @@
  * A connection that goes silent must not hold an agent for the SDK's ten minutes. Tested against a local server so the
  * real SDK, real streaming and real aborts are involved.
  */
-import { afterEach, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
 import { OpenCodeGoProvider } from "./opencode-go"
 import type { LLMCallOptions } from "../llm-client"
 
@@ -31,6 +31,7 @@ beforeAll(() => {
   })
 })
 afterEach(() => { hits = 0 })
+afterAll(() => { server.stop(true); delete process.env.HIVECODE_LLM_IDLE_MS })
 
 const call = () => new OpenCodeGoProvider().call({
   provider: "opencode-go", model: "m", apiKey: "k", baseUrl: `http://localhost:${server.port}/v1`,
@@ -56,4 +57,24 @@ describe("idle guard on streaming", () => {
     await expect(call()).rejects.toThrow(/a mitad de la respuesta/)
     expect(hits).toBe(1)
   }, 15_000)
+})
+
+describe("runWithIdleGuard", () => {
+  const networkTimeout = () => Object.assign(new Error("The operation timed out."), { name: "TimeoutError" })
+
+  test("a network timeout before any data is retried", async () => {
+    const { runWithIdleGuard } = await import("./idle-guard")
+    let calls = 0
+    const result = await runWithIdleGuard("p", undefined, async () => { if (++calls === 1) throw networkTimeout(); return "ok" })
+    expect(result).toBe("ok")
+    expect(calls).toBe(2)
+  })
+
+  test("after data arrived the error reaches the loop unreplayed, and other errors pass through", async () => {
+    const { runWithIdleGuard } = await import("./idle-guard")
+    let calls = 0
+    await expect(runWithIdleGuard("p", undefined, async (_s, beat) => { calls++; beat.data(); throw networkTimeout() })).rejects.toThrow("The operation timed out.")
+    expect(calls).toBe(1)
+    await expect(runWithIdleGuard("p", undefined, async () => { throw new Error("HTTP 400") })).rejects.toThrow("HTTP 400")
+  })
 })

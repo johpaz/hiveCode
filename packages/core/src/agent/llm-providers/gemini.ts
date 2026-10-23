@@ -1,9 +1,24 @@
 import { logger } from "../../utils/logger"
+import { runWithIdleGuard } from "./idle-guard"
 import { sanitizeMessages, resolveMaxTokens } from "./interface"
 import type { LLMCallOptions, LLMProvider, LLMResponse, LLMToolCall } from "./interface"
 import type { ContentPart, LLMMessage } from "../llm-client"
 
 const log = logger.child("llm-client")
+
+/**
+ * Gemini's usage, in the shape the loop reads. `promptTokenCount` already includes the cached part, and the thinking tokens
+ * are billed as output but reported apart from `candidatesTokenCount`, so they are added to it.
+ */
+function geminiUsage(meta: any): { input_tokens: number; output_tokens: number; thinking_tokens: number; cached_tokens?: number } {
+  const thinking = meta?.thoughtsTokenCount ?? 0
+  return {
+    input_tokens: meta?.promptTokenCount ?? 0,
+    output_tokens: (meta?.candidatesTokenCount ?? 0) + thinking,
+    thinking_tokens: thinking,
+    ...(typeof meta?.cachedContentTokenCount === "number" ? { cached_tokens: meta.cachedContentTokenCount } : {}),
+  }
+}
 
 export class GeminiProvider implements LLMProvider {
   static readonly secretKey = "GEMINI_API_KEY"
@@ -152,6 +167,9 @@ export class GeminiProvider implements LLMProvider {
     const maxTokens = resolveMaxTokens(options.maxTokens, options.contextWindow)
     if (maxTokens) config.maxOutputTokens = maxTokens
     if (options.temperature !== undefined) config.temperature = options.temperature
+    // Gemini 3 reasons by default at every turn (about 300 tokens even to answer "ok"). The per-task policy picks how hard it
+    // thinks, as it already does for DeepSeek and OpenCode. MINIMAL is rejected by 3.8; low, medium and high are accepted.
+    if (options.reasoningEffort && /gemini-3/.test(options.model)) config.thinkingConfig = { thinkingLevel: options.reasoningEffort.toUpperCase() }
     if (options.tools?.length) {
       config.tools = [{
         functionDeclarations: options.tools.map((t) => ({
@@ -166,54 +184,56 @@ export class GeminiProvider implements LLMProvider {
 
     // Use streaming if onToken callback is provided, otherwise single-shot
     if (options.onToken) {
-      const streamResponse = await ai.models.generateContentStream({ model: options.model, contents, config })
+      const onToken = options.onToken
+      return runWithIdleGuard("gemini", options.signal, async (signal, beat) => {
+        const streamResponse = await ai.models.generateContentStream({ model: options.model, contents, config: { ...config, abortSignal: signal } })
+        beat.open()
 
-      let content = ""
-      const tool_calls: LLMToolCall[] = []
-      let finishReason: string | undefined
+        let content = ""
+        const tool_calls: LLMToolCall[] = []
+        let finishReason: string | undefined
+        // The usage travels in the chunks (the last one carries the totals), not in the stream object.
+        let usageMeta: any
 
-      for await (const chunk of streamResponse) {
-        const candidate = chunk.candidates?.[0]
-        if (!candidate) continue
+        for await (const chunk of streamResponse) {
+          beat.data()
+          if (chunk.usageMetadata) usageMeta = chunk.usageMetadata
+          const candidate = chunk.candidates?.[0]
+          if (!candidate) continue
 
-        for (const part of candidate.content?.parts ?? []) {
-          if (part.text) {
-            content += part.text
-            options.onToken(part.text)
+          for (const part of candidate.content?.parts ?? []) {
+            if (part.text) {
+              content += part.text
+              onToken(part.text)
+            }
+            if (part.functionCall) {
+              tool_calls.push({
+                id: crypto.randomUUID(),
+                type: "function",
+                function: { name: part.functionCall.name ?? "", arguments: JSON.stringify(part.functionCall.args ?? {}) },
+                thought_signature: part.thoughtSignature ?? undefined,
+              })
+            }
           }
-          if (part.functionCall) {
-            tool_calls.push({
-              id: crypto.randomUUID(),
-              type: "function",
-              function: { name: part.functionCall.name ?? "", arguments: JSON.stringify(part.functionCall.args ?? {}) },
-              thought_signature: part.thoughtSignature ?? undefined,
-            })
-          }
+
+          if (candidate.finishReason) finishReason = candidate.finishReason
         }
 
-        if (candidate.finishReason) finishReason = candidate.finishReason
-      }
+        const stop_reason: LLMResponse["stop_reason"] =
+          tool_calls.length > 0 ? "tool_calls"
+            : finishReason === "MAX_TOKENS" ? "max_tokens"
+              : "stop"
 
-      const stop_reason: LLMResponse["stop_reason"] =
-        tool_calls.length > 0 ? "tool_calls"
-          : finishReason === "MAX_TOKENS" ? "max_tokens"
-            : "stop"
-
-      // Aggregate usage from the final chunk if available
-      const aggUsage = streamResponse as any
-      return {
-        content,
-        tool_calls: tool_calls.length ? tool_calls : undefined,
-        stop_reason,
-        usage: {
-          input_tokens: aggUsage?.usageMetadata?.promptTokenCount ?? 0,
-          output_tokens: aggUsage?.usageMetadata?.candidatesTokenCount ?? 0,
-          thinking_tokens: aggUsage?.usageMetadata?.thoughtsTokenCount ?? 0,
-        },
-      }
+        return {
+          content,
+          tool_calls: tool_calls.length ? tool_calls : undefined,
+          stop_reason,
+          usage: geminiUsage(usageMeta),
+        }
+      })
     }
 
-    const response = await ai.models.generateContent({ model: options.model, contents, config })
+    const response = await ai.models.generateContent({ model: options.model, contents, config: { ...config, abortSignal: options.signal } })
 
     const candidate = response.candidates?.[0]
 
@@ -257,11 +277,7 @@ export class GeminiProvider implements LLMProvider {
       content,
       tool_calls: tool_calls.length ? tool_calls : undefined,
       stop_reason,
-      usage: usageMeta ? {
-        input_tokens: usageMeta.promptTokenCount ?? 0,
-        output_tokens: usageMeta.candidatesTokenCount ?? 0,
-        thinking_tokens: (usageMeta as any).thoughtsTokenCount ?? 0,
-      } : undefined,
+      usage: usageMeta ? geminiUsage(usageMeta) : undefined,
     }
   }
 }

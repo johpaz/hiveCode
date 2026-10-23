@@ -324,6 +324,7 @@ export const SEED_DATA: SeedData = {
     { id: "es_MX-claude-14947-epoch-high", providerId: "piper", name: "Piper Spanish (Claude)", modelType: "tts", contextWindow: 0, capabilities: JSON.stringify(["tts", "speech", "local"]) },
 
     // ── Google Gemini (fuente: openrouter.ai/google + ai.google.dev) ──
+    { id: "gemini-3.8-flash", providerId: "gemini", name: "Gemini 3.8 Flash", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming", "reasoning"]) },
     { id: "gemini-3.5-flash", providerId: "gemini", name: "Gemini 3.5 Flash", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming", "reasoning"]) },
     { id: "gemini-3.1-pro-preview", providerId: "gemini", name: "Gemini 3.1 Pro Preview", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming", "reasoning"]) },
     { id: "gemini-3.1-flash-lite-preview", providerId: "gemini", name: "Gemini 3.1 Flash Lite Preview", modelType: "llm", contextWindow: 1048576, capabilities: JSON.stringify(["chat", "vision", "json_mode", "function_calling", "streaming"]) },
