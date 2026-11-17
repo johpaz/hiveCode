@@ -27,6 +27,8 @@ import {
   type CapabilityType,
 } from "../../agent/capability-search.ts";
 import { CORE_TOOL_CATALOG } from "../../agent/tool-selector.ts";
+import { getRecentMessages, getScratchpad, getMessagesByIds } from "../../agent/conversation-store.ts";
+import { searchThreadMessages } from "../../agent/message-memory.ts";
 
 const log = logger.child("core");
 
@@ -584,6 +586,55 @@ export const reportProgressTool: Tool = {
   },
 };
 
+// ─── conversation_read (historial recuperable) ───────────────────────────────
+
+/** Máximo de mensajes que devuelve conversation_read. */
+const CONVERSATION_READ_LIMIT = 8;
+
+/**
+ * Lectura selectiva del historial. La compactación pierde detalle por diseño («You don't need long context»,
+ * arXiv 2611.05306): lo compactado sigue guardado e indexado, y esta herramienta lo trae bajo demanda por id o
+ * por significado. Solo se carga cuando hay un resumen aplicado al turno.
+ */
+export const conversationReadTool: Tool = {
+  name: "conversation_read",
+  description: "Read earlier messages from the current conversation by message IDs or text query when the summary lacks an exact detail (a path, an error, a value). Searches by meaning across the whole history, including messages already compacted into the summary.",
+  parameters: {
+    type: "object",
+    properties: {
+      message_ids: { type: "array", description: "Message IDs to read", items: { type: "number" } },
+      note_keys: { type: "array", description: "Scratchpad note keys to read", items: { type: "string" } },
+      query: { type: "string", description: "Text to search in earlier messages, by meaning and keywords (includes compacted history)" },
+    },
+  },
+  execute: async (params, config) => {
+    const threadId = config?.configurable?.thread_id as string | undefined;
+    if (!threadId) return { ok: false, error: "Conversation scope unavailable" };
+    const ids = new Set(Array.isArray(params.message_ids) ? params.message_ids.map(Number).filter(Number.isFinite) : []);
+    const noteKeys = new Set(Array.isArray(params.note_keys) ? params.note_keys.map(String) : []);
+    const query = String(params.query ?? "").trim().toLocaleLowerCase();
+    if (!ids.size && !noteKeys.size && !query) return { ok: false, error: "Provide message_ids, note_keys or query" };
+    // Por id: lectura directa, sin importar la antigüedad.
+    const byId = ids.size ? await getMessagesByIds(threadId, [...ids]) : [];
+    // Por texto: primero lo más cercano por significado en TODO el historial (índice híbrido); la subcadena sobre
+    // lo reciente cubre lo que aún no está indexado.
+    const byMeaning = query ? (await searchThreadMessages(threadId, query, CONVERSATION_READ_LIMIT)).map(hit => hit.message) : [];
+    const recent = query ? await getRecentMessages(threadId, 200) : [];
+    const bySubstring = query ? recent.filter(row => row.content.toLocaleLowerCase().includes(query)) : [];
+    const seen = new Set<number>();
+    const messages = [...byId, ...byMeaning, ...bySubstring]
+      .filter(row => !seen.has(row.id) && seen.add(row.id))
+      .slice(0, CONVERSATION_READ_LIMIT);
+    const notes = noteKeys.size || query ? await getScratchpad(threadId) : [];
+    return {
+      ok: true,
+      messages: messages.map(row => ({ id: row.id, role: row.role, content: row.content.slice(0, 2000) })),
+      notes: notes.filter(note => noteKeys.has(note.key) || (query && `${note.key} ${note.value}`.toLocaleLowerCase().includes(query)))
+        .slice(0, 8).map(note => ({ key: note.key, value: note.value.slice(0, 2000) })),
+    };
+  },
+};
+
 export function createTools(): Tool[] {
-  return [searchKnowledgeTool, getProjectContextTool, ...codeIndexTools, notifyTool, saveNoteTool, reportProgressTool];
+  return [searchKnowledgeTool, getProjectContextTool, ...codeIndexTools, notifyTool, saveNoteTool, reportProgressTool, conversationReadTool];
 }

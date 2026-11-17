@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@johpaz/hive-db": "^0.7.0",
+    "@johpaz/hive-db": "^0.7.2",
     "@johpaz/hivecode-mcp": "workspace:*",
     "@johpaz/hivecode-skills": "workspace:*",
     "@anthropic-ai/sdk": "^0.98.0",

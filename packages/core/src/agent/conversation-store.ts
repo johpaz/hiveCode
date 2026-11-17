@@ -35,6 +35,8 @@ export interface Summary {
   summary: string
   last_message_id: number
   messages_covered: number
+  /** Traspaso de seis campos, si el resumen se hizo con él. */
+  structured: import("./handoff").Handoff | null
 }
 
 export interface ScratchpadNoteRow {
@@ -114,6 +116,9 @@ export async function addMessage(
     updated_at: now,
   }, { expectedVersion: 0 })
 
+  // Recuperable desde el primer momento (segundo plano): no depende de que algún día se compacte con un modelo.
+  void import("./message-memory").then((m) => m.indexMessage(threadId, seq, role, textContent)).catch(() => {})
+
   const hour = new Date(now).toISOString().slice(0, 13)
   bumpRollup("activityRollups", hour, { messageCount: 1 }).catch(() => {})
 
@@ -181,6 +186,23 @@ export async function getMessagesAfter(threadId: string, afterId: number): Promi
     .filter((message) => message.id > afterId)
 }
 
+/**
+ * Mensajes concretos de un hilo por su número de secuencia. Los que no existen (borrados, de otro hilo) se
+ * omiten. Es la lectura puntual del historial recuperable: el índice devuelve ids y el texto sale de aquí.
+ */
+export async function getMessagesByIds(threadId: string, ids: number[]): Promise<StoredMessage[]> {
+  if (ids.length === 0) return []
+  const conversations = await col<ConversationDoc>("conversations")
+  const found = await Promise.all(
+    [...new Set(ids)].map(async (seq) => {
+      const id = storageId(threadId, seq)
+      const entry = await conversations.get(id)
+      return entry ? toStoredMessage(id, entry.doc) : null
+    }),
+  )
+  return found.filter((m): m is StoredMessage => m !== null).sort((a, b) => a.id - b.id)
+}
+
 // ─── Convert stored messages → LLMMessage array ───────────────────────────────
 
 export function toAPIMessages(rows: StoredMessage[]): LLMMessage[] {
@@ -209,6 +231,7 @@ export async function getSummary(threadId: string): Promise<Summary | null> {
     summary: entry.doc.summary,
     last_message_id: entry.doc.last_message_id ? parseInt(entry.doc.last_message_id, 10) : 0,
     messages_covered: entry.doc.messages_covered,
+    structured: entry.doc.structured ?? null,
   }
 }
 
@@ -216,7 +239,8 @@ export async function saveSummary(
   threadId: string,
   summary: string,
   messagesCovered: number,
-  lastMessageId: number
+  lastMessageId: number,
+  structured: import("./handoff").Handoff | null = null,
 ): Promise<void> {
   const summaries = await col<SummaryDoc>("summaries")
   const existing = await summaries.get(threadId)
@@ -226,6 +250,7 @@ export async function saveSummary(
     summary,
     messages_covered: messagesCovered,
     last_message_id: String(lastMessageId),
+    structured,
     created_at: existing?.doc.created_at ?? now,
     updated_at: now,
   }, { expectedVersion: existing?.version ?? 0 })

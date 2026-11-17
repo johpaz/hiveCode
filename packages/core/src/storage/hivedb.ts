@@ -98,7 +98,12 @@ export async function getHiveDb(): Promise<HiveDB> {
     const dbPath = getHiveDbPath();
     const isNew = !fs.existsSync(dbPath);
     ensureHiveDbDir(dbPath);
-    opening = HiveDB.open(dbPath).then((opened) => {
+    // Embedder local (opt-in): con él la búsqueda del historial encuentra por significado, no solo por palabras
+    // (ver bench/compaction, variante recall-paraphrase). Cuesta ~470 MB de pesos la primera vez y ~20 ms por
+    // documento indexado. Una base creada sin embedder y abierta con él (o al revés) puede rechazarse: se decide
+    // al crear la base.
+    const embedder = process.env.HIVE_EMBEDDER === "local" ? ({ embedder: "local" } as const) : undefined;
+    opening = HiveDB.open(dbPath, embedder).then((opened) => {
       db = opened;
       log.info(`[hivedb] Opened at ${dbPath}`);
       if (isNew) warnIfLegacyDbExists();

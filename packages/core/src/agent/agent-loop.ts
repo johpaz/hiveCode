@@ -22,6 +22,9 @@ import { runWithTaskSignal } from "../runtime/task-execution"
  */
 
 import { logger } from "../utils/logger"
+import { loadConfig } from "../config/loader"
+import { singleActionEnabled, updateTaskState, collapseMessages } from "./single-action"
+import type { Handoff } from "./handoff"
 import { getHiveDb } from "../storage/hivedb"
 import { causalLogEnabled } from "../storage/causal-events"
 import type { HiveDB } from "@johpaz/hive-db"
@@ -725,6 +728,10 @@ export async function* runAgent(
 
   log.info(`[agent-loop] Starting harness: run=${runId} agent=${agentName} thread=${opts.threadId} provider=${providerCfg.provider}/${cleanModel} maxSteps=${maxSteps} checkpointEvery=${checkpointEvery}`)
 
+  // Fixed part of the prompt (system, skills, tools, project packet): not compactable, so the compaction trigger
+  // works on what is left. Unknown until the first compile of this run; compaction assumes an estimate until then.
+  let lastFixedTokens: number | undefined
+
   // Store the user message in conversation history
   if (!opts.isolated) {
     // If userMessage is multimodal, addMessage extracts text for history storage
@@ -734,7 +741,10 @@ export async function* runAgent(
       opts.threadId,
       opts.channel && opts.userId
         ? { channel: opts.channel, userId: opts.userId }
-        : undefined
+        : undefined,
+      providerCfg.contextWindow,
+      opts.signal,
+      lastFixedTokens,
     )
   }
 
@@ -761,6 +771,7 @@ export async function* runAgent(
     // lista cambia a lo largo de la tarea.
     onLoadout: (loadout) => emitLoadout({ agentId: opts.agentId, ...loadout }),
   })
+  lastFixedTokens = ctx.contextMetrics.system + ctx.contextMetrics.skills + ctx.contextMetrics.tools + ctx.contextMetrics.project
   if (ctx.projectScope) {
     opts.codeSessionId = ctx.projectScope.sessionId
     opts.workspace = ctx.projectScope.workspace
@@ -810,6 +821,8 @@ export async function* runAgent(
     return fit.messages
   }
 
+  /** Tope de la llamada que actualiza el estado en el modo de una acción. */
+  const SINGLE_ACTION_STATE_TIMEOUT_MS = 60_000
   let iterations = 0
   let estimatedInputTokens = priorEstimatedInputTokens
   let totalInputTokens = 0
@@ -825,6 +838,14 @@ export async function* runAgent(
   let wrapUpAnnounced = false
   let markupRetries = 0
   let emptyRetries = 0
+
+  // ── Modo de una acción por contexto (experimental, apagado por defecto) ────
+  // Solo en workers y en ejecuciones nuevas: una reanudada trae su historial restaurado y conserva el
+  // comportamiento de siempre. Ver single-action.ts.
+  const singleAction = singleActionEnabled(opts, loadConfig()) && !isResume
+  const singleActionBase: LLMMessage[] = singleAction ? [...messages] : []
+  let taskState: Handoff | null = null
+  let stateCutoff = messages.length
 
   // ── Resume from checkpoint ────────────────────────────────────────────────
   if (isResume) {
@@ -908,7 +929,10 @@ export async function* runAgent(
           opts.threadId,
           opts.channel && opts.userId
             ? { channel: opts.channel, userId: opts.userId }
-            : undefined
+            : undefined,
+          providerCfg.contextWindow,
+          opts.signal,
+          lastFixedTokens,
         )
       }
       log.info(`[agent-loop] Checkpoint: run=${runId} iteration=${iterations - 1}/${maxSteps}`)
@@ -1603,6 +1627,36 @@ export async function* runAgent(
         }
       }
 
+    }
+
+    // ── Una acción por contexto: destilar el estado y reiniciar la conversación ──
+    // Si la actualización falla NO se recorta nada: el historial de este paso se conserva.
+    if (singleAction && !loopDetected) {
+      const task = typeof opts.userMessage === "string" ? opts.userMessage : JSON.stringify(opts.userMessage)
+      const stateSignal = AbortSignal.timeout(SINGLE_ACTION_STATE_TIMEOUT_MS)
+      let update: Awaited<ReturnType<typeof updateTaskState>> = null
+      try {
+        update = await updateTaskState({
+          task,
+          previous: taskState,
+          delta: messages.slice(stateCutoff),
+          call: (stateMessages) => callProfileLLM({
+            ...providerCfg,
+            messages: stateMessages,
+            signal: opts.signal ? AbortSignal.any([opts.signal, stateSignal]) : stateSignal,
+          }),
+        })
+      } catch { /* sin estado: se conserva el historial */ }
+      if (update) {
+        taskState = update.state
+        totalInputTokens += update.inputTokens
+        totalOutputTokens += update.outputTokens
+        messages = collapseMessages(singleActionBase, taskState)
+        stateCutoff = messages.length
+        log.info(`[agent-loop] single-action: estado actualizado tras la iteración ${iterations} (contexto reiniciado a ${messages.length} mensajes)`)
+      } else {
+        log.warn(`[agent-loop] single-action: no se pudo actualizar el estado en la iteración ${iterations}; se conserva el historial`)
+      }
     }
 
     // ── Checkpoint: tools completed, pending cleared ──────────────────────

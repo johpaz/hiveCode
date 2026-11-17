@@ -51,7 +51,7 @@ Definidos en `agent/agent-profiles.ts` (`CORE_AGENT_DEFINITIONS`). Se aseguran e
 
 | Perfil | Permiso | Turnos máx. | Herramientas principales |
 |--------|---------|-------------|--------------------------|
-| **bee** | `orchestrate` | 30 | Lectura, `task_delegate`, `task_revise`, `task_status`, `speckit_artifact_read`, `speckit_validate`, `speckit_converge`, `report_progress`, `save_note` |
+| **bee** | `orchestrate` | 30 | Lectura, `task_delegate`, `task_revise`, `task_status`, `speckit_artifact_read`, `speckit_validate`, `speckit_converge`, `report_progress`, `save_note`, `conversation_read` |
 | **scout** | `read_only` | 18 | Solo lectura (`fs_read`, `fs_list`, `fs_glob`, `search_in_files`, `find_imports`, `parse_ast`, `git_status/diff/log`, `search_knowledge`, `get_project_context`, `web_search`, `web_fetch`) |
 | **planner** | `read_only` | 24 | Lectura + `speckit_init`, `speckit_artifact_read/write`, `speckit_validate`, `save_note` |
 | **builder** | `write_workspace` | 40 | Lectura + `fs_write`, `fs_edit`, `fs_delete`, `shell_executor`, `check_types`, `code_test`, `code_build`, `run_script` |

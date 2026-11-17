@@ -9,7 +9,7 @@ Código en `packages/core/src/tools/`. Cada herramienta tiene `name`, `descripti
 | Sistema de archivos | `filesystem/` | `fs_read`, `fs_write`, `fs_edit`, `fs_delete`, `fs_exists`, `fs_list`, `fs_glob`, `search_in_files` |
 | Shell | `cli/` | `shell_executor` (con sandbox opcional) |
 | Código y git | `code/` | `git_status`, `git_diff`, `git_log`, `git_blame`, `git_branch`, `git_commit`, `git_create_pr`, `git_rollback`, `code_search`, `code_build`, `code_test`, `code_test_parallel`, `code_lint`, `code_diff_create`, `parse_ast`, `find_imports`, `check_types`, `run_script` |
-| Contexto | `core/` | `search_knowledge`, `get_project_context`, `notify`, `save_note`, `report_progress` |
+| Contexto | `core/` | `search_knowledge`, `get_project_context`, `notify`, `save_note`, `report_progress`, `conversation_read` (historial fuera de la ventana; solo BEE, y solo se carga cuando parte del hilo está fuera de ella) |
 | Delegación y memoria | `agents/` | `task_delegate`, `task_revise`, `task_status`, `task_delegate_code`, `spawn_agent`, `agent_create`, `agent_find`, `agent_archive`, `get_available_models`, `memory_write`/`write_memory`, `memory_read`, `memory_list`, `memory_search`, `memory_delete`, `bus_publish`, `bus_read`, `project_updates` |
 | Spec Kit | `speckit/` | `speckit_init`, `speckit_artifact_read`, `speckit_artifact_write`, `speckit_validate`, `speckit_tasks_sync`, `speckit_converge` |
 | Narrativa y decisiones | `narrative/` | `read_narrative`, `append_narrative`, `search_narrative`, `read_decisions`, `write_decision`, `get_task_context` |

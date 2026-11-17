@@ -252,16 +252,8 @@ describe("specificationEvidence", () => {
   })
 })
 
-describe("approving a plan made in plan mode", () => {
+describe("plan mode", () => {
   const OBJECTIVE = "planifica la migración de arquitectura del módulo de auth"
-
-  async function workspaceWithPlan() {
-    const { mkdirSync, writeFileSync } = await import("node:fs")
-    const ws = mkdtempSync(path.join(tmpdir(), "hive-reuse-plan-"))
-    mkdirSync(path.join(ws, "specs", "001-auth"), { recursive: true })
-    writeFileSync(path.join(ws, "specs", "001-auth", "tasks.md"), "- [ ] T001 [builder] algo")
-    return ws
-  }
 
   function recording(handler?: (task: string) => string) {
     const prompts: string[] = []
@@ -272,42 +264,33 @@ describe("approving a plan made in plan mode", () => {
     return { prompts, runner }
   }
 
-  test("executes the plan that was already made instead of planning again", async () => {
-    const ws = await workspaceWithPlan()
-    const planning = recording(task => task.includes("delega el plan") ? "Plan listo.\nFEATURE_DIR: specs/001-auth" : "ok")
+  test("a complex task is planned by BEE alone: no planner, no Spec Kit", async () => {
+    const planning = recording(() => "1. Cambiar auth.ts\n2. Probar")
     const planned = await new ProfileHarness(planning.runner).run({
-      objective: OBJECTIVE, sessionId: "s-reuse", workspace: ws, policy: "plan",
+      objective: OBJECTIVE, sessionId: "s-plan-alone", workspace: "/workspace/test", policy: "plan",
     })
+
     expect(planned.status).toBe("ready")
-    expect(planned.featureDir).toBe("specs/001-auth")
-    expect(planning.prompts.filter(p => p.includes("delega el plan"))).toHaveLength(1)
-
-    const executing = recording(task => task.includes("Consolida") ? "listo" : "VERDICT: PASS")
-    const done = await new ProfileHarness(executing.runner).run({
-      objective: OBJECTIVE, sessionId: "s-reuse", workspace: ws, policy: "auto", resumeTaskId: planned.taskId,
-    })
-
-    expect(done.status).toBe("completed")
-    expect(done.taskId).toBe(planned.taskId)
-    // Ni una sola llamada de planificación en la segunda corrida.
-    expect(executing.prompts.some(p => p.includes("delega el plan"))).toBe(false)
-    expect(executing.prompts.some(p => p.includes("Ejecuta el plan de specs/001-auth"))).toBe(true)
+    expect(planned.response).toContain("Cambiar auth.ts")
+    expect(planned.featureDir).toBeUndefined()
+    // One model run for the whole plan, and it is told not to start Spec Kit.
+    expect(planning.prompts).toHaveLength(1)
+    expect(planning.prompts[0]).toContain("no inicies Spec Kit")
+    expect(planning.prompts[0]).not.toContain('worker_id="planner"')
   })
 
-  test("plans again when the plan's artifacts are no longer in the workspace", async () => {
-    const ws = await workspaceWithPlan()
-    const planning = recording(task => task.includes("delega el plan") ? "Plan listo.\nFEATURE_DIR: specs/001-auth" : "ok")
+  test("approving that plan executes the task: the executing run plans with Spec Kit as usual", async () => {
+    const planning = recording(() => "1. Cambiar auth.ts")
     const planned = await new ProfileHarness(planning.runner).run({
-      objective: OBJECTIVE, sessionId: "s-reuse-missing", workspace: ws, policy: "plan",
+      objective: OBJECTIVE, sessionId: "s-plan-approve", workspace: "/workspace/test", policy: "plan",
     })
 
-    // Otro workspace, sin specs/: el plan no se puede reutilizar.
-    const elsewhere = mkdtempSync(path.join(tmpdir(), "hive-reuse-elsewhere-"))
-    const executing = recording(task => task.includes("delega el plan") ? "Plan nuevo.\nFEATURE_DIR: specs/001-auth" : "VERDICT: PASS")
-    await new ProfileHarness(executing.runner).run({
-      objective: OBJECTIVE, sessionId: "s-reuse-missing", workspace: elsewhere, policy: "auto", resumeTaskId: planned.taskId,
+    const executing = recording(task => task.includes("delega el plan") ? "Plan listo.\nFEATURE_DIR: specs/001-auth" : "VERDICT: PASS")
+    const done = await new ProfileHarness(executing.runner).run({
+      objective: OBJECTIVE, sessionId: "s-plan-approve", workspace: "/workspace/test", policy: "auto", resumeTaskId: planned.taskId,
     })
 
+    expect(done.taskId).toBe(planned.taskId)
     expect(executing.prompts.some(p => p.includes("delega el plan"))).toBe(true)
   })
 })

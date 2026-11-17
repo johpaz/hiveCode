@@ -34,6 +34,7 @@ El proyecto de prueba debe ser un repo git con al menos un commit si vas a usar 
 | `HIVE_AUTH_TOKEN` | Token del gateway. |
 | `HIVE_MAX_AGENT_CONCURRENCY` | Llamadas activas por sesión (1–32, por defecto 4). |
 | `HIVECODE_AGENT_MAX_STEPS` | Tope global de pasos del bucle de agente. |
+| `HIVECODE_SINGLE_ACTION` | `true` activa el modo experimental de una acción por contexto en los workers (apagado por defecto). |
 | `HIVECODE_LEGACY_HARNESS=1` | Usa el pipeline antiguo de coordinadores en vez de `ProfileHarness`. |
 | `HIVECODE_TUI=1` | La pone el lanzador de la TUI; desactiva los prompts por stdin. |
 | `HIVETUI_HEADLESS=1` | La TUI emite NDJSON en vez de pintar. |

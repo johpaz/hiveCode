@@ -154,6 +154,8 @@ export const CORE_TOOL_CATALOG: ToolDescriptor[] = [
     // Notes/persistence
     { name: "save_note", description: "Save persistent note to scratchpad, write quick notes and reminders. Spanish keywords: guardar nota, escribir nota, recordatorio rápido, nota rápida, apuntar", category: "core", abstractionLevel: "atomic" },
 
+    { name: "conversation_read", description: "Read earlier messages from this conversation by ID or search text when the summary lacks a detail. Spanish keywords: recuperar contexto, leer historial, conversación anterior", category: "core", abstractionLevel: "atomic" },
+
     // Notifications/reporting
     { name: "notify", description: "Send system notification, alert user with message or alert. Spanish keywords: notificar, enviar notificación, alertar, aviso, alarma", category: "core", abstractionLevel: "atomic" },
     { name: "report_progress", description: "Report progress to user, inform user of current status and completion. Spanish keywords: reportar progreso, informar estado, actualizar,报告进度, progreso", category: "core", abstractionLevel: "atomic" },

@@ -47,7 +47,7 @@ export interface Config {
   }
   hooks?: { scripts?: string[] }
   bindings?: Binding[]
-  agent?: { defaultAgentId?: string; baseDir?: string }
+  agent?: { defaultAgentId?: string; baseDir?: string; context?: { compactionThreshold?: number; singleActionMode?: boolean } }
   workspace?: { path?: string; activeProject?: string }
   sandbox?: {
     enabled?: boolean
@@ -114,6 +114,13 @@ function applyEnvOverrides(config: Config): Config {
   if (envSandboxMode === 'auto-allow' || envSandboxMode === 'permissions') {
     config.sandbox = config.sandbox || {}
     config.sandbox.mode = envSandboxMode
+  }
+
+  // Experimental, apagado por defecto: ver agent/single-action.ts.
+  const envSingleAction = process.env.HIVECODE_SINGLE_ACTION
+  if (envSingleAction === 'true' || envSingleAction === '1') {
+    config.agent = config.agent || {}
+    config.agent.context = { ...config.agent.context, singleActionMode: true }
   }
 
   return config

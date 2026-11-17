@@ -133,6 +133,7 @@
     "lint": "bunx tsc --noEmit",
     "bench": "bun run scripts/bench-context.ts",
     "bench:context": "bun run scripts/bench-context.ts",
+    "bench:compaction": "bun bench/compaction/run.ts",
     "reload-tools": "bun run scripts/reload-tools.ts",
     "build:binary:mac": "mkdir -p dist && (cd packages/hivetui && cargo build --release && cp target/release/hivetui hivetui.bin) && bun scripts/build-binary.ts --target bun-darwin-arm64 --outfile dist/hivecode-macos-arm64",
     "build:binary:mac-intel": "mkdir -p dist && (cd packages/hivetui && cargo build --release && cp target/release/hivetui hivetui.bin) && bun scripts/build-binary.ts --target bun-darwin-x64 --outfile dist/hivecode-macos-x64",
@@ -142,7 +143,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.98.0",
     "@google/genai": "^1.43.0",
-    "@johpaz/hive-db": "^0.7.0",
+    "@johpaz/hive-db": "^0.7.2",
     "@modelcontextprotocol/sdk": "^1.26.0",
     "grammy": "latest",
     "openai": "^6.18.0",

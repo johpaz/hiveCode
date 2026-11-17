@@ -262,6 +262,8 @@ export interface SummaryDoc {
   summary: string;
   messages_covered: number;
   last_message_id: string | null;
+  /** Traspaso estructurado (seis campos); `summary` guarda su texto renderizado, o el resumen libre de hilos anteriores. */
+  structured?: import("../agent/handoff").Handoff | null;
   created_at: number;
   updated_at: number;
 }

@@ -63,6 +63,8 @@ export const CORE_AGENT_DEFINITIONS: Record<CoreAgentType, CoreAgentDefinition> 
       // El plan lo escribe el planner; BEE solo lo lee, lo valida y cierra la convergencia.
       "speckit_artifact_read", "speckit_validate", "speckit_converge",
       "report_progress", "save_note",
+      // Solo BEE: su hilo es el único que se compacta (los workers corren aislados); lee el detalle que el resumen no trae.
+      "conversation_read",
       // Trabajo directo en cambios pequeños: delegar uno solo duplica lectura y juicio del handoff.
       "fs_write", "fs_edit", "shell_executor", "check_types", "code_test",
     ],

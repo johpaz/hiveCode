@@ -51,6 +51,12 @@ export const configSchema = z.object({
   agent: z.object({
     defaultAgentId: z.string().optional(),
     baseDir: z.string().optional(),
+    context: z.object({
+      /** Cuándo compactar: proporción de la ventana del modelo (≤ 1, por defecto 0.25) o tokens absolutos (> 1). */
+      compactionThreshold: z.number().positive().optional(),
+      /** Experimental: un worker destila un estado tras cada acción y reinicia su conversación con solo la tarea y ese estado. */
+      singleActionMode: z.boolean().optional(),
+    }).optional(),
   }).optional(),
   sandbox: z.object({
     enabled: z.boolean().default(false),

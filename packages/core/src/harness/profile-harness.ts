@@ -405,6 +405,20 @@ ${objective}`,
         }
       }
 
+      // `plan` mode: BEE answers with a short plan itself (it may delegate research to scouts/spiders).
+      // No planner, no Spec Kit artifacts, no validation: those are steps nobody asked for before the
+      // person has even approved anything. The executing run plans with Spec Kit when it needs to.
+      if (policy === "plan" && !existing) {
+        await updateStage("planning")
+        const response = await invoke(
+          "bee",
+          `Modo plan: entrega un plan claro y localizado para esta tarea. Investiga lo imprescindible (puedes delegar lectura a Scout o Spider en paralelo) y responde con: pasos ordenados, archivos afectados, riesgos y cómo se verificará. No modifiques código, no delegues en el planner y no inicies Spec Kit.\n\n${objective}`,
+          "harness",
+        )
+        await updateStage("ready")
+        return { taskId, complexity, route: weight.tier, routeSignals: weight.signals, status: "ready", response, repairCycles: 0 }
+      }
+
       // A plan approved after a `plan` run is reused, not redone. Only if its artifacts are still
       // there: they live in the workspace, and a resumed task may be pointed at another one.
       const reusablePlan = existing?.doc.planId && await directoryExists(path.join(options.workspace, existing.doc.planId))

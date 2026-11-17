@@ -2,6 +2,7 @@ import { DISK_WALK_TOOLS, computeLoadout, isProjectIndexed, isReaderAgent, type 
 import { projectOfSession } from "./project-identity"
 import { buildContextPacket, resolveProjectScope, type ContextReference, type ProjectScope } from "./project-context"
 import { selectSpecialty, REQUIRED_PROFILE_SKILLS, FACTORY_SPECIALTIES } from "./specialties"
+import { getExecutionMode } from "./execution-mode"
 /**
  * Context Compiler — Implementa las 4 estrategias de Context Engineering:
  * 
@@ -36,6 +37,8 @@ import { causalLogEnabled } from "../storage/causal-events"
 import { syncPlaybookToIndex } from "./playbook-selector"
 import { getRecentMessages, getSummary, getScratchpad, toAPIMessages } from "./conversation-store"
 import { relevantConversationMemory } from "./conversation-memory"
+import { loadWorkLedger, renderWorkLedger } from "./work-ledger"
+import { searchThreadMessages } from "./message-memory"
 import { PROMPT_VOLATILE_MARKER } from "./prompt-cache"
 import { formatContext, estimateTokens } from "../utils/llm-text"
 import { buildSystemPromptWithProjects } from "./prompt-builder"
@@ -51,7 +54,10 @@ const log = logger.child("context-compiler")
 
 // Configuration constants
 const KEEP_LAST_N_MESSAGES = 40      // Always keep last N messages (Strategy: SELECT) — increased because tool calls/results are now persisted
-const TOKEN_COMPACT_THRESHOLD = 6000 // Compact when exceeds this (Strategy: COMPRESS)
+const RECALL_MIN_QUERY_CHARS = 12  // a shorter message («sigue», «ok») has nothing to search with
+const RECALL_CANDIDATES = 8        // search a few more than are shown: the ones inside the window are discarded
+const RECALL_MESSAGES = 3          // older messages injected per turn
+const RECALL_CHARS = 500           // per message
 const SUMMARY_MAX_CHARS = 4000       // Cap the compacted summary so it can't itself blow the system-prompt budget
 /** Share of the window the system prompt may take; the history and the answer need the rest. */
 const SYSTEM_PROMPT_RATIO = 0.5
@@ -469,6 +475,9 @@ export async function compileContext(opts: {
     }
   }
   let allSkills = Array.from(skillMap.values())
+  // `plan` mode investigates and answers with a short plan: the Spec Kit procedure (init, spec, plan,
+  // tasks, validate) only adds steps there, and nothing in plan mode may write its artifacts anyway.
+  if (getExecutionMode() === "plan") allSkills = allSkills.filter(skill => skill.name !== "spec-kit")
 
   // [STEP-9] STRATEGY 3: COMPRESS — Load history with compaction
   log.info(`[context-compiler] [STEP-9] Loading conversation history...`)
@@ -496,10 +505,56 @@ export async function compileContext(opts: {
   // providers hoist every system message into one instruction, and a
   // context-overflow retry that keeps only the last one would replace the real
   // prompt with the summary.
-  const summaryApplies = !!(summary && totalTokens > TOKEN_COMPACT_THRESHOLD)
-  const conversationSummarySection = summaryApplies
-    ? `\n\n# RESUMEN DE LA CONVERSACIÓN (turnos anteriores, compactados)\n${summary!.summary.slice(0, SUMMARY_MAX_CHARS)}\n`
-    : ""
+  // A summary applies when it covers messages that fell out of the current window: the window's earliest message
+  // comes after the last one the summary covers. Comparing the window's own tokens against a fixed threshold, as
+  // before, almost never fired (the window holds at most KEEP_LAST_N_MESSAGES), so the summary was computed,
+  // stored and paid for, but rarely reached the model.
+  const summaryApplies = !!(
+    summary && summary.last_message_id > 0 &&
+    (recentMessages.length === 0 || recentMessages[0].id > summary.last_message_id)
+  )
+  // Part of the thread is out of the window when the loaded messages do not start at the thread's first one.
+  // Nothing needs a model for that: the history is stored and indexed (HiveDB), the work done is in the tool-run
+  // log, and the rest is a search away. The summary, when there is one, is one more piece, not the only one.
+  const outOfWindow = summaryApplies || (recentMessages.length > 0 && recentMessages[0].id > 1)
+
+  // Work ledger: facts derived from the tool-run log (files touched, checks, failed attempts). No model call.
+  let workLedgerSection = ""
+  // Older messages relevant to what the user just said, found by search (BM25 + vectors if enabled).
+  let recalledSection = ""
+  if (outOfWindow && !isolated) {
+    try {
+      workLedgerSection = renderWorkLedger(await loadWorkLedger(threadId))
+    } catch (err) {
+      log.warn(`[context-compiler] work ledger failed: ${(err as Error).message}`)
+    }
+    try {
+      const query = typeof userMessage === "string"
+        ? userMessage
+        : userMessage.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join(" ")
+      if (query.trim().length >= RECALL_MIN_QUERY_CHARS && recentMessages.length > 0) {
+        const windowStart = recentMessages[0].id
+        const hits = (await searchThreadMessages(threadId, query, RECALL_CANDIDATES))
+          .filter((h) => h.message.id < windowStart && h.message.role !== "system")
+          .slice(0, RECALL_MESSAGES)
+        if (hits.length > 0) {
+          recalledSection =
+            "\n\n# MENSAJES ANTERIORES RELEVANTES (fuera de tu ventana; la conversación actual manda)\n" +
+            hits.map((h) => `- #${h.message.id} [${h.message.role}] ${h.message.content.replace(/\s+/g, " ").slice(0, RECALL_CHARS)}`).join("\n") + "\n"
+        }
+      }
+    } catch (err) {
+      log.warn(`[context-compiler] message recall failed: ${(err as Error).message}`)
+    }
+  }
+
+  // The summary is lossy by design (and the window finite): tell the model where the exact detail lives.
+  const conversationSummarySection = (summaryApplies
+    ? `\n\n# RESUMEN DE LA CONVERSACIÓN (turnos anteriores, compactados)\n${summary!.summary.slice(0, SUMMARY_MAX_CHARS)}\n` +
+      `Los mensajes hasta el #${summary!.last_message_id} están compactados en este resumen. Si necesitas un dato exacto que no aparece (una ruta, un error, un valor), usa \`conversation_read\` con \`query\` antes de asumir que falta.\n`
+    : outOfWindow
+      ? `\n\n# HISTORIAL FUERA DE VENTANA\nLos mensajes anteriores al #${recentMessages[0].id} siguen guardados e indexados. Si necesitas un dato exacto de ellos (una ruta, un error, un valor), usa \`conversation_read\` con \`query\` antes de asumir que falta.\n`
+      : "") + workLedgerSection + recalledSection
   if (summaryApplies) {
     log.info(`[context-compiler] [STEP-9c] Using summary (${summary!.messages_covered} messages compressed) — folded into system prompt`)
   }
@@ -529,7 +584,7 @@ export async function compileContext(opts: {
       ? objectiveSource.filter(p => p.type === "text").map(p => (p as { text: string }).text).join("\n")
       : String(objectiveSource)
 
-  if (summary && totalTokens > TOKEN_COMPACT_THRESHOLD && causalStreamId && causalLogEnabled()) {
+  if (summaryApplies && causalStreamId && causalLogEnabled()) {
     try {
       const causalDb = await getHiveDb()
       const causalMaxTokens = Math.max(500, Math.min(4000, Math.floor(causalWindow * 0.05)))
@@ -732,6 +787,12 @@ export async function compileContext(opts: {
       `- \`shell_executor\` es para lo que no hay herramienta: instalar dependencias, git, procesos.\n` +
       `- Antes de repetir un comando que falló: lee el error y corrige la causa. Probar variantes del mismo comando no converge.\n` +
       `\n# CURRENT TASK\n${opts.taskContext}\n\nFocus ONLY on this task. Do not deviate.`
+  }
+
+  // Out-of-window history is recoverable on demand — load the reader only when part of the thread is out of the window.
+  if (outOfWindow && !toolsForLLM.some(t => t.function.name === "conversation_read")) {
+    const reader = allTools.find(t => t.name === "conversation_read")
+    if (reader) toolsForLLM = [...toolsForLLM, { type: "function", function: { name: reader.name, description: reader.description, parameters: reader.parameters } }]
   }
 
   const finalTools = toolsForLLM

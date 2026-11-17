@@ -16,6 +16,8 @@ Cambio de modo: `Shift+Tab` en la TUI (cicla `plan → approval → auto`), `/mo
 
 Delegar en `plan` **sí** está permitido (Scout, Planner y Spider investigan), pero el hijo hereda el mismo modo y no puede escribir.
 
+**Sin Spec Kit.** En `plan`, BEE entrega el plan él solo (pasos, archivos, riesgos, verificación; puede delegar lectura a Scout/Spider). No delega en el planner, no corre `speckit_*` y la skill `spec-kit` no se inyecta en el contexto (`context-compiler.ts`). El plan con spec/plan/tasks se hace al ejecutar, en `approval` o `auto`.
+
 Detalles de implementación:
 
 - Una tarea en `plan` no es mutante: `CoordinatorManager` no crea worktree ni integra nada, así que funciona en directorios que no son un repo git.
@@ -53,11 +55,7 @@ La decisión llega por `options.approve`. Si no hay `approve` cableado (p. ej. e
 
 El resumen de BEE puede ser inútil si el turno agotó sus pasos; por eso se adjuntan los artefactos, que son lo que realmente se aprueba. El texto de un resumen que solo contenga marcado DSML se descarta (`stripDsmlBlocks`).
 
-**Un plan aprobado se reutiliza.** Cuando `plan` termina con un plan Spec Kit, su fila en `harnessTasks` queda en `stage: "ready"` con el `planId` de su directorio `specs/<feature>/`. Si la persona aprueba ese mismo objetivo ("Ejecutar automáticamente" o "Aprobar fase por fase"), `CoordinatorManager.findReadyPlan` busca la fila más reciente con ese `title` y esa etapa, y la ejecución llama a `ProfileHarness.run({ resumeTaskId })`: **no vuelve a planificar** y va directo a la ejecución, o a la puerta `specification` en `approval`. No se guarda nada aparte: es la misma tarea del harness, en HiveDB, así que sobrevive a cerrar y reabrir la TUI. Reanudarla la saca de `ready`, por lo que un plan se usa una sola vez. No se reutiliza si:
-
-- el objetivo cambió (por ejemplo "Agregar contexto" añade texto);
-- la tarea del plan tiene más de 30 minutos, o ya se ejecutó;
-- los artefactos `specs/<feature>/` ya no están en el workspace de la ejecución.
+**Aprobar un plan de `plan`.** Como `plan` ya no crea artefactos Spec Kit, la tarea aprobada se ejecuta con `resumeTaskId` (misma fila del harness) y la ejecución hace su propia planificación Spec Kit antes de implementar. `CoordinatorManager.findReadyPlan` solo reutiliza filas con `planId`, que ahora no las produce `plan`.
 
 En cualquiera de esos casos se planifica de nuevo, como antes. Antes de este cambio, aprobar el plan lo planificaba dos veces: el segundo plan sustituía al que la persona acababa de revisar y costaba varios minutos y tokens más.
 

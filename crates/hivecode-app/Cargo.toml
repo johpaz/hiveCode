@@ -1,0 +1,16 @@
+[package]
+name = "hivecode-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "hivecode command line (Rust)"
+
+[[bin]]
+name = "hivecode"
+path = "src/main.rs"
+
+[dependencies]
+hivecode-host = { path = "../hivecode-host" }
+serde_json.workspace = true
+tokio.workspace = true

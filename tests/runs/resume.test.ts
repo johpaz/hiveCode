@@ -22,6 +22,10 @@ let turn = 0
 let toolCallCount = 0
 let responses: Array<{ content?: string; tool_calls?: any[] }> = []
 
+// `mock.module` outlives this file in the same Bun process: keep the real exports to put them back in afterAll,
+// or every test that runs later (compaction, summaries…) would call this stub instead of its own provider.
+const realLlmClient = { ...(await import("@johpaz/hivecode-core/agent/llm-client")) }
+
 mock.module("@johpaz/hivecode-core/agent/llm-client", () => ({
   callLLM: async (req: any) => {
     const scripted = responses[Math.min(turn, responses.length - 1)]
@@ -111,6 +115,7 @@ beforeEach(async () => {
 })
 
 afterAll(() => {
+  mock.module("@johpaz/hivecode-core/agent/llm-client", () => realLlmClient)
   closeHiveDb()
   if (previousDbPath === undefined) delete process.env.HIVE_DB_PATH
   else process.env.HIVE_DB_PATH = previousDbPath

@@ -185,6 +185,7 @@ export const SEED_DATA: SeedData = {
     // 11. CORE — Notificaciones, notas y contexto
     { id: "notify", name: "notify", category: "core", description: "Enviar notificación al usuario. Sinónimos: notificar, enviar notificación, alertar, aviso" },
     { id: "save_note", name: "save_note", category: "core", description: "Guardar nota persistente en el scratchpad. Sinónimos: guardar nota, escribir nota, recordatorio rápido, apuntar" },
+    { id: "conversation_read", name: "conversation_read", category: "core", description: "Recuperar mensajes anteriores de esta conversación por ID o búsqueda de texto, también los ya compactados. Sinónimos: leer conversación, recuperar contexto, historial omitido" },
     { id: "report_progress", name: "report_progress", category: "core", description: "Reportar progreso actual al usuario. Sinónimos: reportar progreso, informar estado, actualizar progreso, porcentaje" },
     { id: "outline", name: "outline", category: "core", description: "Listar lo que declara un archivo (funciones, clases, métodos) con su rango de líneas, desde el índice. Decide qué líneas leer antes de fs_read. Sinónimos: esquema del archivo, símbolos de un archivo" },
     { id: "find_symbol", name: "find_symbol", category: "core", description: "Encontrar dónde se define una función, clase, método o tipo, con archivo y rango de líneas, desde el índice. Sinónimos: dónde está definido, buscar símbolo, definición" },

@@ -89,18 +89,16 @@ describe("causal context budget", () => {
 
 describe("causal context gating", () => {
   test("memory is only paid for when compaction actually applied", () => {
-    // The compiler's condition: summary && totalTokens > TOKEN_COMPACT_THRESHOLD
-    // && causalStreamId && causalLogEnabled().
-    const COMPACT_THRESHOLD = 6000
+    // The compiler's condition: summaryApplies && causalStreamId && causalLogEnabled(), where the summary applies
+    // when it covers messages that fell out of the window (tests/compaction/long-thread.test.ts checks that part).
     const shouldBuild = (
-      hasSummary: boolean, totalTokens: number, streamId: string | undefined, logEnabled: boolean,
-    ) => hasSummary && totalTokens > COMPACT_THRESHOLD && !!streamId && logEnabled
+      summaryApplies: boolean, streamId: string | undefined, logEnabled: boolean,
+    ) => summaryApplies && !!streamId && logEnabled
 
-    expect(shouldBuild(true, 20_000, "s1", true)).toBe(true)
+    expect(shouldBuild(true, "s1", true)).toBe(true)
     // Each missing precondition turns it off.
-    expect(shouldBuild(false, 20_000, "s1", true)).toBe(false)
-    expect(shouldBuild(true, 500, "s1", true)).toBe(false)
-    expect(shouldBuild(true, 20_000, undefined, true)).toBe(false)
-    expect(shouldBuild(true, 20_000, "s1", false)).toBe(false)
+    expect(shouldBuild(false, "s1", true)).toBe(false)
+    expect(shouldBuild(true, undefined, true)).toBe(false)
+    expect(shouldBuild(true, "s1", false)).toBe(false)
   })
 })
