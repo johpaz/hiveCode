@@ -1,0 +1,18 @@
+[package]
+name = "hivecode-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "hivecode's settings: providers, where their keys live, and the MCP server list"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "crypto-rust", "apple-native", "windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service = { version = "4", features = ["crypto-rust"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,13 @@
+[package]
+name = "hivecode-index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Project code index: symbols, imports, dependents (port of source-index.ts / source-symbols.ts)"
+
+[dependencies]
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"

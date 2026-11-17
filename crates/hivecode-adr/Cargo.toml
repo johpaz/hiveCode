@@ -1,0 +1,13 @@
+[package]
+name = "hivecode-adr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Architecture decision records of a project: load, match to files, and rate the risk of changing them"
+
+[dependencies]
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"

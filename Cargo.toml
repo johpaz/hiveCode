@@ -1,16 +1,19 @@
 [workspace]
 resolver = "3"
-members = ["crates/hivecode-host", "crates/hivecode-app"]
+# The TUI is its own project (its own Cargo.lock, built by `cd packages/hivetui && cargo build`).
+exclude = ["packages/hivetui"]
+members = ["crates/hivecode-host", "crates/hivecode-app", "crates/hivecode-workspace", "crates/hivecode-tools", "crates/hivecode-verify", "crates/hivecode-index", "crates/hivecode-swarm", "crates/hivecode-harness", "crates/hivecode-store", "crates/hivecode-config", "crates/hivecode-adr"]
 
 [workspace.package]
 version = "0.1.5"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.100"
 license = "MIT"
 
 [workspace.dependencies]
 # The Hive Agents SDK engine. Path dependency while both trees live side by side.
 hive-agent-core = { path = "../hiveRust/hiveSDK-Rust/crates/hive-core", features = ["services", "harness", "scheduler", "tools"] }
+hivedb-core = { git = "https://github.com/johpaz/hive-db.git", rev = "10fcd921d79872db881914f2e3f45bb3c20ed917" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

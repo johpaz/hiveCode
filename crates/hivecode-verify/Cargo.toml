@@ -1,0 +1,15 @@
+[package]
+name = "hivecode-verify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "What 'verify this project' means in each ecosystem (port of tools/code/ecosystems.ts)"
+
+[dependencies]
+regex = "1"
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

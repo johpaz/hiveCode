@@ -1,0 +1,20 @@
+[package]
+name = "hivecode-swarm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The swarm: a lead (BEE) that delegates to profiled workers, in parallel, with private worktrees"
+
+[dependencies]
+hive-agent-core.workspace = true
+hivecode-host = { path = "../hivecode-host" }
+hivecode-workspace = { path = "../hivecode-workspace" }
+serde_json.workspace = true
+serde.workspace = true
+regex = "1"
+tokio.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+tempfile = "3"

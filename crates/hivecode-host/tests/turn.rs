@@ -88,6 +88,13 @@ fn host(port: u16, project: &Path, state: &Path, mode: Mode) -> Host {
         max_turns: 6,
         allowed_programs: vec![],
         mode,
+        context_window: None,
+        max_tool_calls: 50,
+        extra_tools: vec![],
+        store: None,
+        budget: None,
+        allowed_tools: None,
+        web: None,
     })
     .unwrap()
 }
@@ -209,4 +216,243 @@ async fn auto_mode_writes_without_asking_and_reads_never_ask() {
         std::fs::read_to_string(project.path().join("a.txt")).unwrap(),
         "hola"
     );
+}
+
+#[tokio::test]
+async fn a_small_context_window_drops_the_oldest_turns_but_keeps_the_stored_history() {
+    let (port, bodies) = fake(vec![answer("uno"), answer("dos"), answer("tres")]).await;
+    let project = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let host = Host::open(HostConfig {
+        db: state.path().join("db"),
+        root: project.path().to_owned(),
+        provider: json!({"base_url": format!("http://127.0.0.1:{port}/v1"), "api_key": "fake"}),
+        model: "fake-model".into(),
+        system: Some("Eres un agente de código.".into()),
+        agent: "bee".into(),
+        session: "s1".into(),
+        max_turns: 6,
+        allowed_programs: vec![],
+        mode: Mode::Plan,
+        // The tool schemas alone take a good part of this; each prompt below takes ~1800 tokens.
+        context_window: Some(4000),
+        max_tool_calls: 50,
+        extra_tools: vec![],
+        store: None,
+        budget: None,
+        allowed_tools: None,
+        web: None,
+    })
+    .unwrap();
+    let filler = |marker: &str| format!("{marker} {}", "palabra distinta numero ".repeat(600));
+    for marker in ["PRIMERO", "SEGUNDO", "TERCERO"] {
+        host.run(
+            &filler(marker),
+            &mut |_| {},
+            &mut |_, _| false,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+    }
+    let stored = host.messages().await.unwrap();
+    assert!(
+        stored
+            .iter()
+            .any(|m| m["content"].as_str().is_some_and(|c| c.contains("PRIMERO"))),
+        "dropping only shapes the request; the stored history keeps every turn"
+    );
+    let bodies = bodies.lock().unwrap();
+    assert!(bodies[0].contains("PRIMERO"));
+    assert!(bodies[1].contains("PRIMERO") || bodies[1].contains("SEGUNDO"));
+    assert!(
+        bodies[2].contains("TERCERO"),
+        "the active turn is always kept"
+    );
+    assert!(
+        !bodies[2].contains("PRIMERO"),
+        "the oldest turn no longer fits the window and is dropped"
+    );
+}
+
+/// A page server for `web_fetch`, so the test never leaves the machine.
+async fn page_server() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_request(&mut socket).await;
+            let body = "<html><body>contenido-publico-77</body></html>";
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(reply.as_bytes()).await;
+        }
+    });
+    port
+}
+
+fn web_host(port: u16, project: &Path, state: &Path, web: Option<Value>) -> Host {
+    Host::open(HostConfig {
+        db: state.join("db"),
+        root: project.to_owned(),
+        provider: json!({"base_url": format!("http://127.0.0.1:{port}/v1"), "api_key": "fake"}),
+        model: "fake-model".into(),
+        system: None,
+        agent: "bee".into(),
+        session: "s1".into(),
+        max_turns: 6,
+        allowed_programs: vec![],
+        mode: Mode::Plan,
+        context_window: None,
+        max_tool_calls: 50,
+        extra_tools: vec![],
+        store: None,
+        budget: None,
+        allowed_tools: None,
+        web,
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn web_fetch_reads_a_page_and_never_asks_even_in_plan_mode() {
+    let page = page_server().await;
+    let (port, bodies) = fake(vec![
+        tool_call(
+            "web_fetch",
+            json!({"url": format!("http://127.0.0.1:{page}/doc")}),
+        ),
+        answer("leído"),
+    ])
+    .await;
+    let project = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    // Loopback is private: reaching the test server needs the explicit opt-in.
+    let host = web_host(
+        port,
+        project.path(),
+        state.path(),
+        Some(json!({"allow_private_hosts": true})),
+    );
+    let mut events = vec![];
+    host.run(
+        "lee la página",
+        &mut |e| events.push(e),
+        &mut |_, _| panic!("a read never asks"),
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        events.contains(&Event::ToolDone {
+            name: "web_fetch".into(),
+            ok: true
+        }),
+        "{events:?}"
+    );
+    assert!(bodies.lock().unwrap()[1].contains("contenido-publico-77"));
+}
+
+#[tokio::test]
+async fn by_default_a_model_supplied_url_cannot_reach_loopback_or_the_lan() {
+    let page = page_server().await;
+    let (port, bodies) = fake(vec![
+        tool_call(
+            "web_fetch",
+            json!({"url": format!("http://127.0.0.1:{page}/doc")}),
+        ),
+        answer("no pude"),
+    ])
+    .await;
+    let project = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let host = web_host(port, project.path(), state.path(), Some(json!({})));
+    host.run(
+        "lee la página",
+        &mut |_| {},
+        &mut |_, _| false,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !bodies.lock().unwrap()[1].contains("contenido-publico-77"),
+        "the private host must stay unreachable"
+    );
+}
+
+#[tokio::test]
+async fn without_a_web_policy_the_web_tools_do_not_exist() {
+    let (port, bodies) = fake(vec![answer("hola")]).await;
+    let project = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let host = web_host(port, project.path(), state.path(), None);
+    host.run("hola", &mut |_| {}, &mut |_, _| false, &Default::default())
+        .await
+        .unwrap();
+    assert!(!bodies.lock().unwrap()[0].contains("web_fetch"));
+}
+
+#[tokio::test]
+async fn a_run_stops_at_its_budget_and_reports_what_it_used() {
+    use hivecode_host::{Budget, BudgetLimits, budget_snapshot, open_budget, open_store};
+    let (port, bodies) = fake(vec![
+        tool_call("fs_read", json!({"path": "a.txt"})),
+        tool_call("fs_read", json!({"path": "b.txt"})),
+        answer("no llega"),
+    ])
+    .await;
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("a.txt"), "x").unwrap();
+    std::fs::write(project.path().join("b.txt"), "y").unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let store = open_store(&state.path().join("db")).unwrap();
+    open_budget(
+        &store,
+        "run",
+        &BudgetLimits {
+            max_model_calls: 2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut host_config = |store| HostConfig {
+        db: state.path().join("db"),
+        root: project.path().to_owned(),
+        provider: json!({"base_url": format!("http://127.0.0.1:{port}/v1"), "api_key": "fake"}),
+        model: "fake-model".into(),
+        system: None,
+        agent: "bee".into(),
+        session: "s1".into(),
+        max_turns: 6,
+        allowed_programs: vec![],
+        mode: Mode::Plan,
+        context_window: None,
+        max_tool_calls: 50,
+        extra_tools: vec![],
+        store: Some(store),
+        budget: Some(Budget {
+            objective_id: "run".into(),
+            depth: 0,
+        }),
+        allowed_tools: None,
+        web: None,
+    };
+    let host = Host::open(host_config(store.clone())).unwrap();
+    let error = host
+        .run("lee", &mut |_| {}, &mut |_, _| false, &Default::default())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("OBJECTIVE_LIMIT"), "{error}");
+    assert_eq!(
+        bodies.lock().unwrap().len(),
+        2,
+        "the third call was never made"
+    );
+    assert_eq!(budget_snapshot(&store, "run").unwrap()["model_calls"], 2);
+    let _ = &mut host_config;
 }

@@ -1,0 +1,13 @@
+[package]
+name = "hivecode-workspace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Per-task git worktrees for hivecode: prepare, diff, integrate, clean up"
+
+[dependencies]
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

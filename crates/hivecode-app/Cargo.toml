@@ -12,5 +12,20 @@ path = "src/main.rs"
 
 [dependencies]
 hivecode-host = { path = "../hivecode-host" }
+hivecode-workspace = { path = "../hivecode-workspace" }
+hivecode-tools = { path = "../hivecode-tools" }
+hivecode-swarm = { path = "../hivecode-swarm" }
+hivecode-harness = { path = "../hivecode-harness" }
+hivecode-store = { path = "../hivecode-store" }
+hivecode-config = { path = "../hivecode-config" }
+hivecode-adr = { path = "../hivecode-adr" }
+hivecode-index = { path = "../hivecode-index" }
+hivecode-verify = { path = "../hivecode-verify" }
+hive-agent-core.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
 serde_json.workspace = true
 tokio.workspace = true
