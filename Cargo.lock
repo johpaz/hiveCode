@@ -1054,11 +1054,13 @@ dependencies = [
  "hivecode-harness",
  "hivecode-host",
  "hivecode-index",
+ "hivecode-skills",
  "hivecode-store",
  "hivecode-swarm",
  "hivecode-tools",
  "hivecode-verify",
  "hivecode-workspace",
+ "reqwest",
  "serde_json",
  "tempfile",
  "tokio",
@@ -1103,6 +1105,15 @@ name = "hivecode-index"
 version = "0.1.5"
 dependencies = [
  "regex",
+ "tempfile",
+]
+
+[[package]]
+name = "hivecode-skills"
+version = "0.1.5"
+dependencies = [
+ "serde_json",
+ "serde_yaml",
  "tempfile",
 ]
 

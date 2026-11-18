@@ -1,123 +1,32 @@
 # Desarrollo
 
-## Ejecutar desde el código fuente
+## Requisitos
+La cadena de Rust de `rust-toolchain.toml`, `git` y el SDK en `../hiveRust/hiveSDK-Rust`. No hace
+falta Bun ni Node.
 
+## Compilar y probar
 ```bash
-bun install
-bun run dev        # cargo build de la TUI (debug) + gateway + TUI en el mismo proceso
+cargo build -p hivecode-app                         # target/debug/hivecode
+cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings
+cargo build --manifest-path packages/hivetui/Cargo.toml   # la TUI (las pruebas del CLI la usan si existe)
+cargo test --workspace
+(cd packages/hivetui && cargo test)
+scripts/build-rust.sh                               # binario de release con la TUI incrustada
 ```
+Las pruebas no llaman a ningún modelo real: usan un servidor de modelo falso local, repositorios git
+temporales y un `HIVE_HOME` aislado (nunca tocan tu perfil ni el llavero).
 
-Equivalente manual, útil para no tocar el `hivecode` instalado desde npm:
-
-```bash
-(cd packages/hivetui && cargo build)
-HIVE_DEV=true bun packages/cli/src/index.ts
-```
-
-Para probar contra otro proyecto, lanza el comando **desde su directorio** (la sesión toma `process.cwd()` como proyecto):
-
-```bash
-cd ~/Documentos/Agents/Bee
-HIVE_DEV=true bun ~/Documentos/Agents/Hive/hiveCode/packages/cli/src/index.ts
-```
-
-El proyecto de prueba debe ser un repo git con al menos un commit si vas a usar `approval` o `auto` (crean un `git worktree`). En `plan` no hace falta.
+## Prueba con un proveedor real
+`scripts/real-check.sh PRESET MODELO [--swarm]` con `HIVECODE_API_KEY` (o `KEY_FILE`). Perfil y
+proyecto temporales, presupuesto acotado (40 llamadas al modelo, 120 de herramientas).
 
 ## Variables de entorno
+`HIVE_HOME` (perfil; por defecto `~/.hivecode`), `HIVECODE_API_KEY`, `HIVECODE_MODEL`,
+`HIVECODE_BASE_URL`, `HIVECODE_CONTEXT_WINDOW`, `HIVECODE_SECRETS_FILE`, `HIVECODE_BRAVE_API_KEY`,
+`HIVECODE_AGENT_MAX_STEPS`, `HIVECODE_BUDGET_MODEL_CALLS|TOOL_CALLS|OUTPUT_TOKENS|MINUTES`,
+`HIVECODE_TUI_BIN` (otra TUI), `HIVETUI_EMBED` (TUI a incrustar al compilar).
 
-| Variable | Efecto |
-|----------|--------|
-| `HIVE_HOME` | Directorio de configuración y datos (por defecto `~/.hivecode`). |
-| `HIVE_DB_PATH` | Ruta explícita de HiveDB. Los tests la aíslan. |
-| `HIVE_DEV` | Logging detallado y comportamientos de desarrollo. |
-| `HIVE_PORT`, `HIVE_HOST` | Puerto y host del gateway. |
-| `HIVE_AUTH_TOKEN` | Token del gateway. |
-| `HIVE_MAX_AGENT_CONCURRENCY` | Llamadas activas por sesión (1–32, por defecto 4). |
-| `HIVECODE_AGENT_MAX_STEPS` | Tope global de pasos del bucle de agente. |
-| `HIVECODE_SINGLE_ACTION` | `true` activa el modo experimental de una acción por contexto en los workers (apagado por defecto). |
-| `HIVECODE_LEGACY_HARNESS=1` | Usa el pipeline antiguo de coordinadores en vez de `ProfileHarness`. |
-| `HIVECODE_TUI=1` | La pone el lanzador de la TUI; desactiva los prompts por stdin. |
-| `HIVETUI_HEADLESS=1` | La TUI emite NDJSON en vez de pintar. |
-| `HIVE_SANDBOX=1`, `HIVE_SANDBOX_MODE` | Activa y configura el sandbox del shell. |
-| `HIVE_SKILL_DIRS` | Directorios extra de skills (separador de `PATH`). |
-| `HIVE_LLM_RAW_LOG=<archivo>` | Guarda (una línea JSON por respuesta) todo texto del modelo que parezca una llamada a herramienta, con cuántas se pudieron interpretar y si se le habían ofrecido herramientas, y también las respuestas completamente vacías (`empty: true`, con el motivo de parada y los caracteres de razonamiento). Una línea con `parsed: 0` es marcado que ningún parser entendió: así se detecta una variante nueva de un modelo. |
-| `HIVE_CAUSAL_LOG=1` | Activa el registro causal del bucle (coste: una escritura por llamada). |
-| `HIVE_COORDINATOR_PROVIDER`, `HIVE_COORDINATOR_MODEL` | Provider y modelo del coordinador. |
-| `HIVE_FREE_API_URL` | API de `hivecode-free`. |
-
-## Pruebas
-
-```bash
-bun run lint                       # tsc --noEmit en la raíz (debe dar 0 errores)
-bun run test                       # bun test con la DB y el llavero aislados
-bun run test:integration           # tests/ con tsconfig propio
-bun run test:runs                  # ejecución, reanudación y detección de bucles de los runs
-cd packages/hivetui && cargo test  # Rust
-```
-
-Reglas aprendidas:
-
-- Usa siempre `--preload ./tests/setup/db-isolated.ts` (el script `test` ya lo hace); sin él los tests escriben en tu HiveDB real.
-- **No uses `mock.module` en tests nuevos**: en Bun se filtra entre archivos y rompe pruebas ajenas. Parchea el prototipo o inyecta la dependencia (ver `tests/audit/plan-mode-harness.test.ts`, que parchea `ProfileHarness.prototype.run`).
-- Los tests con LLM real (`tests/agents/*.real.test.ts`) están excluidos en `bunfig.toml`, porque dentro de un worktree causaban caídas del JIT. Se ejecutan a mano con `--tsconfig-override tests/tsconfig.json`.
-- `tsc` por paquete (`-p packages/code`) da más errores que el `tsc` de la raíz; el criterio es la raíz.
-
-Directorios de `tests/`: `agent-loop`, `agents`, `audit` (regresiones de bugs reales), `checkpoint`, `context`, `context-compiler`, `coordinator`, `database`, `e2e`, `harness-recovery`, `ipc`, `runs`, `recovery`, `security`, `tools`…
-
-## Depurar la TUI con tmux
-
-Para ver la TUI real sin ensuciar tu terminal:
-
-```bash
-tmux new-session -d -s bee -x 200 -y 50 -c ~/Documentos/Agents/Bee \
-  'HIVE_DEV=true bun ~/Documentos/Agents/Hive/hiveCode/packages/cli/src/index.ts'
-tmux set-option -g remain-on-exit on
-tmux send-keys -t bee 'crea un proyecto…' Enter
-tmux send-keys -t bee BTab               # Shift+Tab
-tmux capture-pane -t bee -p              # lo que se ve ahora
-tmux kill-server
-```
-
-Una tarea real con un modelo remoto tarda de 3 a 5 minutos. El modo persiste en `~/.hivecode/execution_mode`, así que comprueba con qué modo arrancas.
-
-Antes de repetir una prueba en el proyecto de ejemplo:
-
-```bash
-git reset --hard && git clean -fdx
-git worktree prune; git branch --list 'hivecode/*' | xargs -r git branch -D
-rm -rf /tmp/hivecode-worktrees
-```
-
-## Diagnóstico
-
-- `hivecode doctor`: providers, llavero, base de datos, propuestas pendientes.
-- `/logs list|follow` dentro de la TUI y `HIVE_LOG_CONSOLE` para ver el log en consola.
-- Bun recoge las trazas de herramientas en `code_traces` y los eventos del harness en la narrativa (`/narrative show|search`).
-- **`/task delegations [--limit N] [texto]`** muestra quién delegó qué a quién (hora, agente origen → worker/especialidad, herramienta, descripción recortada, criterios, estado, duración y error). Sale de `toolRuns`, que ya guarda los argumentos de cada llamada (`agent/delegation-log.ts`); incluye `task_delegate`, `task_revise` y `spawn_agent`. El texto filtra por el id de la tarea externa.
-
-## Convenciones de cambios
-
-- Un bug real = una prueba de regresión en `tests/audit/` (o junto al código) que falle sin el arreglo.
-- Mantén los commits por tema. El README y `docs/` se actualizan en el mismo cambio que modifica el comportamiento que describen.
-- Los tipos nulos de sesión/tarea (`taskId`, `sessionId`) se tratan como `string | null` en narrativa y ADR; usa `ensureSession()` para obtener una sesión garantizada.
-
-## Publicación
-
-El repositorio versiona en *lockstep*: un único número en todos los `package.json`, `Cargo.toml` y `Cargo.lock` (`scripts/set-version.ts` es la fuente de verdad).
-
-```bash
-scripts/release.sh patch --dry-run   # verifica (tipos, tests Bun y Rust) sin cambiar nada
-scripts/release.sh patch --push      # sube versión, crea el tag vX.Y.Z y lo empuja
-```
-
-### Binarios independientes
-
-`bun run build:binary` (y `:mac`, `:mac-intel`, `:win`, `:all`) usa `scripts/build-binary.ts`, no `bun build --compile` a secas. `@johpaz/hive-db` carga su módulo nativo con `createRequire(import.meta.url)`, que el empaquetador no sigue: el binario compilaba pero **no arrancaba** (`Cannot find module '../native.cjs'`) porque el `.node` nunca se incluía. El script aplica un parche en memoria a ese cargador (`exposeNativeRequire`), y `tests/audit/build-binary.test.ts` falla si una versión nueva de hive-db cambia la forma del cargador. El paquete npm no tenía este problema: `packages/cli/scripts/build.ts` copia el módulo nativo a `dist/node_modules`.
-
-El addon que se embebe es el **del target**, no el de la máquina que compila. `scripts/build-binary.ts` mapea cada target de Bun al paquete `@johpaz/hive-db-<plataforma>` (`ADDON_FOR_TARGET`); si `bun install` ya lo bajó lo usa y, si no, lo descarga con `npm pack` y redirige a él las dos peticiones del cargador (`package.json` y el `.node`). Así cualquier target se puede compilar desde cualquier equipo, y el Mach-O de macOS Intel compilado en Linux lleva solo el addon `darwin-x64`.
-
-**Windows arm64 no se publica.** `@johpaz/hive-db` no tiene paquete para esa plataforma, así que el script se niega a compilarlo (`✗ … no publica un módulo nativo`) y se quitó del `release.yml`. Volver a ofrecerlo exige que hive-db publique `win32-arm64-msvc` y añadirlo a `ADDON_FOR_TARGET`.
-
-En `release.yml`, `linux-x64`, `linux-arm64`, `macos-arm64` y `windows-x64` se compilan en su plataforma y ejecutan un *smoke test* (`--version` y `doctor`) antes de subir el artefacto. `macos-x64` (runner arm64) y `linux-x64-musl` (runner glibc) no se pueden ejecutar en CI: se sabe que llevan su addon, no que arranquen.
-
-El tag dispara `release.yml`: verifica, compila los binarios por plataforma, crea la release con `SHA256SUMS` y publica `@johpaz/hivecode` en npm. `bun run build` genera el bundle de skills, compila la TUI en release y empaqueta el CLI; `bun run build:binary[:mac|:win|:all]` produce los ejecutables independientes.
+## Publicar
+`scripts/release.sh patch|minor|major|X.Y.Z [--push]` sube la versión, crea el tag `vX.Y.Z` y, con
+`--push`, dispara `release.yml` (binarios para Linux x64/arm64 y macOS arm64/x64). CI y release
+descargan también el SDK; si es privado, define el secreto `SDK_TOKEN`.

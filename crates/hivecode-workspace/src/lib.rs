@@ -62,8 +62,8 @@ pub fn slug(value: &str) -> String {
     }
 }
 
-/// Untracked files no task should leave in the project: tool backups, installed dependencies and
-/// the scratch agents create to check their own work. Only untracked files are filtered.
+/// Untracked files no task should leave in the project: tool backups, installed dependencies, the
+/// scratch agents create to check their own work and the caches that running tests leaves. Only untracked files are filtered.
 pub fn is_noise(file: &str) -> bool {
     let parts: Vec<&str> = file.split('/').collect();
     let name = parts.last().copied().unwrap_or("");
@@ -72,9 +72,17 @@ pub fn is_noise(file: &str) -> bool {
         .is_some_and(|(_, ts)| !ts.is_empty() && ts.chars().all(|c| c.is_ascii_digit()));
     backup
         || parts.contains(&"node_modules")
-        || parts[..parts.len().saturating_sub(1)]
-            .iter()
-            .any(|p| matches!(*p, ".qg" | ".smoke" | ".scratch" | ".tmp" | ".cache"))
+        || parts[..parts.len().saturating_sub(1)].iter().any(|p| {
+            matches!(
+                *p,
+                ".qg" | ".smoke" | ".scratch" | ".tmp" | ".cache"
+                // What running a project's own tests leaves behind: found by a real run, where the
+                // agent's `python3 -m unittest` put `__pycache__/*.pyc` in the integrated patch.
+                | "__pycache__" | ".pytest_cache" | ".mypy_cache" | ".ruff_cache"
+            )
+        })
+        || name.ends_with(".pyc")
+        || name == ".DS_Store"
         || matches!(name, ".qg" | ".smoke" | ".scratch" | ".tmp" | ".cache")
         || name.starts_with(".verify-")
         || file.ends_with(".log")

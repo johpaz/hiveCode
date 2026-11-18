@@ -2688,3 +2688,746 @@ async fn a_due_scheduled_task_runs_as_a_normal_run_and_a_disabled_one_does_not()
         serde_json::from_slice(&hivecode(home.path(), &["history", "--json"]).stdout).unwrap();
     assert_eq!(runs.as_array().unwrap().len(), 1, "no second run");
 }
+
+#[tokio::test]
+async fn a_run_that_ends_with_an_error_is_failed_not_interrupted_and_can_be_recovered() {
+    let project = repo();
+    let home = tempfile::tempdir().unwrap();
+    // Nothing listens on this port: the provider is unreachable.
+    let (h, p) = (home.path().to_owned(), project.path().to_owned());
+    let failed = tokio::task::spawn_blocking(move || {
+        Command::new(env!("CARGO_BIN_EXE_hivecode"))
+            .args([
+                "run",
+                "--headless",
+                "--mode",
+                "plan",
+                "--model",
+                "fake",
+                "--base-url",
+                "http://127.0.0.1:9/v1",
+                "--root",
+            ])
+            .arg(&p)
+            .arg("¿qué hay aquí?")
+            .env("HIVECODE_API_KEY", "x")
+            .env("HIVE_HOME", &h)
+            .env("TMPDIR", &h)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(!failed.status.success());
+    let runs: Value =
+        serde_json::from_slice(&hivecode(home.path(), &["history", "--json"]).stdout).unwrap();
+    assert_eq!(
+        runs[0]["status"], "failed",
+        "an error is not an interruption: {runs}"
+    );
+    assert!(
+        runs[0]["response"]
+            .as_str()
+            .unwrap()
+            .contains("PROVIDER_ERROR"),
+        "{runs}"
+    );
+    let text = String::from_utf8_lossy(&hivecode(home.path(), &["history"]).stdout).into_owned();
+    assert!(!text.contains("interrumpida"), "{text}");
+
+    // A failed run can be redone with --recover once the provider answers.
+    let id = runs[0]["id"].as_str().unwrap().to_owned();
+    let port = serve(vec![answer("ahora sí")]).await;
+    let done = done_of(
+        &run_args(
+            port,
+            home.path(),
+            vec![
+                "--mode".into(),
+                "plan".into(),
+                "--recover".into(),
+                id.clone(),
+            ],
+            "",
+        )
+        .await,
+    );
+    assert_eq!(done["content"], "ahora sí");
+    let runs: Value =
+        serde_json::from_slice(&hivecode(home.path(), &["history", "--json"]).stdout).unwrap();
+    assert_eq!(runs[0]["resumed_from"], id.as_str());
+    // A finished run is still not recoverable.
+    let again = run_args(
+        port,
+        home.path(),
+        vec![
+            "--recover".into(),
+            runs[0]["id"].as_str().unwrap().to_owned(),
+        ],
+        "",
+    )
+    .await;
+    assert!(!again.status.success());
+}
+
+#[tokio::test]
+async fn a_skill_that_fits_the_task_reaches_the_prompt_and_one_that_does_not_stays_out() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = seen.clone();
+    let port = serve_by(move |_, body| {
+        sink.lock().unwrap().push(
+            body["messages"][0]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned(),
+        );
+        answer("ok")
+    })
+    .await;
+    let project = repo();
+    let home = tempfile::tempdir().unwrap();
+    let skill = project.path().join(".hivecode/skills/despliegue");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: despliegue_local\ndescription: Cómo desplegar este proyecto\ntriggers:\n  - \"desplegar a produccion\"\nrules:\n  - \"Nunca despliegues un viernes\"\n---\nUsa ./scripts/deploy.sh\n",
+    )
+    .unwrap();
+    let root = project.path().to_str().unwrap().to_owned();
+    let with = |task: &'static str| {
+        run_args(
+            port,
+            home.path(),
+            vec![
+                "--mode".into(),
+                "plan".into(),
+                "--root".into(),
+                root.clone(),
+            ],
+            task,
+        )
+    };
+    done_of(&with("quiero desplegar a produccion hoy").await);
+    done_of(&with("explica el proyecto").await);
+    let prompts = seen.lock().unwrap().clone();
+    assert!(
+        prompts[0].contains("### Skill: despliegue_local")
+            && prompts[0].contains("Nunca despliegues un viernes")
+            && prompts[0].contains("./scripts/deploy.sh"),
+        "{}",
+        prompts[0]
+    );
+    assert!(!prompts[1].contains("### Skill:"), "{}", prompts[1]);
+}
+
+#[test]
+fn the_skill_command_lists_shows_matches_and_checks() {
+    let home = tempfile::tempdir().unwrap();
+    let text =
+        |args: &[&str]| String::from_utf8_lossy(&hivecode(home.path(), args).stdout).into_owned();
+    let list = text(&["skill", "list"]);
+    assert!(
+        list.contains("test_driven_development")
+            && !list.contains("spec-kit")
+            && list.contains("skills."),
+        "{list}"
+    );
+    assert!(text(&["skill", "show", "test_driven_development"]).contains("Pasos:"));
+    assert!(
+        text(&["skill", "match", "quiero", "pruebas", "primero"])
+            .contains("test_driven_development")
+    );
+    assert!(text(&["skill", "match", "hola"]).contains("Ninguna skill aplica"));
+    assert!(text(&["skill", "check"]).contains("con problemas"));
+    assert!(
+        !hivecode(home.path(), &["skill", "show", "nada"])
+            .status
+            .success()
+    );
+    assert!(!hivecode(home.path(), &["skill", "match"]).status.success());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_tui_socket_is_private_to_its_owner_whatever_the_umask() {
+    let port = serve_by(|_, _| answer("hola")).await;
+    let (project, home) = (repo(), tempfile::tempdir().unwrap());
+    let (_, received) = with_fake_tui(
+        port,
+        home.path(),
+        project.path(),
+        json!([{"expect": "init"}, {"send": "exit"}]),
+        vec![],
+    )
+    .await;
+    let socket = kinds(&received, "__socket");
+    assert_eq!(socket.len(), 1, "{received:?}");
+    assert_eq!(socket[0]["socket_mode"], "0o600");
+    assert_eq!(socket[0]["dir_mode"], "0o700");
+    // And it is cleaned up.
+    let leftovers: Vec<_> = std::fs::read_dir(home.path().join("run"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+/// A fake Telegram Bot API + webhook: records `(path, body)` of each request and answers like Telegram.
+async fn fake_notify_server(seen: std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>) -> u16 {
+    fake_bot_server(seen, std::sync::Arc::new(Vec::new())).await
+}
+
+/// The same, with a fixed list of Telegram updates served the way `getUpdates` does (by `offset`).
+async fn fake_bot_server(
+    seen: std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>,
+    updates: std::sync::Arc<Vec<Value>>,
+) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (seen, updates) = (seen.clone(), updates.clone());
+            tokio::spawn(async move {
+                let mut data = Vec::new();
+                let mut buf = [0u8; 8192];
+                loop {
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    data.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&data).into_owned();
+                    if let Some(split) = text.find("\r\n\r\n") {
+                        let len = text[..split]
+                            .to_ascii_lowercase()
+                            .lines()
+                            .find_map(|l| {
+                                l.strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if data.len() >= split + 4 + len || n == 0 {
+                            let path = text.split_whitespace().nth(1).unwrap_or("").to_owned();
+                            let body: Value =
+                                serde_json::from_str(&text[split + 4..]).unwrap_or(Value::Null);
+                            let reply = if path.ends_with("/getMe") {
+                                if path.contains("bad") {
+                                    (401, json!({"ok": false, "description": "Unauthorized"}))
+                                } else {
+                                    (200, json!({"ok": true, "result": {"username": "hive_bot"}}))
+                                }
+                            } else if path.ends_with("/getUpdates") {
+                                let offset = body["offset"].as_i64().unwrap_or(0);
+                                let mut picked: Vec<Value> = if offset < 0 {
+                                    updates.last().cloned().into_iter().collect()
+                                } else {
+                                    updates
+                                        .iter()
+                                        .filter(|u| u["update_id"].as_i64().unwrap_or(0) >= offset)
+                                        .cloned()
+                                        .collect()
+                                };
+                                picked.truncate(50);
+                                (200, json!({"ok": true, "result": picked}))
+                            } else {
+                                (200, json!({"ok": true, "result": {}}))
+                            };
+                            seen.lock().unwrap().push((path, body));
+                            let payload = reply.1.to_string();
+                            let head = format!(
+                                "HTTP/1.1 {} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                                reply.0,
+                                payload.len()
+                            );
+                            let _ = socket.write_all(head.as_bytes()).await;
+                            let _ = socket.write_all(payload.as_bytes()).await;
+                            return;
+                        }
+                    }
+                    if n == 0 {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+const TOKEN: &str = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789";
+
+fn notify(home: &Path, port: u16, args: &[&str]) -> (bool, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_hivecode"))
+        .args(args)
+        .env("HIVE_HOME", home)
+        .env("TMPDIR", home)
+        .env("HIVECODE_SECRETS_FILE", home.join("secrets.json"))
+        .env("HIVECODE_TELEGRAM_API", format!("http://127.0.0.1:{port}"))
+        .output()
+        .unwrap();
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[allow(clippy::vec_init_then_push)] // each step reads better as its own line
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn notifications_go_to_telegram_and_a_webhook_without_ever_showing_the_secrets() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let port = fake_notify_server(seen.clone()).await;
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path().to_owned();
+    let hook = format!("http://127.0.0.1:{port}/hook/SECRETO-DEL-WEBHOOK");
+    let outputs = tokio::task::spawn_blocking(move || {
+        let mut all = Vec::new();
+        all.push(notify(&h, port, &["notify", "test"])); // nothing configured
+        all.push(notify(
+            &h,
+            port,
+            &["notify", "telegram", "no-es-un-token", "123456"],
+        ));
+        all.push(notify(&h, port, &["notify", "telegram", TOKEN, "@usuario"]));
+        all.push(notify(
+            &h,
+            port,
+            &[
+                "notify",
+                "telegram",
+                &TOKEN
+                    .replace("123456789", "999999999")
+                    .replace("ABC", "bad"),
+                "123456",
+            ],
+        ));
+        all.push(notify(
+            &h,
+            port,
+            &["notify", "telegram", TOKEN, "tg:123456"],
+        ));
+        all.push(notify(&h, port, &["notify", "webhook", &hook]));
+        all.push(notify(&h, port, &["notify", "status"]));
+        all.push(notify(&h, port, &["notify", "test"]));
+        all
+    })
+    .await
+    .unwrap();
+    assert!(
+        !outputs[0].0 && outputs[0].2.contains("no hay destinos"),
+        "{:?}",
+        outputs[0]
+    );
+    assert!(!outputs[1].0 && outputs[1].2.contains("formato de BotFather"));
+    assert!(!outputs[2].0 && outputs[2].2.contains("ID numérico"));
+    assert!(
+        !outputs[3].0 && outputs[3].2.contains("rechazó el token"),
+        "{:?}",
+        outputs[3]
+    );
+    assert!(
+        outputs[4].0 && outputs[4].1.contains("@hive_bot"),
+        "{:?}",
+        outputs[4]
+    );
+    assert!(outputs[5].0 && !outputs[5].1.contains("SECRETO"));
+    assert!(
+        outputs[6].1.contains("telegram: configurado (chat 123456)")
+            && outputs[6].1.contains("webhook:  configurado")
+    );
+    assert!(
+        outputs[7].0 && outputs[7].1.contains("✓ telegram") && outputs[7].1.contains("✓ webhook"),
+        "{:?}",
+        outputs[7]
+    );
+
+    let seen = seen.lock().unwrap().clone();
+    let send = seen
+        .iter()
+        .find(|(p, _)| p.ends_with("/sendMessage"))
+        .expect("a sendMessage");
+    assert!(
+        send.0.contains(TOKEN)
+            && send.1["chat_id"] == "123456"
+            && send.1["text"].as_str().unwrap().contains("prueba")
+    );
+    let hook_call = seen
+        .iter()
+        .find(|(p, _)| p.starts_with("/hook/"))
+        .expect("a webhook call");
+    assert_eq!(hook_call.1["source"], "hivecode");
+    // Secrets live in the secret store (0600), never in config.json or in the output.
+    for (_, out, err) in &outputs {
+        assert!(
+            !out.contains(TOKEN)
+                && !err.contains(TOKEN)
+                && !out.contains("SECRETO")
+                && !err.contains("SECRETO")
+        );
+    }
+    assert!(
+        !home.path().join("config.json").exists()
+            || !std::fs::read_to_string(home.path().join("config.json"))
+                .unwrap()
+                .contains(TOKEN)
+    );
+    let removed = notify(home.path(), port, &["notify", "remove", "telegram"]);
+    assert!(
+        removed.0
+            && notify(home.path(), port, &["notify", "status"])
+                .1
+                .contains("telegram: no")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_run_with_notify_tells_telegram_how_it_ended_and_a_failed_notice_does_not_fail_the_task()
+{
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tg = fake_notify_server(seen.clone()).await;
+    let model = serve_by(|_, _| answer("listo")).await;
+    let (project, home) = (repo(), tempfile::tempdir().unwrap());
+    let (h, root) = (
+        home.path().to_owned(),
+        project.path().to_str().unwrap().to_owned(),
+    );
+    let run = |notify_flag: bool, telegram: u16| {
+        let (h, root) = (h.clone(), root.clone());
+        tokio::task::spawn_blocking(move || {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_hivecode"));
+            cmd.args([
+                "run",
+                "--headless",
+                "--mode",
+                "plan",
+                "--model",
+                "fake",
+                "--root",
+                &root,
+                "--base-url",
+                &format!("http://127.0.0.1:{model}/v1"),
+            ]);
+            if notify_flag {
+                cmd.arg("--notify");
+            }
+            cmd.arg("¿qué hay aquí?")
+                .env("HIVECODE_API_KEY", "x")
+                .env("HIVE_HOME", &h)
+                .env("TMPDIR", &h)
+                .env("HIVECODE_SECRETS_FILE", h.join("secrets.json"))
+                .env(
+                    "HIVECODE_TELEGRAM_API",
+                    format!("http://127.0.0.1:{telegram}"),
+                );
+            cmd.output().unwrap()
+        })
+    };
+    let h2 = h.clone();
+    assert!(
+        tokio::task::spawn_blocking(
+            move || notify(&h2, tg, &["notify", "telegram", TOKEN, "777"]).0
+        )
+        .await
+        .unwrap()
+    );
+    let quiet = run(false, tg).await.unwrap();
+    assert!(quiet.status.success());
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .all(|(p, _)| !p.ends_with("/sendMessage")),
+        "without --notify nothing is sent"
+    );
+    let told = run(true, tg).await.unwrap();
+    assert!(told.status.success());
+    let sent: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(p, _)| p.ends_with("/sendMessage"))
+        .cloned()
+        .collect();
+    assert_eq!(sent.len(), 1);
+    let text = sent[0].1["text"].as_str().unwrap();
+    assert!(
+        text.contains("✅")
+            && text.contains("¿qué hay aquí?")
+            && text.contains("estado: completed")
+            && text.contains("listo"),
+        "{text}"
+    );
+    // Telegram unreachable: the task still succeeds, and the failure is a warning with no secret in it.
+    let unreachable = run(true, 9).await.unwrap();
+    assert!(unreachable.status.success());
+    let err = String::from_utf8_lossy(&unreachable.stderr);
+    assert!(
+        err.contains("no se pudo avisar por telegram") && !err.contains(TOKEN),
+        "{err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stats_summarise_the_runs_by_route_with_their_cost() {
+    let port = serve_by(|_, _| answer("hecho")).await;
+    let (project, home) = (repo(), tempfile::tempdir().unwrap());
+    let empty = String::from_utf8_lossy(&hivecode(home.path(), &["stats"]).stdout).into_owned();
+    assert!(empty.contains("Sin corridas"), "{empty}");
+    for task in ["¿qué hay aquí?", "explica el proyecto"] {
+        done_of(
+            &run_args(
+                port,
+                home.path(),
+                vec![
+                    "--mode".into(),
+                    "plan".into(),
+                    "--swarm".into(),
+                    "--root".into(),
+                    project.path().to_str().unwrap().into(),
+                ],
+                task,
+            )
+            .await,
+        );
+    }
+    let report: Value =
+        serde_json::from_slice(&hivecode(home.path(), &["stats", "--json"]).stdout).unwrap();
+    assert_eq!(report["runs"], 2);
+    let conversation = &report["by_route"]["conversation"];
+    assert_eq!(
+        (
+            conversation["runs"].as_u64(),
+            conversation["completed"].as_u64()
+        ),
+        (Some(2), Some(2)),
+        "{report}"
+    );
+    assert!(
+        conversation["avg_model_calls"].as_f64().unwrap() >= 1.0,
+        "{report}"
+    );
+    let text = String::from_utf8_lossy(&hivecode(home.path(), &["stats"]).stdout).into_owned();
+    assert!(
+        text.contains("2 corridas") && text.contains("conversation: 2 corridas — 2 completadas"),
+        "{text}"
+    );
+}
+
+fn tg_update(id: i64, from: i64, text: &str) -> Value {
+    json!({"update_id": id, "message": {"message_id": id, "from": {"id": from}, "chat": {"id": from}, "text": text}})
+}
+
+/// `hivecode telegram run --once ...` against the fake bot and the fake model; returns what the bot sent.
+async fn telegram_session(
+    updates: Vec<Value>,
+    extra: &[&str],
+    allow: &[&str],
+) -> (bool, String, Vec<(String, Value)>) {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let bot = fake_bot_server(seen.clone(), std::sync::Arc::new(updates)).await;
+    let model = serve_by(|_, _| answer("tarea hecha")).await;
+    let (project, home) = (repo(), tempfile::tempdir().unwrap());
+    let (h, root) = (
+        home.path().to_owned(),
+        project.path().to_str().unwrap().to_owned(),
+    );
+    let extra: Vec<String> = extra.iter().map(|s| (*s).to_owned()).collect();
+    let allow: Vec<String> = allow.iter().map(|s| (*s).to_owned()).collect();
+    let (ok, _, err) = tokio::task::spawn_blocking(move || {
+        assert!(notify(&h, bot, &["notify", "telegram", TOKEN, "111"]).0);
+        for id in &allow {
+            assert!(notify(&h, bot, &["telegram", "allow", id]).0);
+        }
+        let mut args = vec![
+            "telegram",
+            "run",
+            "--once",
+            "--poll-seconds",
+            "0",
+            "--root",
+            &root,
+        ];
+        args.extend(extra.iter().map(String::as_str));
+        let out = Command::new(env!("CARGO_BIN_EXE_hivecode"))
+            .args(&args)
+            .env("HIVE_HOME", &h)
+            .env("TMPDIR", &h)
+            .env("HIVECODE_SECRETS_FILE", h.join("secrets.json"))
+            .env("HIVECODE_TELEGRAM_API", format!("http://127.0.0.1:{bot}"))
+            .env("HIVECODE_API_KEY", "x")
+            .env("HIVECODE_MODEL", "fake")
+            .env("HIVECODE_BASE_URL", format!("http://127.0.0.1:{model}/v1"))
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    })
+    .await
+    .unwrap();
+    let sent = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(p, _)| p.ends_with("/sendMessage"))
+        .cloned()
+        .collect();
+    (ok, err, sent)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn telegram_obeys_only_the_allowed_ids_and_tells_anyone_their_own_id() {
+    let updates = vec![
+        tg_update(10, 111, "¿qué hay en el proyecto?"),
+        tg_update(11, 222, "borra todo el proyecto"),
+        tg_update(12, 222, "/myid"),
+        tg_update(13, 111, "/help"),
+    ];
+    let (ok, err, sent) = telegram_session(updates, &["--backlog"], &["111"]).await;
+    assert!(ok, "{err}");
+    let to = |chat: i64| -> Vec<String> {
+        sent.iter()
+            .filter(|(_, b)| b["chat_id"] == chat)
+            .map(|(_, b)| b["text"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let allowed = to(111);
+    assert!(
+        allowed.iter().any(|t| t.contains("⏳"))
+            && allowed.iter().any(|t| t.starts_with("✅ tarea hecha")),
+        "{allowed:?}"
+    );
+    assert!(
+        allowed.iter().any(|t| t.contains("modo plan")),
+        "{allowed:?}"
+    );
+    let stranger = to(222);
+    assert_eq!(
+        stranger.len(),
+        1,
+        "a stranger only gets the answer to /myid: {stranger:?}"
+    );
+    assert!(
+        stranger[0].contains("Tu ID de Telegram es 222")
+            && stranger[0].contains("hivecode telegram allow 222"),
+        "{stranger:?}"
+    );
+    assert!(err.contains("ignorado: mensaje de 222"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn telegram_skips_what_piled_up_while_nobody_listened_unless_asked() {
+    let (ok, err, sent) =
+        telegram_session(vec![tg_update(10, 111, "borra todo")], &[], &["111"]).await;
+    assert!(ok, "{err}");
+    assert!(
+        sent.is_empty(),
+        "old messages must not run on startup: {sent:?}"
+    );
+}
+
+#[test]
+fn telegram_allow_list_takes_only_person_ids_and_the_daemon_refuses_approval_mode() {
+    let home = tempfile::tempdir().unwrap();
+    let t = |args: &[&str]| notify(home.path(), 1, args);
+    assert!(
+        t(&["telegram", "list"])
+            .1
+            .contains("personas permitidas: ninguna")
+    );
+    assert!(
+        t(&["telegram", "allow", "123456", "777"])
+            .1
+            .contains("123456, 777")
+    );
+    assert!(
+        t(&["telegram", "allow", "123456"])
+            .1
+            .contains("123456, 777"),
+        "adding twice keeps one"
+    );
+    for bad in ["@usuario", "-100123456", "abc", "12"] {
+        let (ok, _, err) = t(&["telegram", "allow", bad]);
+        assert!(
+            !ok && err.contains("no es un ID de persona"),
+            "{bad}: {err}"
+        );
+    }
+    assert!(
+        t(&["telegram", "deny", "123456"])
+            .1
+            .contains("Lista de Telegram: 777")
+    );
+    assert!(t(&["telegram", "deny", "777"]).1.contains("vacía"));
+    let (ok, _, err) = t(&["telegram", "run", "--mode", "approval"]);
+    assert!(!ok && err.contains("approval"), "{err}");
+    let (ok, _, err) = t(&["telegram", "run", "--once"]);
+    assert!(!ok && err.contains("no hay bot"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stats_report_which_tools_each_role_called_against_what_its_profile_loads() {
+    // The lead reads a file once; the model then answers.
+    let port = serve_by(|_, body| {
+        if last_role(body) == "tool" {
+            answer("leído")
+        } else {
+            tool_call("fs_read", json!({"path": "README.md"}))
+        }
+    })
+    .await;
+    let (project, home) = (repo(), tempfile::tempdir().unwrap());
+    std::fs::write(project.path().join("README.md"), "hola").unwrap();
+    for task in ["lee el README", "vuelve a leer el README"] {
+        done_of(
+            &run_args(
+                port,
+                home.path(),
+                vec![
+                    "--mode".into(),
+                    "plan".into(),
+                    "--swarm".into(),
+                    "--root".into(),
+                    project.path().to_str().unwrap().into(),
+                ],
+                task,
+            )
+            .await,
+        );
+    }
+    let report: Value =
+        serde_json::from_slice(&hivecode(home.path(), &["stats", "--json"]).stdout).unwrap();
+    let bee = &report["roles"]["bee"];
+    assert_eq!(bee["runs"], 2, "{report}");
+    assert_eq!(bee["used"][0]["tool"], "fs_read", "{report}");
+    assert_eq!(
+        (
+            bee["used"][0]["runs"].as_u64(),
+            bee["used"][0]["calls"].as_u64()
+        ),
+        (Some(2), Some(2)),
+        "{report}"
+    );
+    assert_eq!(bee["enough"], false, "two runs are not evidence");
+    assert!(
+        bee["unused"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t == "task_delegate"),
+        "loaded but never called: {report}"
+    );
+    assert!(
+        !bee["unused"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t == "fs_read")
+    );
+    let text = String::from_utf8_lossy(&hivecode(home.path(), &["stats"]).stdout).into_owned();
+    assert!(
+        text.contains("Uso de herramientas por rol")
+            && text.contains("bee: 2 corrida(s)")
+            && text.contains("muestra corta"),
+        "{text}"
+    );
+}

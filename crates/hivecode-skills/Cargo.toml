@@ -1,0 +1,15 @@
+[package]
+name = "hivecode-skills"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SKILL.md skills: the ones that ship with hivecode, the user's and the project's, and the choice of which apply to a task"
+build = "build.rs"
+
+[dependencies]
+serde_yaml = "0.9.34"
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

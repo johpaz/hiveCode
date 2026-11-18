@@ -4,6 +4,8 @@
 //! taken from flags/environment; the key is read from `HIVECODE_API_KEY`, never from argv.
 mod commands;
 mod cron;
+mod notify;
+mod telegram;
 mod tui;
 mod tui_settings;
 mod ui;
@@ -16,8 +18,9 @@ use serde_json::json;
 use std::path::PathBuf;
 use ui::{Report, Terminal, Ui};
 
-const USAGE: &str = "uso: hivecode provider list|presets|add|use|remove|key   hivecode mcp list|add|remove|enable|disable|test   hivecode onboard   hivecode cron add|list|enable|disable|run\n     hivecode doctor   hivecode init [--write]\n     hivecode [tui] [--model M] [--base-url URL] [--provider NOMBRE] [--preset ID] [--root DIR] [--mode ...]   (la TUI)\n     hivecode history [--limit N] [--json] [--db DIR]\n     hivecode rollback <id-de-corrida> [--db DIR]\n     hivecode run [--headless] [--model M] [--base-url URL] [--preset ID] \
-[--root DIR] [--db DIR] [--resume ID | --recover ID] [--mode plan|approval|auto] [--context-window TOKENS] [--swarm] [--no-web] [--allow PROGRAMA]... <tarea>\n  \
+const USAGE: &str = "uso: hivecode provider list|presets|add|use|remove|key   hivecode mcp list|add|remove|enable|disable|test   hivecode onboard   hivecode cron add|list|enable|disable|run   hivecode skill list|show|match|check   hivecode notify telegram|webhook|status|test|remove   hivecode telegram allow|deny|list|run\n     hivecode doctor   hivecode init [--write]\n     hivecode [tui] [--model M] [--base-url URL] [--provider NOMBRE] [--preset ID] [--root DIR] [--mode ...]   (la TUI)\n     hivecode history [--limit N] [--json] [--db DIR]
+     hivecode stats [--limit N] [--json] [--db DIR]\n     hivecode rollback <id-de-corrida> [--db DIR]\n     hivecode run [--headless] [--model M] [--base-url URL] [--preset ID] \
+[--root DIR] [--db DIR] [--resume ID | --recover ID] [--mode plan|approval|auto] [--context-window TOKENS] [--swarm] [--notify] [--no-web] [--allow PROGRAMA]... <tarea>\n  \
 clave del proveedor: variable HIVECODE_API_KEY\n";
 
 #[derive(Clone)]
@@ -34,6 +37,8 @@ struct Args {
     allow: Vec<String>,
     no_web: bool,
     swarm: bool,
+    /// Tell the configured Telegram/webhook when the task ends (`hivecode notify`).
+    notify: bool,
     mode: Option<Mode>,
     context_window: Option<u64>,
     /// A provider from `config.json` (the active one when omitted).
@@ -54,6 +59,7 @@ fn parse(mut args: impl Iterator<Item = String>, need_task: bool) -> Result<Args
         allow: vec![],
         no_web: false,
         swarm: false,
+        notify: false,
         mode: None,
         context_window: None,
         provider_name: None,
@@ -66,6 +72,7 @@ fn parse(mut args: impl Iterator<Item = String>, need_task: bool) -> Result<Args
             "--headless" => parsed.headless = true,
             "--no-web" => parsed.no_web = true,
             "--swarm" => parsed.swarm = true,
+            "--notify" => parsed.notify = true,
             "--model" => parsed.model = Some(value("--model")?),
             "--base-url" => parsed.base_url = Some(value("--base-url")?),
             "--preset" => parsed.preset = Some(value("--preset")?),
@@ -157,12 +164,13 @@ async fn main() {
     match first.as_deref() {
         Some("run") => {}
         Some(
-            command @ ("history" | "rollback" | "provider" | "mcp" | "doctor" | "init" | "onboard"
-            | "cron"),
+            command @ ("history" | "stats" | "rollback" | "provider" | "mcp" | "doctor" | "init"
+            | "onboard" | "cron" | "skill" | "notify" | "telegram"),
         ) => {
             let rest: Vec<String> = args.collect();
             let outcome = match command {
                 "history" => history(&rest),
+                "stats" => stats(&rest),
                 "provider" => commands::provider(rest),
                 "mcp" if rest.first().is_some_and(|a| a == "test") => {
                     commands::mcp_test(rest[1..].to_vec()).await
@@ -170,6 +178,9 @@ async fn main() {
                 "mcp" => commands::mcp(rest),
                 "onboard" => commands::onboard(),
                 "cron" => cron::command(rest).await,
+                "skill" => commands::skill(rest),
+                "notify" => notify::command(rest).await,
+                "telegram" => telegram::command(rest).await,
                 "doctor" => commands::doctor(),
                 "init" => commands::init(rest),
                 _ => rollback(&rest).await,
@@ -205,11 +216,45 @@ async fn main() {
     }
 }
 
+/// Runs one task. A run that ends with an error is recorded as `failed` (with the error), never left
+/// as `running`: that word is for a process that was cut, and `hivecode history` says "interrupted"
+/// about it.
 async fn run(
-    mut args: Args,
+    args: Args,
     ui: std::sync::Arc<dyn Ui>,
     cancel: hivecode_host::CancellationToken,
 ) -> hivecode_host::Result<()> {
+    let mut open: Option<(Store, RunDoc)> = None;
+    let notify_on_error = args.notify;
+    let outcome = run_body(args, ui, cancel, &mut open).await;
+    if let (Err(error), Some((store, mut doc))) = (&outcome, open) {
+        if notify_on_error {
+            notify::announce(&notify::run_message(
+                "tarea fallida",
+                &doc.objective,
+                "failed",
+                "—",
+                &doc.id,
+                &error.to_string(),
+            ))
+            .await;
+        }
+        doc.status = "failed".into();
+        doc.finished_ms = now_ms();
+        doc.response = error.to_string().chars().take(2000).collect();
+        let _ = store.record_run(&doc);
+    }
+    outcome
+}
+
+async fn run_body(
+    mut args: Args,
+    ui: std::sync::Arc<dyn Ui>,
+    cancel: hivecode_host::CancellationToken,
+    open: &mut Option<(Store, RunDoc)>,
+) -> hivecode_host::Result<()> {
+    let counting = std::sync::Arc::new(ui::Counting::new(ui));
+    let ui: std::sync::Arc<dyn Ui> = counting.clone();
     let settings = settings(&args)?;
     let (model, provider) = (settings.model.clone(), settings.provider.clone());
     // A run id sorts by start time and is unique even if the process id is reused.
@@ -231,9 +276,9 @@ async fn run(
             } else if !earlier.swarm && args.swarm {
                 return Err(format!("la corrida {id} se hizo sin --swarm: reanúdala igual").into());
             }
-            if args.recover && earlier.status != "running" {
+            if args.recover && !matches!(earlier.status.as_str(), "running" | "failed") {
                 return Err(format!(
-                    "la corrida {id} no está interrumpida (estado: {}); para continuarla usa --resume",
+                    "la corrida {id} no está interrumpida ni falló (estado: {}); para continuarla usa --resume",
                     earlier.status
                 )
                 .into());
@@ -384,7 +429,7 @@ async fn run(
     let web = (!args.no_web).then(web_policy);
     // The record exists from the start: a run that is cut leaves it as "running", which is how
     // `hivecode history` knows it was interrupted and `--recover` finds it.
-    let _ = persistent.record_run(&RunDoc {
+    let started = RunDoc {
         id: session_id.clone(),
         project: project.display().to_string(),
         objective: objective.chars().take(2000).collect(),
@@ -395,11 +440,18 @@ async fn run(
         started_ms,
         status: "running".into(),
         ..Default::default()
-    });
+    };
+    let _ = persistent.record_run(&started);
+    *open = Some((persistent.clone(), started));
     let mut system =
         "Eres hivecode, un agente de código. Trabaja dentro del proyecto con las herramientas \
          disponibles y responde de forma breve y exacta."
             .to_owned();
+    // The skills that fit the task (bundled, the person's, the project's): guidance added to the prompt.
+    system.push_str(&hivecode_skills::prompt_section(
+        &hivecode_skills::catalog(&home(), &project).0,
+        &objective,
+    ));
     let mut allowed_tools = None;
     let sessions = persistent.sessions();
     let store = Some(sessions.clone());
@@ -597,6 +649,8 @@ async fn run(
             .unwrap_or(false),
         None => false,
     };
+    // From here the run is finished: the final record below replaces the `running` one.
+    *open = None;
     let recorded = persistent.record_run(&RunDoc {
         id: session_id.clone(),
         project: project.display().to_string(),
@@ -625,9 +679,24 @@ async fn run(
         response: answer.chars().take(2000).collect(),
         has_patch,
         rolled_back: false,
+        tool_usage: counting.usage(),
     });
     if let Err(error) = recorded {
         ui.note(&format!("⚠ no se pudo guardar el historial: {error}"));
+    }
+    if args.notify {
+        notify::announce(&notify::run_message(
+            "tarea terminada",
+            &objective,
+            route
+                .as_ref()
+                .and_then(|r| r["status"].as_str())
+                .unwrap_or("completed"),
+            status,
+            &session_id,
+            &answer,
+        ))
+        .await;
     }
     ui.done(&Report {
         run_id: session_id,
@@ -869,4 +938,25 @@ fn settings(args: &Args) -> hivecode_host::Result<Settings> {
         provider,
         window,
     })
+}
+
+/// `hivecode stats`: what the last runs did and cost, by route. Only what the history reliably holds:
+/// how each one ended, how often it needed repair or was undone, and the budget it used.
+fn stats(args: &[String]) -> hivecode_host::Result<()> {
+    let (db, rest) = split_db(args);
+    let limit = rest
+        .iter()
+        .position(|a| a == "--limit")
+        .and_then(|i| rest.get(i + 1))
+        .map(|v| v.parse::<usize>().map_err(|_| "--limit: un número"))
+        .transpose()?
+        .unwrap_or(200);
+    let runs = Store::open(&db)?.runs(limit)?;
+    let report = commands::run_stats(&runs);
+    if rest.iter().any(|a| a == "--json") {
+        println!("{report}");
+        return Ok(());
+    }
+    commands::print_stats(&report);
+    Ok(())
 }

@@ -460,10 +460,23 @@ fn start(
 
 pub async fn serve(base: Args) -> hivecode_host::Result<()> {
     let tui = find_tui()?;
-    std::fs::create_dir_all(home())?;
-    let socket = home().join(format!("ipc-{}.sock", std::process::id()));
+    // The socket lives in a directory only its owner can enter, and is itself owner-only: whoever can
+    // connect can drive the agent (approve tools, run tasks), so it must not depend on the umask.
+    let run_dir = home().join("run");
+    std::fs::create_dir_all(&run_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&run_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let socket = run_dir.join(format!("ipc-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+    }
     let mut child = tokio::process::Command::new(&tui)
         .env("HIVECODE_IPC", &socket)
         .env("HIVECODE_TUI", "1")

@@ -15,7 +15,11 @@ sock = socket.socket(socket.AF_UNIX)
 sock.settimeout(30)
 sock.connect(path)
 reader = sock.makefile("r", encoding="utf-8")
-log = []
+# What the server left on disk for this socket: tests check it is private.
+log = [{"type": "__socket", "payload": {
+    "socket_mode": oct(os.stat(path).st_mode & 0o777),
+    "dir_mode": oct(os.stat(os.path.dirname(path)).st_mode & 0o777),
+}}]
 
 
 def save():

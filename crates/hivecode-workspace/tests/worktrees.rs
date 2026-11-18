@@ -43,6 +43,10 @@ fn slugs_and_noise() {
     assert_eq!(slug("!!!"), "task");
     assert_eq!(slug(&"x".repeat(200)).len(), 80);
     for noise in [
+        "pkg/__pycache__/m.cpython-315.pyc",
+        "m.pyc",
+        ".pytest_cache/v/x",
+        ".DS_Store",
         "a.txt.hive-bak.1700",
         "web/node_modules/x/y.js",
         ".qg/out",
@@ -231,4 +235,46 @@ async fn an_integrated_patch_can_be_reverted_and_a_changed_project_is_refused_un
         "uno\nEDITADO-POR-LA-PERSONA\ntres\n",
         "nothing was touched"
     );
+}
+
+#[tokio::test]
+async fn what_running_the_projects_tests_leaves_behind_is_not_integrated_and_the_run_can_be_undone()
+{
+    let project = repo();
+    let root = tempfile::tempdir().unwrap();
+    let ws = Workspaces::new(root.path());
+    let a = ws.assignment("con-cache", project.path(), true);
+    ws.prepare(&a, "HEAD").await.unwrap();
+    std::fs::write(a.worktree.join("nuevo.py"), "def f(): pass\n").unwrap();
+    std::fs::create_dir_all(a.worktree.join("__pycache__")).unwrap();
+    std::fs::write(
+        a.worktree.join("__pycache__/nuevo.cpython-315.pyc"),
+        [0u8, 159, 146, 150],
+    )
+    .unwrap();
+    std::fs::create_dir_all(a.worktree.join(".pytest_cache")).unwrap();
+    std::fs::write(a.worktree.join(".pytest_cache/README.md"), "x").unwrap();
+
+    let Integration::Integrated { diff } = ws.integrate(&a).await else {
+        panic!("expected integration")
+    };
+    assert!(
+        diff.contains("nuevo.py") && !diff.contains("pycache") && !diff.contains("pytest_cache"),
+        "{diff}"
+    );
+    ws.cleanup(&a).await.unwrap();
+    assert!(
+        project.path().join("nuevo.py").exists() && !project.path().join("__pycache__").exists()
+    );
+
+    // The person (or a check of their own) runs the tests in the project and regenerates the caches:
+    // that must not stop the run from being undone.
+    std::fs::create_dir_all(project.path().join("__pycache__")).unwrap();
+    std::fs::write(
+        project.path().join("__pycache__/nuevo.cpython-315.pyc"),
+        [1u8, 2, 3],
+    )
+    .unwrap();
+    ws.revert(project.path(), &diff).await.unwrap();
+    assert!(!project.path().join("nuevo.py").exists());
 }

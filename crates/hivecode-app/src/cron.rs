@@ -230,6 +230,8 @@ async fn execute(job: Job, cancel: CancellationToken) -> hive_agent_core::Result
     command.args([
         "run",
         "--headless",
+        // Tells the person (Telegram/webhook, if configured with `hivecode notify`) how it ended.
+        "--notify",
         "--mode",
         p["mode"].as_str().unwrap_or("plan"),
         "--root",

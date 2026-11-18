@@ -2,7 +2,7 @@
 resolver = "3"
 # The TUI is its own project (its own Cargo.lock, built by `cd packages/hivetui && cargo build`).
 exclude = ["packages/hivetui"]
-members = ["crates/hivecode-host", "crates/hivecode-app", "crates/hivecode-workspace", "crates/hivecode-tools", "crates/hivecode-verify", "crates/hivecode-index", "crates/hivecode-swarm", "crates/hivecode-harness", "crates/hivecode-store", "crates/hivecode-config", "crates/hivecode-adr"]
+members = ["crates/hivecode-host", "crates/hivecode-app", "crates/hivecode-workspace", "crates/hivecode-tools", "crates/hivecode-verify", "crates/hivecode-index", "crates/hivecode-swarm", "crates/hivecode-harness", "crates/hivecode-store", "crates/hivecode-config", "crates/hivecode-adr", "crates/hivecode-skills"]
 
 [workspace.package]
 version = "0.1.5"

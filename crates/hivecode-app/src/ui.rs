@@ -33,6 +33,63 @@ pub trait Ui: Send + Sync {
     fn swarm(&self, _event: &hivecode_swarm::SwarmEvent) {}
 }
 
+/// Wraps another `Ui` and counts every tool call by role, so the run's record says what each role used.
+pub struct Counting {
+    inner: std::sync::Arc<dyn Ui>,
+    usage: std::sync::Mutex<
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, u32>>,
+    >,
+}
+
+impl Counting {
+    pub fn new(inner: std::sync::Arc<dyn Ui>) -> Self {
+        Self {
+            inner,
+            usage: Default::default(),
+        }
+    }
+
+    pub fn usage(
+        &self,
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, u32>> {
+        self.usage.lock().map(|u| u.clone()).unwrap_or_default()
+    }
+}
+
+impl Ui for Counting {
+    fn note(&self, text: &str) {
+        self.inner.note(text);
+    }
+    fn event(&self, worker: Option<&str>, event: &Event) {
+        if let Event::ToolStart { name, .. } = event {
+            // `scout#2` is a second instance of `scout`: the role is the base profile.
+            let role = worker
+                .map_or("bee", |w| w.split('#').next().unwrap_or(w))
+                .to_owned();
+            if let Ok(mut usage) = self.usage.lock() {
+                *usage
+                    .entry(role)
+                    .or_default()
+                    .entry(name.clone())
+                    .or_default() += 1;
+            }
+        }
+        self.inner.event(worker, event);
+    }
+    fn approve(&self, name: &str, arguments: &Value) -> bool {
+        self.inner.approve(name, arguments)
+    }
+    fn gate(&self, gate: &str, text: &str) -> bool {
+        self.inner.gate(gate, text)
+    }
+    fn done(&self, report: &Report) {
+        self.inner.done(report);
+    }
+    fn swarm(&self, event: &hivecode_swarm::SwarmEvent) {
+        self.inner.swarm(event);
+    }
+}
+
 /// The command line: `--headless` is NDJSON on stdout, otherwise text with progress on stderr.
 pub struct Terminal {
     pub headless: bool,

@@ -1,5 +1,7 @@
 name: Release
 
+# Un tag vX.Y.Z publica un binario único `hivecode` (con la TUI incrustada) por plataforma.
+# La TUI usa un socket Unix, así que no hay build de Windows.
 on:
   push:
     tags:
@@ -7,231 +9,72 @@ on:
 
 permissions:
   contents: write
-  id-token: write
 
 jobs:
-  verify:
-    name: Verificar antes de publicar
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      # Un tag sólo se publica si está en main: evita liberar una rama a medias.
-      - name: El tag pertenece a main
-        run: |
-          git fetch origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
-            || { echo "::error::el tag ${GITHUB_REF_NAME} no está en main"; exit 1; }
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4.4"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: packages/hivetui
-
-      - run: bun install --frozen-lockfile
-      # Los E2E de la TUI ejecutan packages/hivetui/target/debug/hivetui.
-      - name: Build TUI (debug)
-        run: cargo build --locked --manifest-path packages/hivetui/Cargo.toml
-      - name: Typecheck
-        run: bun run lint
-      - name: Tests Bun
-        run: bun run test --parallel
-      - name: Tests Rust (TUI)
-        run: cargo test --locked --manifest-path packages/hivetui/Cargo.toml
-
   build:
-    name: Build ${{ matrix.target }}
-    needs: verify
+    name: Build ${{ matrix.artifact }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: bun-linux-x64
-            rust: x86_64-unknown-linux-gnu
-            artifact: hive-code-linux-x64
-            smoke: true
-          - os: ubuntu-24.04-arm
-            target: bun-linux-arm64
-            rust: aarch64-unknown-linux-gnu
-            artifact: hive-code-linux-arm64
-            smoke: true
-          - os: ubuntu-latest
-            target: bun-linux-x64-musl
-            rust: x86_64-unknown-linux-musl
-            artifact: hive-code-linux-x64-musl
-          - os: macos-latest
-            target: bun-darwin-x64
-            rust: x86_64-apple-darwin
-            artifact: hive-code-macos-x64
-          - os: macos-latest
-            target: bun-darwin-arm64
-            rust: aarch64-apple-darwin
-            artifact: hive-code-macos-arm64
-            smoke: true
-          - os: windows-latest
-            target: bun-windows-x64
-            rust: x86_64-pc-windows-msvc
-            artifact: hive-code-windows-x64.exe
-            smoke: true
-
+          - { os: ubuntu-latest,    artifact: hivecode-linux-x64 }
+          - { os: ubuntu-24.04-arm, artifact: hivecode-linux-arm64 }
+          - { os: macos-14,         artifact: hivecode-macos-arm64 }
+          - { os: macos-13,         artifact: hivecode-macos-x64 }
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.4.4"
-
-      - uses: dtolnay/rust-toolchain@stable
+          path: hiveCode
+      - uses: actions/checkout@v4
         with:
-          targets: ${{ matrix.rust }}
+          repository: johpaz/hiveSDK-Rust
+          path: hiveRust/hiveSDK-Rust
+          token: ${{ secrets.SDK_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/hivetui
-          key: ${{ matrix.rust }}
-
-      - name: Install musl tools
-        if: contains(matrix.rust, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      # La TUI va embebida en el binario vía packages/hivetui/hivetui.bin. Si
-      # falla, el build falla: un release sin TUI no arranca.
-      - name: Build TUI
-        shell: bash
+          workspaces: |
+            hiveCode
+            hiveCode/packages/hivetui
+      - name: Pruebas
+        working-directory: hiveCode
         run: |
-          cargo build --release --locked --target ${{ matrix.rust }} \
-            --manifest-path packages/hivetui/Cargo.toml
-          BIN=packages/hivetui/target/${{ matrix.rust }}/release/hivetui
-          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
-          cp "$BIN" packages/hivetui/hivetui.bin
-          ls -la packages/hivetui/hivetui.bin
-
-      # `shell: bash` explícito: en los runners de Windows el shell por defecto
-      # es PowerShell, donde la continuación de línea con `\` es un error de sintaxis.
-      - name: Build CLI binary
-        shell: bash
+          git config --global user.email ci@example.com && git config --global user.name ci
+          cargo build --locked --manifest-path packages/hivetui/Cargo.toml
+          cargo test --workspace --locked
+      - name: Binario
+        working-directory: hiveCode
         run: |
-          bun scripts/build-binary.ts \
-            --target ${{ matrix.target }} \
-            --outfile ${{ matrix.artifact }}
-
-      # Un binario que compila pero no arranca (le pasó: sin el módulo nativo de HiveDB) no debe
-      # publicarse. Sólo se puede ejecutar el de la plataforma del runner.
-      - name: Smoke test
-        if: matrix.smoke
-        shell: bash
-        env:
-          HIVE_HOME: ${{ runner.temp }}/hive-smoke
+          scripts/build-rust.sh
+          cp dist/hivecode-rust-* "dist/${{ matrix.artifact }}"
+          (cd dist && sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256" 2>/dev/null || shasum -a 256 "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256")
+      - name: Arranca sin dependencias
+        working-directory: hiveCode
         run: |
-          chmod +x "${{ matrix.artifact }}"
-          "./${{ matrix.artifact }}" --version
-          "./${{ matrix.artifact }}" doctor
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          H=$(mktemp -d)
+          HIVE_HOME="$H" "dist/${{ matrix.artifact }}" --version
+          HIVE_HOME="$H" HIVECODE_API_KEY=x HIVECODE_MODEL=x "dist/${{ matrix.artifact }}" doctor
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          path: |
+            hiveCode/dist/${{ matrix.artifact }}
+            hiveCode/dist/${{ matrix.artifact }}.sha256
 
-  release:
-    name: Create GitHub Release
+  publish:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
-
-      - name: Checksums
-        run: cd artifacts && sha256sum * > SHA256SUMS
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - name: Sumas
+        run: cd artifacts && cat *.sha256 > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
           generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(github.ref, '-') }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  publish-npm:
-    name: Publish to npm
-    needs: [verify, release]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4.4"
-
-      - name: Setup Node.js for npm publish
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      # `release.sh` ya dejó todos los package.json en la versión del tag. Si no
-      # coinciden, el tag se empujó a mano o sin pasar por el script: no se publica.
-      - name: El tag coincide con la versión del paquete
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PKG_VERSION=$(node -p "require('./packages/cli/package.json').version")
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "::error::el tag v$TAG_VERSION no coincide con packages/cli/package.json ($PKG_VERSION)"
-            exit 1
-          fi
-
-      # `files: ["dist/"]`: sin construir, npm publicaría un paquete vacío.
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: packages/hivetui
-
-      - name: Build dist (CLI, workers y TUI)
-        run: cd packages/cli && bun run build
-
-      # El CLI va empaquetado en dist/hivecode.js. Las dependencias `workspace:*`
-      # no existen en npm y harían fallar la instalación; solo se quitan en este
-      # workspace de CI, no se commitea.
-      - name: Quitar dependencias de workspace del paquete publicado
-        run: |
-          node -e '
-            const fs = require("fs");
-            const f = "packages/cli/package.json";
-            const p = JSON.parse(fs.readFileSync(f, "utf8"));
-            for (const k of ["dependencies", "optionalDependencies", "peerDependencies"]) {
-              for (const [n, v] of Object.entries(p[k] ?? {})) {
-                if (String(v).startsWith("workspace:")) delete p[k][n];
-              }
-            }
-            fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n");
-          '
-          cp README.md packages/cli/README.md
-
-      - name: Contenido del paquete
-        run: cd packages/cli && npm pack --dry-run
-
-      - name: Publish to npm
-        run: cd packages/cli && npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

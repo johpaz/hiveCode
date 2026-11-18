@@ -642,3 +642,290 @@ pub fn onboard() -> Res {
     println!("\nSiguiente: hivecode doctor   ·   hivecode init   ·   hivecode   (la TUI)");
     Ok(())
 }
+
+/// `hivecode skill list | show NOMBRE | match TEXTO | check`.
+pub fn skill(mut args: Vec<String>) -> hivecode_host::Result<()> {
+    let sub = if args.is_empty() {
+        "list".to_owned()
+    } else {
+        args.remove(0)
+    };
+    let project = std::env::current_dir()?;
+    let (skills, problems) = hivecode_skills::catalog(&crate::home(), &project);
+    match sub.as_str() {
+        "list" => {
+            for s in &skills {
+                let origin = match s.source {
+                    hivecode_skills::Source::Bundled => "",
+                    hivecode_skills::Source::User => " [tuya]",
+                    hivecode_skills::Source::Project => " [proyecto]",
+                };
+                println!(
+                    "{:<28} {:<12} {}{origin}",
+                    s.name,
+                    s.category,
+                    s.description.chars().take(70).collect::<String>()
+                );
+            }
+            println!(
+                "\n{} skills. Las tuyas van en {}/skills/<nombre>/SKILL.md y las del proyecto en .hivecode/skills/.",
+                skills.len(),
+                crate::home().display()
+            );
+        }
+        "show" => {
+            let name = args.first().ok_or("uso: hivecode skill show NOMBRE")?;
+            let s = skills
+                .iter()
+                .find(|s| &s.name == name)
+                .ok_or(format!("no hay una skill `{name}` (hivecode skill list)"))?;
+            println!("{}", hivecode_skills::render(s));
+            if !s.triggers.is_empty() {
+                println!("Se activa con: {}", s.triggers.join(" · "));
+            }
+        }
+        "match" => {
+            let text = args.join(" ");
+            if text.trim().is_empty() {
+                return Err("uso: hivecode skill match TEXTO DE LA TAREA".into());
+            }
+            let chosen = hivecode_skills::select(&skills, &text);
+            if chosen.is_empty() {
+                println!("Ninguna skill aplica a esa tarea.");
+            }
+            for s in chosen {
+                println!(
+                    "{} (afinidad {}) — {}",
+                    s.name,
+                    hivecode_skills::score(s, &text),
+                    s.description
+                );
+            }
+        }
+        "check" => {
+            for p in &problems {
+                println!("✗ {p}");
+            }
+            println!(
+                "{} skills cargadas, {} con problemas.",
+                skills.len(),
+                problems.len()
+            );
+            if !problems.is_empty() {
+                return Err("hay skills que no cargan".into());
+            }
+        }
+        other => {
+            return Err(format!(
+                "subcomando desconocido: skill {other} (list, show, match, check)"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Aggregates runs by route (`conversation`, `scoped`, `feature`, or `plain` for a run without the harness).
+pub fn run_stats(runs: &[hivecode_store::RunDoc]) -> serde_json::Value {
+    use serde_json::{Value, json};
+    use std::collections::BTreeMap;
+    #[derive(Default)]
+    struct Group {
+        runs: u64,
+        completed: u64,
+        failed: u64,
+        interrupted: u64,
+        integrated: u64,
+        rolled_back: u64,
+        repairs: u64,
+        repaired_runs: u64,
+        secs: u64,
+        counted: u64,
+        model_calls: u64,
+        tool_calls: u64,
+        output_tokens: u64,
+        budgeted: u64,
+    }
+    let mut groups: BTreeMap<String, Group> = BTreeMap::new();
+    for run in runs {
+        let g = groups
+            .entry(run.route.clone().unwrap_or_else(|| "plain".into()))
+            .or_default();
+        g.runs += 1;
+        match run.status.as_str() {
+            "completed" | "ready" => g.completed += 1,
+            "running" => g.interrupted += 1,
+            _ => g.failed += 1,
+        }
+        g.integrated += u64::from(run.integration == "integrated");
+        g.rolled_back += u64::from(run.rolled_back);
+        g.repairs += u64::from(run.repair_cycles);
+        g.repaired_runs += u64::from(run.repair_cycles > 0);
+        if run.finished_ms >= run.started_ms && run.finished_ms > 0 {
+            g.secs += (run.finished_ms - run.started_ms) / 1000;
+            g.counted += 1;
+        }
+        if let Some(b) = &run.budget {
+            g.budgeted += 1;
+            g.model_calls += b["model_calls"].as_u64().unwrap_or(0);
+            g.tool_calls += b["tool_calls"].as_u64().unwrap_or(0);
+            g.output_tokens += b["output_tokens"].as_u64().unwrap_or(0);
+        }
+    }
+    let avg = |total: u64, n: u64| {
+        if n == 0 {
+            Value::Null
+        } else {
+            json!((total as f64 / n as f64 * 10.0).round() / 10.0)
+        }
+    };
+    let by_route: serde_json::Map<String, Value> = groups
+        .iter()
+        .map(|(route, g)| {
+            (
+                route.clone(),
+                json!({
+                    "runs": g.runs, "completed": g.completed, "failed": g.failed, "interrupted": g.interrupted,
+                    "integrated": g.integrated, "rolled_back": g.rolled_back,
+                    "runs_needing_repair": g.repaired_runs, "repair_cycles": g.repairs,
+                    "avg_seconds": avg(g.secs, g.counted),
+                    "avg_model_calls": avg(g.model_calls, g.budgeted),
+                    "avg_tool_calls": avg(g.tool_calls, g.budgeted),
+                    "avg_output_tokens": avg(g.output_tokens, g.budgeted),
+                    "runs_with_budget": g.budgeted,
+                }),
+            )
+        })
+        .collect();
+    json!({"runs": runs.len(), "by_route": by_route, "roles": role_stats(runs)})
+}
+
+/// Fewest runs of a role before its tool usage says anything about what it should start with.
+pub const MIN_SAMPLE: u64 = 10;
+
+/// What each role actually called, against the tools its profile starts with: a tool that is loaded in
+/// every turn of a role and never called costs its description each time (candidates to drop); one called
+/// in most runs belongs in the core. It only reports: changing a profile stays a decision.
+fn role_stats(runs: &[hivecode_store::RunDoc]) -> serde_json::Value {
+    use serde_json::json;
+    use std::collections::{BTreeMap, BTreeSet};
+    // role -> (runs that used it, tool -> (runs that called it, calls))
+    type Calls<'a> = BTreeMap<&'a str, (u64, u64)>;
+    let mut roles: BTreeMap<&str, (u64, Calls)> = BTreeMap::new();
+    for run in runs.iter().filter(|r| r.status != "running") {
+        for (role, tools) in &run.tool_usage {
+            let entry = roles.entry(role).or_default();
+            entry.0 += 1;
+            for (tool, calls) in tools {
+                let t = entry.1.entry(tool).or_default();
+                t.0 += 1;
+                t.1 += u64::from(*calls);
+            }
+        }
+    }
+    let out: serde_json::Map<String, serde_json::Value> = roles
+        .into_iter()
+        .map(|(role, (n, tools))| {
+            let loaded: BTreeSet<&str> = hivecode_swarm::profiles::find(role).map(|p| p.tools.into_iter().collect()).unwrap_or_default();
+            let called: BTreeSet<&str> = tools.keys().copied().collect();
+            let mut used: Vec<_> = tools.iter().map(|(t, (r, c))| (*t, *r, *c)).collect();
+            used.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(b.0)));
+            (
+                role.to_owned(),
+                json!({
+                    "runs": n,
+                    "enough": n >= MIN_SAMPLE,
+                    "used": used.iter().map(|(t, r, c)| json!({"tool": t, "runs": r, "calls": c})).collect::<Vec<_>>(),
+                    "unused": loaded.difference(&called).collect::<Vec<_>>(),
+                }),
+            )
+        })
+        .collect();
+    serde_json::Value::Object(out)
+}
+
+pub fn print_stats(report: &serde_json::Value) {
+    print_routes(report);
+    print_roles(report);
+}
+
+fn print_roles(report: &serde_json::Value) {
+    let Some(roles) = report["roles"].as_object().filter(|r| !r.is_empty()) else {
+        return;
+    };
+    println!("\nUso de herramientas por rol (corridas con --swarm):");
+    for (role, r) in roles {
+        let used: Vec<String> = r["used"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(8)
+            .map(|u| {
+                format!(
+                    "{} ({} corr./{} llam.)",
+                    u["tool"].as_str().unwrap_or(""),
+                    u["runs"],
+                    u["calls"]
+                )
+            })
+            .collect();
+        println!(
+            "  {role}: {} corrida(s) · usa: {}",
+            r["runs"],
+            used.join(", ")
+        );
+        let unused: Vec<&str> = r["unused"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .collect();
+        if r["enough"] == true {
+            if !unused.is_empty() {
+                println!(
+                    "    cargadas y nunca llamadas (candidatas a quitar): {}",
+                    unused.join(", ")
+                );
+            }
+        } else {
+            println!(
+                "    muestra corta (<{MIN_SAMPLE} corridas): no hay evidencia para cambiar lo que carga este rol"
+            );
+        }
+    }
+}
+
+fn print_routes(report: &serde_json::Value) {
+    if report["runs"] == 0 {
+        println!("Sin corridas todavía.");
+        return;
+    }
+    println!("{} corridas", report["runs"]);
+    let num = |v: &serde_json::Value| v.as_f64().map_or("—".to_owned(), |n| format!("{n}"));
+    for (route, g) in report["by_route"].as_object().into_iter().flatten() {
+        println!(
+            "\n{route}: {} corridas — {} completadas, {} fallidas, {} interrumpidas · {} integradas, {} deshechas",
+            g["runs"],
+            g["completed"],
+            g["failed"],
+            g["interrupted"],
+            g["integrated"],
+            g["rolled_back"]
+        );
+        println!(
+            "  reparación: {} corridas la necesitaron ({} ciclos) · promedio: {} s, {} llamadas al modelo, {} de herramientas, {} tokens de salida",
+            g["runs_needing_repair"],
+            g["repair_cycles"],
+            num(&g["avg_seconds"]),
+            num(&g["avg_model_calls"]),
+            num(&g["avg_tool_calls"]),
+            num(&g["avg_output_tokens"])
+        );
+        if g["runs_with_budget"].as_u64().unwrap_or(0) < g["runs"].as_u64().unwrap_or(0) {
+            println!(
+                "  (el presupuesto solo se mide en corridas con --swarm o con límites HIVECODE_BUDGET_*: {} de {})",
+                g["runs_with_budget"], g["runs"]
+            );
+        }
+    }
+}

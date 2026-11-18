@@ -1,7 +1,8 @@
 name: CI
 
-# release.yml sólo dispara con tags y nunca corrió la suite: los 22 archivos de
-# test del repo no los verificaba nada antes de publicar.
+# hivecode depende del SDK por ruta relativa (`../hiveRust/hiveSDK-Rust`): se descargan los dos
+# repositorios con esa misma disposición. Si el SDK es privado, hace falta el secreto SDK_TOKEN
+# (un token con permiso de lectura sobre johpaz/hiveSDK-Rust).
 on:
   push:
     branches: [main, master]
@@ -16,55 +17,41 @@ concurrency:
 
 jobs:
   verify:
-    name: Typecheck y tests
+    name: Formato, clippy y pruebas
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
         with:
-          # Pin exacto: Bun 1.4.1 traía dos regresiones (renombrado de `var` en
-          # `bun build`, que rompía imports con SyntaxError, y una fuga de
-          # AsyncLocalStorage) que sólo 1.4.2 y posteriores corrigen; se fija 1.4.4, la que se usa en local.
-          bun-version: "1.4.4"
-
-      - run: bun install --frozen-lockfile
-
-      # Los E2E de la TUI ejecutan packages/hivetui/target/debug/hivetui.
-      - uses: dtolnay/rust-toolchain@stable
+          path: hiveCode
+      - uses: actions/checkout@v4
+        with:
+          repository: johpaz/hiveSDK-Rust
+          path: hiveRust/hiveSDK-Rust
+          token: ${{ secrets.SDK_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/hivetui
-      - name: Build TUI (debug)
+          workspaces: |
+            hiveCode
+            hiveCode/packages/hivetui
+      - name: git para las pruebas (worktrees)
+        run: git config --global user.email ci@example.com && git config --global user.name ci
+      - name: Formato
+        working-directory: hiveCode
+        run: cargo fmt --check
+      - name: Clippy
+        working-directory: hiveCode
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # La TUI se compila antes: una prueba del CLI la ejecuta si existe.
+      - name: TUI (debug)
+        working-directory: hiveCode
         run: cargo build --locked --manifest-path packages/hivetui/Cargo.toml
-
-      - name: Typecheck
-        run: bun run lint
-
-      # --parallel reparte los archivos entre procesos (uno por núcleo) e implica
-      # --isolate. Medido en este repo: 23,6 s -> 18,1 s, con resultados idénticos.
-      # `bun run test` lleva el --preload que aísla la DB; sin él los tests
-      # tocarían la base real.
-      - name: Tests
-        run: bun run test --parallel
-
-  tui:
-    name: TUI (Rust)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: packages/hivetui
-      - name: Tests
+      - name: Pruebas del workspace
+        working-directory: hiveCode
+        run: cargo test --workspace --locked
+      - name: Pruebas de la TUI
+        working-directory: hiveCode
         run: cargo test --locked --manifest-path packages/hivetui/Cargo.toml
-
-      # El release compila la TUI para Windows; `cargo check` no necesita linker,
-      # así que un `tokio::signal::unix` suelto falla aquí y no al publicar.
-      - name: Compila para Windows (x64 y arm64)
-        run: |
-          rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
-          for t in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
-            cargo check --locked --release --bins --lib --target "$t" \
-              --manifest-path packages/hivetui/Cargo.toml
-          done

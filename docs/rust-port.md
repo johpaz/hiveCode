@@ -1,8 +1,8 @@
 # Port a Rust sobre el SDK de Hive Agents
 
-Objetivo: un solo binario `hivecode` en Rust, sin Bun/Node, construido sobre `hive-agent-core`
-(`../hiveRust/hiveSDK-Rust/crates/hive-core`). El TS actual sigue siendo la referencia hasta que
-cada etapa pase paridad; no se borra nada antes.
+Estado: **el TypeScript se eliminó del repositorio (queda en el historial de git)**. Objetivo cumplido: un solo binario `hivecode` en Rust, sin Bun/Node, construido sobre `hive-agent-core`
+(`../hiveRust/hiveSDK-Rust/crates/hive-core`). (texto histórico del port:)
+
 
 ## Workspace
 
@@ -63,6 +63,8 @@ cada etapa pase paridad; no se borra nada antes.
 - Hub de configuración de la TUI (`F2`): la pestaña **Providers** lista los de `config.json` (con `has_key` de verdad), **Agents** muestra los 5 perfiles (fijos), **MCP** los de `mcp.json`; **Models** muestra el modelo del proveedor. El hub se maneja con comandos que el servidor atiende: `/provider add` (abre un formulario con catálogo en lista, URL, modelo, ventana y clave enmascarada) y `modal_submit`, `/provider remove|set ID`, `provider_activate` (elegir un proveedor y escribir su clave ahí), `/modelo set PROVEEDOR MODELO`, `/mcp add|remove|enable|disable|inspect ID`, `/agent list`; tras cada cambio manda un `settings_data` nuevo y una línea en el historial; un error se dice con `(×ᴗ×) …`. `/skill`, `/github` y `/telegram` responden que no están en la versión Rust. Las claves van al llavero del sistema, o a un archivo `0600` si se define `HIVECODE_SECRETS_FILE=/ruta` (para máquinas sin llavero: servidores, contenedores); la configuración nunca lleva claves. Probado con un cliente falso y con la `hivetui` real (F2 muestra el proveedor y el servidor MCP del lado Rust).
 - Aprobación de plan en la TUI: con `--swarm` en modo `plan`, un cambio responde con un plan y el servidor manda `plan_approval_request`; desde ahí `/approve auto` lo ejecuta en modo auto (una sola vez), `/approve review` en `approval`, `/reject` (o `n`) lo descarta, y **el siguiente texto que se escriba se añade como contexto** y lo ejecuta en auto (como en el TS). Sin plan pendiente, `/approve` dice que no hay. No hay `plan_update` con fases (el plan es el texto de BEE) ni puerta «aprobar especificación» (no hay Spec Kit).
 - Tareas programadas (`hivecode cron add|list|enable|disable|run`), sobre el scheduler duradero del SDK (`harness/schedules.rs`): `add NOMBRE (--cron "EXPR" [--tz ZONA] | --every-seconds N) --task "TEXTO" [--root DIR] [--mode plan|auto] [--swarm]` (cinco o seis campos, listas, rangos, pasos, nombres de día y mes; la zona es de `chrono-tz`, `UTC` por defecto); `list` muestra estado, cuándo toca, cuántas se publicaron y cómo acabó la última; `enable|disable`; y `run`, el demonio (sondea cada `--poll-ms`, 1000 por defecto, y ejecuta lo que vence; `--once` publica lo vencido, lo ejecuta y sale, que es lo que quiere un cron externo o una prueba). Cada ocurrencia es **un `hivecode run` en un proceso hijo** con su tarea, raíz y modo, así que es exactamente una tarea que una persona podría escribir: mismo proveedor, mismas copias de git, integración e historial. Viven en su propia base (`<home>/data/cron`) para que el demonio nunca dispute el bloqueo de la principal. Reglas del SDK que se mantienen: una definición es inmutable (para cambiarla se desactiva y se crea otra con otro nombre; repetir la misma es idempotente), una ocurrencia perdida se omite (no se repite en ráfaga) y no se publica otra mientras la anterior no termine. **`approval` se rechaza**: nadie está delante para aprobar. Un fallo no se reintenta solo (`max_attempts: 1`). No hay canal de notificación (en el TS el cron avisaba por Telegram/canales): el resultado queda en `hivecode history`. Probado con una tarea de intervalo que vence y se ejecuta de verdad como un `run` (aparece en el historial con su objetivo), con una desactivada que no se publica, y con los rechazos (modo, cron inválido, definición distinta). Una expresión comprobada a mano: `0 8 * * MON` en `America/Bogota` da el lunes a las 13:00Z.
+- Estados de una corrida: `running` solo mientras corre **o si el proceso se cortó** (y entonces `history` la llama «interrumpida»); una corrida que termina con un error (proveedor inalcanzable, presupuesto agotado, cancelada con `/halt`) queda `failed` con el error en `response`, y `--recover` también la acepta (descarta su turno y la rehace con lo ya hecho). Antes un error dejaba la corrida como `running`, que `history` presentaba como una interrupción: lo destapó el ensayo del script de prueba real.
+- **Prueba real contra un proveedor** (2026-11-17, DeepSeek `deepseek-flash`, con la clave del hivecode instalado leída del llavero solo para la prueba, perfil y proyecto temporales): `scripts/real-check.sh PRESET MODELO [--swarm]`. **Sin enjambre**: la pregunta de solo lectura (5 llamadas al modelo, 7 de herramientas, 323 tokens de salida), un cambio (añadir `resta` y su prueba: 6 llamadas, 8 herramientas, 581 tokens; las pruebas del proyecto pasan comprobadas aparte) y `rollback`. **Con enjambre**: ruta `conversation` (3 llamadas) y ruta `scoped` (4 llamadas) con «verificación determinista: todo en verde». **Ruta feature con delegación real**: una tarea con dos señales de acoplamiento (puntuación 70) hizo que BEE delegara al `builder` (que escribió `calc.py` y `test_calc.py`), el `verifier` esperó y luego verificó, y BEE cerró con `VERDICT: PASS`: 21 llamadas al modelo, 39 de herramientas, 18 538 tokens de salida, 2 delegaciones con sus 2 handoffs, cambios integrados y 9 pruebas pasando. **Lo que destapó, corregido**: el parche integrado llevaba `__pycache__/*.pyc` (el agente ejecutó las pruebas en su copia) y por eso `rollback` no podía deshacerlo; ahora `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `*.pyc` y `.DS_Store` nunca se integran. **Observación sin resolver**: `command_run` solo existe si la persona pasa `--allow PROGRAMA`; sin eso los agentes ejecutan las pruebas por `verify_run` pero no pueden correr otros comandos (el verifier lo declaró como límite de su toolset). Es una decisión de seguridad por defecto, no un fallo, pero conviene decidir si el modo `auto` debe permitir por defecto los programas del ecosistema detectado. No se probó: la TUI con un modelo real, Gemini, y proyectos que no sean Python.
 - Presupuesto compartido: un objetivo raíz del SDK (`open_budget`) que BEE (profundidad 0) y todos sus workers (profundidad 1) consumen juntos; el motor cuenta el permiso de modelo antes de llamar al proveedor, así que una llamada denegada no gasta nada y dos workers en paralelo no pueden pasarse del tope. Al agotarse, el que lo pide recibe `OBJECTIVE_LIMIT` (un worker lo informa como no terminado; BEE lo ve en el resultado de la delegación). Está activo con `--swarm` y, en una corrida normal, cuando se pone alguno de `HIVECODE_BUDGET_MODEL_CALLS` (400 por defecto), `HIVECODE_BUDGET_TOOL_CALLS` (2000), `HIVECODE_BUDGET_OUTPUT_TOKENS` (1 000 000 de salida en total) o `HIVECODE_BUDGET_MINUTES` (sin límite). Los valores por defecto del SDK (8 y 16) son de un turno de chat. `run` informa lo usado (en `done.budget` con `--headless`, y en stderr si no). **El proveedor debe informar el uso de tokens**: el SDK detiene una corrida cuyo consumo no puede contabilizar. No es un techo monetario.
 - Perfiles: `planner` no existe (era el de Spec Kit; BEE planifica él), y los prompts se adaptaron a las herramientas de Rust. Los workers usan el mismo proveedor y modelo que BEE (sin modelo por perfil todavía).
 - Pruebas de `hivecode-swarm` (15, incluidas wait_for, la reutilización de informes, el tablero y la del presupuesto compartido: tres scouts, tope de dos llamadas, el tercero nunca llega al modelo y el contador queda en 2: perfil y herramientas por worker, dependencia con entrega, dependencia fallida, grupos inválidos, dos builders con fusión, modo plan en workers, herramienta fuera del perfil, revisión con contexto conservado y revisión de instancia privada) y una del binario (`--swarm`: BEE delega a scout y builder y el archivo llega al proyecto), todas con modelo falso.
@@ -94,3 +96,50 @@ El proyecto no está en producción, así que **no hay importador ni compatibili
 
 Cada etapa se cierra con: tests Rust, comparación con el TS sobre las mismas tareas semilla
 (`scripts/bench-seed-hivecode.ts`, `bench-run.ts`) y reporte de lo no probado.
+
+## Corte: el TypeScript se eliminó (2026-11-17)
+
+Por decisión expresa del usuario se borraron `packages/{core,code,cli,mcp,skills}`, `src/`, `tests/`,
+`bench/`, los `scripts/*.ts`, `package.json`, `bun.lock`, los `tsconfig*`, `bunfig.toml`, la carpeta
+`undefined/` (una base de datos suelta que estaba versionada por error) y el binario `dist/hivecode-linux-x64`
+de 153 MB. Todo sigue en el historial de git (último commit con TS: `32bd89f`). Se conservó
+`packages/hivetui` (la TUI, ya en Rust). Las skills empaquetadas se movieron a `skills/` y las lee
+`hivecode-skills` (sin `spec-kit`, que no se porta). CI (`ci.yml`), release (`release.yml`) y
+`scripts/release.sh` pasaron a ser solo Rust; descargan el SDK junto a este repositorio (secreto
+`SDK_TOKEN` si el SDK es privado). **Sin verificar**: los dos workflows no se han ejecutado en GitHub.
+
+### Lo que existía en el TS y NO tiene equivalente en Rust
+- `auth`/`free` (login con el backend del operador y
+  token `hivecode_token`); `adaptive-scheduler` (su función —dependencias, un solo escritor a la vez, máximo de paralelo— la cubre `task_delegate_group` del enjambre, no hay una cola aparte); narrativa/escriba (la base de sesiones, turnos y decisiones del TS se sustituye por el historial de corridas, los parches y los ADR; los títulos de sesión por un modelo no se portan: `history` muestra la primera línea de la tarea); Spec Kit;
+  `plan_update` estructurado en la TUI (en Rust el plan es el texto que devuelve BEE, con el modal de aprobación; convertirlo en fases exigiría analizar texto libre); reglas de enrutado por coste (`rutas-por-costo.md`, que era solo
+  una propuesta); los benchmarks `bench/*` y las auditorías `scripts/audit-*`.
+- Los binarios para Windows (la TUI usa un socket Unix).
+- Las skills incluidas nombran a veces herramientas del TS (`cron.create`, `code_test`…): son guías.
+
+### Añadido tras el corte
+- `hivecode notify telegram TOKEN CHAT_ID | webhook URL | status | test | remove` y `run --notify`: aviso de
+  salida cuando una tarea termina o falla (las programadas con `cron` siempre lo piden). El token y la URL del
+  webhook van al almacén de secretos (llavero o archivo `0600`), nunca a `config.json` ni a la salida; los errores
+  de red se limpian de ellos. El token se valida con el formato de BotFather y con `getMe` antes de guardarlo; el
+  chat debe ser un ID numérico. Un aviso que falla no hace fallar la tarea. Probado contra un servidor falso de
+  la API de Telegram y un webhook falso (no contra Telegram real). La API se puede redirigir con `HIVECODE_TELEGRAM_API`.
+- `hivecode stats [--json]`: por ruta, corridas completadas/fallidas/interrumpidas, integradas, deshechas,
+  reparaciones y promedios de segundos, llamadas y tokens (el presupuesto solo se mide en corridas con `--swarm`
+  o con `HIVECODE_BUDGET_*`).
+- Transporte de la TUI: medido socket Unix vs TCP vs WebSocket (ver `docs/tui.md`); se conserva el socket Unix y
+  se endureció: `<home>/run` con modo `0700` y el socket `0600`.
+- **Telegram entrante** (`hivecode telegram allow|deny|list|run`): un demonio de long‑polling sobre el bot de
+  `hivecode notify telegram`. Un mensaje de una persona permitida se convierte en un `hivecode run` en un proceso
+  hijo (mismas copias de git, integración e historial) y la respuesta vuelve al chat. Seguridad: se reconoce por ID
+  numérico (nunca @usuario), solo se obedece a los de la lista (`/myid` sí responde a cualquiera, para que pueda
+  pedir que lo añadan), modo `plan` por defecto (`auto` solo si el operador lo pide al arrancar; `approval` no existe
+  porque no hay a quién preguntar), los mensajes acumulados antes de arrancar se descartan (`--backlog` los procesa),
+  una tarea a la vez con corte a los 30 min (`--timeout-minutes`), y la lista se relee en cada mensaje. Probado
+  contra un servidor falso de la API de Telegram (no contra Telegram real): obedece al permitido, ignora al extraño,
+  responde `/myid`, descarta el atraso y rechaza `approval`.
+- **Uso de herramientas por rol** (equivalente a `loadout-learning`, en `hivecode stats`): cada corrida guarda
+  qué herramientas llamó cada rol (`bee`, `scout`, `builder`…; `builder#2` cuenta como `builder`); el informe
+  junta las corridas y compara con lo que el perfil carga. Con menos de 10 corridas de un rol dice que no hay
+  evidencia (como el TS); con 10 o más, lista las cargadas y nunca llamadas (candidatas a quitar). Solo informa:
+  cambiar un perfil sigue siendo una decisión. Limitación: un rol solo cuenta en una corrida si llamó alguna
+  herramienta, y no se recogen las capacidades «descubiertas» con búsqueda ni los tokens del arranque.

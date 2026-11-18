@@ -67,6 +67,8 @@ pub struct RunDoc {
     /// A patch is kept for this run, so it can be rolled back.
     pub has_patch: bool,
     pub rolled_back: bool,
+    /// Tool calls by role (`bee`, `scout`, `builder`…; a duplicate `builder#2` counts as `builder`).
+    pub tool_usage: std::collections::BTreeMap<String, std::collections::BTreeMap<String, u32>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

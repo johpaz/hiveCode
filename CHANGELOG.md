@@ -4,6 +4,10 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 
 ## Sin publicar
 
+### Reescritura en Rust
+
+hivecode es ahora un único binario en Rust sobre el SDK de Hive Agents (sin Bun ni Node); el TypeScript se eliminó del repositorio. Nuevo: `hivecode skill`, `hivecode cron`, estados de corrida `failed`, los cachés de pruebas (`__pycache__`, `.pytest_cache`…) ya no se integran. Ver `docs/rust-port.md`.
+
 ### Contexto corto y memoria selectiva
 
 Basado en «You don't need long context» (arXiv 2611.05306, https://arxiv.org/abs/2611.05306): mantener el contexto corto compactando con frecuencia, pasar un estado explícito de un tramo al siguiente y leer el historial de forma selectiva. El diseño se portó de `hive` y `hive-sdk`; `hiveCode` no depende de ellos (tiene su propio `core`), solo de `@johpaz/hive-db`.

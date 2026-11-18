@@ -1,6 +1,6 @@
 # La TUI
 
-`packages/hivetui`. Binario Rust sobre `crossterm` con renderer propio (`term/canvas.rs`, `renderer/`); no usa Ratatui. El lanzador está en `packages/cli/src/commands-code/tui-launcher.ts`.
+`packages/hivetui`. Binario Rust sobre `crossterm` con renderer propio (`term/canvas.rs`, `renderer/`); no usa Ratatui. El servidor del protocolo es `crates/hivecode-app/src/tui.rs` (en Rust); el binario `hivecode` lleva la TUI incrustada y la lanza con `HIVECODE_IPC` apuntando a su socket.
 
 ## Estructura del crate
 
@@ -73,7 +73,7 @@ Se abre también desde la pantalla de bienvenida (los modales se dibujan sobre e
 
 Pestañas: **Providers**, **Models**, **Agents**, **MCP**, **Skills**, **GitHub**, **Telegram**. `Tab`/`Shift+Tab` cambian de pestaña, `↑/↓` de fila, `Enter` actúa sobre la fila, `Espacio` activa/desactiva (Skills, MCP), `A` añade, `D` borra, `E` edita (Providers), `L` carga y `T` prueba (MCP).
 
-En **Providers**, cada fila muestra el estado de la clave: `✓` guardada, `?` falta, `~` login de navegador (`hivecode-free`). `Enter` sobre una fila sin clave abre un formulario con un único campo enmascarado; el id del provider elegido viaja en `provider_activate`, que guarda la clave en `Bun.secrets` y activa el provider sin volver a preguntarlo. Si ya tiene clave, se activa directamente. El hub queda abierto y la tabla se refresca sola.
+En **Providers**, cada fila muestra el estado de la clave: `✓` guardada, `?` falta, `~` login de navegador (`hivecode-free`). `Enter` sobre una fila sin clave abre un formulario con un único campo enmascarado; el id del provider elegido viaja en `provider_activate`, que guarda la clave en el llavero (o el archivo `0600`) y activa el provider sin volver a preguntarlo. Si ya tiene clave, se activa directamente. El hub queda abierto y la tabla se refresca sola.
 
 ## Modales
 
@@ -81,18 +81,39 @@ En **Providers**, cada fila muestra el estado de la clave: `✓` guardada, `?` f
 |--------|------------------------|
 | `command_popup` | `/`: lista de comandos con navegación. |
 | `settings_hub` | `F2`/`Ctrl+S`. |
-| `config_modal` | Formularios de Bun (`show_config_modal`), p. ej. la API key. |
+| `config_modal` | Formularios del servidor (`show_config_modal`), p. ej. la API key. |
 | `info_modal` | `?` o `show_info_modal`; `↑/↓` desplaza, `Esc` cierra. |
 | `plan_approval_modal` | Tras un plan en `plan`/`approval`: ejecutar automáticamente, fase por fase, agregar contexto, cancelar. Ver [modes.md](./modes.md#aprobación-del-plan-modal). |
 | `ReviewConfirm` | Confirmación de `Alt+A/R/M`. |
 | `tool_approval_modal` | **AUTORIZAR HERRAMIENTA** (una herramienta de `approval` pide permiso) y las puertas del harness **APROBAR ESPECIFICACIÓN Y PLAN** / **APROBAR RESULTADO** (`kind: "gate"`). `↩`/`y` aprueba, `Esc`/`n` rechaza o cancela, `↑↓`/`PgUp`/`PgDn` desplazan. Se ajusta al contenido; las puertas pueden ocupar casi toda la pantalla. |
 | `resume_badge` | `▶ RESUME` en el enjambre: `Enter` arma, `Enter` otra vez reanuda una tarea interrumpida. |
 
+## Transporte: por qué un socket Unix (medido)
+
+Se compararon, en esta máquina y con NDJSON de 100 B y 4 KB (20 000 mensajes), el socket Unix, TCP
+loopback y WebSocket (`tokio-tungstenite`):
+
+| Transporte | Latencia p50 (100 B) | Mensajes/s (100 B) | Latencia p50 (4 KB) | Mensajes/s (4 KB) |
+|------------|----------------------|--------------------|---------------------|-------------------|
+| Socket Unix | 11,8 µs | 277 844 | 16,8 µs | 135 196 |
+| WebSocket (loopback) | 21,0 µs | 206 439 | 24,3 µs | 162 477 |
+| TCP loopback | 32,2 µs | 87 401 | 34,0 µs | 80 623 |
+
+Las tres sobran: un stream de modelo emite decenas de mensajes por segundo, así que **el rendimiento no
+decide**. Decide la seguridad y el uso: el socket Unix no abre ningún puerto, se protege con permisos
+de archivo (el directorio `<home>/run` es `0700` y el socket `0600`, sin depender de la `umask`) y no
+necesita autenticación. WebSocket solo compensa si un cliente de fuera del proceso (navegador, IDE,
+otra máquina) debe conectarse; entonces hace falta puerto, token y comprobación de `Origin`, y es lo
+que el gateway del SDK ya ofrece. Decisión: **socket Unix para la TUI local**; si algún día hay un
+cliente web o remoto, se añade WebSocket como segundo transporte del mismo protocolo (los mensajes no
+cambian, solo el marco), no en lugar del socket Unix. En Windows haría falta TCP loopback con token
+(la TUI ya lo admite; el servidor aún no).
+
 ## Protocolo IPC
 
-Transporte: socket Unix (o TCP loopback en Windows), mensajes JSON de una línea envueltos en un sobre con prioridad y sesión (`ipc/envelope.ts`). Tipos en `packages/core/src/ipc/protocol.ts`; el lado Rust los refleja con serde.
+Transporte: socket Unix (o TCP loopback en Windows), mensajes JSON de una línea envueltos en un sobre con prioridad y sesión (`ipc/mod.rs`). Tipos en `packages/hivetui/src/ipc/mod.rs`.
 
-### Bun → TUI (`BunMessage`)
+### Servidor → TUI (`BunMessage`; el nombre es histórico)
 
 | Prioridad | Mensajes |
 |-----------|----------|
@@ -104,7 +125,7 @@ Transporte: socket Unix (o TCP loopback en Windows), mensajes JSON de una línea
 
 Los `critical` se envían de inmediato; los `low` pueden ir con retraso. `tool_call` y `tool_done` siempre vienen en pareja con el mismo `call_id`.
 
-### TUI → Bun (`TuiMessage`)
+### TUI → servidor (`TuiMessage`)
 
 `ready`, `submit` (texto del input, incluye `/approve …`, `/reject`, `/halt`), `mode_change`, `modal_submit`, `modal_cancel`, `info_modal_close`, `suspended`, `exit`, `rollback`, `task_resume`, `request_settings`, `provider_activate`, `tool_approval_response` (`{ request_id, approve }`, también para las puertas), entre otros definidos en `protocol.ts`.
 
